@@ -395,7 +395,8 @@ describe("live grouped services", () => {
       expect(summary).toHaveTextContent(/^BYOK$/);
       await user.hover(summary);
       const tooltip = await screen.findByRole("tooltip");
-      expect(tooltip).toHaveTextContent(`${name}: BYOK`);
+      expect(tooltip).toHaveTextContent("BYOK · 1 connection");
+      expect(tooltip).toHaveTextContent(name);
       expect(tooltip).not.toHaveTextContent("0.05");
       await user.click(summary);
       const panel = card.getByRole("region", { name: `Billing for ${name}` });
@@ -484,11 +485,13 @@ describe("live grouped services", () => {
     await user.hover(summary);
     const tooltip = await screen.findByRole("tooltip");
     for (const text of [
-      "ChronoAI Twitter: BYOK",
-      "Personal Twitter: NyxID",
-      "Public Twitter: NyxID",
-      "Legacy Twitter: Unverified",
-      "0.05 credits / request",
+      "BYOK · 1 connection",
+      "ChronoAI Twitter",
+      "Personal Twitter",
+      "Public Twitter",
+      "Unverified · 1 connection",
+      "Legacy Twitter",
+      "0.05 credits/request",
     ])
       expect(tooltip).toHaveTextContent(text);
     await user.click(summary);
@@ -739,7 +742,8 @@ describe("live grouped services", () => {
     );
     const tooltip = within(await screen.findByRole("tooltip"));
     expect(tooltip.getByText("Connection billing")).toBeInTheDocument();
-    expect(tooltip.getByText("Personal account: BYOK")).toBeInTheDocument();
+    expect(tooltip.getAllByText("BYOK · 1 connection")[0]).toBeInTheDocument();
+    expect(tooltip.getByText("Personal account")).toBeInTheDocument();
     expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
   });

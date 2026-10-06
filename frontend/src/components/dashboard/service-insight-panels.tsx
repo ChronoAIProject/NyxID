@@ -26,7 +26,10 @@ import {
 } from "@/lib/service-usage";
 import { formatExactCredits, hasCredits } from "@/lib/credits";
 import { plainBilling } from "@/lib/billing-plain";
-import type { ServiceInsight } from "@/schemas/service-insights";
+import type {
+  ConfiguredCatalogEntry,
+  ServiceInsight,
+} from "@/schemas/service-insights";
 import {
   useServiceInsights,
   type ServiceInsightsState,
@@ -322,10 +325,12 @@ function ConnectionBillingPanel({
   connection,
   insight,
   state,
+  catalog,
 }: {
   readonly connection: KeyInfo;
   readonly insight: ServiceInsight;
   readonly state: ServiceInsightsState;
+  readonly catalog?: ConfiguredCatalogEntry;
 }) {
   const [caller, setCaller] = useState("you");
   const selectedState = useServiceInsights(
@@ -337,7 +342,7 @@ function ConnectionBillingPanel({
     caller === "you"
       ? insight.billing
       : selectedState.connections.get(connection.id)?.billing;
-  const plain = bill ? plainBilling(connection, bill) : null;
+  const plain = bill ? plainBilling(connection, bill, catalog) : null;
   // Settings say what should be charged; recorded usage says what was.
   const recent = useBillingUsage("7d");
   const recentCharged = recent.data
@@ -434,11 +439,13 @@ export function ConnectionInsightPanel({
   insight,
   view,
   state,
+  catalog,
 }: {
   readonly connection: KeyInfo;
   readonly insight?: ServiceInsight;
   readonly view: InsightPanel;
   readonly state: ServiceInsightsState;
+  readonly catalog?: ConfiguredCatalogEntry;
 }) {
   const [showAllKeys, setShowAllKeys] = useState(false);
   if (!insight || (view === "billing" ? !insight.billing : !insight.usage))
@@ -450,6 +457,7 @@ export function ConnectionInsightPanel({
         connection={connection}
         insight={insight}
         state={state}
+        catalog={catalog}
       />
     );
   if (!usage) return <InsightsUnavailable state={state} />;

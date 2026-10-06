@@ -1,5 +1,9 @@
 import { metricLabel } from "@/schemas/billing-metrics";
-import type { ServiceBillingExplanation } from "@/schemas/service-insights";
+import type {
+  ConfiguredCatalogEntry,
+  ServiceBillingExplanation,
+} from "@/schemas/service-insights";
+import { configuredPlatformPrice } from "./service-billing-config";
 import type { KeyInfo } from "@/types/keys";
 
 export type BillingVerdict = "charged" | "free" | "unconfirmed" | "hidden";
@@ -47,6 +51,7 @@ function supplierOf(
 export function plainBilling(
   connection: KeyInfo,
   bill: ServiceBillingExplanation,
+  catalog?: ConfiguredCatalogEntry,
 ): PlainBilling {
   const provider = providerName(connection);
   const org =
@@ -109,7 +114,7 @@ export function plainBilling(
   // rate, shown the same way for every NyxID-supplied service.
   const servicePrice =
     supplier === "nyxid" && !bill.rates.length
-      ? connection.platform_key_pricing
+      ? configuredPlatformPrice(connection, catalog)
       : null;
   const free =
     !servicePrice &&

@@ -5,7 +5,8 @@ import {
   connectionBillingLabels,
   type ConnectionBillingCategory,
 } from "@/lib/service-card-summary";
-import { insightStatusLabel, nyxidChargeLabel } from "@/lib/service-insights";
+import { insightStatusLabel } from "@/lib/service-insights";
+import { plainBilling } from "@/lib/billing-plain";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import {
   Tooltip,
@@ -13,6 +14,20 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+/** Up to three names, then a count; disabled connections are counted apart. */
+function groupNames(connections: readonly KeyInfo[]): string {
+  const active = connections.filter((connection) => connection.is_active);
+  const disabled = connections.length - active.length;
+  const shown = active.slice(0, 3).map((connection) => connection.label);
+  const more = active.length - shown.length;
+  return [
+    shown.join(", ") + (more > 0 ? ` and ${more} more` : ""),
+    disabled ? `${disabled} disabled` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
 
 export function ServiceBillingSummary({
   connections,
@@ -52,6 +67,37 @@ export function ServiceBillingSummary({
     unknown: "unverified",
   };
   const notBillable = rows.every((row) => row.category === "not_billable");
+  // Identical entries collapse into one line; a list of 30 equal rows says
+  // nothing more than "30 connections".
+  const groups = [
+    ...rows
+      .reduce((all, row) => {
+        const detail =
+          row.category === "not_billable"
+            ? "Not billable by NyxID"
+            : row.category === "unknown"
+              ? row.billing?.service_billing_configured === true
+                ? "Whose key or app is used isn't confirmed"
+                : "Billing details unavailable"
+              : row.billing
+                ? plainBilling(row.connection, row.billing, catalog).short
+                : "Billing details unavailable";
+        const key = `${row.category}|${detail}`;
+        const group = all.get(key) ?? {
+          key,
+          category: row.category,
+          detail,
+          rows: [] as typeof rows,
+        };
+        group.rows.push(row);
+        return all.set(key, group);
+      }, new Map<string, { key: string; category: ConnectionBillingCategory; detail: string; rows: typeof rows }>())
+      .values(),
+  ].sort(
+    (a, b) =>
+      categories.indexOf(a.category) - categories.indexOf(b.category) ||
+      b.rows.length - a.rows.length,
+  );
   const label =
     insights.status !== "ready"
       ? insightStatusLabel(insights.status, "Billing")
@@ -94,42 +140,30 @@ export function ServiceBillingSummary({
           align={notBillable ? "center" : "start"}
           sideOffset={8}
           collisionPadding={12}
-          className="max-w-[min(22rem,calc(100vw-2rem))] space-y-1 break-words [overflow-wrap:anywhere]"
+          className="max-h-[90vh] min-w-56 max-w-[min(22rem,calc(100vw-2rem))] space-y-2 overflow-y-auto break-words [overflow-wrap:anywhere]"
         >
           {notBillable ? (
             <p>Not billable by NyxID</p>
           ) : (
             <>
               <p className="font-medium">Connection billing</p>
-              {rows.map(({ connection, category, billing }) => (
-                <div key={connection.id}>
+              {groups.map((group) => (
+                <div key={group.key}>
                   <p>
-                    {connection.label}:{" "}
-                    {category === "not_billable"
-                      ? "Not billable by NyxID"
-                      : connectionBillingLabels[category]}
-                    {!connection.is_active ? " · disabled" : ""}
+                    {connectionBillingLabels[group.category]} ·{" "}
+                    {group.rows.length}{" "}
+                    {group.rows.length === 1 ? "connection" : "connections"}
                   </p>
-                  {category === "unknown" && (
-                    <p className="text-muted-foreground">
-                      {billing?.service_billing_configured === true
-                        ? "Credential supplier unverified"
-                        : "Billing configuration unavailable"}
-                    </p>
-                  )}
-                  {billing && category !== "not_billable" && (
-                    <p className="text-muted-foreground">
-                      {nyxidChargeLabel(billing)}
-                    </p>
-                  )}
+                  <p className="text-muted-foreground">{group.detail}</p>
+                  <p className="text-muted-foreground">
+                    {groupNames(group.rows.map((row) => row.connection))}
+                  </p>
                 </div>
               ))}
-              <p className="text-muted-foreground">
-                NyxID means platform billing is configured. BYOK means the
-                selected key or developer app was supplied by you or your
-                organization. Free credits and grants do not change these
-                labels. A dash means not billable by NyxID; the provider may
-                charge separately.
+              <p className="border-t border-border/60 pt-1.5 text-muted-foreground">
+                NyxID: uses NyxID&apos;s key or app and costs NyxID credits.
+                BYOK: uses your or your organization&apos;s own key or app. —:
+                NyxID doesn&apos;t charge for it.
               </p>
             </>
           )}

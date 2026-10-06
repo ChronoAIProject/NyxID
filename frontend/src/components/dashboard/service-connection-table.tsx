@@ -506,7 +506,7 @@ export function ServiceConnectionTable({
                             (billingCategory === "platform" ||
                               billingCategory === "byok") && (
                               <span className="mt-1 block truncate text-[11px] text-muted-foreground">
-                                {plainBilling(key, billing).short}
+                                {plainBilling(key, billing, catalog).short}
                               </span>
                             )}
                         </button>
@@ -532,7 +532,7 @@ export function ServiceConnectionTable({
                           <>
                             <p className="font-medium">
                               {billing
-                                ? plainBilling(key, billing).headline
+                                ? plainBilling(key, billing, catalog).headline
                                 : insightStatusLabel(
                                     insights.status,
                                     "Billing",
@@ -540,7 +540,7 @@ export function ServiceConnectionTable({
                             </p>
                             {billing && (
                               <p className="mt-1">
-                                {plainBilling(key, billing).detail}
+                                {plainBilling(key, billing, catalog).detail}
                               </p>
                             )}
                             <p className="mt-1 text-muted-foreground">
@@ -639,6 +639,7 @@ export function ServiceConnectionTable({
                           insight={insight}
                           view={open.view}
                           state={insights}
+                          catalog={catalog}
                         />
                       )}
                     </TableCell>
