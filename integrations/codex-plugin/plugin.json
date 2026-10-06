@@ -1,0 +1,48 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "nyxid",
+  "version": "0.9.0",
+  "description": "Use NyxID to connect services and access them through its credential broker.",
+  "author": {
+    "name": "ChronoAI",
+    "url": "https://nyx.chrono-ai.fun"
+  },
+  "homepage": "https://nyx.chrono-ai.fun",
+  "repository": "https://github.com/ChronoAIProject/NyxID",
+  "license": "Apache-2.0",
+  "keywords": [
+    "nyxid",
+    "credentials",
+    "oauth",
+    "mcp"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "NyxID",
+        "shortDescription": "Connect services with NyxID",
+        "longDescription": "Use NyxID to discover connected services, start a hosted connection, and invoke authorized operations through its credential broker. Sign-in and credential entry happen on NyxID's website. Available actions depend on your account's service grants and approval settings.",
+        "developerName": "ChronoAI",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Discover connections",
+          "Use authorized service tools"
+        ],
+        "websiteURL": "https://nyx.chrono-ai.fun",
+        "supportURL": "https://github.com/ChronoAIProject/NyxID/issues",
+        "privacyPolicyURL": "https://nyx.chrono-ai.fun/privacy",
+        "termsOfServiceURL": "https://nyx.chrono-ai.fun/terms",
+        "defaultPrompt": [
+          "Show my connected NyxID services.",
+          "Help me connect a service in NyxID.",
+          "List my GitHub repositories through NyxID."
+        ],
+        "composerIcon": "./assets/composer-icon.svg",
+        "logo": "./assets/logo.svg"
+      },
+      "publication": {
+        "release_notes": "Ships a single MCP-first NyxID skill instead of the CLI skill family, and declares behavior hints on every tool."
+      }
+    }
+  }
+}
