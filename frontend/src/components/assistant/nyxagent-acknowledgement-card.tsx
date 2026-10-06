@@ -53,7 +53,7 @@ export function NyxAgentAcknowledgementCard({
   const routed = acknowledgement.decider === "orchestrator";
   if (acknowledgement.status !== "pending") {
     return (
-      <p role="status" className="ml-[30px] px-[7px] text-[11px] text-muted-foreground">
+      <p role="status" className="ml-[30px] px-[7px] text-11 text-muted-foreground">
         {decisionLabel(acknowledgement)} · {label}
       </p>
     );
@@ -74,12 +74,12 @@ export function NyxAgentAcknowledgementCard({
       className="ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4"
     >
       {routed ? (
-        <p className="text-[10px] font-medium uppercase tracking-[1.5px] text-text-tertiary">
+        <p className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
           Requested from NyxBot
         </p>
       ) : null}
-      <p className="text-[13px] font-medium text-foreground">{label}</p>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-13 font-medium text-foreground">{label}</p>
+      <p className="text-12 text-muted-foreground">
         {acknowledgement.kind === "skills"
           ? "This proposal does not attach content. NyxBot must request your confirmation before adding or re-pinning skills."
           : acknowledgement.kind === "operations"
@@ -93,7 +93,7 @@ export function NyxAgentAcknowledgementCard({
         {routed ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
       </p>
       {error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error}
         </p>
       ) : null}

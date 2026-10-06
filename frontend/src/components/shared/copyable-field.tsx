@@ -29,8 +29,8 @@ export function CopyableField({
     }
   }
 
-  const textSize = size === "sm" ? "text-[10px]" : "text-xs";
-  const labelSize = size === "sm" ? "text-[10px]" : "text-xs";
+  const textSize = size === "sm" ? "text-10" : "text-xs";
+  const labelSize = size === "sm" ? "text-10" : "text-xs";
   const btnSize = size === "sm" ? "h-7 w-7" : "h-8 w-8";
   const padding = size === "sm" ? "px-3 py-2" : "px-4 py-3.5";
   const minH = size === "sm" ? "min-h-[36px]" : "min-h-[44px]";

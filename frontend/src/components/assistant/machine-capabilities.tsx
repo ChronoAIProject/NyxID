@@ -20,9 +20,9 @@ export function MachineCapabilities({ agentId, disabled = false }: { readonly ag
   const query = useMachineAccess(agentId, (enabled || contextsEnabled) && !disabled);
   if (!enabled && !contextsEnabled && !query.data?.length) return null;
   return <section aria-label="Machine capabilities" className="space-y-3">
-    <p className="text-[12px] text-muted-foreground">Choose what this agent can do on each machine. With capability editing enabled, newly selected machines start with all permissions off. Existing legacy access stays until edited. Saving changes cancels this agent’s current work on that machine.</p>
-    {!enabled ? <p role="status" className="text-[12px] text-muted-foreground">Capability editing is not enabled yet. Existing restrictions still apply.</p> : null}
-    {query.error ? <p role="alert" className="text-[12px] text-destructive">Could not load machine capabilities.</p> : null}
+    <p className="text-12 text-muted-foreground">Choose what this agent can do on each machine. With capability editing enabled, newly selected machines start with all permissions off. Existing legacy access stays until edited. Saving changes cancels this agent’s current work on that machine.</p>
+    {!enabled ? <p role="status" className="text-12 text-muted-foreground">Capability editing is not enabled yet. Existing restrictions still apply.</p> : null}
+    {query.error ? <p role="alert" className="text-12 text-destructive">Could not load machine capabilities.</p> : null}
     {query.data?.map(machine => <MachineCapabilityForm key={`${machine.node_id}:${machine.revision}`} machine={machine} agentId={agentId} disabled={disabled || !enabled} contextEnabled={contextsEnabled} />)}
   </section>;
 }
@@ -57,35 +57,35 @@ export function MachineCapabilityForm({ machine, agentId, disabled = false, cont
     try { await mutation.mutateAsync({ node: machine.node_id, selection }); form.reset(selection); }
     catch { setError("Could not save capabilities. Reload if access changed."); }
   })}>
-    <div className="flex flex-wrap items-center gap-2"><span className="text-[13px] font-medium">{machine.name}</span><Badge variant="secondary">{machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy"}</Badge></div>
-    <p className="text-[12px] text-muted-foreground">{machine.mode === "separated" ? "This agent has its own workspace and browser profiles. Full isolation requires a separate machine container or VM per agent." : "Workspace and browser sessions are shared with other agents on this machine."}</p>
-    {machine.revocation_pending ? <p role="status" className="text-[12px] text-muted-foreground">Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.</p> : null}
-    {!machine.can_edit ? <p role="status" className="text-[12px]">Only the machine owner or an organization admin can edit this access.</p> : null}
-    {!machine.protocol_v2 ? <p role="status" className="text-[12px]">Update this machine before changing capabilities. Its existing access continues.</p> : null}
+    <div className="flex flex-wrap items-center gap-2"><span className="text-13 font-medium">{machine.name}</span><Badge variant="secondary">{machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy"}</Badge></div>
+    <p className="text-12 text-muted-foreground">{machine.mode === "separated" ? "This agent has its own workspace and browser profiles. Full isolation requires a separate machine container or VM per agent." : "Workspace and browser sessions are shared with other agents on this machine."}</p>
+    {machine.revocation_pending ? <p role="status" className="text-12 text-muted-foreground">Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.</p> : null}
+    {!machine.can_edit ? <p role="status" className="text-12">Only the machine owner or an organization admin can edit this access.</p> : null}
+    {!machine.protocol_v2 ? <p role="status" className="text-12">Update this machine before changing capabilities. Its existing access continues.</p> : null}
     {contextEnabled && machine.mode !== "separated" && machine.can_edit ? (
       machine.separated?.available ? (
         <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/5 p-3">
-          <p className="text-[12px]">Give this agent a separate workspace and browser through an owner-approved Assistant card.</p>
+          <p className="text-12">Give this agent a separate workspace and browser through an owner-approved Assistant card.</p>
           <Button type="button" size="sm" variant="secondary" disabled={contextMutation.isPending} onClick={() => void requestContext()}>
             Separate workspace and browser for this agent
           </Button>
           {contextRequested || contextMutation.isSuccess ? <p role="status">Owner approval requested in the NyxBot Assistant thread.</p> : null}
         </div>
       ) : (
-        <p role="status" className="text-[12px]">Separate workspace and browser is unavailable on this machine{machine.separated?.reason ? `: ${machine.separated.reason}` : "."}</p>
+        <p role="status" className="text-12">Separate workspace and browser is unavailable on this machine{machine.separated?.reason ? `: ${machine.separated.reason}` : "."}</p>
       )
     ) : null}
     <fieldset disabled={disabled || !machine.can_edit || !machine.protocol_v2 || mutation.isPending} className="grid gap-2 sm:grid-cols-2">
       <legend className="sr-only">Allowed capabilities</legend>
-      {(Object.keys(labels) as Array<keyof typeof labels>).map(key => <label key={key} className="flex items-center gap-2 text-[12px]">
+      {(Object.keys(labels) as Array<keyof typeof labels>).map(key => <label key={key} className="flex items-center gap-2 text-12">
         <Checkbox checked={caps[key]} disabled={!machine.ceiling[key] || ((key === "computer" || key === "developer_browser") && !caps.browser)} onCheckedChange={value => {
           form.setValue(`capabilities.${key}`, value === true);
           if (key === "browser" && value !== true) { form.setValue("capabilities.computer", false); form.setValue("capabilities.developer_browser", false); }
         }} />{labels[key]}{!machine.ceiling[key] ? <span className="text-muted-foreground">(off on node)</span> : null}
       </label>)}
     </fieldset>
-    <details className="text-[12px] text-muted-foreground"><summary className="cursor-pointer">What these permissions mean</summary><p className="mt-2">Shell commands can read and write anything their OS user can access, even with file tools off. Full computer control can operate applications through their UI. Browser-only access avoids desktop authority. Developer browser permits JavaScript evaluation in its separate browser; saved logins stay in the secure browser.</p></details>
-    {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
+    <details className="text-12 text-muted-foreground"><summary className="cursor-pointer">What these permissions mean</summary><p className="mt-2">Shell commands can read and write anything their OS user can access, even with file tools off. Full computer control can operate applications through their UI. Browser-only access avoids desktop authority. Developer browser permits JavaScript evaluation in its separate browser; saved logins stay in the secure browser.</p></details>
+    {error ? <p role="alert" className="text-12 text-destructive">{error}</p> : null}
     <Button type="submit" size="sm" disabled={disabled || !machine.can_edit || !machine.protocol_v2 || !form.formState.isDirty || mutation.isPending}>Save capabilities</Button>
   </form>;
 }

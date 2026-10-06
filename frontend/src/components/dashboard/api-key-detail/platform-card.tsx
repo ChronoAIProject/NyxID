@@ -58,7 +58,7 @@ export function PlatformCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Monitor className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Platform</CardTitle>
+          <CardTitle className="text-15">Platform</CardTitle>
         </div>
         <CardDescription>
           Agent platform using this key

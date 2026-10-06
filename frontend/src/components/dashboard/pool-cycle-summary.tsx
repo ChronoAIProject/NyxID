@@ -25,7 +25,7 @@ export function PoolCycleSummary({
     groups.set(tier, group);
   });
   return (
-    <div className="space-y-2 rounded-xl border border-border/50 bg-muted/20 p-3 text-[11px] text-muted-foreground">
+    <div className="space-y-2 rounded-xl border border-border/50 bg-muted/20 p-3 text-11 text-muted-foreground">
       <p className="font-medium text-foreground">
         {priority
           ? "Cycles within each priority"

@@ -64,20 +64,20 @@ export function PoolHealthDialog({
           </DialogDescription>
         </DialogHeader>
         {aiChat ? (
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Checking AI chat requests (POST /chat/completions).
           </p>
         ) : (
           <PoolOperationCheck operation={operation} onChange={setOperation} />
         )}
         {!aiChat && !operation && (
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Choose an operation above to see its cooldown and failure history.
             Connection availability is shown below.
           </p>
         )}
         {pool.strategy !== "priority" && (
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             {strategyLabels[pool.strategy]} sends one attempt per request and
             does not use cooldowns.
           </p>
@@ -86,7 +86,7 @@ export function PoolHealthDialog({
         {health.isLoading && <Skeleton className="h-16" />}
         <div className="space-y-2">
           {health.data?.candidates.length === 0 && (
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               This pool has no connections yet. Edit the pool to add them.
             </p>
           )}
@@ -96,7 +96,7 @@ export function PoolHealthDialog({
               className="flex items-center justify-between gap-3 rounded-xl border border-border/50 p-3"
             >
               <div className="min-w-0 flex-1">
-                <div className="break-words text-[12px] font-medium">
+                <div className="break-words text-12 font-medium">
                   {row.name || row.slug}{" "}
                   <Badge variant={row.eligible ? "success" : "warning"}>
                     {row.reason
@@ -106,7 +106,7 @@ export function PoolHealthDialog({
                         : "Available connection"}
                   </Badge>
                 </div>
-                <p className="break-words text-[11px] text-muted-foreground">
+                <p className="break-words text-11 text-muted-foreground">
                   {row.slug} · {bindingLabel(row.credential_binding)}
                   {pool.strategy === "priority"
                     ? ` · Priority ${pool.members.find((m) => m.user_service_id === row.user_service_id)?.priority ?? 0}`

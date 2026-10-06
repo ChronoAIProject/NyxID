@@ -113,10 +113,10 @@ export function NotificationSetupCard() {
           <div className="flex items-center gap-3">
             <Bell className="h-5 w-5 text-primary" aria-hidden="true" />
             <div className="flex flex-col gap-0.5">
-              <h3 className="text-[22px] font-normal leading-tight">
+              <h3 className="text-22 font-normal leading-tight">
                 Notifications & Approvals
               </h3>
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 Control how AI agents access your services
               </p>
             </div>
@@ -126,14 +126,14 @@ export function NotificationSetupCard() {
           <div className="flex flex-col gap-2">
             {steps.map((step, i) => (
               <div key={i} className="flex items-center gap-2.5">
-                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.04] text-[10px] font-medium text-muted-foreground">
+                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-10 font-medium text-muted-foreground">
                   {i + 1}
                 </div>
                 <span
                   className={
                     step.done
-                      ? "text-[13px] text-muted-foreground"
-                      : "text-[13px] font-medium"
+                      ? "text-13 text-muted-foreground"
+                      : "text-13 font-medium"
                   }
                 >
                   {step.label}
@@ -147,7 +147,7 @@ export function NotificationSetupCard() {
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-primary" />
-                <span className="text-[13px] font-medium">
+                <span className="text-13 font-medium">
                   Approval protection is active
                 </span>
               </div>
@@ -167,7 +167,7 @@ export function NotificationSetupCard() {
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-amber-500" />
-                <span className="text-[13px] font-medium">
+                <span className="text-13 font-medium">
                   Approval protection is suspended
                 </span>
               </div>
@@ -189,7 +189,7 @@ export function NotificationSetupCard() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="text-[13px] font-medium">Telegram</p>
+                  <p className="text-13 font-medium">Telegram</p>
                   <p className="text-xs text-muted-foreground">
                     Receive approval requests via bot
                   </p>
@@ -217,7 +217,7 @@ export function NotificationSetupCard() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="text-[13px] font-medium">NyxID Mobile App</p>
+                  <p className="text-13 font-medium">NyxID Mobile App</p>
                   <p className="text-xs text-muted-foreground">
                     Approve from your phone (iOS & Android)
                   </p>

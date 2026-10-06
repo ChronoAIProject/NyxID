@@ -117,13 +117,13 @@ const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
     field: "api_key_id",
     label: "API Key ID",
     defaultWidth: 300,
-    cellClassName: "font-mono text-[11px] text-muted-foreground",
+    cellClassName: "font-mono text-11 text-muted-foreground",
   },
   {
     field: "ip_address",
     label: "IP",
     defaultWidth: 150,
-    cellClassName: "font-mono text-[11px]",
+    cellClassName: "font-mono text-11",
   },
   {
     field: "user_agent",
@@ -535,7 +535,7 @@ export function AdminAuditLogPage() {
             )}
             {service.slug && (
               <p
-                className="truncate font-mono text-[11px] text-muted-foreground"
+                className="truncate font-mono text-11 text-muted-foreground"
                 title={service.slug}
               >
                 {service.slug}
@@ -586,7 +586,7 @@ export function AdminAuditLogPage() {
               </p>
             )}
             <p
-              className="truncate font-mono text-[11px] text-muted-foreground"
+              className="truncate font-mono text-11 text-muted-foreground"
               title={entry.user_id}
             >
               {entry.user_id}
@@ -847,7 +847,7 @@ export function AdminAuditLogPage() {
             </div>
 
             <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-[11px] text-text-tertiary">
+              <p className="text-11 text-text-tertiary">
                 Showing {String((displayedPage - 1) * displayedPerPage + 1)}-
                 {String(Math.min(displayedPage * displayedPerPage, total))} of{" "}
                 {String(total)} events
@@ -904,7 +904,7 @@ export function AdminAuditLogPage() {
                 >
                   <ChevronLeft />
                 </Button>
-                <span className="min-w-[84px] text-center text-[11px] text-text-tertiary">
+                <span className="min-w-[84px] text-center text-11 text-text-tertiary">
                   Page {String(displayedPage)} of {String(displayedTotalPages)}
                 </span>
                 <Button

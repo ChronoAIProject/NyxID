@@ -21,7 +21,7 @@ export function ThreadTitle({
         type="button"
         aria-label="Rename chat"
         title={title}
-        className="group flex min-w-0 max-w-full items-center gap-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
+        className="group flex min-w-0 max-w-full items-center gap-2 text-left text-12 text-muted-foreground hover:text-foreground"
         onClick={() => {
           form.reset({ title });
           setError(undefined);
@@ -86,7 +86,7 @@ export function ThreadTitle({
         </Button>
       </div>
       {error && (
-        <p role="alert" className="text-[11px] text-destructive">
+        <p role="alert" className="text-11 text-destructive">
           {error}
         </p>
       )}

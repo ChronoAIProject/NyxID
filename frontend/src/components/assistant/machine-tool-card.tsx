@@ -75,12 +75,12 @@ export function MachineToolCard({
           <span>{receipt.bytes.toLocaleString()} bytes</span>
         )}
       </div>
-      <p className="break-all text-[10px] text-muted-foreground">
+      <p className="break-all text-10 text-muted-foreground">
         {receipt.machine_name?.trim() ||
           `Machine ${receipt.node_id.slice(0, 8)}`}{" "}
         · {receipt.context_mode === "separated" ? "Separate workspace and browser for this agent" : "Shared workspace and browser"}
       </p>
-      <details className="text-[10px] text-muted-foreground">
+      <details className="text-10 text-muted-foreground">
         <summary className="cursor-pointer">Correlation IDs</summary>
         <dl className="space-y-1 break-all pt-2">
           {[
@@ -176,7 +176,7 @@ function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
   if (failed) return <p role="status">Excerpt unavailable.</p>;
   if (text === undefined) return <p role="status">Loading excerpt…</p>;
   return (
-    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-[11px]">
+    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-11">
       {text}
     </pre>
   );

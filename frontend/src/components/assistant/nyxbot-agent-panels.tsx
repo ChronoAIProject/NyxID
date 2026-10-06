@@ -80,8 +80,8 @@ export function ThreadHeader({
     <div className="space-y-2">
       <div className="flex items-center gap-2">
         <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size="md" />
-        <h2 className="min-w-0 truncate text-[13px] font-semibold text-foreground">{name}</h2>
-        {handle ? <span className="shrink-0 text-[11px] text-text-tertiary">{handle}</span> : null}
+        <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">{name}</h2>
+        {handle ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
         {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
         {onOpenDetails ? (
@@ -100,7 +100,7 @@ export function ThreadHeader({
       {destroyed ? (
         <p
           role="status"
-          className="rounded-lg bg-overlay px-3 py-2 text-[11px] text-muted-foreground"
+          className="rounded-lg bg-overlay px-3 py-2 text-11 text-muted-foreground"
         >
           {name} was destroyed. Its access is revoked and this thread is read-only.
         </p>
@@ -139,7 +139,7 @@ export function TeamStrip({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-12 text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight className={cn("h-3 w-3 transition-transform", open && "rotate-90")} />
         <Users aria-hidden="true" className="h-3.5 w-3.5 text-text-tertiary" />
@@ -149,7 +149,7 @@ export function TeamStrip({
           {running ? ` · ${String(running)} working` : ""}
         </span>
         {requests ? (
-          <span className="ml-auto rounded-md border border-warning/30 bg-warning/10 px-1.5 text-[10px] font-medium text-warning">
+          <span className="ml-auto rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
             {requests} {requests === 1 ? "request" : "requests"}
           </span>
         ) : null}
@@ -164,21 +164,21 @@ export function TeamStrip({
                   <button
                     type="button"
                     onClick={() => onOpenConversation(agent.home_conversation_id!)}
-                    className="min-w-0 truncate text-[12px] font-medium text-foreground hover:underline"
+                    className="min-w-0 truncate text-12 font-medium text-foreground hover:underline"
                   >
                     {agentTitle(agent)}
                   </button>
                 ) : (
-                  <span className="min-w-0 truncate text-[12px] font-medium text-foreground">
+                  <span className="min-w-0 truncate text-12 font-medium text-foreground">
                     {agentTitle(agent)}
                   </span>
                 )}
-                <span className="text-[11px] text-text-tertiary">
+                <span className="text-11 text-text-tertiary">
                   {AGENT_STATUS_LABEL[agent.status]}
                 </span>
               </div>
               {agent.last_reply ? (
-                <p className="line-clamp-1 pl-3.5 text-[11px] text-muted-foreground">
+                <p className="line-clamp-1 pl-3.5 text-11 text-muted-foreground">
                   {excerpt(agent.last_reply.text)}
                 </p>
               ) : null}
@@ -187,7 +187,7 @@ export function TeamStrip({
                   key={request.request_id}
                   className="ml-3.5 flex items-center gap-2 rounded-lg border border-warning/15 bg-warning/[0.04] px-2.5 py-1.5"
                 >
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-warning">
+                  <span className="min-w-0 flex-1 truncate text-11 text-warning">
                     {request.summary}
                   </span>
                   <Button
@@ -229,24 +229,24 @@ export function WaitingNote({
     >
       {items.map((item) => (
         <div key={`${item.kind}:${item.since}:${item.title}`}>
-          <p className="flex items-center gap-2 text-[12px] text-foreground">
+          <p className="flex items-center gap-2 text-12 text-foreground">
             <span
               aria-hidden="true"
               className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
             />
             <span className="min-w-0 truncate">{item.title}</span>
             {item.expires_at ? (
-              <span className="ml-auto shrink-0 text-[11px] text-text-tertiary">
+              <span className="ml-auto shrink-0 text-11 text-text-tertiary">
                 expires {formatTimeDistance(item.expires_at)}
               </span>
             ) : null}
           </p>
           {item.detail ? (
-            <p className="pl-3.5 text-[11px] text-muted-foreground">{item.detail}</p>
+            <p className="pl-3.5 text-11 text-muted-foreground">{item.detail}</p>
           ) : null}
         </div>
       ))}
-      <p className="text-[11px] text-text-tertiary">
+      <p className="text-11 text-text-tertiary">
         {agentName} continues here by itself when this happens; no need to reply.
       </p>
     </div>
@@ -263,7 +263,7 @@ export function PendingEventsNote({
 }) {
   if (count <= 0) return null;
   return (
-    <p role="status" className="px-1 text-[11px] text-text-tertiary">
+    <p role="status" className="px-1 text-11 text-text-tertiary">
       {count} {count === 1 ? "update" : "updates"} waiting for {agentName}&apos;s next turn
     </p>
   );

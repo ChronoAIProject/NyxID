@@ -113,7 +113,7 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
       >
         <Card className="space-y-5 p-5">
           <div className="space-y-1">
-            <h2 className="text-[13px] font-semibold">Files kept by NyxID</h2>
+            <h2 className="text-13 font-semibold">Files kept by NyxID</h2>
             <p className="text-xs text-muted-foreground">
               Changes apply to existing files immediately. Expired files are
               deleted permanently; increasing a limit cannot restore them.

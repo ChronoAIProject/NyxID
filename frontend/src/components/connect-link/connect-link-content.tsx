@@ -805,7 +805,7 @@ export function ConnectLinkReturnPage() {
     <ConnectShell>
       {recoveryError ? <ErrorBanner message={recoveryError} /> : null}
       <Card className="border-border/50">
-        <CardContent className="p-5 text-center text-[12px] text-muted-foreground">
+        <CardContent className="p-5 text-center text-12 text-muted-foreground">
           Finishing the connection...
         </CardContent>
       </Card>
@@ -1103,14 +1103,14 @@ function DeviceCodePanel({
 }) {
   return (
     <div className="space-y-3 rounded-lg border border-border/50 p-4">
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         Enter this code at the provider. NyxID will finish the connection after
         authorization.
       </p>
-      <p className="font-mono text-[15px] font-semibold text-foreground">
+      <p className="font-mono text-15 font-semibold text-foreground">
         {code}
       </p>
-      <p className="text-[11px] text-muted-foreground" role="status">
+      <p className="text-11 text-muted-foreground" role="status">
         {status === "slow_down"
           ? `Provider requested a slower check. Checking again in ${interval} seconds.`
           : `Checking automatically every ${interval} seconds.`}
@@ -1154,7 +1154,7 @@ export function TerminalPanel({
           Connection completed
         </p>
       ) : null}
-      <h1 className="text-[28px] font-semibold leading-tight text-foreground sm:text-[36px]">
+      <h1 className="text-28 font-semibold leading-tight text-foreground sm:text-36">
         {completed
           ? `${serviceName ?? "Service"} connected`
           : status === "cancelled"

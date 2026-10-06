@@ -32,7 +32,7 @@ function Section({
   return (
     <section aria-labelledby={id} className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h2 id={id} className="text-[15px] font-semibold text-foreground">
+        <h2 id={id} className="text-15 font-semibold text-foreground">
           {title}
         </h2>
         {action}
@@ -44,7 +44,7 @@ function Section({
 
 function Quiet({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="rounded-lg bg-overlay px-4 py-3 text-[12px] text-muted-foreground">{children}</p>
+    <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{children}</p>
   );
 }
 
@@ -69,14 +69,14 @@ function AwayList({
         <li key={item.key} className="flex items-start gap-3 px-4 py-3">
           <AgentAvatar agent={item.agent} size="lg" />
           <div className="min-w-0 flex-1 space-y-0.5">
-            <div className="flex items-center gap-2 text-[12px]">
+            <div className="flex items-center gap-2 text-12">
               <span className="font-medium text-foreground">{agentTitle(item.agent)}</span>
               {item.kind === "request" ? (
-                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-[10px] font-medium text-warning light:border-transparent light:bg-warning light:text-white">
+                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning light:border-transparent light:bg-warning light:text-white">
                   Needs a decision
                 </span>
               ) : (
-                <span className="flex items-center gap-1.5 text-[11px] text-text-tertiary">
+                <span className="flex items-center gap-1.5 text-11 text-text-tertiary">
                   <AgentStatusDot status={item.agent.status} />
                   {AGENT_STATUS_LABEL[item.agent.status]}
                   <span aria-hidden="true">·</span>
@@ -84,7 +84,7 @@ function AwayList({
                 </span>
               )}
             </div>
-            <p className="line-clamp-2 text-[12px] text-muted-foreground">
+            <p className="line-clamp-2 text-12 text-muted-foreground">
               {item.kind === "request" ? item.request.summary : item.text}
             </p>
           </div>
@@ -140,12 +140,12 @@ function MemoryPreview({
           className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-card"
         >
           {notes.slice(0, MEMORY_PREVIEW).map((note) => (
-            <li key={note.id} className="line-clamp-2 px-4 py-2.5 text-[12px] text-foreground">
+            <li key={note.id} className="line-clamp-2 px-4 py-2.5 text-12 text-foreground">
               {note.text}
             </li>
           ))}
           {notes.length > MEMORY_PREVIEW ? (
-            <li className="px-4 py-2 text-[11px] text-text-tertiary">
+            <li className="px-4 py-2 text-11 text-text-tertiary">
               and {notes.length - MEMORY_PREVIEW} more
             </li>
           ) : null}
@@ -175,16 +175,16 @@ function RosterCard({
         <AgentAvatar agent={agent} size="lg" />
         <div className="min-w-0 flex-1">
           <p className="flex min-w-0 items-baseline gap-1.5">
-            <span className="truncate text-[13px] font-semibold text-foreground">
+            <span className="truncate text-13 font-semibold text-foreground">
               {agentTitle(agent)}
             </span>
             {handle ? (
-              <span className="shrink-0 text-[11px] text-text-tertiary">
+              <span className="shrink-0 text-11 text-text-tertiary">
                 {handle}
               </span>
             ) : null}
           </p>
-          <p className="flex items-center gap-1.5 text-[11px] text-text-tertiary">
+          <p className="flex items-center gap-1.5 text-11 text-text-tertiary">
             {nyxbot ? (
               "Your personal agent"
             ) : (
@@ -202,7 +202,7 @@ function RosterCard({
           </p>
         </div>
       </div>
-      <p className="line-clamp-2 min-h-8 text-[12px] text-muted-foreground">
+      <p className="line-clamp-2 min-h-8 text-12 text-muted-foreground">
         {agent.description ||
           (nyxbot
             ? "Full access to your services and account. Delegates to your specialists."
@@ -243,16 +243,16 @@ function GroupCard({
         <div className="flex w-full items-center gap-2">
           <AgentAvatarStack agents={group.members} size="sm" max={4} />
           {working ? (
-            <span className="ml-auto flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="ml-auto flex items-center gap-1.5 text-11 text-muted-foreground">
               <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
               {working} working
             </span>
           ) : null}
         </div>
-        <span className="truncate text-[13px] font-semibold text-foreground">
+        <span className="truncate text-13 font-semibold text-foreground">
           {group.name}
         </span>
-        <span className="truncate text-[11px] text-text-tertiary">
+        <span className="truncate text-11 text-text-tertiary">
           {group.owner?.type === "org" ? `${group.owner.name} · ` : ""}
           {group.members.map((member) => agentTitle(member)).join(", ")}
           {group.last_message_at ? ` · ${formatRelativeTime(group.last_message_at)}` : ""}
@@ -309,13 +309,13 @@ export function NyxBotHome({
           <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="lg" />
           <div className="min-w-0 space-y-1">
             <h1
-              className="text-[22px] font-bold leading-[1.1] text-foreground sm:text-[28px]"
+              className="text-22 font-bold leading-[1.1] text-foreground sm:text-28"
               style={{ letterSpacing: "-0.03em" }}
             >
               {greetingFor(now)}
               {firstName ? `, ${firstName}` : ""}
             </h1>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               NyxBot is your personal agent. Ask it anything below, or check in
               on your team.
             </p>
@@ -354,7 +354,7 @@ export function NyxBotHome({
                   aria-label={section.label}
                   className="space-y-2"
                 >
-                  <h3 className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                  <h3 className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                     {section.label}
                   </h3>
                   <ul className="grid gap-3 sm:grid-cols-2">

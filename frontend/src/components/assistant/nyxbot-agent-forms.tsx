@@ -46,7 +46,7 @@ import {
 export const PERSONA_HINT = "e.g. warm, concise, uses emoji sparingly";
 
 export const TEXTAREA_CLASS =
-  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-[12px] leading-relaxed text-foreground placeholder:text-text-tertiary focus-visible:border-white/[0.15] focus-visible:outline-none aria-invalid:border-destructive";
+  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-12 leading-relaxed text-foreground placeholder:text-text-tertiary focus-visible:border-input-focus focus-visible:outline-none aria-invalid:border-destructive";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -86,12 +86,12 @@ export function ServiceGrantPicker({
   }
   if (keys.isPending) {
     return (
-      <p className="text-[12px] text-text-tertiary">Loading your services...</p>
+      <p className="text-12 text-text-tertiary">Loading your services...</p>
     );
   }
   if (!rows.length) {
     return (
-      <p className="rounded-lg bg-overlay px-3 py-2 text-[12px] text-muted-foreground">
+      <p className="rounded-lg border border-dashed border-border px-3 py-2 text-12 text-muted-foreground">
         You have no connected services yet. The agent can ask NyxBot for access later.
       </p>
     );
@@ -107,7 +107,7 @@ export function ServiceGrantPicker({
           <li key={service.slug}>
             <label
               htmlFor={id}
-              className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[12px] hover:bg-overlay"
+              className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-12 hover:bg-overlay"
             >
               <Checkbox
                 id={id}
@@ -118,7 +118,7 @@ export function ServiceGrantPicker({
               <span className="min-w-0 flex-1 truncate text-foreground">
                 {service.label}
               </span>
-              <span className="shrink-0 font-mono text-[10px] text-text-tertiary">
+              <span className="shrink-0 font-mono text-10 text-text-tertiary">
                 {service.slug}
               </span>
             </label>
@@ -142,7 +142,7 @@ function AgentOwnerPicker({
   );
   return (
     <div className="space-y-2">
-      <label className="text-[12px] font-medium" htmlFor="agent-owner">
+      <label className="text-12 font-medium" htmlFor="agent-owner">
         Ownership
       </label>
       <Select
@@ -162,7 +162,7 @@ function AgentOwnerPicker({
         </SelectContent>
       </Select>
       {value ? (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Admins and Members maintain this agent. Each member has private chats;
           memory is shared.
         </p>
@@ -237,7 +237,7 @@ export function NewAgentDialog({
                   }}
                 />
               ) : (
-                <p className="text-[11px] text-text-tertiary">
+                <p className="text-11 text-text-tertiary">
                   Organization agents are not enabled yet.
                 </p>
               )}
@@ -256,7 +256,7 @@ export function NewAgentDialog({
                         onChange={(event) => field.onChange(event.target.value.toLowerCase())}
                       />
                     </FormControl>
-                    <FormDescription className="text-[11px]">
+                    <FormDescription className="text-11">
                       The @handle: lowercase letters, digits and hyphens.
                     </FormDescription>
                     <FormMessage />
@@ -282,7 +282,7 @@ export function NewAgentDialog({
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="text-[11px]">
+                    <FormDescription className="text-11">
                       Shown instead of the @handle.
                     </FormDescription>
                     <FormMessage />
@@ -326,7 +326,7 @@ export function NewAgentDialog({
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="text-[11px]">
+                    <FormDescription className="text-11">
                       Personality and tone only; it never changes what the agent
                       may do.
                     </FormDescription>
@@ -370,7 +370,7 @@ export function NewAgentDialog({
                     <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
                       <div className="space-y-1">
                         <FormLabel>Read my account</FormLabel>
-                        <FormDescription className="text-[12px]">
+                        <FormDescription className="text-12">
                             Lets it look up your keys, services and nodes. It
                             can never change or delete them.
                           </FormDescription>
@@ -384,7 +384,7 @@ export function NewAgentDialog({
               />
               ) : null}
               {error ? (
-                <p role="alert" className="text-[12px] text-destructive">
+                <p role="alert" className="text-12 text-destructive">
                   {error}
                 </p>
               ) : null}

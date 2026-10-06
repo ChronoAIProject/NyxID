@@ -37,7 +37,7 @@ function OrgsEmptyState({ onCreate }: { readonly onCreate: () => void }) {
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground">No organizations yet</p>
+        <p className="text-12 font-medium text-muted-foreground">No organizations yet</p>
         <p className="text-xs text-muted-foreground">
           Create an organization to share services and credentials with
           teammates.
@@ -77,7 +77,7 @@ export function OrgsPage() {
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <Building2 className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-[13px] font-semibold text-foreground">My Organizations</h3>
+            <h3 className="text-13 font-semibold text-foreground">My Organizations</h3>
           </div>
 
           {/* Cards - always on mobile, desktop only in grid mode */}
@@ -89,7 +89,7 @@ export function OrgsPage() {
                 params={{ orgId: org.id }}
                 className="block focus-visible:outline-none rounded-xl"
               >
-                <Card className="transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/30">
+                <Card className="transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/30">
                   <CardContent className="flex flex-col gap-3 p-4">
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex min-w-0 items-center gap-3">
@@ -99,7 +99,7 @@ export function OrgsPage() {
                           className="h-8 w-8"
                         />
                         <div className="min-w-0">
-                          <p className="truncate text-[12px] font-medium text-foreground">
+                          <p className="truncate text-12 font-medium text-foreground">
                             {org.display_name ?? "Untitled org"}
                           </p>
                           <p className="truncate text-xs text-muted-foreground">

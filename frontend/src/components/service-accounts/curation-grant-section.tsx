@@ -153,7 +153,7 @@ export function CurationGrantSection({
         </>
       )}
       <div className="space-y-4 p-5">
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Recommendations can be assigned, replaced, removed, and restored
           within these catalog services. Package editing requires a separate
           scoped Ornn identity. Revoking the grant keeps this account protected.
@@ -177,7 +177,7 @@ export function CurationGrantSection({
         {isAdmin && editing && (
           <Form {...form}>
             <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 This legacy grant limits access to selected catalog services.
                 Saving catalog scopes in Edit switches the account to platform-wide
                 catalog access. Org-owned accounts cannot receive a legacy grant.
@@ -215,7 +215,7 @@ export function CurationGrantSection({
                 />
               ))}
               {submitError && (
-                <p role="alert" className="text-[12px] text-destructive">
+                <p role="alert" className="text-12 text-destructive">
                   {submitError}
                 </p>
               )}

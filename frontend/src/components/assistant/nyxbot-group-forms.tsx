@@ -130,7 +130,7 @@ function AgentPicker({
             <label
               htmlFor={id}
               className={cn(
-                "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[12px] hover:bg-overlay",
+                "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-12 hover:bg-overlay",
                 row.destroyed && "opacity-50",
                 disabled && "cursor-not-allowed",
               )}
@@ -150,7 +150,7 @@ function AgentPicker({
               <AgentAvatar agent={row} size="sm" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-foreground">{row.name}</span>
-                <span className="block truncate text-[11px] text-text-tertiary">
+                <span className="block truncate text-11 text-text-tertiary">
                   {row.description}
                 </span>
               </span>
@@ -169,7 +169,7 @@ function GroupOwnerPicker({ value, onChange }: {
   const orgs = useOrgs();
   const enabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   return <div className="space-y-2">
-    <label htmlFor="group-owner" className="text-[12px] font-medium">Ownership</label>
+    <label htmlFor="group-owner" className="text-12 font-medium">Ownership</label>
     <Select value={value ?? "personal"} onValueChange={(id) => onChange(id === "personal" ? undefined : id)}>
       <SelectTrigger id="group-owner"><SelectValue /></SelectTrigger>
       <SelectContent>
@@ -178,7 +178,7 @@ function GroupOwnerPicker({ value, onChange }: {
           <SelectItem key={org.id} value={org.id} disabled={!enabled}>{org.display_name ?? org.slug}</SelectItem>)}
       </SelectContent>
     </Select>
-    {!enabled && (orgs.data?.length ?? 0) > 0 ? <p className="text-[11px] text-muted-foreground">Organization groups are not enabled yet.</p> : null}
+    {!enabled && (orgs.data?.length ?? 0) > 0 ? <p className="text-11 text-muted-foreground">Organization groups are not enabled yet.</p> : null}
   </div>;
 }
 
@@ -190,18 +190,18 @@ export function GroupParticipantPicker({ org, value, onChange }: {
   const members = useOrgMembers(org);
   const eligible = (members.data ?? []).filter((member) => !member.revoked_at && ["admin", "member"].includes(member.role));
   return <div className="space-y-2">
-    <p className="text-[12px] font-medium">Participants ({value.length} of 16)</p>
+    <p className="text-12 font-medium">Participants ({value.length} of 16)</p>
     <ul aria-label="Participants" className="assistant-scrollbar max-h-44 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
       {eligible.map((member) => <li key={member.user_id}>
-        <label className="flex items-center gap-2 text-[12px]">
+        <label className="flex items-center gap-2 text-12">
           <Checkbox checked={value.includes(member.user_id)} disabled={value.length >= 16 && !value.includes(member.user_id)}
             onCheckedChange={(checked) => onChange(checked ? [...value, member.user_id] : value.filter((id) => id !== member.user_id))} />
           {member.display_name ?? "Member"}
         </label>
       </li>)}
     </ul>
-    {members.isError ? <p role="alert" className="text-[12px] text-destructive">Could not load organization members.</p> : null}
-    <p className="text-[11px] text-muted-foreground">Only selected Admins and Members can read and participate. The creator is included when creating a group.</p>
+    {members.isError ? <p role="alert" className="text-12 text-destructive">Could not load organization members.</p> : null}
+    <p className="text-11 text-muted-foreground">Only selected Admins and Members can read and participate. The creator is included when creating a group.</p>
   </div>;
 }
 
@@ -317,7 +317,7 @@ export function NewGroupDialog({
                 : true))} />
               {org ? <GroupParticipantPicker org={org} value={people} onChange={(ids) => form.setValue("participant_user_ids", ids)} /> : null}
               {error ? (
-                <p role="alert" className="text-[12px] text-destructive">
+                <p role="alert" className="text-12 text-destructive">
                   {error}
                 </p>
               ) : null}
@@ -436,13 +436,13 @@ export function GroupSettingsDialog({
           <Form {...form}>
             <form aria-label="Group settings" noValidate onSubmit={form.handleSubmit(save)}>
               <DialogBody className="space-y-4 pb-1">
-                {org ? <p className="text-[12px] text-muted-foreground">{group.owner?.name} · {canManage ? "You can manage this group." : "Only the creator and participating Admins manage this group."}</p> : null}
+                {org ? <p className="text-12 text-muted-foreground">{group.owner?.name} · {canManage ? "You can manage this group." : "Only the creator and participating Admins manage this group."}</p> : null}
                 <fieldset disabled={!canManage} className="space-y-4">
                   <GroupFields form={form} rows={pickerRows(agents.filter((agent) => org ? agent.owner_id === org : true), group)} />
                   {org ? <>
                     <GroupParticipantPicker org={org} value={form.watch("participant_user_ids") ?? []} onChange={(ids) => form.setValue("participant_user_ids", ids)} />
                     <div className="space-y-2">
-                      <label htmlFor="group-lead" className="text-[12px] font-medium">Lead agent</label>
+                      <label htmlFor="group-lead" className="text-12 font-medium">Lead agent</label>
                       <Select value={form.watch("lead_agent_id")} onValueChange={(id) => form.setValue("lead_agent_id", id)}>
                         <SelectTrigger id="group-lead"><SelectValue /></SelectTrigger>
                         <SelectContent>{agents.filter((agent) => members.includes(agent.id)).map((agent) => <SelectItem key={agent.id} value={agent.id}>{agentTitle(agent)}</SelectItem>)}</SelectContent>
@@ -451,7 +451,7 @@ export function GroupSettingsDialog({
                   </> : null}
                 </fieldset>
                 {error ? (
-                  <p role="alert" className="text-[12px] text-destructive">
+                  <p role="alert" className="text-12 text-destructive">
                     {error}
                   </p>
                 ) : null}
@@ -479,7 +479,7 @@ export function GroupSettingsDialog({
             </form>
           </Form>
           {org ? <div className="space-y-2">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               The creator or a participating Admin must remain. Leaving as the last participant deletes the group.
               Wait for your running turns to finish before leaving or being removed.
             </p>
@@ -490,8 +490,8 @@ export function GroupSettingsDialog({
             className="mt-2 flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4"
           >
             <div className="space-y-1">
-              <h3 className="text-[13px] font-semibold text-destructive">Delete group</h3>
-              <p className="text-[12px] text-destructive/70">
+              <h3 className="text-13 font-semibold text-destructive">Delete group</h3>
+              <p className="text-12 text-destructive/70">
                 Removes the group and its messages. Your agents and their own threads stay.
               </p>
             </div>
@@ -524,7 +524,7 @@ export function GroupSettingsDialog({
             </DialogDescription>
           </DialogHeader>
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}

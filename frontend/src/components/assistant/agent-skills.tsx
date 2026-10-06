@@ -37,18 +37,18 @@ function AttachedSkill({
   const latest = versions.data?.items[0]?.version;
   return (
     <div className="space-y-2 rounded-lg border border-border/50 p-3">
-      <p className="text-[12px] font-medium">
+      <p className="text-12 font-medium">
         {skill.name}{" "}
         <span className="font-mono text-text-tertiary">{skill.version}</span>
       </p>
-      <p className="text-[12px] text-muted-foreground">{description}</p>
+      <p className="text-12 text-muted-foreground">{description}</p>
       {size !== undefined && (
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           {size.toLocaleString()} bytes
         </p>
       )}
       {versions.error && (
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           Could not check for updates. Your pinned version is unchanged.
         </p>
       )}
@@ -112,20 +112,20 @@ export function AgentSkills({
   return (
     <section aria-label="Skills" className="space-y-3">
       <div className="space-y-1">
-        <h3 className="text-[13px] font-semibold">Skills</h3>
-        <p className="text-[12px] text-muted-foreground">
+        <h3 className="text-13 font-semibold">Skills</h3>
+        <p className="text-12 text-muted-foreground">
           Teach this agent with pinned Ornn skills. Skills never grant
           permissions. Up to 16 skills.
         </p>
       </div>
       {current.data && (
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           {current.data.skills.length}/16 skills · Revision{" "}
           {current.data.revision}
         </p>
       )}
       {current.isPending && (
-        <p className="text-[12px] text-muted-foreground">Loading skills...</p>
+        <p className="text-12 text-muted-foreground">Loading skills...</p>
       )}
       {[current.error, write.error, search.error, versions.error, preview.error]
         .filter(Boolean)
@@ -133,7 +133,7 @@ export function AgentSkills({
           <ErrorBanner key={i} message={e!.message} />
         ))}
       {current.data?.skills.length === 0 && (
-        <p className="text-[12px] text-muted-foreground">No skills attached.</p>
+        <p className="text-12 text-muted-foreground">No skills attached.</p>
       )}
       {current.data?.skills.map((skill) => (
         <AttachedSkill
@@ -187,13 +187,13 @@ export function AgentSkills({
               >
                 {item.name}
               </Button>
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 {item.description}
               </p>
             </div>
           ))}
           {search.data?.items.length === 0 && (
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               No visible skills found.
             </p>
           )}
@@ -202,7 +202,7 @@ export function AgentSkills({
               <Button disabled={page <= 1} onClick={() => setPage(page - 1)}>
                 Previous
               </Button>
-              <span className="text-[11px]">Page {page}</span>
+              <span className="text-11">Page {page}</span>
               <Button
                 disabled={page >= search.data.total_pages}
                 onClick={() => setPage(page + 1)}
@@ -213,7 +213,7 @@ export function AgentSkills({
           )}
           {selected && (
             <div className="space-y-3 rounded-lg border border-border/50 p-3">
-              <p className="text-[12px] font-medium">{selected.name}</p>
+              <p className="text-12 font-medium">{selected.name}</p>
               <Select value={version} onValueChange={setVersion}>
                 <SelectTrigger aria-label="Skill version">
                   <SelectValue placeholder="Choose an exact version" />
@@ -238,7 +238,7 @@ export function AgentSkills({
                   >
                     Newer versions
                   </Button>
-                  <span className="text-[11px]">
+                  <span className="text-11">
                     Version page {versionPage}
                   </span>
                   <Button
@@ -253,23 +253,23 @@ export function AgentSkills({
                 </div>
               )}
               {preview.isFetching && (
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   Verifying package...
                 </p>
               )}
               {preview.data && (
                 <>
-                  <p className="text-[12px] text-muted-foreground">
+                  <p className="text-12 text-muted-foreground">
                     {preview.data.description}
                   </p>
-                  <p className="text-[11px] text-text-tertiary">
+                  <p className="text-11 text-text-tertiary">
                     {preview.data.size_bytes.toLocaleString()} bytes ·{" "}
                     {preview.data.reference.dependencies.length} pinned
                     dependencies
                   </p>
                 </>
               )}
-              <p className="text-[11px] text-text-tertiary">
+              <p className="text-11 text-text-tertiary">
                 Attaching external guidance changes how this agent works.
               </p>
               <Button

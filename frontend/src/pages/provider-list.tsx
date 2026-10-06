@@ -129,10 +129,10 @@ export function ProviderListPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
             Manage Providers
           </h2>
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Create and manage OAuth, Telegram, device code, and API key
             providers.
           </p>
@@ -153,7 +153,7 @@ export function ProviderListPage() {
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -197,7 +197,7 @@ export function ProviderListPage() {
                       <FormLabel>Description</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Optional description"
                           {...field}
                         />
@@ -335,7 +335,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "oauth2" && (
                   <>
                     <Separator />
-                    <h4 className="text-[13px] font-semibold">
+                    <h4 className="text-13 font-semibold">
                       OAuth 2.0 Configuration
                     </h4>
 
@@ -481,7 +481,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "device_code" && (
                   <>
                     <Separator />
-                    <h4 className="text-[13px] font-semibold">
+                    <h4 className="text-13 font-semibold">
                       Device Code Configuration (RFC 8628)
                     </h4>
 
@@ -627,7 +627,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "telegram_widget" && (
                   <>
                     <Separator />
-                    <h4 className="text-[13px] font-semibold">
+                    <h4 className="text-13 font-semibold">
                       Telegram Widget Configuration
                     </h4>
 
@@ -676,7 +676,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "api_key" && (
                   <>
                     <Separator />
-                    <h4 className="text-[13px] font-semibold">
+                    <h4 className="text-13 font-semibold">
                       API Key Configuration
                     </h4>
 
@@ -688,7 +688,7 @@ export function ProviderListPage() {
                           <FormLabel>API Key Instructions</FormLabel>
                           <FormControl>
                             <textarea
-                              className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                              className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                               placeholder="Instructions for users to obtain an API key"
                               {...field}
                             />
@@ -748,7 +748,7 @@ export function ProviderListPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No Providers</p>
+            <p className="text-12 font-medium text-muted-foreground">No Providers</p>
             <p className="text-xs text-muted-foreground">
               Add a provider to get started.
             </p>
@@ -759,7 +759,7 @@ export function ProviderListPage() {
           {providers.map((provider) => (
             <Card
               key={provider.id}
-              className="cursor-pointer transition-colors duration-300 hover:border-white/[0.15]"
+              className="cursor-pointer transition-colors duration-300 hover:border-hairline-strong"
               onClick={() =>
                 void navigate({
                   to: "/providers/$providerId",

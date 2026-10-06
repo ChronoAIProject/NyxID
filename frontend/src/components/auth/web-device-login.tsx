@@ -171,7 +171,7 @@ export function WebDeviceLogin({
       <button
         type="button"
         onClick={closePanel}
-        className="mb-5 flex cursor-pointer items-center gap-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+        className="mb-5 flex cursor-pointer items-center gap-1.5 text-12 font-medium text-muted-foreground transition-colors hover:text-foreground"
         aria-label="Back to all sign-in options"
       >
         <ArrowLeft className="size-3.5" />
@@ -183,11 +183,11 @@ export function WebDeviceLogin({
           id="nyxid-app-login-heading"
           ref={headingRef}
           tabIndex={-1}
-          className="text-[20px] font-semibold outline-none"
+          className="text-20 font-semibold outline-none"
         >
           Continue with the NyxID app
         </h2>
-        <p className="mx-auto mt-1.5 max-w-[340px] text-[12.5px] leading-relaxed text-muted-foreground">
+        <p className="mx-auto mt-1.5 max-w-[340px] text-[0.78125rem] leading-relaxed text-muted-foreground">
           Approve this sign-in from a phone that&apos;s already signed in to
           NyxID.
         </p>
@@ -195,7 +195,7 @@ export function WebDeviceLogin({
 
       {deviceLogin.phase === "requesting" && (
         <div
-          className="mt-8 flex items-center justify-center gap-2 text-[12px] text-muted-foreground"
+          className="mt-8 flex items-center justify-center gap-2 text-12 text-muted-foreground"
           role="status"
         >
           <RefreshCw className="size-3.5 animate-spin" />
@@ -214,7 +214,7 @@ export function WebDeviceLogin({
                   className="size-[208px] rounded-md object-contain"
                 />
               ) : (
-                <div className="flex size-[208px] items-center justify-center gap-2 text-[12px] text-muted-foreground">
+                <div className="flex size-[208px] items-center justify-center gap-2 text-12 text-muted-foreground">
                   <ScanLine className="size-4" />
                   Preparing QR code...
                 </div>
@@ -223,11 +223,11 @@ export function WebDeviceLogin({
           </div>
 
           <div className="text-center">
-            <p className="text-[11px] uppercase text-text-tertiary">
+            <p className="text-11 uppercase text-text-tertiary">
               Manual code
             </p>
             <div className="mt-1.5 flex items-center justify-center gap-2">
-              <span className="font-mono text-[24px] font-semibold text-foreground">
+              <span className="font-mono text-24 font-semibold text-foreground">
                 {formattedCode}
               </span>
               <button
@@ -245,15 +245,15 @@ export function WebDeviceLogin({
             </div>
           </div>
 
-          <p className="text-center text-[12px] leading-relaxed text-muted-foreground">
+          <p className="text-center text-12 leading-relaxed text-muted-foreground">
             Scan the code, or open{" "}
-            <span className="break-all font-mono text-[11px] text-foreground">
+            <span className="break-all font-mono text-11 text-foreground">
               {deviceLogin.request.verification_uri}
             </span>{" "}
             on your phone and enter the manual code.
           </p>
 
-          <div className="flex items-center justify-center gap-1.5 text-[11px] text-warning">
+          <div className="flex items-center justify-center gap-1.5 text-11 text-warning">
             <Clock3 className="size-3.5" />
             Expires in{" "}
             {formatWebAuthDeviceRemaining(
@@ -269,7 +269,7 @@ export function WebDeviceLogin({
           role="status"
         >
           <AlertTriangle className="mx-auto size-5 text-destructive" />
-          <p className="mt-2 text-[13px] font-medium text-destructive">
+          <p className="mt-2 text-13 font-medium text-destructive">
             {terminalMessage}
           </p>
           <Button
@@ -290,17 +290,17 @@ export function WebDeviceLogin({
       {deviceLogin.phase === "restricted" && deviceLogin.loginCode && (
         <section className="mt-6 space-y-3 text-center" aria-live="polite">
           <CheckCircle2 className="mx-auto size-6 text-success" />
-          <h3 className="text-[15px] font-semibold">Restricted terminal login</h3>
-          <p className="text-[12px] text-muted-foreground">This browser remains signed out.</p>
-          <code data-sensitive className="block font-mono text-[24px]">{deviceLogin.loginCode.code}</code>
-          <p className="text-[12px]">Terminal command: <code>nyxid login --code</code></p>
-          <p className="text-[12px] text-muted-foreground">Expires {new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString()}</p>
+          <h3 className="text-15 font-semibold">Restricted terminal login</h3>
+          <p className="text-12 text-muted-foreground">This browser remains signed out.</p>
+          <code data-sensitive className="block font-mono text-24">{deviceLogin.loginCode.code}</code>
+          <p className="text-12">Terminal command: <code>nyxid login --code</code></p>
+          <p className="text-12 text-muted-foreground">Expires {new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString()}</p>
         </section>
       )}
 
       {deviceLogin.phase === "success" && (
         <div
-          className="mt-8 flex items-center justify-center gap-2 text-[13px] text-success"
+          className="mt-8 flex items-center justify-center gap-2 text-13 text-success"
           role="status"
         >
           <CheckCircle2 className="size-4" />

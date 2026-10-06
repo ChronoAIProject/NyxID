@@ -1120,7 +1120,7 @@ export function OAuthFlow({
               ? "OAuth app credentials"
               : "Paste your OAuth app credentials"}
           </h3>
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             This provider expects you to register your own OAuth app
             and supply the resulting Client ID and Client Secret.
           </p>
@@ -1145,7 +1145,7 @@ export function OAuthFlow({
 
         {hasCopyOptions ? (
           <div className="flex flex-col gap-2">
-            <Label className="text-[12px] font-medium">
+            <Label className="text-12 font-medium">
               Use credentials from an existing connection
             </Label>
             <div className="flex flex-col gap-1.5">
@@ -1240,23 +1240,23 @@ export function OAuthFlow({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h3 className="font-medium">Complete sign-in on the provider</h3>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           We opened a new tab where you'll authorize NyxID. When it
           completes, come back — this page will finish automatically.
         </p>
       </div>
       {phase === "checking-credentials" ? (
-        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex items-center gap-2 text-12 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Checking provider credentials...
         </div>
       ) : phase === "starting" ? (
-        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex items-center gap-2 text-12 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Creating placeholder service...
         </div>
       ) : phase === "waiting" ? (
-        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex items-center gap-2 text-12 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Waiting for provider authorization...
         </div>
@@ -1267,7 +1267,7 @@ export function OAuthFlow({
           href={authUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-[12px] hover:bg-muted"
+          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-12 hover:bg-muted"
         >
           Reopen provider sign-in
           <ExternalLink className="h-4 w-4" />
@@ -1698,14 +1698,14 @@ export function DeviceCodeFlow({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h3 className="font-medium">Authorize via device code</h3>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Open the verification URL, enter the code, and complete
           sign-in on the provider. This page will finish automatically.
         </p>
       </div>
 
       {phase === "starting" ? (
-        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex items-center gap-2 text-12 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Requesting device code...
         </div>
@@ -1743,7 +1743,7 @@ export function DeviceCodeFlow({
               href={verifyUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-[12px] underline-offset-2 hover:underline"
+              className="inline-flex items-center gap-1.5 text-12 underline-offset-2 hover:underline"
             >
               {verifyUrl}
               <ExternalLink className="h-3.5 w-3.5" />
@@ -1756,7 +1756,7 @@ export function DeviceCodeFlow({
         </div>
       ) : phase === "expired" ? (
         <div className="flex flex-col gap-2">
-          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
             The device code expired before authorization completed.
           </p>
           <Button variant="primary" onClick={() => void startSession()}>
@@ -1780,7 +1780,7 @@ export function DeviceCodeFlow({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
       {message}
     </p>
   );

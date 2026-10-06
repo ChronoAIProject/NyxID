@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 
 export const LOGIN_PROVIDER_ROW_CLASS =
-  "flex min-h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 py-2 text-left text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-overlay disabled:cursor-not-allowed disabled:opacity-60";
+  "flex min-h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 py-2 text-left text-[0.84375rem] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-overlay disabled:cursor-not-allowed disabled:opacity-60";
 
 export function LoginProviderRow({
   icon,

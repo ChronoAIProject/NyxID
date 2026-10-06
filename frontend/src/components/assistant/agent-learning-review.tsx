@@ -32,23 +32,23 @@ export function AgentLearningReview({
   return (
     <section aria-label="Learning" className="space-y-3">
       <div className="space-y-1">
-        <h3 className="text-[13px] font-semibold text-foreground">
+        <h3 className="text-13 font-semibold text-foreground">
           Learning proposals
         </h3>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Completed work can produce private, untrusted Ornn skill drafts.
           Publishing and attaching always requires your confirmation.
         </p>
       </div>
       {review.error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           Automatic learning is unavailable.
         </p>
       ) : null}
 
       {!readOnly ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3">
-          <label className="flex items-center gap-2 text-[12px]">
+          <label className="flex items-center gap-2 text-12">
             <Switch
               checked={learningEnabled}
               disabled={review.configure.isPending}
@@ -61,7 +61,7 @@ export function AgentLearningReview({
             />
             Enable automatic learning
           </label>
-          <label className="flex items-center gap-2 text-[12px]">
+          <label className="flex items-center gap-2 text-12">
             <span>Threshold</span>
             <Input
               aria-label="Learning threshold"
@@ -87,7 +87,7 @@ export function AgentLearningReview({
       ) : null}
 
       {proposals.length === 0 ? (
-        <p className="text-[12px] text-text-tertiary">
+        <p className="text-12 text-text-tertiary">
           No pending proposals.
         </p>
       ) : null}
@@ -103,27 +103,27 @@ export function AgentLearningReview({
             className="space-y-3 rounded-lg border border-border/50 p-3"
           >
             <div className="flex items-center justify-between gap-2">
-              <p className="text-[12px] font-medium">
+              <p className="text-12 font-medium">
                 {draft?.name ?? "Learning proposal"}
               </p>
               <Badge variant="secondary">{proposal.status}</Badge>
             </div>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               {draft?.description}
             </p>
-            <p className="text-[11px] text-text-tertiary">
+            <p className="text-11 text-text-tertiary">
               {proposal.evidence_count} evidence items ·{" "}
               {proposal.body_bytes.toLocaleString()} bytes
             </p>
 
             {isOpen && draft ? (
               <div className="space-y-2">
-                <p className="text-[11px] text-text-tertiary">
+                <p className="text-11 text-text-tertiary">
                   Generated guidance is untrusted and is shown as plain text.
                 </p>
                 <Textarea
                   aria-label="Skill draft"
-                  className="min-h-40 font-mono text-[11px]"
+                  className="min-h-40 font-mono text-11"
                   value={draftText}
                   readOnly={readOnly}
                   onChange={(event) =>
@@ -133,7 +133,7 @@ export function AgentLearningReview({
                     }))
                   }
                 />
-                <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2 text-[11px]">
+                <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2 text-11">
                   {draft.safety_notes}
                 </pre>
                 {!readOnly &&
@@ -201,7 +201,7 @@ export function AgentLearningReview({
               </Button>
             </div>
             {card ? (
-              <p className="text-[11px] text-warning">
+              <p className="text-11 text-warning">
                 Confirming this exact card will publish the private skill and
                 attach its pinned version. The card expires if the draft or
                 agent changes.

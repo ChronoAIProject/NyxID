@@ -164,12 +164,12 @@ export function AssistantPendingCredentialCreateDialog({
         </DialogHeader>
 
         {resultId ? (
-          <p className="break-all border-y border-border py-4 font-mono text-[12px] text-muted-foreground">
+          <p className="break-all border-y border-border py-4 font-mono text-12 text-muted-foreground">
             {resultId}
           </p>
         ) : (
           <div className="space-y-4 border-y border-border py-4">
-            <div className="flex items-center justify-between gap-4 text-[12px]">
+            <div className="flex items-center justify-between gap-4 text-12">
               <span className="text-muted-foreground">Node</span>
               <Badge
                 variant="secondary"
@@ -242,7 +242,7 @@ export function AssistantPendingCredentialCreateDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}

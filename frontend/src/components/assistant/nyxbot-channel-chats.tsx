@@ -61,7 +61,7 @@ function SettingSelect<T extends string>({
 }) {
   return (
     <Select value={value} onValueChange={(next) => onChange(next as T)} disabled={disabled}>
-      <SelectTrigger aria-label={label} className="h-7 w-full max-w-[220px] rounded-md px-2 text-[12px]">
+      <SelectTrigger aria-label={label} className="h-7 w-full max-w-[220px] rounded-md px-2 text-12">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -126,20 +126,20 @@ function ChatRow({
     <div className="space-y-2 rounded-md bg-overlay px-2.5 py-2">
       <div className="flex items-center gap-2">
         <ChatKindIcon kind={chat.kind} className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-        <p className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">{title}</p>
+        <p className="min-w-0 flex-1 truncate text-12 font-medium text-foreground">{title}</p>
         {chat.kind ? (
-          <span className="shrink-0 rounded-md border border-hairline px-1 text-[10px] text-text-tertiary">
+          <span className="shrink-0 rounded-md border border-hairline px-1 text-10 text-text-tertiary">
             {kindLabel}
           </span>
         ) : null}
         {chat.last_message_at ? (
-          <span className="shrink-0 text-[11px] text-text-tertiary">
+          <span className="shrink-0 text-11 text-text-tertiary">
             {formatRelativeTime(chat.last_message_at)}
           </span>
         ) : null}
       </div>
-      <p className="text-[11px] text-muted-foreground">{summary}</p>
-      <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-[11px] text-muted-foreground">
+      <p className="text-11 text-muted-foreground">{summary}</p>
+      <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-11 text-muted-foreground">
         {group ? (
           <>
             <span>Answers</span>
@@ -195,9 +195,9 @@ function ChatRow({
           onCheckedChange={(allow_posts) => void change({ allow_posts })}
         />
       </div>
-      {group && chat.follow_guidance ? <p className="text-[11px] text-muted-foreground">{chat.follow_guidance}</p> : null}
+      {group && chat.follow_guidance ? <p className="text-11 text-muted-foreground">{chat.follow_guidance}</p> : null}
       {group && (chat.thread_capabilities?.thread_follow || chat.has_thread_history || (chat.followed_thread_count ?? 0) > 0) ? <ChannelThreads chat={chat} /> : null}
-      {notice ? <p className="text-[11px] text-muted-foreground">{notice}</p> : null}
+      {notice ? <p className="text-11 text-muted-foreground">{notice}</p> : null}
     </div>
   );
 }
@@ -238,7 +238,7 @@ export function ChannelChats({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="flex items-center gap-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+        className="flex items-center gap-1 text-12 text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight
           aria-hidden="true"
@@ -249,7 +249,7 @@ export function ChannelChats({
       {open ? (
         <div className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[11px] text-muted-foreground">Private chats with the bot</span>
+            <span className="text-11 text-muted-foreground">Private chats with the bot</span>
             <SettingSelect
               label={`Who can talk to ${channel.bot_label} in private chats`}
               value={channel.private_chats}
@@ -261,7 +261,7 @@ export function ChannelChats({
               onChange={(value) => void setAccess(value)}
             />
           </div>
-          <p className="text-[11px] text-text-tertiary">
+          <p className="text-11 text-text-tertiary">
             People other than you talk to the agent as guests: it never acts on your account for
             them, NyxBot uses none of your services for them, and a chat&apos;s own specialist
             only reads with its services. Members of a group can talk to it once you have talked
@@ -269,7 +269,7 @@ export function ChannelChats({
             every message.
           </p>
           {error ? (
-            <p role="alert" className="text-[11px] text-destructive">
+            <p role="alert" className="text-11 text-destructive">
               {error}
             </p>
           ) : null}
@@ -279,7 +279,7 @@ export function ChannelChats({
               onRetry={() => void chats.refetch()}
             />
           ) : chats.isPending ? (
-            <p className="text-[11px] text-text-tertiary">Loading chats...</p>
+            <p className="text-11 text-text-tertiary">Loading chats...</p>
           ) : rows.length ? (
             <ul aria-label={`Chats of ${channel.bot_label}`} className="space-y-1.5">
               {roots.slice(0, shown).map((chat) => (
@@ -293,14 +293,14 @@ export function ChannelChats({
                   onError={setError}
                 />
                 {rows.filter((child) => child.parent_chat_id === chat.id).map((child) => <div key={child.id} className="ml-3 mt-1 border-l border-hairline pl-2">
-                  <p className="mb-1 text-[11px] text-text-tertiary">Earlier thread settings</p>
+                  <p className="mb-1 text-11 text-text-tertiary">Earlier thread settings</p>
                   <ChatRow channel={channel} chat={child} agents={agents} botAgentName={botAgentName} onError={setError} />
                 </div>)}
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="text-[11px] text-text-tertiary">
+            <p className="text-11 text-text-tertiary">
               No chats yet. Message the bot, or add it to a group and mention it.
             </p>
           )}

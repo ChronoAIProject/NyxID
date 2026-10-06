@@ -95,7 +95,7 @@ export function NodeScopeCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <HardDrive className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Node Scope</CardTitle>
+          <CardTitle className="text-15">Node Scope</CardTitle>
         </div>
         <CardDescription>
           Which nodes this key can route through
@@ -110,7 +110,7 @@ export function NodeScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-nodes" className="text-[12px]">
+              <Label htmlFor="allow-all-nodes" className="text-12">
                 Allow all nodes
               </Label>
             </div>
@@ -134,7 +134,7 @@ export function NodeScopeCard({
                           variant={
                             n.status === "online" ? "default" : "secondary"
                           }
-                          className="ml-1 text-[10px]"
+                          className="ml-1 text-10"
                         >
                           {n.status}
                         </Badge>

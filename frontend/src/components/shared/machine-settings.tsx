@@ -39,7 +39,7 @@ function SettingsSection({
 }) {
   return (
     <section className="min-w-0 space-y-3 rounded-xl border border-border/50 bg-card p-4">
-      <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
+      <h3 className="text-13 font-semibold text-foreground">{title}</h3>
       {children}
     </section>
   );
@@ -134,7 +134,7 @@ export function MachineSettings({
       <form
         aria-label="Machine settings"
         onSubmit={form.handleSubmit(save)}
-        className="flex min-h-0 min-w-0 flex-1 flex-col text-[12px]"
+        className="flex min-h-0 min-w-0 flex-1 flex-col text-12"
       >
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-5 [overflow-wrap:anywhere]">
           {update ? (

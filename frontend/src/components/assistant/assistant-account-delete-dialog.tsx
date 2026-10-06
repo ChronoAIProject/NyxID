@@ -52,8 +52,8 @@ export function AssistantAccountDeleteDialog({
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
         <DialogHeader><DialogTitle>{verifiedUserId ? "Account deleted" : "Delete account"}</DialogTitle><DialogDescription>{verifiedUserId ? "The account projection is absent. Your session can now be cleared." : "This is irreversible. Every time, type your account email to confirm."}</DialogDescription></DialogHeader>
-        {!verifiedUserId ? <div className="space-y-2 border-y border-border py-4"><label htmlFor="assistant-account-delete-email" className="text-[12px] font-medium">Account email</label><Input id="assistant-account-delete-email" value={confirmEmail} onChange={(event) => setConfirmEmail(event.target.value)} placeholder={accountEmail ?? "you@example.com"} autoComplete="email" /></div> : null}
-        {error ? <p role="alert" className="text-[11px] text-destructive">{error}</p> : null}
+        {!verifiedUserId ? <div className="space-y-2 border-y border-border py-4"><label htmlFor="assistant-account-delete-email" className="text-12 font-medium">Account email</label><Input id="assistant-account-delete-email" value={confirmEmail} onChange={(event) => setConfirmEmail(event.target.value)} placeholder={accountEmail ?? "you@example.com"} autoComplete="email" /></div> : null}
+        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
         <DialogFooter>{verifiedUserId ? <Button type="button" variant="primary" onClick={() => { onComplete(verifiedUserId); close(); }}>Continue</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmEmail.trim()} onClick={() => void submit()}>Delete account</Button></>}</DialogFooter>
       </DialogContent>
     </Dialog>
