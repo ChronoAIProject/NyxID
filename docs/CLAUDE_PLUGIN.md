@@ -7,10 +7,14 @@ The repository-root `.claude-plugin/` marketplace is separate: it installs the C
 ## Validate
 
 ```bash
-python3 scripts/validate-claude-plugin.py
+python3 scripts/validate-claude-plugin.py                  # package checks
+python3 scripts/validate-claude-plugin.py --require-claude # also require `claude plugin validate --strict`
+python3 scripts/validate-claude-plugin.py --repo-only      # repository-wide directory limits
 ```
 
-The script checks the manifest (https listing URLs, icon), the remote MCP server declaration, skill frontmatter, README length, LICENSE, and the directory's bundle limits (512 files, 256 KiB per non-image file, no symlinks, no `.ico`/`.pdf`/`.zip`/`.DS_Store`). When the `claude` CLI is on `PATH`, it also runs `claude plugin validate --strict`. CI runs it as **Claude Plugin Validate** whenever the folder or script changes.
+These are conservative local checks, not the directory's full validation or security scan. They cover the manifest (https listing URLs, icon), the remote MCP server declaration, skill frontmatter, README length outside code blocks, LICENSE, and the bundle limits (512 files and 256 KiB per non-image file, which the directory treats as review holds; a 5 MiB cap on any file; no symlinks, executables, archives, or OS metadata files). `--repo-only` checks the limits the directory reads across the whole repository: under 10,000 files and folders, 256 MiB unpacked, and 50 MiB archived.
+
+CI runs the repository check on every PR as **Claude Plugin Validate**, and the package checks with a pinned Claude Code (`CLAUDE_CODE_VERSION`) whenever the folder or validator changes.
 
 ## Submit
 

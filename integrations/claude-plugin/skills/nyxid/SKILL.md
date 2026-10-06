@@ -36,4 +36,4 @@ Ask the user before calling an operation that sends messages, changes data, or d
 
 ## Out of scope
 
-NyxID cannot disconnect services, delete connections, or change account settings from this plugin; direct the user to the NyxID web app at https://nyx.chrono-ai.fun for those. Only the signed-in user's own services are visible; never attempt to access another person's account.
+NyxID cannot disconnect services, delete connections, or change account settings from this plugin; direct the user to the NyxID web app at https://nyx.chrono-ai.fun for those. Only services available to the signed-in account are visible: its own connections, credential-free services, and services shared through its organizations under their permissions. Never attempt to access another person's account.
