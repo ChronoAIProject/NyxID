@@ -20,14 +20,14 @@ export function AgentPluginsSection() {
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h2
           id="agent-plugins-heading"
-          className="text-[15px] font-semibold text-foreground"
+          className="text-15 font-semibold text-foreground"
         >
           Agent plugins
         </h2>
         <Link
           to="/settings"
           search={{ tab: "mcp" }}
-          className="text-[11px] text-muted-foreground hover:text-foreground"
+          className="text-11 text-text-tertiary hover:text-foreground"
         >
           MCP setup{" "}
           <ArrowUpRight className="inline h-3 w-3" aria-hidden="true" />
@@ -37,9 +37,7 @@ export function AgentPluginsSection() {
         {PLUGIN_COMMANDS.map(({ name, command }) => (
           <div key={name} className="min-w-0 space-y-2">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-[12px] font-medium text-foreground">
-                {name}
-              </h3>
+              <h3 className="text-12 font-medium text-foreground">{name}</h3>
               <Button
                 variant="outline"
                 size="sm"
@@ -51,7 +49,7 @@ export function AgentPluginsSection() {
                 Copy command
               </Button>
             </div>
-            <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">
+            <pre className="whitespace-pre-wrap break-all font-mono text-11 leading-5 text-muted-foreground">
               {command}
             </pre>
           </div>

@@ -161,7 +161,7 @@ After the CLI is installed, choose where it should log in:
 > codex mcp login nyxid
 > ```
 >
-> The same Claude marketplace also offers `nyxid-cli@nyxid`, the CLI edition that bundles every skill in `skills/` (it calls the `nyxid` CLI installed above). **Cursor**: see [`integrations/cursor-plugin/`](integrations/cursor-plugin/). Maintainers: see [`docs/PLUGINS.md`](docs/PLUGINS.md).
+> `claude mcp login` needs Claude Code 2.1.284 or later; on older versions run `/mcp` inside Claude Code to sign in. The same Claude marketplace also offers `nyxid-cli@nyxid`, the CLI edition that bundles every skill in `skills/` (it calls the `nyxid` CLI installed above). **Cursor**: see [`integrations/cursor-plugin/`](integrations/cursor-plugin/). Maintainers: see [`docs/PLUGINS.md`](docs/PLUGINS.md).
 
 #### Hosted (Recommended)
 

@@ -23,4 +23,13 @@ Submit from the Claude organization that should own the listing (on Team or Ente
 1. **MCP connector**: `https://nyx-api.chrono-ai.fun/mcp`, OAuth via dynamic client registration.
 2. **Plugin**: this repository and the `integrations/claude-plugin` folder.
 
-Before submitting, connect the server as a custom connector in Claude and run the example prompts from the README end to end. Reviewer access uses SSO (Google, GitHub, or Apple); provide a dedicated reviewer account with services already connected.
+Before submitting, connect the server as a custom connector in Claude and run the example prompts from the README end to end.
+
+### Reviewer account
+
+The directory reviews the tools listed to the reviewer's session, so prepare a dedicated NyxID account that shows only what passes review:
+
+- **Sign-in:** the hosted instance is SSO-only (Google, GitHub or Apple; email/password login is disabled). Provide a dedicated Google or GitHub account for reviewers, or confirm an alternative with Anthropic before submitting.
+- **Services:** connect only catalog services with curated API specs (for example GitHub). Do not connect custom services without an OpenAPI spec. They publish a generic `{slug}__request` tool whose `method` parameter mixes safe and unsafe HTTP methods, a pattern the directory rejects.
+- **Tool names:** keep to services whose tool names stay within 64 characters (`{slug}__{operation}`). The curated catalog overlays do; specs discovered automatically may not.
+- **Consent:** approve the connector with the services to review (or all services), so `nyx__list_connected_services` is not empty.

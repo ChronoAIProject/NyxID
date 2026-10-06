@@ -579,10 +579,13 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// 2. `Authorization: Bearer <JWT>` (OAuth access token)
 /// 3. `Mcp-Session-Id` header (session fallback; only when `session_fallback` is true)
 ///
-/// When `session_fallback` is true (all methods except `initialize`), an
-/// expired JWT is tolerated as long as a valid MCP session exists.  This
-/// allows long-lived MCP sessions (30 days) to survive past the short-lived
-/// access-token TTL without forcing re-authentication.
+/// When `session_fallback` is true (all methods except `initialize`), a
+/// missing or expired JWT is tolerated only for sessions whose
+/// `session_fallback_allowed` flag is set: those minted from unrestricted
+/// first-party access tokens (see `McpAuthContext::allows_session_fallback`).
+/// They survive past the short access-token TTL for up to 30 idle days.
+/// Sessions minted from app-issued or restricted tokens, and legacy rows
+/// without the flag, return 401 so the client re-presents its token.
 ///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
 #[allow(clippy::result_large_err)]
@@ -3367,10 +3370,12 @@ async fn handle_meta_discover(
 }
 
 /// Refusal for a restricted caller asking to connect a service outside its
-/// grant. API keys are managed on the key itself; an OAuth app's access is the
-/// user's consent, which they change by revoking the app and reconnecting.
+/// grant. Only a plain OAuth app's access is the user's consent, which they
+/// change by revoking the app and reconnecting; API keys, the relay tokens
+/// that inherit an agent key's allowlist, delegated tokens and service
+/// accounts are managed elsewhere.
 fn restricted_connect_refusal(auth: &McpAuthContext, frontend_url: &str) -> String {
-    if auth.is_api_key {
+    if auth.auth_method != AuthMethod::AccessToken || auth.api_key_id.is_some() {
         return "API key does not have access to this service".to_string();
     }
     let consents_url = format!("{}/settings/consents", frontend_url.trim_end_matches('/'));
@@ -5665,6 +5670,20 @@ mod tests {
             restricted_connect_refusal(&api_key, "https://nyx.example/"),
             "API key does not have access to this service"
         );
+
+        for method in [
+            AuthMethod::Relay,
+            AuthMethod::Delegated,
+            AuthMethod::ServiceAccount,
+        ] {
+            let label = format!("{method:?}");
+            let ctx = McpAuthContext::user("user-1".to_string(), method);
+            assert_eq!(
+                restricted_connect_refusal(&ctx, "https://nyx.example/"),
+                "API key does not have access to this service",
+                "{label} must not be sent to OAuth consents"
+            );
+        }
 
         let oauth = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
         let refusal: serde_json::Value =

@@ -56,4 +56,8 @@ Never edit generated files by hand. CI fails when they differ from the source.
 
 Plugins sign in with OAuth dynamic client registration. On the consent page the user chooses which services the app may use. A restricted or zero-service grant is kept through code exchange and refresh. The skill's "When services are missing" section tells the agent to send the user to `/settings/consents` to revoke and reconnect the app. `nyx__connect_service` returns `service_not_granted` with the same link when a restricted app asks to connect a new service.
 
-MCP sessions created by tokens issued to an OAuth client, or by tokens restricted to certain services or nodes, never authenticate on their own: every request must carry a live bearer token, so the grant always applies.
+MCP sessions created by tokens issued to an OAuth client, or by tokens restricted to certain services or nodes, never authenticate on their own: every request must carry a live bearer token, so the grant always applies. This holds once every backend replica runs a build with `session_fallback_allowed`; during a rolling deploy older replicas still honor the fallback. Sessions created before that build (no flag) need a live bearer once; clients refresh on the 401.
+
+## Requirements
+
+The install commands (`claude mcp login`) and `claude plugin validate --strict` need Claude Code 2.1.284 or later (CI pins `CLAUDE_CODE_VERSION`). On older versions, run `/mcp` inside Claude Code to sign in.
