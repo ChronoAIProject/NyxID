@@ -232,7 +232,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
         {step === "requesting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Requesting code from {provider.name}...
             </p>
           </div>
@@ -276,7 +276,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
             </div>
 
             {/* Instructions */}
-            <div className="rounded-lg bg-muted p-3 text-[12px] text-muted-foreground">
+            <div className="rounded-lg bg-muted p-3 text-12 text-muted-foreground">
               <ol className="list-decimal list-inside space-y-1">
                 <li>Click the link above to open the authentication page</li>
                 <li>Enter the code shown above</li>
@@ -307,7 +307,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle2 className="h-8 w-8 text-success" />
-              <p className="text-[12px] text-muted-foreground text-center">
+              <p className="text-12 text-muted-foreground text-center">
                 Your {provider.name} account has been connected successfully.
                 Tokens are encrypted and stored securely.
               </p>
@@ -324,7 +324,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <AlertCircle className="h-8 w-8 text-destructive" />
-              <p className="text-[12px] text-destructive text-center">
+              <p className="text-12 text-destructive text-center">
                 {errorMessage}
               </p>
             </div>

@@ -63,7 +63,7 @@ export function SshTerminalPage() {
         <h3 className="mb-2 text-lg font-semibold">
           Service not found
         </h3>
-        <p className="mb-4 text-[12px] text-muted-foreground">
+        <p className="mb-4 text-12 text-muted-foreground">
           The service you are looking for does not exist or has been deleted.
         </p>
         <Button variant="outline" onClick={handleBack}>
@@ -80,7 +80,7 @@ export function SshTerminalPage() {
         <h3 className="mb-2 text-lg font-semibold">
           Terminal not available
         </h3>
-        <p className="mb-4 max-w-md text-center text-[12px] text-muted-foreground">
+        <p className="mb-4 max-w-md text-center text-12 text-muted-foreground">
           {!isSshService
             ? "This service is not an SSH service. The web terminal is only available for SSH services."
             : "Certificate authentication is not enabled for this SSH service. Enable it to use the web terminal."}
@@ -107,7 +107,7 @@ export function SshTerminalPage() {
 
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-slate-400" />
-          <span className="text-[12px] font-medium text-slate-200">
+          <span className="text-12 font-medium text-slate-200">
             {service.name}
           </span>
           {targetHost !== null && (
@@ -115,7 +115,7 @@ export function SshTerminalPage() {
           )}
         </div>
 
-        <Badge variant="accent" className="text-[9px]">
+        <Badge variant="accent" className="text-9">
           {principal}
         </Badge>
 

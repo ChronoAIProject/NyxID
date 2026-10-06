@@ -1,4 +1,5 @@
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useMemo } from "react";
+import { buildCustomColorCss } from "@/lib/theme-colors";
 import {
   useThemeStore,
   resolveTheme,
@@ -27,6 +28,7 @@ export function useResolvedTheme(): ResolvedTheme {
  */
 export function useApplyTheme(): void {
   const resolved = useResolvedTheme();
+  const textScale = useThemeStore((s) => s.textScale);
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.classList.toggle("theme-light", resolved === "light");
@@ -35,4 +37,48 @@ export function useApplyTheme(): void {
       root.classList.remove("theme-light", "theme-dark");
     };
   }, [resolved]);
+  const density = useThemeStore((s) => s.density);
+  const motion = useThemeStore((s) => s.motion);
+  const customColors = useThemeStore((s) => s.customColors);
+  const customCss = useMemo(() => buildCustomColorCss(customColors), [customColors]);
+
+  // Text size: a percentage root font size keeps the user's browser default
+  // as the 100% baseline. Only rem text follows it; spacing is px.
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    root.style.fontSize = textScale === 1 ? "" : `${textScale * 100}%`;
+    return () => {
+      root.style.fontSize = "";
+    };
+  }, [textScale]);
+
+  // Density scales Tailwind's spacing step (4px by default in app.css).
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    if (density === 1) root.style.removeProperty("--spacing");
+    else root.style.setProperty("--spacing", `${4 * density}px`);
+    return () => {
+      root.style.removeProperty("--spacing");
+    };
+  }, [density]);
+
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("motion-reduce", motion === "reduce");
+    return () => {
+      root.classList.remove("motion-reduce");
+    };
+  }, [motion]);
+
+  // Custom colors: one stylesheet scoped to `html.theme-*`, removed on unmount.
+  useLayoutEffect(() => {
+    if (!customCss) return;
+    const style = document.createElement("style");
+    style.id = "nyxid-custom-colors";
+    style.textContent = customCss;
+    document.head.appendChild(style);
+    return () => {
+      style.remove();
+    };
+  }, [customCss]);
 }

@@ -181,7 +181,7 @@ function TriggerDetail({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
         <SheetHeader>
-          <SheetTitle className="text-[15px]">{trigger?.label}</SheetTitle>
+          <SheetTitle className="text-15">{trigger?.label}</SheetTitle>
           <SheetDescription>
             Ingress verification and delivery configuration.
           </SheetDescription>
@@ -513,7 +513,7 @@ export function TriggersPage() {
         description="Relay verified inbound events to agents, webhooks, or notifications."
         actions={
           <>
-            <Link to="/assistant/automations" className="text-[12px] text-primary underline">
+            <Link to="/assistant/automations" className="text-12 text-primary underline">
               Automations
             </Link>
             <AddCtaButton
@@ -555,11 +555,11 @@ export function TriggersPage() {
               >
                 <div className="absolute right-3 top-3">{actions(trigger)}</div>
                 <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/50 bg-white/[0.03]">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/50 bg-overlay">
                     <BellRing className="h-4 w-4 text-muted-foreground" />
                   </div>
                   <div className="min-w-0 space-y-2">
-                    <p className="truncate text-[13px] font-semibold">
+                    <p className="truncate text-13 font-semibold">
                       {trigger.label}
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -574,7 +574,7 @@ export function TriggersPage() {
                         {deliveryLabel(trigger)}
                       </Badge>
                     </div>
-                    <p className="text-[11px] text-text-tertiary">
+                    <p className="text-11 text-text-tertiary">
                       Created {formatDateTime(trigger.created_at)}
                     </p>
                   </div>
@@ -610,7 +610,7 @@ export function TriggersPage() {
                         {titleCase(trigger.status)}
                       </Badge>
                     </TableCell>
-                    <TableCell className="font-mono text-[11px] text-text-tertiary">
+                    <TableCell className="font-mono text-11 text-text-tertiary">
                       {formatDateTime(trigger.created_at)}
                     </TableCell>
                     <TableCell className="text-right">

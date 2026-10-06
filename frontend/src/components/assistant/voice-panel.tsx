@@ -253,10 +253,10 @@ export function VoicePanel({
   return (
     <section
       aria-label="Voice conversation"
-      className="rounded-xl border border-border bg-card p-4 text-[12px]"
+      className="rounded-xl border border-border bg-card p-4 text-12"
     >
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-[15px] font-semibold">Talk to your assistant</h2>
+        <h2 className="text-15 font-semibold">Talk to your assistant</h2>
         <span role="status">{status}</span>
         <span aria-label="Call duration" className="font-mono tabular-nums">
           {timer}

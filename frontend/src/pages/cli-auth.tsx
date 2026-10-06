@@ -60,7 +60,7 @@ export function CliAuthPage() {
           <h2 className="text-lg font-semibold">
             Invalid CLI Auth Request
           </h2>
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             This page is used by the NyxID CLI. Run{" "}
             <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
               nyxid login
@@ -82,7 +82,7 @@ export function CliAuthPage() {
         <h2 className="text-lg font-semibold">
           CLI Authentication
         </h2>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Sending credentials to the NyxID CLI...
         </p>
         <p className="text-xs text-muted-foreground">

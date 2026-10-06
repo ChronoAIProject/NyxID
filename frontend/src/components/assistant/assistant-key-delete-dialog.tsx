@@ -208,7 +208,7 @@ export function AssistantKeyDeleteDialog({
         </DialogHeader>
 
         {!resultKeyId ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Key</span>
               <Badge
@@ -218,7 +218,7 @@ export function AssistantKeyDeleteDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
+            <p className="text-11 leading-relaxed text-muted-foreground">
               Deletion cannot be remembered or pre-approved. Confirm this exact
               key every time.
             </p>
@@ -226,13 +226,13 @@ export function AssistantKeyDeleteDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-[11px] text-success">
+          <p className="text-11 text-success">
             Authorization evidence is absent.
           </p>
         ) : null}

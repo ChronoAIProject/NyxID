@@ -171,7 +171,7 @@ function KeyCardContent({
       className={`h-full transition-colors duration-300 ${
         isBlocked
           ? "opacity-60"
-          : "hover:border-white/[0.15] hover:bg-accent/30"
+          : "hover:border-hairline-strong hover:bg-accent/30"
       }`}
       aria-disabled={isBlocked ? true : undefined}
     >
@@ -184,7 +184,7 @@ function KeyCardContent({
             className="mt-0.5"
           />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-[12px] font-medium text-foreground">
+            <p className="truncate text-12 font-medium text-foreground">
               {keyInfo.label}
             </p>
             {keyInfo.catalog_service_name && (
@@ -378,7 +378,7 @@ function ServiceTableRow({
 
   return (
     <TableRow
-      className={`border-border/30 cursor-pointer hover:bg-white/[0.03] ${isBlocked ? "opacity-60" : ""}`}
+      className={`border-border/30 cursor-pointer hover:bg-overlay ${isBlocked ? "opacity-60" : ""}`}
       onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: keyInfo.id } })}
     >
       <TableCell className="h-[60px]">
@@ -390,7 +390,7 @@ function ServiceTableRow({
           />
           <div className="min-w-0 flex-1">
         <p className="truncate font-medium text-foreground">{keyInfo.label}</p>
-        <p className="truncate text-[11px] text-text-tertiary mt-0.5">
+        <p className="truncate text-11 text-text-tertiary mt-0.5">
           {keyInfo.catalog_service_name ?? " "}
         </p>
           </div>
@@ -398,7 +398,7 @@ function ServiceTableRow({
       </TableCell>
 
       <TableCell className="h-[60px]">
-        <span className="truncate text-muted-foreground text-[11px] font-mono">
+        <span className="truncate text-muted-foreground text-11 font-mono">
           {displayUrl}
         </span>
       </TableCell>
@@ -406,7 +406,7 @@ function ServiceTableRow({
       <TableCell className="h-[60px] text-muted-foreground">{authLabel}</TableCell>
 
       <TableCell className="h-[60px]">
-        <span className="truncate text-muted-foreground text-[11px] font-mono">
+        <span className="truncate text-muted-foreground text-11 font-mono">
           {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
         </span>
       </TableCell>
@@ -486,7 +486,7 @@ function ServiceTableView({
               ) : (
                 <Globe className="h-4 w-4 text-muted-foreground" />
               )}
-              <h3 className="text-[13px] font-semibold text-foreground">
+              <h3 className="text-13 font-semibold text-foreground">
                 {group.title}
               </h3>
             </div>
@@ -721,7 +721,7 @@ function ExternalServicesTab({
               ) : (
                 <Globe className="h-4 w-4 text-muted-foreground" />
               )}
-              <h3 className="text-[13px] font-semibold text-foreground">
+              <h3 className="text-13 font-semibold text-foreground">
                 {group.title}
               </h3>
             </div>
@@ -772,7 +772,7 @@ function NyxIdApiKeysTab({
               <Shield className="h-4 w-4 text-primary" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-[13px] font-semibold text-foreground">
+              <h3 className="text-13 font-semibold text-foreground">
                 Set up an isolated AI agent
               </h3>
               <p className="max-w-2xl text-xs text-muted-foreground">
@@ -791,7 +791,7 @@ function NyxIdApiKeysTab({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-[13px] font-semibold text-foreground">Agent Keys</h3>
+          <h3 className="text-13 font-semibold text-foreground">Agent Keys</h3>
         </div>
         <ApiKeyTable viewMode={viewMode} />
       </div>
@@ -846,7 +846,7 @@ function AutoConnectedToggle({
       />
       <Label
         htmlFor="show-auto-connected"
-        className="text-[12px] text-muted-foreground"
+        className="text-12 text-muted-foreground"
       >
         Show auto-connected ({count})
       </Label>

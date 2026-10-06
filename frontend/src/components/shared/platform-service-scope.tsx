@@ -31,7 +31,7 @@ export function PlatformServiceScope({
   const prefix = useId();
   if (orgOwned && !services.some((service) => service.auto_connected)) {
     return (
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         This org-owned key cannot use platform services from your personal account.
       </p>
     );
@@ -41,10 +41,10 @@ export function PlatformServiceScope({
       aria-label="Auto-connected platform services"
       className="space-y-2 border-t border-border/50 pt-3"
     >
-      <p className="text-[12px] font-medium">
+      <p className="text-12 font-medium">
         Auto-connected platform services
       </p>
-      <Label className="flex items-start gap-2 text-[12px]">
+      <Label className="flex items-start gap-2 text-12">
         <Checkbox
           checked={allowAll}
           disabled={disabled}
@@ -60,7 +60,7 @@ export function PlatformServiceScope({
             <Label
               key={service.id}
               htmlFor={`${prefix}-${service.id}`}
-              className={`flex items-center gap-2 text-[12px] ${implied ? "text-muted-foreground" : ""}`}
+              className={`flex items-center gap-2 text-12 ${implied ? "text-muted-foreground" : ""}`}
             >
               <Checkbox
                 id={`${prefix}-${service.id}`}

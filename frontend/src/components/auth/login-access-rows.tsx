@@ -91,10 +91,10 @@ export function LoginAccessRows({
             <summary className="flex cursor-pointer list-none items-center gap-3 p-3 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
               <PermissionIcon group={group} />
               <span className="min-w-0 flex-1">
-                <strong className="block break-words text-[12px]">
+                <strong className="block break-words text-12">
                   {name}
                 </strong>
-                <span className="block break-words text-[11px] text-muted-foreground">
+                <span className="block break-words text-11 text-muted-foreground">
                   {group === "nyxid"
                     ? apiKey.scopes
                     : accounts.length
@@ -105,7 +105,7 @@ export function LoginAccessRows({
                 </span>
               </span>
               <span
-                className={`shrink-0 text-[10px] ${missing || nyxidMissing || extras.length ? "text-warning" : "text-muted-foreground"}`}
+                className={`shrink-0 text-10 ${missing || nyxidMissing || extras.length ? "text-warning" : "text-muted-foreground"}`}
               >
                 {missing
                   ? accounts.length
@@ -141,7 +141,7 @@ export function LoginAccessRows({
               <AccessEntries label="Included permissions" entries={matched} />
               <AccessEntries label="Extra access included" entries={extras} />
               {selection && group !== "nyxid" && accounts.length > 0 && (
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   The selected accounts keep all their provider permissions.
                 </p>
               )}

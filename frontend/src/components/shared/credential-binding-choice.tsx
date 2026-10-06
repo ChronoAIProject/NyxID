@@ -52,7 +52,7 @@ export function CredentialBindingChoice({
         </label>
       ))}
       {resaleBillable && (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Platform-key use may also incur the separate resale fee.
         </p>
       )}

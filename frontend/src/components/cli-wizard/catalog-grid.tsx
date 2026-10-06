@@ -191,15 +191,15 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
 
       <SectionLabel>Simple setup</SectionLabel>
       {isLoading ? (
-        <p className="text-[12px] text-muted-foreground">Loading catalog…</p>
+        <p className="text-12 text-muted-foreground">Loading catalog…</p>
       ) : error ? (
-        <p className="text-[12px] text-destructive">
+        <p className="text-12 text-destructive">
           {error instanceof ApiError
             ? `Couldn't load the catalog: ${error.message} (${String(error.status)})`
             : "Couldn't load the catalog. Check the CLI logs for details."}
         </p>
       ) : visible.length === 0 ? (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           {f ? "No services match your search." : "Catalog is empty."}
         </p>
       ) : (
@@ -260,16 +260,16 @@ function CatalogCard({
       type="button"
       onClick={onClick}
       role="listitem"
-      className="group relative flex min-h-[132px] flex-col items-start gap-1 rounded-xl border border-border/50 bg-card/60 p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-card focus-visible:outline-none"
+      className="group relative flex min-h-[132px] flex-col items-start gap-1 rounded-xl border border-border/50 bg-card/60 p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-card focus-visible:outline-none"
     >
       {badge ? (
-        <span className="absolute right-3 top-3 rounded-full border border-border bg-muted/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <span className="absolute right-3 top-3 rounded-full border border-border bg-muted/60 px-2 py-0.5 text-10 uppercase tracking-wide text-muted-foreground">
           {badge}
         </span>
       ) : null}
       <div className="flex w-full items-center gap-2">
         <ServiceIcon slug={entry.slug} size="sm" />
-        <span className="text-[13px] font-semibold text-foreground">
+        <span className="text-13 font-semibold text-foreground">
           {entry.name || entry.slug}
         </span>
       </div>
@@ -278,7 +278,7 @@ function CatalogCard({
           {entry.description}
         </span>
       ) : null}
-      <span className="mt-auto text-[11px] text-text-tertiary">
+      <span className="mt-auto text-11 text-text-tertiary">
         {shapeLabel(shape, entry)}
       </span>
     </button>
@@ -290,9 +290,9 @@ function CustomCard({ onClick }: { readonly onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="flex min-h-[132px] flex-col items-start gap-1 rounded-xl border border-dashed border-border/50 bg-transparent p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-card/40 focus-visible:outline-none"
+      className="flex min-h-[132px] flex-col items-start gap-1 rounded-xl border border-dashed border-border/50 bg-transparent p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-card/40 focus-visible:outline-none"
     >
-      <span className="text-[13px] font-semibold text-foreground">
+      <span className="text-13 font-semibold text-foreground">
         Custom / self-hosted…
       </span>
       <span className="text-xs text-muted-foreground">

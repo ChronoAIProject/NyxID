@@ -338,7 +338,7 @@ function OptionSelection({
         open && activeIndex >= 0 ? `${id}-choice-${activeIndex}` : undefined
       }
       autoComplete="off"
-      className="h-6 min-w-20 flex-1 bg-transparent p-0 text-[12px] text-foreground outline-none placeholder:text-text-tertiary disabled:cursor-not-allowed"
+      className="h-6 min-w-20 flex-1 bg-transparent p-0 text-12 text-foreground outline-none placeholder:text-text-tertiary disabled:cursor-not-allowed"
       size={original === undefined ? undefined : Math.max(10, draft.length + 1)}
       placeholder={
         allowCustom
@@ -396,7 +396,7 @@ function OptionSelection({
           ref={field}
           onBlur={(event) => leaveWidget(event.relatedTarget)}
           className={cn(
-            "flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1 rounded-lg border border-input bg-transparent px-3 py-0.5 text-foreground transition-colors duration-200 focus-within:border-white/[0.15] has-[[aria-invalid=true]]:border-destructive",
+            "flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1 rounded-lg border border-input bg-transparent px-3 py-0.5 text-foreground transition-colors duration-200 focus-within:border-input-focus has-[[aria-invalid=true]]:border-destructive",
             disabled && "opacity-50",
           )}
           onClick={(event) => {
@@ -412,7 +412,7 @@ function OptionSelection({
               role="group"
               aria-label={`Selected ${v}`}
               className={cn(
-                "flex min-h-6 max-w-full items-stretch overflow-hidden rounded-md border border-input bg-muted/25 text-[12px]",
+                "flex min-h-6 max-w-full items-stretch overflow-hidden rounded-md border border-input bg-muted/25 text-12",
                 original === v && "border-ring ring-1 ring-ring",
               )}
             >
@@ -552,8 +552,8 @@ function OptionSelection({
               aria-disabled={disabled || choice.disabled}
               data-option-index={index}
               className={cn(
-                "flex cursor-pointer items-center gap-2 rounded-md px-3 py-1.5 text-[12px] transition-colors duration-200 hover:bg-white/[0.06]",
-                activeIndex === index && "bg-white/[0.06]",
+                "flex cursor-pointer items-center gap-2 rounded-md px-3 py-1.5 text-12 transition-colors duration-200 hover:bg-overlay-strong",
+                activeIndex === index && "bg-overlay-strong",
                 (disabled || choice.disabled) &&
                   "cursor-not-allowed opacity-50",
               )}

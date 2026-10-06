@@ -203,8 +203,8 @@ export function DatePicker(props: DatePickerProps) {
           disabled={disabled}
           aria-label={ariaLabel}
           className={cn(
-            "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-[12px] transition-colors",
-            "hover:border-white/[0.15] focus-visible:outline-none focus-visible:border-white/[0.15]",
+            "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-12 transition-colors",
+            "hover:border-hairline-strong focus-visible:outline-none focus-visible:border-input-focus",
             "disabled:cursor-not-allowed disabled:opacity-50",
             displayValue ? "text-foreground" : "text-text-tertiary",
           )}
@@ -221,18 +221,18 @@ export function DatePicker(props: DatePickerProps) {
               type="button"
               aria-label="Previous month"
               onClick={prevMonth}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-overlay-strong hover:text-foreground"
             >
               <ChevronLeft className="h-4 w-4" aria-hidden="true" />
             </button>
-            <span className="text-[12px] font-medium">
+            <span className="text-12 font-medium">
               {MONTHS[viewMonth]} {viewYear}
             </span>
             <button
               type="button"
               aria-label="Next month"
               onClick={nextMonth}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-overlay-strong hover:text-foreground"
             >
               <ChevronRight className="h-4 w-4" aria-hidden="true" />
             </button>
@@ -243,7 +243,7 @@ export function DatePicker(props: DatePickerProps) {
             {DAYS.map((d, i) => (
               <span
                 key={i}
-                className="text-[10px] font-semibold uppercase tracking-[1px] text-text-tertiary py-1"
+                className="text-10 font-semibold uppercase tracking-[1px] text-text-tertiary py-1"
               >
                 {d}
               </span>
@@ -266,12 +266,12 @@ export function DatePicker(props: DatePickerProps) {
                   aria-pressed={sel}
                   onClick={() => selectDay(cell.date)}
                   className={cn(
-                    "flex h-8 w-full items-center justify-center rounded-md text-[12px] transition-colors",
+                    "flex h-8 w-full items-center justify-center rounded-md text-12 transition-colors",
                     !cell.current && "text-text-tertiary/40",
                     cell.current &&
                       !sel &&
                       !cell.disabled &&
-                      "text-foreground hover:bg-white/[0.06]",
+                      "text-foreground hover:bg-overlay-strong",
                     (cell.disabled || selectionLimitReached) &&
                       "cursor-not-allowed opacity-30",
                     sel && "bg-primary text-primary-foreground font-medium",
@@ -289,7 +289,7 @@ export function DatePicker(props: DatePickerProps) {
             <Button
               type="button"
               variant="ghost"
-              className="h-7 text-[11px]"
+              className="h-7 text-11"
               disabled={values.length === 0}
               onClick={() => {
                 if (multiple) {
@@ -306,7 +306,7 @@ export function DatePicker(props: DatePickerProps) {
               <Button
                 type="button"
                 variant="ghost"
-                className="h-7 text-[11px]"
+                className="h-7 text-11"
                 onClick={() => {
                   const t = new Date();
                   const todayValue = toDateString(t);
@@ -331,7 +331,7 @@ export function DatePicker(props: DatePickerProps) {
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-7 text-[11px]"
+                  className="h-7 text-11"
                   onClick={() => setOpen(false)}
                 >
                   Done

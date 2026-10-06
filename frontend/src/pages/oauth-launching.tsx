@@ -78,18 +78,18 @@ export function OAuthLaunchingPage() {
         <NyxidIcon className="mx-auto h-8 w-8" />
         {failed ? (
           <>
-            <h1 className="mt-4 text-[15px] font-semibold">
+            <h1 className="mt-4 text-15 font-semibold">
               Unable to start connection
             </h1>
-            <p className="mt-2 text-[12px] leading-5 text-muted-foreground">
+            <p className="mt-2 text-12 leading-5 text-muted-foreground">
               Close this window and start the connection again from NyxID.
             </p>
           </>
         ) : (
           <>
             <Loader2 className="mx-auto mt-5 h-5 w-5 animate-spin text-muted-foreground" />
-            <h1 className="mt-3 text-[15px] font-semibold">Connecting...</h1>
-            <p className="mt-2 text-[12px] text-muted-foreground">
+            <h1 className="mt-3 text-15 font-semibold">Connecting...</h1>
+            <p className="mt-2 text-12 text-muted-foreground">
               Preparing secure authorization
             </p>
           </>

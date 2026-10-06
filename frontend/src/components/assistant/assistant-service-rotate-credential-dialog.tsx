@@ -306,12 +306,12 @@ export function AssistantServiceRotateCredentialDialog({
           <div className="flex items-start gap-3 border-y border-border py-4">
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="text-[13px] font-medium">Rotated service</p>
-              <p className="break-all font-mono text-[12px] text-muted-foreground">
+              <p className="text-13 font-medium">Rotated service</p>
+              <p className="break-all font-mono text-12 text-muted-foreground">
                 {resultId}
               </p>
               {verified ? (
-                <p className="text-[11px] text-success">
+                <p className="text-11 text-success">
                   Rotation lineage verified. No credential material returned.
                 </p>
               ) : null}
@@ -320,7 +320,7 @@ export function AssistantServiceRotateCredentialDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-[12px] text-destructive">
+          <p role="alert" className="text-12 text-destructive">
             {error}
           </p>
         ) : null}

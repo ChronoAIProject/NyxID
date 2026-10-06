@@ -63,8 +63,8 @@ export function LoginIdentityCard({
   return (
     <div className="space-y-4 border-t border-border pt-4">
       <div className="space-y-1">
-        <h3 className="text-[13px] font-semibold">Verify your identity</h3>
-        <p className="text-[12px] text-muted-foreground">
+        <h3 className="text-13 font-semibold">Verify your identity</h3>
+        <p className="text-12 text-muted-foreground">
           Choose how to use this browser. You’ll choose the requesting device’s
           access next.
         </p>
@@ -94,20 +94,20 @@ export function LoginIdentityCard({
             aria-pressed={(approval.identity?.keep_signed_in ?? keep) === value}
             disabled={blocked || !!approval.identity || appOpen}
             onClick={() => setKeep(value)}
-            className={`rounded-lg border p-3 text-left disabled:opacity-60 ${(approval.identity?.keep_signed_in ?? keep) === value ? "border-primary/60" : "border-border hover:bg-white/[0.03]"}`}
+            className={`rounded-lg border p-3 text-left disabled:opacity-60 ${(approval.identity?.keep_signed_in ?? keep) === value ? "border-primary/60" : "border-border hover:bg-overlay"}`}
           >
-            <span className="flex items-center gap-2 text-[12px] font-medium">
+            <span className="flex items-center gap-2 text-12 font-medium">
               <Icon className="size-4" />
               {title}
             </span>
-            <span className="mt-1 block text-[11px] text-muted-foreground">
+            <span className="mt-1 block text-11 text-muted-foreground">
               {text}
             </span>
           </button>
         ))}
       </div>
       {error && (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error}
         </p>
       )}

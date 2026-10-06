@@ -47,10 +47,10 @@ export function DisplayOncePanel({
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
           <Lock className="h-4 w-4" />
-          <span className="text-[12px] font-medium">Shown once — save it now</span>
+          <span className="text-12 font-medium">Shown once — save it now</span>
         </div>
-        <h2 className="font-serif text-[28px] font-normal">{title}</h2>
-        <p className="text-[12px] text-muted-foreground">{description}</p>
+        <h2 className="font-serif text-28 font-normal">{title}</h2>
+        <p className="text-12 text-muted-foreground">{description}</p>
       </div>
 
       <SecretField label="Secret" value={secret} />
@@ -129,7 +129,7 @@ export function RecoveryCodesPanel({
           <Lock className="h-4 w-4" />
           <span className="text-sm font-medium">Shown once — save them now</span>
         </div>
-        <h2 className="font-serif text-[28px] font-normal">Save your recovery codes</h2>
+        <h2 className="font-serif text-28 font-normal">Save your recovery codes</h2>
         <p className="text-sm text-muted-foreground">
           Each code is single-use and lets you sign in if you lose access to your
           authenticator. Store them in a password manager or print them. They are{" "}
@@ -214,7 +214,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
         {label}
       </label>
       <div className="flex items-center gap-2">
-        <code className="flex-1 overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-[12px]">
+        <code className="flex-1 overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-12">
           {revealed ? value : masked}
         </code>
         <Button

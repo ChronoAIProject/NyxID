@@ -114,10 +114,10 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
           <p className="mb-1 text-xs font-medium text-muted-foreground">
             Example Request
           </p>
-          <pre className="rounded-xl border border-border bg-muted px-3 py-2 text-[11px] overflow-x-auto whitespace-pre-wrap break-all">
+          <pre className="rounded-xl border border-border bg-muted px-3 py-2 text-11 overflow-x-auto whitespace-pre-wrap break-all">
             {exampleCurl}
           </pre>
-          <p className="mt-1 text-[10px] text-muted-foreground">
+          <p className="mt-1 text-10 text-muted-foreground">
             {pickedKey
               ? "Using the picked Agent Key preview. Copy the full key from the Agent Keys tab to run this."
               : "Create an Agent Key in the Agent Keys tab, then pick it above to see a ready-to-run example."}

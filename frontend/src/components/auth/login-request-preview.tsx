@@ -23,7 +23,7 @@ export function LoginDeviceShell({
 
 export function ApprovalCaution() {
   return (
-    <div className="flex items-start gap-2 px-1 text-[12px] leading-relaxed text-muted-foreground">
+    <div className="flex items-start gap-2 px-1 text-12 leading-relaxed text-muted-foreground">
       <Info className="mt-0.5 size-4 shrink-0" />
       <p>
         Only approve if you started this sign-in.{" "}
@@ -106,12 +106,12 @@ export function PreviewPanel({
         className="rounded-lg border border-border bg-background px-4 py-5 text-center"
       >
         <span className="sr-only">User code: </span>
-        <p className="font-mono text-[28px] font-medium tracking-widest">
+        <p className="font-mono text-28 font-medium tracking-widest">
           {formatAuthDeviceUserCodeInput(userCode)}
         </p>
         <p
           className={cn(
-            "mt-2 text-[11px] text-muted-foreground",
+            "mt-2 text-11 text-muted-foreground",
             expiryTone === "danger" && "text-destructive",
             expiryTone === "warning" && "text-warning",
           )}
@@ -123,12 +123,12 @@ export function PreviewPanel({
               : `Expires in ${formatWebAuthDeviceRemaining(remainingSeconds)}`}
         </p>
       </div>
-      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[12px]">
+      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-12">
         <span className="text-muted-foreground">Requester</span>
         <span className="min-w-0 break-words font-medium">
           {preview.client_label ?? preview.client_app ?? "Requesting device"}
         </span>
-        <span className="font-mono text-[11px] text-muted-foreground">
+        <span className="font-mono text-11 text-muted-foreground">
           {verifiedIp && preview.client_ip
             ? preview.client_ip
             : unverifiedIp
@@ -158,7 +158,7 @@ export function PreviewPanel({
         open={detailsOpen}
         onToggle={(event) => onDetailsOpenChange(event.currentTarget.open)}
       >
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-[12px] text-muted-foreground hover:text-foreground">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-12 text-muted-foreground hover:text-foreground">
           Request details
           <ChevronDown
             aria-hidden="true"
@@ -356,12 +356,12 @@ function ApprovalDetailRow({
   readonly tone?: DetailValueTone;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 px-4 py-2.5 text-[12px]">
+    <div className="flex items-start justify-between gap-4 px-4 py-2.5 text-12">
       <span className="shrink-0 text-muted-foreground">{label}</span>
       <span
         className={cn(
           "min-w-0 break-words text-right text-foreground",
-          mono ? "font-mono text-[11px]" : "font-medium",
+          mono ? "font-mono text-11" : "font-medium",
           tone === "warning" && "text-warning",
           tone === "danger" && "text-destructive",
         )}

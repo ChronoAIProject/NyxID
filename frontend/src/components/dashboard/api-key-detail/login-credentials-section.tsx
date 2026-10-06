@@ -38,14 +38,14 @@ export function LoginCredentialsSection({
   return (
     <section className="space-y-4 border-t border-border/50 pt-6">
       <div>
-        <h2 className="text-[15px] font-semibold">Login credentials</h2>
-        <p className="mt-1 text-[12px] text-muted-foreground">
+        <h2 className="text-15 font-semibold">Login credentials</h2>
+        <p className="mt-1 text-12 text-muted-foreground">
           Revoking or rotating this key also invalidates all its login
           credentials.
         </p>
       </div>
       {credentials.isLoading && (
-        <p role="status" className="text-[12px] text-muted-foreground">
+        <p role="status" className="text-12 text-muted-foreground">
           Loading credentials...
         </p>
       )}
@@ -56,7 +56,7 @@ export function LoginCredentialsSection({
         />
       )}
       {credentials.data?.length === 0 && (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           No login credentials.
         </p>
       )}
@@ -68,7 +68,7 @@ export function LoginCredentialsSection({
           return (
             <article
               key={credential.id}
-              className="flex flex-wrap items-start justify-between gap-3 py-3 text-[12px]"
+              className="flex flex-wrap items-start justify-between gap-3 py-3 text-12"
             >
               <div className="min-w-0 space-y-2">
                 <div className="flex flex-wrap items-center gap-2">

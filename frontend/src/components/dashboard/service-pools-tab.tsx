@@ -141,7 +141,7 @@ export function ServicePoolsTab({
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <p className="max-w-xl text-[12px] leading-relaxed text-muted-foreground">
+        <p className="max-w-xl text-12 leading-relaxed text-muted-foreground">
           Keep one stable name for your apps. Prefer a platform connection, fall
           back to your own key, or share traffic across compatible services.
         </p>
@@ -177,13 +177,13 @@ export function ServicePoolsTab({
       {pools.isLoading && <Skeleton className="h-24" />}
       {pools.data?.length === 0 && (
         <div className="rounded-xl border border-border/50 bg-card px-6 py-12 text-center">
-          <div className="mx-auto mb-4 flex size-10 items-center justify-center rounded-xl border border-border/50 bg-white/[0.03]">
+          <div className="mx-auto mb-4 flex size-10 items-center justify-center rounded-xl border border-border/50 bg-overlay">
             <Layers className="size-5 text-muted-foreground" />
           </div>
-          <h3 className="text-[15px] font-semibold">
+          <h3 className="text-15 font-semibold">
             Your connections, one reliable route
           </h3>
-          <p className="mx-auto mt-2 max-w-md text-[12px] leading-relaxed text-muted-foreground">
+          <p className="mx-auto mt-2 max-w-md text-12 leading-relaxed text-muted-foreground">
             Create a pool from{" "}
             {orgId
               ? `${ownerLabel}’s connections`
@@ -191,7 +191,7 @@ export function ServicePoolsTab({
             . Put your preferred connection first and add a backup for when it
             reaches its limit.
           </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-3 text-[12px] text-muted-foreground">
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-3 text-12 text-muted-foreground">
             <span className="rounded-lg border border-border/50 px-3 py-2">
               1. Choose connections
             </span>
@@ -235,7 +235,7 @@ export function ServicePoolsTab({
                         {pool.name}
                       </button>
                       {pool.description && (
-                        <p className="mt-1 max-w-64 truncate text-[11px] text-muted-foreground">
+                        <p className="mt-1 max-w-64 truncate text-11 text-muted-foreground">
                           {pool.description}
                         </p>
                       )}
@@ -246,7 +246,7 @@ export function ServicePoolsTab({
                     <TableCell>
                       {strategyLabels[pool.strategy]}
                       <br />
-                      <span className="text-[11px] text-muted-foreground">
+                      <span className="text-11 text-muted-foreground">
                         {pool.member_contract === "ai_chat"
                           ? "AI chat"
                           : "Same API"}
@@ -274,10 +274,10 @@ export function ServicePoolsTab({
                 className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-card p-4"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="break-words text-[13px] font-medium">
+                  <p className="break-words text-13 font-medium">
                     {pool.name}
                   </p>
-                  <p className="break-words text-[12px] text-muted-foreground">
+                  <p className="break-words text-12 text-muted-foreground">
                     {pool.slug} · {strategyLabels[pool.strategy]} ·{" "}
                     {pool.is_active ? "Enabled" : "Disabled"}
                   </p>
@@ -324,7 +324,7 @@ export function ServicePoolsTab({
               <DialogTitle className="break-words">
                 Use {using.name}
               </DialogTitle>
-              <DialogDescription className="text-[12px]">
+              <DialogDescription className="text-12">
                 Use this pool name wherever you would call a connection. Each
                 request still needs permission to access the selected
                 connection.
@@ -332,7 +332,7 @@ export function ServicePoolsTab({
             </DialogHeader>
             <div className="space-y-4">
               {orgId && (
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   A personal connection or pool with the same slug takes
                   precedence. Give this organization pool a unique slug to
                   select it reliably.
@@ -343,7 +343,7 @@ export function ServicePoolsTab({
                 label="Proxy path"
                 value={`/api/v1/proxy/s/${using.slug}${using.member_contract === "ai_chat" ? "/chat/completions" : ""}`}
               />
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 {using.member_contract === "ai_chat"
                   ? "Send an OpenAI chat-completions request. The pool chooses the model configured for each connection."
                   : "Append your API operation path and send the same method and body your connections expect."}
@@ -354,7 +354,7 @@ export function ServicePoolsTab({
                     label="Gateway model"
                     value={`pool:${using.slug}`}
                   />
-                  <p className="text-[12px] text-muted-foreground">
+                  <p className="text-12 text-muted-foreground">
                     Use this model with the NyxID LLM gateway’s chat-completions
                     endpoint.
                   </p>

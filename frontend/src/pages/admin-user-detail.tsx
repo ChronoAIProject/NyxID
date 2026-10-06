@@ -474,7 +474,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
         {sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BiometricIdentityIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               No sessions found.
             </p>
           </div>

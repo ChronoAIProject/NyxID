@@ -101,7 +101,7 @@ export function DetailsCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Key Details</CardTitle>
+          <CardTitle className="text-15">Key Details</CardTitle>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -147,7 +147,7 @@ export function DetailsCard({
         ) : (
           <div className="flex items-start justify-between">
             <div>
-              <p className="text-[12px] font-medium">{name}</p>
+              <p className="text-12 font-medium">{name}</p>
               {description && (
                 <p className="text-xs text-muted-foreground">{description}</p>
               )}
@@ -173,7 +173,7 @@ export function DetailsCard({
           <div className="space-y-1">
             <p className="text-muted-foreground">Status</p>
             <div>
-              <Badge variant={statusVariant} className="text-[10px]">
+              <Badge variant={statusVariant} className="text-10">
                 {statusLabel}
               </Badge>
             </div>

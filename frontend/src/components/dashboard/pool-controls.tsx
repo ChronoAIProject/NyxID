@@ -24,7 +24,7 @@ export function Choice({
   disabled?: boolean;
 }) {
   return (
-    <label className="space-y-1 text-[12px]">
+    <label className="space-y-1 text-12">
       <span>{label}</span>
       <Select value={value} onValueChange={onChange} disabled={disabled}>
         <SelectTrigger aria-label={label}>
@@ -55,7 +55,7 @@ export function NumberInput({
   max?: number;
 }) {
   return (
-    <label className="space-y-1 text-[12px]">
+    <label className="space-y-1 text-12">
       <span>{label}</span>
       <Input
         aria-label={label}
@@ -78,7 +78,7 @@ export function Toggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex items-center justify-between gap-3 text-[12px]">
+    <label className="flex items-center justify-between gap-3 text-12">
       <span>{label}</span>
       <Switch aria-label={label} checked={checked} onCheckedChange={onChange} />
     </label>
@@ -155,12 +155,12 @@ export function PolicyEditor({
         }
       />
       <fieldset className="space-y-2">
-        <legend className="text-[12px] font-medium">Retry causes</legend>
+        <legend className="text-12 font-medium">Retry causes</legend>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {retryTriggers.map((trigger) => (
             <label
               key={trigger}
-              className="flex items-center gap-2 text-[12px]"
+              className="flex items-center gap-2 text-12"
             >
               <Checkbox
                 checked={policy.retry_on.includes(trigger)}
@@ -183,7 +183,7 @@ export function PolicyEditor({
         checked={policy.retry_ambiguous_dispatch}
         onChange={(v) => set("retry_ambiguous_dispatch", v)}
       />
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         A timeout or 5xx may follow completed work. Enabling replay for POST can
         duplicate provider work and charges. A provider 429 rejection can fall
         back without this option. Set maximum attempts to 1 to disable fallback.

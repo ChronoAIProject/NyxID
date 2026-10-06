@@ -205,24 +205,24 @@ export function CommandPalette({
 
       <div className="relative z-10 w-full max-w-[640px] flex flex-col">
         {/* Search input bar */}
-        <div className="flex items-center gap-3 rounded-2xl border border-white/[0.08] bg-[#1a1a1a] px-5 h-14">
+        <div className="flex items-center gap-3 rounded-2xl border border-hairline bg-[#1a1a1a] px-5 h-14">
           <Search className="h-5 w-5 shrink-0 text-text-tertiary" />
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search pages, actions, or keywords..."
-            className="flex-1 bg-transparent text-[15px] text-foreground placeholder:text-text-tertiary outline-none"
+            className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
             autoFocus
           />
-          <kbd className="flex h-7 items-center rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 text-[12px] font-medium text-text-tertiary">
+          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 text-12 font-medium text-text-tertiary">
             esc
           </kbd>
         </div>
 
         {/* Results */}
         {filtered.length > 0 && (
-          <div className="mt-2 rounded-2xl border border-white/[0.08] bg-[#1a1a1a] p-2 max-h-[360px] overflow-y-auto">
+          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] p-2 max-h-[360px] overflow-y-auto">
             {filtered.map((item, i) => (
               <button
                 key={`${item.to ?? "action"}-${item.label}`}
@@ -230,10 +230,10 @@ export function CommandPalette({
                 onClick={() => handleSelect(item)}
                 onMouseEnter={() => setSelectedIndex(i)}
                 className={cn(
-                  "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[14px] transition-colors duration-300",
+                  "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-14 transition-colors duration-300",
                   i === selectedIndex
-                    ? "bg-white/[0.06] text-foreground"
-                    : "text-muted-foreground hover:bg-white/[0.03]",
+                    ? "bg-overlay-strong text-foreground"
+                    : "text-muted-foreground hover:bg-overlay",
                 )}
               >
                 <item.icon
@@ -244,7 +244,7 @@ export function CommandPalette({
                 />
                 <span className="flex-1">{item.label}</span>
                 {item.group === "action" && (
-                  <span className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
+                  <span className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
                 )}
               </button>
             ))}
@@ -252,7 +252,7 @@ export function CommandPalette({
         )}
 
         {query.trim() && filtered.length === 0 && (
-          <div className="mt-2 rounded-2xl border border-white/[0.08] bg-[#1a1a1a] py-8 text-center text-[14px] text-text-tertiary">
+          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] py-8 text-center text-14 text-text-tertiary">
             No results for &ldquo;{query}&rdquo;
           </div>
         )}

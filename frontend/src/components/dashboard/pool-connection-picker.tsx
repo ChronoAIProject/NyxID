@@ -198,7 +198,7 @@ export function PoolConnectionPicker({
           />
           <p
             aria-live="polite"
-            className="px-1 text-[11px] text-muted-foreground [@media(max-height:500px)]:sr-only"
+            className="px-1 text-11 text-muted-foreground [@media(max-height:500px)]:sr-only"
           >
             {isCheckingCompatibility
               ? isError
@@ -215,7 +215,7 @@ export function PoolConnectionPicker({
             {busy && (
               <p
                 role="status"
-                className="p-2 text-[12px] text-muted-foreground"
+                className="p-2 text-12 text-muted-foreground"
               >
                 {isLoading ? "Loading connections…" : "Searching connections…"}
               </p>
@@ -235,7 +235,7 @@ export function PoolConnectionPicker({
                   aria-label={`${group.name}${group.slug ? ` (${group.slug})` : ""} (${group.rows.length} loaded)`}
                   className="border-b border-border/40 last:border-b-0"
                 >
-                  <div className="flex min-w-0 items-center gap-2 px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+                  <div className="flex min-w-0 items-center gap-2 px-2 pb-1 pt-2 text-11 font-semibold text-muted-foreground">
                     <ServiceIcon slug={group.slug} size="xs" />
                     <span className="min-w-0 flex-1 break-words">
                       {group.name}
@@ -274,12 +274,12 @@ export function PoolConnectionPicker({
                           {selected && <Check className="size-3" />}
                         </span>
                         <div className="min-w-0 flex-1">
-                          <p className="break-words text-[12px] font-medium">
+                          <p className="break-words text-12 font-medium">
                             {row.name || row.slug}
                           </p>
                           <div
                             id={`${id}-description-${index}`}
-                            className="break-words text-[11px] text-muted-foreground"
+                            className="break-words text-11 text-muted-foreground"
                           >
                             <p>
                               {row.slug} ·{" "}
@@ -302,7 +302,7 @@ export function PoolConnectionPicker({
             {!busy && !isError && rows.length === 0 && (
               <p
                 role="status"
-                className="p-2 text-[12px] text-muted-foreground"
+                className="p-2 text-12 text-muted-foreground"
               >
                 {search
                   ? "No connections match this search."
@@ -329,7 +329,7 @@ export function PoolConnectionPicker({
             )}
           </div>
           <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-1 pt-2">
-            <p role="status" className="text-[11px] text-muted-foreground">
+            <p role="status" className="text-11 text-muted-foreground">
               {selectedIds.length} of 50 selected
             </p>
             <Button type="button" size="sm" onClick={() => setOpen(false)}>
@@ -337,7 +337,7 @@ export function PoolConnectionPicker({
             </Button>
           </div>
           {selectedIds.length >= 50 && (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-11 text-muted-foreground">
               A pool supports up to 50 connections. Remove one to choose
               another.
             </p>

@@ -30,6 +30,7 @@ import {
 } from "@/lib/url-tabs";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
+import { DisplaySettings } from "@/components/settings/display-settings";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Card,
@@ -105,10 +106,10 @@ export function SettingsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+        <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           Account Settings
         </h2>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Manage your account settings and preferences.
         </p>
       </div>
@@ -119,6 +120,7 @@ export function SettingsPage() {
           <TabsTrigger value="security">Security</TabsTrigger>
           <TabsTrigger value="sessions">Sessions</TabsTrigger>
           <TabsTrigger value="mcp">MCP</TabsTrigger>
+          <TabsTrigger value="display">Display</TabsTrigger>
           <TabsTrigger value="privacy">Privacy</TabsTrigger>
         </TabsList>
 
@@ -133,6 +135,9 @@ export function SettingsPage() {
         </TabsContent>
         <TabsContent value="mcp">
           <McpTab />
+        </TabsContent>
+        <TabsContent value="display">
+          <DisplaySettings />
         </TabsContent>
         <TabsContent value="privacy">
           <PrivacyTab />
@@ -181,7 +186,7 @@ function ProfileTab() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
-          <label className="text-[12px] font-medium" htmlFor="profile-name">
+          <label className="text-12 font-medium" htmlFor="profile-name">
             Name
           </label>
           <Input
@@ -193,7 +198,7 @@ function ProfileTab() {
         </div>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <label className="text-[12px] font-medium" htmlFor="profile-email">
+            <label className="text-12 font-medium" htmlFor="profile-email">
               Email
             </label>
             {user?.email_verified ? (
@@ -218,7 +223,7 @@ function ProfileTab() {
               type="button"
               variant="link"
               size="sm"
-              className="h-auto p-0 text-[12px]"
+              className="h-auto p-0 text-12"
               onClick={() => {
                 // TODO: backend endpoint POST /api/v1/auth/verify-email/resend is not yet
                 // implemented. Do NOT invent the URL — once it lands, wire it here as:
@@ -395,7 +400,7 @@ function SecurityTab() {
                 }}
                 aria-label="Toggle two-factor authentication"
               />
-              <span className="text-[12px]">
+              <span className="text-12">
                 {user?.mfa_enabled ? "Enabled" : "Disabled"}
               </span>
             </div>
@@ -418,14 +423,14 @@ function SecurityTab() {
             {disableMfaError && (
               <div
                 role="alert"
-                className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
+                className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
               >
                 {disableMfaError}
               </div>
             )}
             <div className="space-y-2">
               <label
-                className="text-[12px] font-medium"
+                className="text-12 font-medium"
                 htmlFor="disable-mfa-password"
               >
                 Password
@@ -477,7 +482,7 @@ function SecurityTab() {
               {passwordForm.formState.errors.root && (
                 <div
                   role="alert"
-                  className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
+                  className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
                 >
                   {passwordForm.formState.errors.root.message}
                 </div>
@@ -642,7 +647,7 @@ function SecurityTab() {
 
           <div className="space-y-2">
             <label
-              className="text-[12px] font-medium"
+              className="text-12 font-medium"
               htmlFor="delete-account-email"
             >
               Email
@@ -743,7 +748,7 @@ function McpTab() {
     <div className="space-y-6">
       <div>
         <h3 className="text-lg font-medium">MCP (Model Context Protocol)</h3>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Install NyxID as an MCP server in your client of choice.
         </p>
       </div>
@@ -770,7 +775,7 @@ function McpTab() {
               <p className="text-xs font-medium text-muted-foreground">
                 Or copy manually
               </p>
-              <Badge variant="secondary" className="text-[10px]">
+              <Badge variant="secondary" className="text-10">
                 .cursor/mcp.json
               </Badge>
             </div>
@@ -805,7 +810,7 @@ function McpTab() {
               <p className="text-xs font-medium text-muted-foreground">
                 Or add manually
               </p>
-              <Badge variant="secondary" className="text-[10px]">
+              <Badge variant="secondary" className="text-10">
                 .claude/settings.json or .mcp.json
               </Badge>
             </div>
@@ -843,7 +848,7 @@ function McpTab() {
               <p className="text-xs font-medium text-muted-foreground">
                 Or add manually
               </p>
-              <Badge variant="secondary" className="text-[10px]">
+              <Badge variant="secondary" className="text-10">
                 ~/.codex/config.toml
               </Badge>
             </div>
@@ -858,7 +863,7 @@ function McpTab() {
       </Card>
 
       <div className="rounded-xl border border-border/50 bg-muted/30 p-4">
-        <p className="mb-1 text-[13px] font-medium">How it works</p>
+        <p className="mb-1 text-13 font-medium">How it works</p>
         <p className="text-xs text-muted-foreground">
           When your MCP client connects for the first time, NyxID will open an
           OAuth flow in your browser to authenticate. Once authenticated, the
@@ -924,8 +929,8 @@ function SessionsTab() {
         {!sessions || sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <PowerButtonIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] font-medium text-foreground">No Active Sessions</p>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 font-medium text-foreground">No Active Sessions</p>
+            <p className="text-12 text-muted-foreground">
               Your active sessions across devices will appear here.
             </p>
           </div>
@@ -954,7 +959,7 @@ function SessionsTab() {
                   </div>
                   <div className="flex items-center gap-2 pr-10">
                     {getDeviceIcon(session.user_agent)}
-                    <p className="min-w-0 flex-1 truncate text-[13px] font-bold">
+                    <p className="min-w-0 flex-1 truncate text-13 font-bold">
                       {deviceLabel}
                     </p>
                     {session.is_current && (
@@ -962,14 +967,14 @@ function SessionsTab() {
                     )}
                   </div>
                   <div className="mt-3 space-y-1">
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       <span className="font-medium">IP Address:</span> {ipLabel}
                     </p>
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       <span className="font-medium">Signed in:</span>{" "}
                       {formatDate(session.created_at)}
                     </p>
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       <span className="font-medium">Expires:</span>{" "}
                       {formatDate(session.expires_at)}
                     </p>
@@ -1130,10 +1135,10 @@ function PrivacyTab() {
             onCheckedChange={handleToggle}
             aria-label="Toggle anonymous usage telemetry"
           />
-          <span className="text-[12px]">{statusLabel}</span>
+          <span className="text-12">{statusLabel}</span>
         </div>
         <Separator />
-        <div className="space-y-2 text-[12px] text-muted-foreground">
+        <div className="space-y-2 text-12 text-muted-foreground">
           <p>
             For the full disclosure of what we collect, how it's stored, and
             retention windows, see the{" "}

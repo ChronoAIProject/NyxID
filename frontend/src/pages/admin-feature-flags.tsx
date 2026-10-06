@@ -265,7 +265,7 @@ export function AdminFeatureFlagsPage() {
 
       {canWrite && pendingCount > 0 && (
         <div className="sticky top-2 z-10 flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 shadow-sm backdrop-blur">
-          <span className="text-[12px] font-medium">
+          <span className="text-12 font-medium">
             {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
           </span>
           <div className="flex items-center gap-2">
@@ -428,16 +428,16 @@ function FlagCard({
       >
         <div className="min-w-0 space-y-1">
           <div className="flex items-center gap-2">
-            <span className="text-[13px] font-semibold text-foreground">
+            <span className="text-13 font-semibold text-foreground">
               {flag.key}
             </span>
-            <Badge variant={kindVariant(flag.kind)} className="text-[11px]">
+            <Badge variant={kindVariant(flag.kind)} className="text-11">
               {flag.kind}
             </Badge>
             {flag.owner && (
               <Badge
                 variant="secondary"
-                className="max-w-[200px] gap-1 text-[11px] font-normal"
+                className="max-w-[200px] gap-1 text-11 font-normal"
                 title={`Owner: ${flag.owner}`}
               >
                 <User className="h-3 w-3 shrink-0" aria-hidden />
@@ -456,7 +456,7 @@ function FlagCard({
               {extraPills > 0 && (
                 <Badge
                   variant="secondary"
-                  className="text-[11px] font-normal text-muted-foreground"
+                  className="text-11 font-normal text-muted-foreground"
                 >
                   +{extraPills} more
                 </Badge>
@@ -465,7 +465,7 @@ function FlagCard({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <Badge variant="secondary" className="text-[11px]">
+          <Badge variant="secondary" className="text-11">
             Default: {flag.defaultEnabled ? "Enabled" : "Disabled"}
           </Badge>
           <ChevronDown
@@ -656,13 +656,13 @@ function FlagMetadataEditor({
 
   if (!canWrite) {
     return (
-      <dl className="space-y-2 px-3 py-2.5 text-[12px]">
+      <dl className="space-y-2 px-3 py-2.5 text-12">
         <div className="space-y-0.5">
-          <dt className="text-[11px] text-muted-foreground">Description</dt>
+          <dt className="text-11 text-muted-foreground">Description</dt>
           <dd className="text-foreground">{flag.description}</dd>
         </div>
         <div className="space-y-0.5">
-          <dt className="text-[11px] text-muted-foreground">Owner</dt>
+          <dt className="text-11 text-muted-foreground">Owner</dt>
           <dd className={cn(!flag.owner && "text-muted-foreground")}>
             {flag.owner ?? "Unassigned"}
           </dd>
@@ -688,7 +688,7 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
-          className="text-[11px] font-normal"
+          className="text-11 font-normal"
         >
           Description — what this flag controls
         </Label>
@@ -699,13 +699,13 @@ function FlagMetadataEditor({
           maxLength={MAX_FEATURE_FLAG_DESCRIPTION_LENGTH}
           onChange={(event) => setDescription(event.target.value)}
           placeholder={flag.codeDescription}
-          className="h-8 text-[12px]"
+          className="h-8 text-12"
         />
       </div>
       <div className="space-y-1">
         <Label
           htmlFor={`flag-owner-${flag.key}`}
-          className="text-[11px] font-normal"
+          className="text-11 font-normal"
         >
           Owner — who to ask about it
         </Label>
@@ -716,11 +716,11 @@ function FlagMetadataEditor({
           maxLength={MAX_FEATURE_FLAG_OWNER_LENGTH}
           onChange={(event) => setOwner(event.target.value)}
           placeholder="Unassigned — e.g. Platform team"
-          className="h-8 text-[12px]"
+          className="h-8 text-12"
         />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           {flag.customDescription == null
             ? "Using the description declared in code."
             : flag.metadataUpdatedAt
@@ -763,7 +763,7 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
     <Badge
       variant={pill.state === "enabled" ? "success" : "secondary"}
       className={cn(
-        "flex max-w-[180px] gap-1 text-[11px] font-normal",
+        "flex max-w-[180px] gap-1 text-11 font-normal",
         pill.state === "inherit" && !pill.pending && "opacity-60",
         pill.pending && "ring-1 ring-primary/70",
       )}
@@ -861,7 +861,7 @@ function AccountSearchPicker({
           aria-label={
             isOrg ? "Search organizations by name" : "Search users by email"
           }
-          className="h-8 pl-8 text-[12px]"
+          className="h-8 pl-8 text-12"
         />
       </div>
       {normalizedSearch ? (
@@ -911,7 +911,7 @@ function AccountSearchPicker({
                   />
                 ))}
                 {remaining > 0 && (
-                  <p className="border-t border-border/40 px-3 py-2 text-[11px] text-muted-foreground">
+                  <p className="border-t border-border/40 px-3 py-2 text-11 text-muted-foreground">
                     +{remaining} more — keep typing to narrow
                   </p>
                 )}
@@ -968,7 +968,7 @@ function FlagsEmptyState({
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <PowerButtonIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground">{title}</p>
+        <p className="text-12 font-medium text-muted-foreground">{title}</p>
         <p className="text-xs text-muted-foreground">{subtitle}</p>
       </div>
     </div>
@@ -984,7 +984,7 @@ function Group({
 }) {
   return (
     <div className="space-y-1.5">
-      <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <p className="text-11 font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
       </p>
       <div className="overflow-hidden rounded-lg border border-border/60 bg-background">
@@ -1014,7 +1014,7 @@ function ScopeRow({
         pending && "bg-primary/[0.07]",
       )}
     >
-      <span className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">
+      <span className="flex items-center gap-1.5 text-12 font-medium text-foreground">
         {/* Dot slot is always reserved so labels don't shift when a row
             becomes pending; only its color/visibility changes. */}
         <span
@@ -1031,7 +1031,7 @@ function ScopeRow({
         disabled={disabled}
         onValueChange={(s) => onChange(s as ScopeState)}
       >
-        <SelectTrigger className="h-7 w-[120px] text-[12px]" aria-label={label}>
+        <SelectTrigger className="h-7 w-[120px] text-12" aria-label={label}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

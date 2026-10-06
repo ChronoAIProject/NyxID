@@ -53,7 +53,7 @@ export function ApprovalSetupWizard({
       <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
         <Info className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
         <div className="space-y-0.5">
-          <p className="text-[12px] font-medium">Approval protection is suspended</p>
+          <p className="text-12 font-medium">Approval protection is suspended</p>
           <p className="text-xs text-muted-foreground">
             Your approval preference is still on, but no enabled notification
             channel is available. Connect or re-enable Telegram or push
@@ -69,7 +69,7 @@ export function ApprovalSetupWizard({
       <div className="flex items-start gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
         <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" />
         <div className="space-y-0.5">
-          <p className="text-[12px] font-medium">
+          <p className="text-12 font-medium">
             Approval protection is active
           </p>
           <p className="text-xs text-muted-foreground">
@@ -94,7 +94,7 @@ export function ApprovalSetupWizard({
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
-          <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.08] bg-white/[0.04]">
+          <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
             <Info className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
           </span>
           Set up approval protection
@@ -116,11 +116,11 @@ export function ApprovalSetupWizard({
         <ol className="space-y-4">
           {steps.map((step, idx) => (
             <li key={step.label} className="flex items-start gap-3">
-              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.04] text-[10px] font-medium text-muted-foreground">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-10 font-medium text-muted-foreground">
                 {String(idx + 1)}
               </span>
               <div className="space-y-0.5">
-                <p className="text-[12px] font-medium">
+                <p className="text-12 font-medium">
                   Step {String(idx + 1)}: {step.label}
                 </p>
                 <p className="text-xs text-muted-foreground">

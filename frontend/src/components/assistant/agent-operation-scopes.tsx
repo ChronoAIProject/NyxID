@@ -35,22 +35,22 @@ export function AgentOperationScopes({
   const query = useAgentOperations(agentId, enabled && !disabled);
   if (!enabled) {
     return (
-      <p role="status" className="text-[12px] text-muted-foreground">
+      <p role="status" className="text-12 text-muted-foreground">
         Operation scope configuration is not enabled yet. Existing operation limits still apply.
       </p>
     );
   }
   return (
     <div className="space-y-3" aria-label="Service operations">
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         Limit each granted service to the operations this specialist needs.
         Guest access and confirmations still apply.
       </p>
       {query.isLoading ? (
-        <p className="text-[12px] text-muted-foreground">Loading operations…</p>
+        <p className="text-12 text-muted-foreground">Loading operations…</p>
       ) : null}
       {query.error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           Could not load operation scopes.
         </p>
       ) : null}
@@ -121,7 +121,7 @@ export function ServiceOperationForm({
       className="space-y-3 rounded-xl border border-border/50 bg-card p-3"
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[13px] font-semibold">
+        <span className="text-13 font-semibold">
           {service.service_name}
         </span>
         <Badge variant="secondary">Revision {service.revision}</Badge>
@@ -152,7 +152,7 @@ export function ServiceOperationForm({
                 onChange={(event) => setSearch(event.target.value)}
               />
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-11 text-muted-foreground">
                   {selected.length} selected
                 </span>
                 <Button
@@ -176,7 +176,7 @@ export function ServiceOperationForm({
                 {operations.map((operation) => (
                   <label
                     key={operation.endpoint_id}
-                    className="flex cursor-pointer items-start gap-2 rounded-lg border border-border/50 p-2 text-[12px]"
+                    className="flex cursor-pointer items-start gap-2 rounded-lg border border-border/50 p-2 text-12"
                   >
                     <Checkbox
                       checked={selected.includes(operation.endpoint_id)}
@@ -212,7 +212,7 @@ export function ServiceOperationForm({
                   </label>
                 ))}
                 {!operations.length ? (
-                  <p className="text-[12px] text-muted-foreground">
+                  <p className="text-12 text-muted-foreground">
                     No matching operations.
                   </p>
                 ) : null}
@@ -220,7 +220,7 @@ export function ServiceOperationForm({
             </>
           ) : service.allows_explicit_rules ? (
             <>
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 No catalog operations. Add exact methods and paths; a variable
                 such as {"{id}"} matches one segment.
               </p>
@@ -293,14 +293,14 @@ export function ServiceOperationForm({
               </Button>
             </>
           ) : (
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               No active catalog operations.
             </p>
           )}
           {selected.some(
             (id) => !service.operations.some((op) => op.endpoint_id === id),
           ) ? (
-            <p role="status" className="text-[12px] text-muted-foreground">
+            <p role="status" className="text-12 text-muted-foreground">
               Some selected operations are unavailable.{" "}
               <Button
                 type="button"
@@ -319,19 +319,19 @@ export function ServiceOperationForm({
               </Button>
             </p>
           ) : null}
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-11 text-muted-foreground">
             An empty selection blocks every operation.
           </p>
         </>
       ) : null}
       {Object.keys(form.formState.errors).length ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           Check the selection: paths must start with / and at most 256
           operations may be selected.
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error}
         </p>
       ) : null}

@@ -288,10 +288,10 @@ export function AuthFlow({
            ================================================================ */
         <div>
           <div className="mb-8">
-            <h1 className="text-[28px] font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
               Welcome back
             </h1>
-            <p className="mt-1 text-[13px] text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               Sign in to your account
             </p>
           </div>
@@ -300,7 +300,7 @@ export function AuthFlow({
             <div
               role="alert"
               data-testid="social-error"
-              className="mb-4 rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
+              className="mb-4 rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
             >
               {SOCIAL_ERROR_MESSAGES[socialError] ??
                 "Social sign-in failed. Please try again."}
@@ -325,7 +325,7 @@ export function AuthFlow({
                 {loginForm.formState.errors.root && (
                   <div
                     role="alert"
-                    className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
+                    className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
                   >
                     {loginForm.formState.errors.root.message}
                   </div>
@@ -385,7 +385,7 @@ export function AuthFlow({
 
                 <Button
                   type="submit"
-                  className="mt-1 h-[44px] w-full nyx-gradient-vivid text-[13px] font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
+                  className="mt-1 h-[44px] w-full nyx-gradient-vivid text-13 font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                   isLoading={loginMutation.isPending}
                 >
                   Sign in
@@ -408,10 +408,10 @@ export function AuthFlow({
           className={`w-1/2 shrink-0 transition-[visibility] duration-300 ${showEmailForm ? "invisible" : "visible"}`}
         >
           <div className="mb-8">
-            <h1 className="text-[28px] font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
               Create your account
             </h1>
-            <p className="mt-1 text-[13px] text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               Start securing your digital identity
             </p>
           </div>
@@ -422,7 +422,7 @@ export function AuthFlow({
             <div className="relative mb-6 pl-9">
               <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-nyx-500/10 to-transparent" />
               <div
-                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors duration-300 ${
+                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-11 font-semibold transition-colors duration-300 ${
                   isInviteValid
                     ? "border-transparent nyx-gradient-vivid text-white"
                     : "border-nyx-500/15 bg-nyx-500/10 text-nyx-secondary-400"
@@ -447,7 +447,7 @@ export function AuthFlow({
                   "1"
                 )}
               </div>
-              <p className="mb-3 text-[13px] font-medium leading-6 text-muted-foreground">
+              <p className="mb-3 text-13 font-medium leading-6 text-muted-foreground">
                 Enter your invite code
               </p>
               <FormField
@@ -483,11 +483,11 @@ export function AuthFlow({
                 )}
               />
               {inviteError && (
-                <p className="mt-2 text-[12px] font-medium text-destructive">
+                <p className="mt-2 text-12 font-medium text-destructive">
                   An invite code is required to use NyxID at this time.
                 </p>
               )}
-              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+              <p className="mt-2 text-11 leading-relaxed text-muted-foreground">
                 NyxID is in closed beta.{" "}
                 <a
                   href="https://discord.gg/QMvcs8UQBW"
@@ -507,10 +507,10 @@ export function AuthFlow({
           <div className={`relative ${inviteRequired ? "pl-9" : ""}`}>
             {inviteRequired && (
             <>
-            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-[11px] font-semibold text-nyx-secondary-400">
+            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-11 font-semibold text-nyx-secondary-400">
               2
             </div>
-            <p className="mb-3 text-[13px] font-medium leading-6 text-muted-foreground">
+            <p className="mb-3 text-13 font-medium leading-6 text-muted-foreground">
               Choose how to sign up
             </p>
             </>
@@ -537,7 +537,7 @@ export function AuthFlow({
           </div>
 
           {/* Footer */}
-          <div className="mt-8 text-center text-[13px] text-muted-foreground">
+          <div className="mt-8 text-center text-13 text-muted-foreground">
             Already have an account?{" "}
             <button
               type="button"
@@ -601,13 +601,13 @@ export function AuthFlow({
               <rect x="3" y="7" width="10" height="7" rx="1.5" />
               <path d="M5 7V5a3 3 0 016 0v2" />
             </svg>
-            <span className="font-mono text-[13px] font-medium tracking-wider text-nyx-secondary-400">
+            <span className="font-mono text-13 font-medium tracking-wider text-nyx-secondary-400">
               {inviteCode.trim().toUpperCase() || "NYX-XXXXXXXX"}
             </span>
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="ml-auto border-0 bg-transparent text-[11px] font-medium text-muted-foreground transition-colors duration-300 hover:text-foreground"
+              className="ml-auto border-0 bg-transparent text-11 font-medium text-muted-foreground transition-colors duration-300 hover:text-foreground"
             >
               Edit
             </button>
@@ -626,7 +626,7 @@ export function AuthFlow({
               {registerForm.formState.errors.root && (
                 <div
                   role="alert"
-                  className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
+                  className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
                 >
                   {registerForm.formState.errors.root.message}
                 </div>
@@ -642,7 +642,7 @@ export function AuthFlow({
                       <Input
                         placeholder="John Doe"
                         autoComplete="name"
-                        className="h-[42px] text-[13.5px]"
+                        className="h-[42px] text-[0.84375rem]"
                         {...field}
                         ref={(el) => {
                           field.ref(el);
@@ -668,7 +668,7 @@ export function AuthFlow({
                         type="email"
                         placeholder="you@example.com"
                         autoComplete="email"
-                        className="h-[42px] text-[13.5px]"
+                        className="h-[42px] text-[0.84375rem]"
                         {...field}
                       />
                     </FormControl>
@@ -688,7 +688,7 @@ export function AuthFlow({
                         type="password"
                         placeholder="Min 8 characters"
                         autoComplete="new-password"
-                        className="h-[42px] text-[13.5px]"
+                        className="h-[42px] text-[0.84375rem]"
                         {...field}
                       />
                     </FormControl>
@@ -713,7 +713,7 @@ export function AuthFlow({
                             />
                           ))}
                         </div>
-                        <p className="text-[11px] text-muted-foreground">
+                        <p className="text-11 text-muted-foreground">
                           {strength.label}
                         </p>
                       </div>
@@ -736,7 +736,7 @@ export function AuthFlow({
                         type="password"
                         placeholder="Re-enter your password"
                         autoComplete="new-password"
-                        className="h-[42px] text-[13.5px]"
+                        className="h-[42px] text-[0.84375rem]"
                         {...field}
                       />
                     </FormControl>
@@ -747,7 +747,7 @@ export function AuthFlow({
 
               <Button
                 type="submit"
-                className="mt-1 h-[44px] w-full nyx-gradient-vivid text-[13px] font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
+                className="mt-1 h-[44px] w-full nyx-gradient-vivid text-13 font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                 isLoading={registerMutation.isPending}
               >
                 Create Account
@@ -756,7 +756,7 @@ export function AuthFlow({
           </Form>
 
           {/* Footer */}
-          <div className="mt-8 text-center text-[13px] text-muted-foreground">
+          <div className="mt-8 text-center text-13 text-muted-foreground">
             Already have an account?{" "}
             <button
               type="button"

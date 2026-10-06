@@ -73,7 +73,7 @@ const TITLE_FADE =
 
 function GroupLabel({ children }: { readonly children: string }) {
   return (
-    <div className="px-3 py-2 text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+    <div className="px-3 py-2 text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
       {children}
     </div>
   );
@@ -94,7 +94,7 @@ function ComingSoonItem({
       <TooltipTrigger asChild>
         <div
           aria-disabled="true"
-          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-muted-foreground opacity-50"
+          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground opacity-50"
         >
           <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
           <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -161,7 +161,7 @@ function ConversationRow({
         aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
-          "w-full overflow-hidden px-3 py-2 text-left text-[13px] transition-colors",
+          "w-full overflow-hidden px-3 py-2 text-left text-13 transition-colors",
           active
             ? "font-medium text-foreground"
             : "text-muted-foreground group-hover:text-foreground",
@@ -180,7 +180,7 @@ function ConversationRow({
         {showDraft && (
           <span
             id={draftPreviewId}
-            className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] leading-4 text-text-tertiary"
+            className="mt-0.5 flex min-w-0 items-center gap-1 text-11 leading-4 text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
             <span className="sr-only">Draft: </span>
@@ -312,20 +312,20 @@ function ChannelThreadsGroup({
         aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
-        className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-[12px] text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+        className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
       >
         <ChevronRight
           aria-hidden="true"
           className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-        <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary">
+        <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary">
           {platform}
         </span>
         {running ? (
           <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
         ) : null}
-        <span className="shrink-0 tabular-nums text-[11px]">{count}</span>
+        <span className="shrink-0 tabular-nums text-11">{count}</span>
       </button>
       {open ? (
         <div className="ml-3 space-y-0.5 border-l border-border/60 pl-1.5">
@@ -333,7 +333,7 @@ function ChannelThreadsGroup({
             const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
             const followed = children.some((thread) => thread.channel?.thread_id);
             return <div key={chatId}>
-              {followed ? <p className="px-3 pt-1 text-[11px] text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
+              {followed ? <p className="px-3 pt-1 text-11 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
               <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
             </div>;
           })}
@@ -342,7 +342,7 @@ function ChannelThreadsGroup({
               type="button"
               onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
               data-keep-drawer-open=""
-              className="w-full rounded-lg px-3 py-1 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+              className="w-full rounded-lg px-3 py-1 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
             >
               Show {String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))} more
             </button>
@@ -386,7 +386,7 @@ function AgentRow({
         aria-label={agentAccessibleName(agent)}
         aria-expanded={selected}
         className={cn(
-          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors",
+          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
           selected
             ? "font-medium text-foreground"
             : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -405,7 +405,7 @@ function AgentRow({
         <span className="min-w-0 flex-1">
           <span className="block truncate">{name}</span>
           {subtitle ? (
-            <span className="block truncate text-[10px] font-normal text-text-tertiary">
+            <span className="block truncate text-10 font-normal text-text-tertiary">
               {subtitle}
             </span>
           ) : null}
@@ -413,14 +413,14 @@ function AgentRow({
         {platforms.slice(0, 1).map((platform) => (
           <span
             key={platform}
-            className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary"
+            className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary"
           >
             {channelPlatformName(platform)}
             {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
           </span>
         ))}
         {pending > 0 ? (
-          <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-[10px] font-medium text-warning">
+          <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
             {pending}
           </span>
         ) : null}
@@ -433,7 +433,7 @@ function AgentRow({
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
-            <p className="px-3 py-1.5 text-[11px] text-text-tertiary">
+            <p className="px-3 py-1.5 text-11 text-text-tertiary">
               Loading threads...
             </p>
           ) : null}
@@ -450,7 +450,7 @@ function AgentRow({
               type="button"
               onClick={() => model.onNewThread(agent.id)}
               aria-label={`New chat with ${name}`}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-[12px] text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
             >
               <Plus aria-hidden="true" className="h-3 w-3" />
               New chat
@@ -481,7 +481,7 @@ function AgentsSection({
     <div className="space-y-0.5">
       {agentOwnerSections(visible).map((section) => (
         <section key={section.id} aria-label={section.label}>
-          <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+          <p className="px-3 pb-1 pt-3 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
             {section.label}
           </p>
           {section.agents.map((agent) => (
@@ -501,7 +501,7 @@ function AgentsSection({
           type="button"
           aria-pressed={showDestroyed}
           onClick={() => setShowDestroyed((value) => !value)}
-          className="w-full rounded-lg px-3 py-1.5 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+          className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
           {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
         </button>
@@ -519,7 +519,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
   return (
     <div className="space-y-0.5">
       {[...sections.entries()].map(([owner, groups]) => <div key={owner}>
-        <p className="px-3 pt-2 pb-1 text-[10px] font-medium text-text-tertiary">{owner === "personal" ? "Personal" : groups[0]?.owner?.name}</p>
+        <p className="px-3 pt-2 pb-1 text-10 font-medium text-text-tertiary">{owner === "personal" ? "Personal" : groups[0]?.owner?.name}</p>
         {groups.map((group) => {
         const working = group.working_agent_ids.length;
         const selected = group.id === model.selectedGroupId;
@@ -533,7 +533,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
               .map((member) => agentTitle(member))
               .join(", ")}${working ? `, ${String(working)} working` : ""}`}
             className={cn(
-              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors",
+              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
               selected
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -551,14 +551,14 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
         );
       })}</div>)}
       {model.loading && !model.groups.length ? (
-        <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading groups...</p>
+        <p className="px-3 py-1.5 text-11 text-text-tertiary">Loading groups...</p>
       ) : null}
       {!model.loading && !model.groups.length ? (
         <button
           type="button"
           onClick={model.onNewGroup}
           data-keep-drawer-open=""
-          className="w-full rounded-lg px-3 py-1.5 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+          className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
           Chat with several agents at once
         </button>
@@ -686,7 +686,7 @@ export function AssistantSidebar({
             type="button"
             onClick={agents.onHome}
             aria-current={agents.homeActive ? "page" : undefined}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13px] transition-colors ${
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-13 transition-colors ${
               agents.homeActive
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -700,7 +700,7 @@ export function AssistantSidebar({
         ) : (
           <Link
             to="/assistant"
-            className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-muted-foreground hover:bg-overlay hover:text-foreground"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground hover:bg-overlay hover:text-foreground"
           >
             <House className="h-4 w-4" />
             Home
@@ -727,7 +727,7 @@ export function AssistantSidebar({
             to={item.to}
             aria-current={activeView === item.view ? "page" : undefined}
             className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors",
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors",
               activeView === item.view
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -747,7 +747,7 @@ export function AssistantSidebar({
         <Link
           to="/assistant/plugins"
           aria-current={pluginsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors ${
             pluginsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -762,7 +762,7 @@ export function AssistantSidebar({
           icon={FileText}
           label="Artifacts"
           trailing={
-            <span className="font-mono text-[9px] text-text-tertiary">
+            <span className="font-mono text-9 text-text-tertiary">
               {counts.data?.artifacts ?? 0}
             </span>
           }
@@ -770,7 +770,7 @@ export function AssistantSidebar({
         <Link
           to="/assistant/approvals"
           aria-current={approvalsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors ${
             approvalsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -781,7 +781,7 @@ export function AssistantSidebar({
           />
           <span className="min-w-0 flex-1 truncate">Approvals</span>
           {(counts.data?.pendingApprovals ?? 0) > 0 && (
-            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-[10px] font-medium text-warning">
+            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
               {counts.data?.pendingApprovals}
             </span>
           )}
@@ -792,7 +792,7 @@ export function AssistantSidebar({
       {notice ? (
         <p
           role="status"
-          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground"
+          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-10 leading-relaxed text-muted-foreground"
         >
           {notice}
         </p>
@@ -852,7 +852,7 @@ export function AssistantSidebar({
       <div className="shrink-0 border-t border-border/60 p-2">
         <Link
           to="/dashboard"
-          className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
+          className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
         >
           <SlidersHorizontal className="h-4 w-4 text-text-tertiary" />
           <span className="flex-1">Studio</span>
@@ -863,10 +863,10 @@ export function AssistantSidebar({
             <User className="h-3.5 w-3.5 text-text-tertiary" />
           </div>
           <div className="min-w-0">
-            <p className="truncate text-[12px] font-medium text-foreground">
+            <p className="truncate text-12 font-medium text-foreground">
               {user?.display_name ?? "User"}
             </p>
-            <p className="truncate text-[10px] text-text-tertiary">
+            <p className="truncate text-10 text-text-tertiary">
               {user?.email ?? ""}
             </p>
           </div>
@@ -937,12 +937,12 @@ function RenameChatInline({
             setError("Could not rename this chat. Try again.");
           }
         })}>
-          <label htmlFor="chat-title" className="text-[12px]">
+          <label htmlFor="chat-title" className="text-12">
             Title
           </label>
           <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
           {error ? (
-            <p role="alert" className="mt-2 text-[12px] text-destructive">
+            <p role="alert" className="mt-2 text-12 text-destructive">
               {error}
             </p>
           ) : null}
