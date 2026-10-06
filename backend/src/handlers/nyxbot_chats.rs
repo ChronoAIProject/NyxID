@@ -56,15 +56,16 @@ pub(super) async fn adopt_relay_chat(
     if sender_id.is_empty() {
         return Ok(());
     }
-    let legacy = direct_partition(chat_id, sender_id, thread_id);
+    let relay_partition = direct_partition(chat_id, sender_id, thread_id);
     let threads = state.db.collection::<NyxbotThread>(THREADS);
-    if threads
-        .find_one(doc! {"channel_id": &row.id, "partition": &legacy})
+    let Some(legacy) = threads
+        .find_one(doc! {"channel_id": &row.id, "$or": [
+        {"partition": &relay_partition}, {"relay_partition": &relay_partition, "kind": "private"}]})
         .await?
-        .is_none()
-    {
+    else {
         return Ok(());
-    }
+    };
+    let legacy = legacy.partition;
     // The gateway conversation carries no chat of its own yet (only its
     // placeholder from `put_conversation`).
     if threads
@@ -85,7 +86,8 @@ pub(super) async fn adopt_relay_chat(
         match threads
             .update_one(
                 doc! {"channel_id": &row.id, "partition": &legacy},
-                doc! {"$set": {"partition": partition, "updated_at": bson::DateTime::now()}},
+                doc! {"$set": {"partition": partition, "relay_partition": &relay_partition,
+                "updated_at": bson::DateTime::now()}},
             )
             .await
         {
@@ -112,6 +114,27 @@ pub(super) async fn adopt_relay_chat(
             .await?;
     }
     Ok(())
+}
+
+/// Reuse a gateway-era private chat only with the exact sender/chat/topic
+/// mapping supplied by a verified provider event. Ordinary relay bots do no
+/// additional reads. Legacy unmapped gateway history stays isolated.
+pub(super) async fn partition_after_gateway(
+    state: &AppState,
+    row: &NyxbotChannel,
+    relay_partition: String,
+) -> AppResult<String> {
+    if row.relay_attempted_at.is_none() {
+        return Ok(relay_partition);
+    }
+    Ok(state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(
+            doc! {"channel_id": &row.id, "relay_partition": &relay_partition, "kind": "private"},
+        )
+        .await?
+        .map_or(relay_partition, |chat| chat.partition))
 }
 
 /// The shared thread of a group, channel or topic.

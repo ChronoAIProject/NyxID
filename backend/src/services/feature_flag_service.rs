@@ -204,13 +204,12 @@ const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
-/// NyxBot reaches the owner's personal chat-app bots on a platform through
-/// the Agent Event Gateway (Telegram always does). One flag per NyxID channel
-/// platform, resolved for each bot's owner, so a platform can be piloted on one
-/// account or org before everyone. Turning one on moves working bots over by
-/// themselves once the gateway takes the platform (it refuses platforms it
-/// cannot verify, and those bots stay on NyxID's relay, retried daily);
-/// turning it off stops further moves (moved bots stay until reconnected).
+/// NyxBot reaches personal and org chat-app bots through the Agent Event
+/// Gateway (Telegram always does). Resolve each flag for the linking person,
+/// including their live org membership overrides. Turning it on moves verified
+/// bots when the gateway accepts the platform; refusals stay on NyxID's relay
+/// and retry daily. Turning it off returns gateway bots to the relay. Both
+/// directions wait for active answers and retain the route and settings.
 /// Keyed by canonical platform.
 pub const NYXBOT_GATEWAY_FLAGS: &[(&str, &str)] = &[
     ("lark", "nyxbot:gateway-lark"),
@@ -233,31 +232,31 @@ const fn nyxbot_gateway_flag(key: &'static str, description: &'static str) -> Fe
 const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
     nyxbot_gateway_flag(
         "nyxbot:gateway-lark",
-        "NyxBot reaches owners' Lark bots through the Agent Event Gateway once the gateway takes Lark (text only there); until then NyxID's relay.",
+        "NyxBot reaches personal and linked org Lark bots through the Agent Event Gateway once the gateway takes Lark (text only there); flag off returns them to NyxID's relay.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-feishu",
-        "NyxBot reaches owners' Feishu bots through the Agent Event Gateway once the gateway takes Feishu (text only there); until then NyxID's relay.",
+        "NyxBot reaches personal and linked org Feishu bots through the Agent Event Gateway once the gateway takes Feishu (text only there); flag off returns them to NyxID's relay.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-discord",
-        "NyxBot reaches owners' Discord bots through the Agent Event Gateway once the gateway verifies Discord; until then NyxID's relay.",
+        "NyxBot reaches personal and linked org Discord bots through the Agent Event Gateway once the gateway verifies Discord; flag off returns them to NyxID's relay.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-slack",
-        "NyxBot reaches owners' Slack bots through the Agent Event Gateway once the gateway verifies Slack; until then NyxID's relay.",
+        "NyxBot reaches personal and linked org Slack bots through the Agent Event Gateway once the gateway verifies Slack; flag off returns them to NyxID's relay.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-whatsapp",
-        "NyxBot reaches owners' WhatsApp bots through the Agent Event Gateway once the gateway verifies WhatsApp; until then NyxID's relay.",
+        "NyxBot reaches personal and linked org WhatsApp bots through the Agent Event Gateway once the gateway verifies WhatsApp; flag off returns them to NyxID's relay.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-x",
-        "NyxBot reaches owners' X bots through the Agent Event Gateway once the gateway supports X; until then NyxID's relay.",
+        "NyxBot reaches personal and linked org X bots through the Agent Event Gateway once the gateway supports X; flag off returns them to NyxID's relay.",
     ),
     nyxbot_gateway_flag(
         "nyxbot:gateway-aurinko",
-        "NyxBot reaches owners' email (Aurinko) bots through the Agent Event Gateway once the gateway supports them; until then NyxID's relay.",
+        "NyxBot reaches personal and linked org email (Aurinko) bots through the Agent Event Gateway once the gateway supports them; flag off returns them to NyxID's relay.",
     ),
 ];
 

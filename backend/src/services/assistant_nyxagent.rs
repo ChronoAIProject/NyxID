@@ -820,6 +820,26 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"channel_id": 1, "relay_partition": 1, "kind": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+            doc! {"status": 1, "transport": 1, "platform": 1, "gateway_attempted_at": 1, "user_id": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+            doc! {"status": 1, "transport": 1, "platform": 1, "relay_attempted_at": 1, "user_id": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+            doc! {"transport": 1, "pending_route_api_key_id": 1, "relay_attempted_at": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
             doc! {"user_id": 1, "channel_id": 1, "last_message_at": -1},
             false,
         ),
