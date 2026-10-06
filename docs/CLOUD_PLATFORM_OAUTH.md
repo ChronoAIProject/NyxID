@@ -190,10 +190,19 @@ functions excluded from compilation. Production code and all six selected
 service/test files were retained; the selected files were verified byte-for-byte
 against the worktree. This is focused validation, not a full backend suite pass.
 
-Frontend provider-branding and add-key dialog checks passed 67 tests. TypeScript
-build, lint of the changed frontend file, Rust formatting, overlay JSON
-validation, and whitespace checks passed. A broader frontend run reported six
-failures in the unchanged `nyxbot-agent-details.test.tsx`; an isolated run of that
-file reported three failures. Those failures remain unresolved and are not
-claimed to be pre-existing. No real-vendor authorization or deployment was
-performed.
+Frontend provider-branding and add-key dialog checks initially passed 67 tests.
+After adding the cloud provider SVGs and provider/catalog slug mappings, 96
+focused frontend tests passed, including provider cards and catalog rendering.
+The React SVGs were visually checked at 20, 32, and 64 pixels, and the CLI
+wizard bundle was rebuilt with the new icons. Cloudflare and Railway use
+Simple Icons (CC0) brand paths; Supabase Management shares the existing
+Supabase glyph.
+
+TypeScript build, frontend lint, Rust formatting, overlay JSON validation,
+and whitespace checks passed. The unchanged `nyxbot-agent-details.test.tsx`
+was unstable locally on both this branch and an untouched main checkout.
+Subsequent full PR CI passed all 4,730 frontend tests and all 7,624 backend
+tests (six existing backend tests skipped by the CI suite), plus frontend
+and backend coverage. No tests were skipped or weakened in this PR. These
+full-suite results preceded the SVG follow-up; that follow-up receives its
+own PR CI run. No real-vendor authorization or deployment was performed.
