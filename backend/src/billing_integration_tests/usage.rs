@@ -52,7 +52,10 @@ async fn read_usage(state: &crate::AppState, actor: &str) -> BillingUsageRespons
     billing::get_usage(
         State(state.clone()),
         test_auth_user(actor),
-        Query(UsageQuery { period: None }),
+        Query(UsageQuery {
+            period: None,
+            bucket: None,
+        }),
     )
     .await
     .expect("usage read")
@@ -967,4 +970,64 @@ async fn execution_owner_preserves_org_acl_for_non_master_credentials() {
         Err(AppError::Forbidden(_))
     ));
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
+    let Some(db) = connect_test_database("billing_usage_day_buckets").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    let today = Utc::now();
+    let yesterday = today - chrono::Duration::days(1);
+    for (at, quantity) in [(yesterday, 4), (today, 5), (today, 6)] {
+        let mut row = meter(&owner, quantity);
+        row.wallet_id = None;
+        row.created_at = at;
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(row)
+            .await
+            .unwrap();
+    }
+    let flat = read_usage(&state, &owner).await;
+    assert_eq!(flat.rows.len(), 1);
+    assert!(flat.rows[0].day.is_none());
+    let daily = billing::get_usage(
+        State(state.clone()),
+        test_auth_user(&owner),
+        Query(UsageQuery {
+            period: Some("7d".into()),
+            bucket: Some("day".into()),
+        }),
+    )
+    .await
+    .expect("daily usage read")
+    .0;
+    let days: Vec<_> = daily
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.day.expect("bucketed day").date_naive(),
+                row.quantity,
+                row.events,
+            )
+        })
+        .collect();
+    assert_eq!(
+        days,
+        vec![(yesterday.date_naive(), 4, 1), (today.date_naive(), 11, 2),]
+    );
+    assert_eq!(daily.totals.quantity, flat.totals.quantity);
+    let invalid = billing::get_usage(
+        State(state),
+        test_auth_user(&owner),
+        Query(UsageQuery {
+            period: None,
+            bucket: Some("hour".into()),
+        }),
+    )
+    .await;
+    assert!(matches!(invalid, Err(AppError::ValidationError(_))));
 }

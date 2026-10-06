@@ -19,7 +19,17 @@ import {
 import { metricLabel } from "@/schemas/billing-metrics";
 import type { BillingUsagePeriod } from "@/schemas/billing";
 import { useBillingUsage } from "@/hooks/use-billing";
-import { serviceUsageSummary } from "@/lib/service-usage";
+import { Bar, BarChart, XAxis, YAxis } from "recharts";
+import {
+  ChartContainer,
+  ChartTooltip,
+  type ChartConfig,
+} from "@/components/ui/chart";
+import {
+  serviceUsageDaily,
+  serviceUsageSummary,
+  type ServiceUsageDay,
+} from "@/lib/service-usage";
 import { formatExactCredits, hasCredits } from "@/lib/credits";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
@@ -77,11 +87,105 @@ const USAGE_PERIODS: readonly [BillingUsagePeriod, string][] = [
   ["90d", "Last 90 days"],
 ];
 
+const usageChartConfig = {
+  calls: { label: "Calls", color: "var(--color-primary)" },
+} satisfies ChartConfig;
+
+const shortDay = (day: string) =>
+  new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+
+function UsageDayTooltip({
+  active,
+  payload,
+}: {
+  readonly active?: boolean;
+  readonly payload?: readonly { payload: ServiceUsageDay }[];
+}) {
+  const day = active ? payload?.[0]?.payload : undefined;
+  if (!day) return null;
+  return (
+    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
+      <p className="font-medium">{shortDay(day.day)} (UTC)</p>
+      <p className="tabular-nums">
+        {day.calls.toLocaleString()} {day.calls === 1 ? "call" : "calls"}
+      </p>
+      {day.quantities.map(({ metric, quantity }) => (
+        <p key={metric} className="text-muted-foreground tabular-nums">
+          {quantity.toLocaleString()} {metricLabel(metric, quantity)}
+        </p>
+      ))}
+      {hasCredits(day.charged) && (
+        <p className="text-muted-foreground tabular-nums">
+          {formatExactCredits(day.charged!)} credits
+        </p>
+      )}
+    </div>
+  );
+}
+
+function UsageDailyChart({ series }: { readonly series: ServiceUsageDay[] }) {
+  return (
+    <figure aria-label="Calls per day">
+      <ChartContainer
+        config={usageChartConfig}
+        className="aspect-auto h-28 w-full"
+      >
+        <BarChart
+          accessibilityLayer
+          data={series}
+          margin={{ top: 4, right: 0, bottom: 0, left: 0 }}
+        >
+          <XAxis
+            dataKey="day"
+            tickLine={false}
+            axisLine={false}
+            tickMargin={6}
+            minTickGap={24}
+            tickFormatter={shortDay}
+          />
+          <YAxis
+            width={28}
+            tickLine={false}
+            axisLine={false}
+            allowDecimals={false}
+            tickCount={3}
+          />
+          <ChartTooltip
+            cursor={{ fill: "var(--color-muted)", opacity: 0.4 }}
+            content={<UsageDayTooltip />}
+          />
+          <Bar
+            dataKey="calls"
+            fill="var(--color-calls)"
+            radius={[4, 4, 0, 0]}
+            maxBarSize={18}
+            isAnimationActive={false}
+          />
+        </BarChart>
+      </ChartContainer>
+      <figcaption className="sr-only">
+        {series
+          .filter((day) => day.calls > 0)
+          .map((day) => `${shortDay(day.day)}: ${day.calls} calls`)
+          .join(", ") || "No calls in this period"}
+      </figcaption>
+    </figure>
+  );
+}
+
 function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
-  const usage = useBillingUsage(period);
+  // One daily request feeds both the totals and the chart.
+  const usage = useBillingUsage(period, period === "24h" ? undefined : "day");
   const summary = usage.data
     ? serviceUsageSummary(usage.data.rows, connection.slug)
+    : null;
+  const daily = usage.data
+    ? serviceUsageDaily(usage.data.rows, connection.slug, period)
     : null;
   const org =
     connection.credential_source?.type === "org"
@@ -171,6 +275,15 @@ function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
                 )}
             </div>
           </dl>
+          {daily ? (
+            <UsageDailyChart series={daily} />
+          ) : (
+            period !== "24h" && (
+              <p className="text-muted-foreground">
+                The daily chart needs the updated NyxID backend.
+              </p>
+            )
+          )}
           {summary.agents.length > 1 || summary.agents[0]?.name ? (
             <p className="text-muted-foreground">
               By caller:{" "}

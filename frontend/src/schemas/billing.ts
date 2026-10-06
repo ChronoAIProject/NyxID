@@ -119,6 +119,8 @@ export const billingUsageRowSchema = z.object({
   billable: z.boolean().optional().default(true),
   estimated_credits_micros: z.number().int().nullable().optional(),
   token_breakdown: billingTokenBreakdownSchema.nullable().optional(),
+  /** UTC day start, only when requested with `bucket=day`. */
+  day: z.string().nullable().optional(),
 });
 
 export const billingUsageTotalsSchema = z.object({

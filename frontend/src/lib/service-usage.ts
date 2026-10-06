@@ -76,3 +76,52 @@ export function serviceUsageSummary(
       .sort((a, b) => b.calls - a.calls),
   };
 }
+
+export interface ServiceUsageDay {
+  /** UTC calendar day, `YYYY-MM-DD`. */
+  readonly day: string;
+  readonly calls: number;
+  readonly quantities: readonly { metric: string; quantity: number }[];
+  /** NyxID credits charged that day; null when a charged row is unsettled. */
+  readonly charged: string | null;
+}
+
+const PERIOD_DAYS: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+
+/**
+ * Zero-filled UTC daily series from `bucket=day` rows, oldest first. Null when
+ * the period has no daily view or the server did not split rows by day.
+ */
+export function serviceUsageDaily(
+  rows: readonly BillingUsageRow[],
+  slug: string,
+  period: string,
+  now = new Date(),
+): ServiceUsageDay[] | null {
+  const days = PERIOD_DAYS[period];
+  const matching = rows.filter((row) => row.service_slug === slug);
+  // Older servers ignore `bucket=day`; any undated row means no daily split.
+  if (!days || rows.some((row) => !row.day)) return null;
+  const byDay = new Map<string, BillingUsageRow[]>();
+  for (const row of matching) {
+    const key = row.day!.slice(0, 10);
+    byDay.set(key, [...(byDay.get(key) ?? []), row]);
+  }
+  const today = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  );
+  return Array.from({ length: days }, (_, i) => {
+    const day = new Date(today - (days - 1 - i) * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const summary = serviceUsageSummary(byDay.get(day) ?? [], slug);
+    return {
+      day,
+      calls: summary?.calls ?? 0,
+      quantities: summary?.quantities ?? [],
+      charged: summary ? summary.charged : "0",
+    };
+  });
+}
