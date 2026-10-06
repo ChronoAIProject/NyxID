@@ -105,6 +105,39 @@ Content-Type: application/json
 
 Dynamically registered clients are public clients. Confidential clients (with a `client_secret`) are registered through the admin API or the developer apps section of the web console.
 
+DCR accepts requested authentication methods `none`, `client_secret_basic`, and
+`client_secret_post`, but always creates a public client and returns
+`token_endpoint_auth_method: "none"` without a secret. Use that returned metadata,
+PKCE S256, and a form `client_id` when exchanging the code.
+
+Unknown scope hints such as `claudeai` are ignored for DCR clients only. Known
+scopes remain narrow; if no known scopes remain at registration, NyxID applies
+`openid profile email roles groups proxy offline_access`. Authorization and PAR
+filter the same hints but still reject known scopes outside the registered set.
+Unknown-only incremental requests preserve existing consent scopes. Only clients
+with durable defaulted provenance receive future server defaults; explicit edits
+and unknown legacy provenance are never widened.
+
+Registration errors return `error` and `error_description` (`invalid_client_metadata`
+or `invalid_redirect_uri`, HTTP 400; oversized bodies retain HTTP 413). Redirect
+metadata is validated, with at most 16 URIs of 2048 bytes each. Scope metadata is
+limited to 64 tokens of 256 bytes each, and client names to 256 bytes.
+
+### MCP resource indicators
+
+`resource={BASE_URL}/mcp` identifies the transport and preserves the user's
+consented service IDs on authorization-code exchange and refresh, including an
+explicit empty selection. Token requests for a restricted resource-bearing grant
+must stay within its original URIs. Mixed service/MCP grants keep the original
+service boundary when requesting only MCP. Live service IDs are intersected with
+the original grant, preventing a recreated service slug from gaining authority.
+If resolved service IDs no longer match any originally consented ID, the access
+token remains restricted to zero services. A missing or inactive service resource
+that no longer resolves rejects the token request; such a rejected refresh leaves
+the stored grant unchanged and unrotated. Restoring the original service can make
+that refresh grant usable again.
+Per-request access-token narrowing never replaces the stored refresh grant.
+
 ## Token introspection and revocation
 
 Resource servers can validate tokens server-side via RFC 7662 introspection (`POST /oauth/introspect`). This is useful when the resource server cannot or does not want to maintain the JWKS and verify signatures locally.

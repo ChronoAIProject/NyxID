@@ -3583,19 +3583,19 @@ mod operator_route_tests {
             crate::services::oauth_broker_service::BROKER_BINDING_SCOPE
         );
 
-        let (_status, _body) = crate::handlers::oauth::register_client(
+        let response = crate::handlers::oauth::register_client(
             State(state.clone()),
-            Json(crate::handlers::oauth::RegisterClientRequest {
+            Ok(Json(crate::handlers::oauth::RegisterClientRequest {
                 client_name: Some("Allowed Before Override".to_string()),
                 redirect_uris: Some(vec!["http://localhost:8080/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some(broker_scope.clone()),
-            }),
+            })),
         )
-        .await
-        .expect("env-default false allows broker scope in DCR");
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
 
         let _updated = update_broker_settings(
             State(state.clone()),
@@ -3609,20 +3609,24 @@ mod operator_route_tests {
         .expect("admin can enable runtime admin-capability requirement");
         assert!(state.broker_require_admin_capability());
 
-        let err = crate::handlers::oauth::register_client(
+        let response = crate::handlers::oauth::register_client(
             State(state),
-            Json(crate::handlers::oauth::RegisterClientRequest {
+            Ok(Json(crate::handlers::oauth::RegisterClientRequest {
                 client_name: Some("Rejected After Override".to_string()),
                 redirect_uris: Some(vec!["http://localhost:8081/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some(broker_scope),
-            }),
+            })),
         )
-        .await
-        .expect_err("runtime override should reject broker DCR without restart");
-        assert!(matches!(err, AppError::Forbidden(_)));
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["error"], "invalid_client_metadata");
     }
 
     #[tokio::test]

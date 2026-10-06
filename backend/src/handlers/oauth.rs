@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -1306,6 +1306,14 @@ async fn prepare_incremental_params(
 ) -> AppResult<AuthorizeQuery> {
     let mut params = params.clone();
     if params.service_access_mode.is_some() {
+        if client.created_by.as_deref() == Some("dynamic_registration") {
+            let known = oauth_client_service::known_dcr_scopes(
+                params.scope.as_deref().unwrap_or_default(),
+            )?;
+            // Incremental omission retains existing consent instead of adding
+            // every registered scope. Unknown-only DCR hints behave identically.
+            params.scope = (!known.is_empty()).then_some(known);
+        }
         let required = incremental_consent_service::union(
             &params.requested_service_ids,
             resources
@@ -1376,7 +1384,7 @@ async fn validate_authorize_request(
     let client =
         oauth_service::validate_client(&state.db, &params.client_id, &params.redirect_uri).await?;
     let validated_scope =
-        oauth_service::resolve_authorize_scope(params.scope.as_deref(), &client.allowed_scopes)?;
+        oauth_service::resolve_authorize_scope_for_client(params.scope.as_deref(), &client)?;
 
     Ok((client, validated_scope))
 }
@@ -2179,7 +2187,15 @@ pub async fn pushed_authorization_request(
         };
 
     oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret)).await?;
-    oauth_service::validate_client(&state.db, &client_id, &body.redirect_uri).await?;
+    let client = oauth_service::validate_client(&state.db, &client_id, &body.redirect_uri).await?;
+    let scope = if client.created_by.as_deref() == Some("dynamic_registration") {
+        let known =
+            oauth_client_service::known_dcr_scopes(body.scope.as_deref().unwrap_or_default())?;
+        oauth_service::validate_scopes(&known, &client.allowed_scopes)?;
+        (!known.is_empty()).then_some(known)
+    } else {
+        body.scope.clone()
+    };
 
     if body.response_type != "code" {
         return Err(AppError::BadRequest(
@@ -2222,7 +2238,7 @@ pub async fn pushed_authorization_request(
         &client_id,
         &body.response_type,
         &body.redirect_uri,
-        body.scope.as_deref(),
+        scope.as_deref(),
         body.state.as_deref(),
         body.code_challenge.as_deref(),
         body.code_challenge_method.as_deref(),
@@ -3367,11 +3383,8 @@ pub async fn revoke(
 pub struct RegisterClientRequest {
     pub client_name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
-    // RFC 7591 fields parsed but not yet acted on. Kept so serde accepts
-    // conformant requests; remove if/when we start branching on them.
-    #[allow(dead_code)]
+    // The response advertises the effective supported grant/response types.
     pub grant_types: Option<Vec<String>>,
-    #[allow(dead_code)]
     pub response_types: Option<Vec<String>>,
     pub token_endpoint_auth_method: Option<String>,
     pub scope: Option<String>,
@@ -3400,49 +3413,290 @@ pub struct RegisterClientResponse {
 // developer_apps path only.
 pub async fn register_client(
     State(state): State<AppState>,
-    Json(body): Json<RegisterClientRequest>,
-) -> AppResult<(StatusCode, Json<RegisterClientResponse>)> {
+    payload: Result<Json<RegisterClientRequest>, JsonRejection>,
+) -> Response {
+    let body = match payload {
+        Ok(Json(body)) => body,
+        Err(rejection) => {
+            let (status, reason, description) =
+                if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                    (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "body_too_large",
+                        "Registration body is too large",
+                    )
+                } else {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "invalid_json",
+                        "Expected a JSON registration object",
+                    )
+                };
+            tracing::info!(target: "nyxid::oauth::dcr", outcome = "rejected", reason, "Dynamic client registration");
+            return DcrError {
+                status,
+                error: "invalid_client_metadata",
+                description,
+                reason,
+            }
+            .into_response();
+        }
+    };
+    let diagnostics = DcrDiagnostics::new(&body);
+    match register_client_inner(&state, body).await {
+        Ok((status, Json(response))) => {
+            diagnostics.log(
+                "registered",
+                "accepted",
+                Some(&response.client_id),
+                Some(&response.scope),
+            );
+            (status, Json(response)).into_response()
+        }
+        Err(error) => {
+            diagnostics.log("rejected", error.reason, None, None);
+            error.into_response()
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DcrError {
+    status: StatusCode,
+    error: &'static str,
+    description: &'static str,
+    reason: &'static str,
+}
+
+impl DcrError {
+    fn metadata(reason: &'static str, description: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "invalid_client_metadata",
+            description,
+            reason,
+        }
+    }
+
+    fn redirect() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "invalid_redirect_uri",
+            description: "Invalid redirect URI metadata (maximum 16 URIs, 2048 bytes each)",
+            reason: "invalid_redirect_uri",
+        }
+    }
+}
+
+impl From<AppError> for DcrError {
+    fn from(_: AppError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: "server_error",
+            description: "An internal error occurred",
+            reason: "internal_error",
+        }
+    }
+}
+
+impl IntoResponse for DcrError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(serde_json::json!({
+                "error": self.error, "error_description": self.description,
+            })),
+        )
+            .into_response()
+    }
+}
+
+// Only bounded, sanitized metadata belongs in registration outcome logs.
+struct DcrDiagnostics {
+    client_name: String,
+    requested_auth_method: &'static str,
+    requested_scope_count: usize,
+    dropped_unknown_scope_count: usize,
+    dropped_unknown_scope_sample: Vec<String>,
+    redirect_uri_count: usize,
+    redirect_hosts: Vec<String>,
+    grant_types: Vec<&'static str>,
+    response_types: Vec<&'static str>,
+}
+
+impl DcrDiagnostics {
+    fn log(
+        &self,
+        outcome: &'static str,
+        reason: &'static str,
+        client_id: Option<&str>,
+        effective_scope: Option<&str>,
+    ) {
+        let scope_provenance = effective_scope.map(|_| {
+            if self.requested_scope_count == self.dropped_unknown_scope_count {
+                "defaulted"
+            } else {
+                "explicit"
+            }
+        });
+        tracing::info!(target: "nyxid::oauth::dcr", outcome, reason, client_id, effective_scope,
+            client_name = %self.client_name, scope_provenance, effective_auth_method = "none", requested_auth_method = self.requested_auth_method,
+            requested_scope_count = self.requested_scope_count, dropped_unknown_scope_count = self.dropped_unknown_scope_count,
+            dropped_unknown_scope_sample = ?self.dropped_unknown_scope_sample,
+            redirect_uri_count = self.redirect_uri_count, redirect_hosts = ?self.redirect_hosts,
+            grant_types = ?self.grant_types, response_types = ?self.response_types,
+            "Dynamic client registration");
+    }
+
+    fn new(body: &RegisterClientRequest) -> Self {
+        let requested_auth_method = match body.token_endpoint_auth_method.as_deref() {
+            None => "absent",
+            Some("none") => "none",
+            Some("client_secret_basic") => "client_secret_basic",
+            Some("client_secret_post") => "client_secret_post",
+            Some(_) => "other",
+        };
+        let mut requested_scope_count = 0;
+        let mut dropped_unknown_scope_count = 0;
+        let mut dropped_unknown_scope_sample = Vec::new();
+        for scope in body.scope.as_deref().unwrap_or_default().split_whitespace() {
+            requested_scope_count += 1;
+            if !oauth_client_service::KNOWN_OIDC_SCOPES.contains(&scope) {
+                dropped_unknown_scope_count += 1;
+                if dropped_unknown_scope_sample.len() < 8 {
+                    dropped_unknown_scope_sample.push(
+                        scope
+                            .chars()
+                            .take(32)
+                            .map(|c| {
+                                if c.is_ascii_alphanumeric() || matches!(c, ':' | '.' | '_' | '-') {
+                                    c
+                                } else {
+                                    '?'
+                                }
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        let redirects = body.redirect_uris.as_deref().unwrap_or_default();
+        let redirect_hosts = redirects
+            .iter()
+            .take(8)
+            .map(|raw| {
+                if raw.len() > 2048 {
+                    return "oversized".to_string();
+                }
+                let Ok(uri) = url::Url::parse(raw.trim()) else {
+                    return "invalid".to_string();
+                };
+                let origin = if matches!(uri.scheme(), "http" | "https") {
+                    uri.origin().ascii_serialization()
+                } else {
+                    format!("{}:", uri.scheme())
+                };
+                origin.chars().take(128).collect()
+            })
+            .collect();
+        let client_name = body
+            .client_name
+            .as_deref()
+            .unwrap_or("Dynamic MCP Client")
+            .chars()
+            .take(128)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-') {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .collect();
+        Self {
+            client_name,
+            requested_auth_method,
+            requested_scope_count,
+            dropped_unknown_scope_count,
+            dropped_unknown_scope_sample,
+            redirect_uri_count: redirects.len(),
+            redirect_hosts,
+            grant_types: body
+                .grant_types
+                .iter()
+                .flatten()
+                .take(8)
+                .map(|value| match value.as_str() {
+                    "authorization_code" => "authorization_code",
+                    "refresh_token" => "refresh_token",
+                    _ => "other",
+                })
+                .collect(),
+            response_types: body
+                .response_types
+                .iter()
+                .flatten()
+                .take(8)
+                .map(|value| match value.as_str() {
+                    "code" => "code",
+                    _ => "other",
+                })
+                .collect(),
+        }
+    }
+}
+
+async fn register_client_inner(
+    state: &AppState,
+    body: RegisterClientRequest,
+) -> Result<(StatusCode, Json<RegisterClientResponse>), DcrError> {
+    if !matches!(
+        body.token_endpoint_auth_method.as_deref(),
+        None | Some("none" | "client_secret_basic" | "client_secret_post")
+    ) {
+        return Err(DcrError::metadata(
+            "unsupported_auth_method",
+            "Unsupported token endpoint authentication method",
+        ));
+    }
     let client_name = body
         .client_name
         .unwrap_or_else(|| "Dynamic MCP Client".to_string());
-
-    let redirect_uris = body.redirect_uris.unwrap_or_default();
-
-    let auth_method = body.token_endpoint_auth_method.as_deref().unwrap_or("none");
-
-    if auth_method != "none" {
-        return Err(AppError::BadRequest(
-            "Only token_endpoint_auth_method=none (public clients) is supported for dynamic registration".to_string(),
+    if client_name.len() > 256 {
+        return Err(DcrError::metadata(
+            "client_name_too_large",
+            "Client name exceeds 256 bytes",
         ));
     }
-
-    // Dynamic registration only creates public clients (PKCE-based, no secret).
-    // Delegated RFC 8693 token exchange is controlled by `delegation_scopes`;
-    // keeping it empty disables delegated token exchange for dynamic clients.
-    //
-    // DCR is used by MCP clients (Cursor, Claude Code, etc.) which need the
-    // `proxy` scope to call `/mcp` (enforced in handlers/mcp_transport.rs).
-    // Use the MCP scope set so the resulting access tokens pass that check.
-    let (allowed_scopes, scope_provenance) = match body.scope.as_deref().map(str::trim) {
-        Some(scope) if !scope.is_empty() => (
-            oauth_client_service::validate_allowed_scopes(scope)?,
-            crate::models::oauth_client::ScopeProvenance::Explicit,
-        ),
-        _ => (
-            oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
-            crate::models::oauth_client::ScopeProvenance::Defaulted,
-        ),
+    let redirect_uris = body.redirect_uris.unwrap_or_default();
+    if redirect_uris.len() > 16 || redirect_uris.iter().any(|uri| uri.len() > 2048) {
+        return Err(DcrError::redirect());
+    }
+    let redirect_uris = if redirect_uris.is_empty() {
+        redirect_uris
+    } else {
+        oauth_client_service::validate_redirect_uris(&redirect_uris)
+            .map_err(|_| DcrError::redirect())?
     };
+    let (allowed_scopes, scope_provenance) =
+        oauth_client_service::resolve_dcr_allowed_scopes(body.scope.as_deref()).map_err(|_| {
+            DcrError::metadata(
+                "scope_too_large",
+                "At most 64 scope tokens of 256 bytes each are allowed",
+            )
+        })?;
     if state.broker_require_admin_capability()
         && allowed_scopes
             .split_whitespace()
             .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
     {
-        return Err(AppError::Forbidden(
-            "Broker capability must be provisioned by a platform admin".to_string(),
+        return Err(DcrError::metadata(
+            "broker_scope_requires_admin",
+            "Broker capability must be provisioned by a platform admin",
         ));
     }
-
+    // DCR is public-only even when the request proposes a confidential method.
+    // Empty delegation scopes and disabled broker capability retain admin gates.
     let (client, _secret) = oauth_client_service::create_client(
         &state.db,
         &client_name,
@@ -3458,13 +3712,6 @@ pub async fn register_client(
         &[],
     )
     .await?;
-
-    tracing::info!(
-        client_id = %client.id,
-        client_name = %client.client_name,
-        "Dynamic OAuth client registered"
-    );
-
     Ok((
         StatusCode::CREATED,
         Json(RegisterClientResponse {
@@ -4622,16 +4869,16 @@ mod tests {
         };
         let state = test_app_state(db.clone());
 
-        let (status, Json(response)) = register_client(
-            State(state),
-            Json(RegisterClientRequest {
+        let (status, Json(response)) = register_client_inner(
+            &state,
+            RegisterClientRequest {
                 client_name: Some("Aevatar".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some(format!("openid {BROKER_BINDING_SCOPE}")),
-            }),
+            },
         )
         .await
         .expect("register client");
@@ -4663,16 +4910,16 @@ mod tests {
         };
         let state = test_app_state(db.clone());
 
-        let (status, Json(response)) = register_client(
-            State(state),
-            Json(RegisterClientRequest {
+        let (status, Json(response)) = register_client_inner(
+            &state,
+            RegisterClientRequest {
                 client_name: Some("MCP Client".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: None,
-            }),
+            },
         )
         .await
         .expect("register client");
@@ -4711,16 +4958,16 @@ mod tests {
         };
         let state = test_app_state(db.clone());
 
-        let (status, Json(response)) = register_client(
-            State(state),
-            Json(RegisterClientRequest {
+        let (status, Json(response)) = register_client_inner(
+            &state,
+            RegisterClientRequest {
                 client_name: Some("Narrow Client".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some("openid email".to_string()),
-            }),
+            },
         )
         .await
         .expect("register client");
@@ -4758,21 +5005,22 @@ mod tests {
         config.broker_require_admin_capability = true;
         let state = test_app_state_with_config(db, config);
 
-        let err = register_client(
-            State(state),
-            Json(RegisterClientRequest {
+        let err = register_client_inner(
+            &state,
+            RegisterClientRequest {
                 client_name: Some("Aevatar".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some(format!("openid {BROKER_BINDING_SCOPE}")),
-            }),
+            },
         )
         .await
         .expect_err("strict DCR rejects broker scope");
 
-        assert!(matches!(err, AppError::Forbidden(message) if message.contains("platform admin")));
+        assert_eq!(err.error, "invalid_client_metadata");
+        assert_eq!(err.reason, "broker_scope_requires_admin");
     }
 
     #[tokio::test]
@@ -4782,9 +5030,9 @@ mod tests {
         };
         let state = test_app_state(db.clone());
 
-        let (status, Json(response)) = register_client(
-            State(state),
-            Json(RegisterClientRequest {
+        let (status, Json(response)) = register_client_inner(
+            &state,
+            RegisterClientRequest {
                 client_name: Some("Aevatar".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
                 grant_types: None,
@@ -4793,7 +5041,7 @@ mod tests {
                 scope: Some(format!(
                     "openid offline_access proxy {BROKER_BINDING_SCOPE}"
                 )),
-            }),
+            },
         )
         .await
         .expect("register client");
@@ -5285,26 +5533,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_client_rejects_unknown_scope() {
+    async fn register_client_drops_unknown_scope() {
         let Some(db) = connect_test_database("oauth_dcr_unknown_scope").await else {
             return;
         };
         let state = test_app_state(db);
 
-        let result = register_client(
-            State(state),
-            Json(RegisterClientRequest {
+        let result = register_client_inner(
+            &state,
+            RegisterClientRequest {
                 client_name: Some("Bad Scope".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some("openid unknown_scope".to_string()),
-            }),
+            },
         )
         .await;
 
-        assert!(matches!(result, Err(AppError::ValidationError(_))));
+        let (_, Json(response)) = result.expect("unknown scope is filtered");
+        assert_eq!(response.scope, "openid");
     }
 
     #[tokio::test]
@@ -5314,16 +5563,16 @@ mod tests {
         };
         let state = test_app_state(db);
 
-        let (_status, Json(response)) = register_client(
-            State(state),
-            Json(RegisterClientRequest {
+        let (_status, Json(response)) = register_client_inner(
+            &state,
+            RegisterClientRequest {
                 client_name: Some("Default Scope".to_string()),
                 redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: None,
-            }),
+            },
         )
         .await
         .expect("register client");
@@ -6179,3 +6428,7 @@ mod tests {
     }
     include!("oauth_incremental_tests.rs");
 }
+
+#[cfg(test)]
+#[path = "oauth_registration_tests.rs"]
+mod registration_tests;
