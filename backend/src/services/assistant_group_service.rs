@@ -251,13 +251,15 @@ pub async fn update(
 }
 
 /// Delete a group, its transcript and its members' hidden threads (and their
-/// keys). Refused while a member is still answering.
+/// keys). Active member turns are stopped before their rows are removed; a
+/// worker that races deletion is fenced by the missing conversation row.
 pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
     get(db, owner, id).await?;
     let threads = member_threads(db, owner, id).await?;
-    let now = Utc::now();
-    if threads.iter().any(|row| live_turn(row, now).is_some()) {
-        return Err(AppError::AssistantTurnActive);
+    for row in &threads {
+        if live_turn(row, Utc::now()).is_some() {
+            engine::request_stop(db, owner, &row.id).await?;
+        }
     }
     for row in threads {
         match engine::delete(db, owner, &row.id).await {

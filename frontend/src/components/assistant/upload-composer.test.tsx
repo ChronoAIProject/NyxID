@@ -15,7 +15,6 @@ import {
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 
 vi.mock("@/lib/assistant/uploads", () => ({
-  UPLOAD_ACCEPT: ".png,.pdf,.txt",
   createUploadDraft: vi.fn().mockResolvedValue("nyxa-draft"),
   removeUpload: vi.fn().mockResolvedValue(undefined),
   uploadFile: vi.fn(),
@@ -130,6 +129,46 @@ describe("Assistant uploads composer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove private.pdf" }));
     expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
   });
+  it("shows the server's unsupported-type rejection from the unrestricted picker", async () => {
+    const message =
+      "Bad request: Malformed or unsupported attachment. Use PDF, DOCX, UTF-8 text, PNG, JPEG, GIF or WebP.";
+    class RefusedUpload {
+      status = 400;
+      responseText = JSON.stringify({ message });
+      upload = {};
+      onload?: () => void;
+      onloadend?: () => void;
+      open = vi.fn();
+      setRequestHeader = vi.fn();
+      abort = vi.fn();
+      send() {
+        this.onload?.();
+        this.onloadend?.();
+      }
+    }
+    vi.stubGlobal("XMLHttpRequest", RefusedUpload);
+    try {
+      // Exercise the real HTTP error decoder as well as the composer's alert.
+      const actual = await vi.importActual<typeof import("@/lib/assistant/uploads")>(
+        "@/lib/assistant/uploads",
+      );
+      vi.mocked(uploadFile).mockImplementation(actual.uploadFile);
+      render(
+        <UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />,
+      );
+      expect(screen.getByLabelText("Choose attachments")).not.toHaveAttribute("accept");
+      choose(new File(["<svg/>"], "drawing.svg", { type: "image/svg+xml" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "hello" } });
+      expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+      expect(base.onSend).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Remove drawing.svg" }));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("supports paste and drop, deletes an unsent upload and scopes group files", async () => {
     render(
       <UploadComposer {...base} scope={{ kind: "groups", id: "group-one" }} />,
@@ -221,4 +260,31 @@ it("adopts one draft for overlapping voice gestures without losing typed state",
   await act(async()=>resolve("nyxa-voice"));
   expect(onVoice).toHaveBeenCalledExactlyOnceWith("nyxa-voice");
   expect(base.onSend).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["notes.md", ""],
+  ["notes.markdown", "application/octet-stream"],
+  ["data.JSON", "application/octet-stream"],
+  ["report.PDF", ""],
+  ["table.csv", "application/vnd.ms-excel"],
+  ["table.csv", ""],
+  ["notes.text", "text/plain"],
+  ["README", ""],
+])("lets the server classify %s with browser MIME %s", async (name, type) => {
+  render(
+    <UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />,
+  );
+  const picker = screen.getByLabelText("Choose attachments");
+  expect(picker).not.toHaveAttribute("accept");
+  const file = new File(["fixture bytes"], name, { type });
+  choose(file);
+  await screen.findByText("Ready");
+  expect(uploadFile).toHaveBeenCalledWith(
+    { kind: "conversations", id: "one" },
+    file,
+    expect.any(AbortSignal),
+    expect.any(Function),
+  );
+  expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
 });

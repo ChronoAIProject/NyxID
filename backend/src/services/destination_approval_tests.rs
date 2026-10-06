@@ -9,6 +9,7 @@ async fn setup_approval(
     operation_name: &str,
 ) -> (ExactServiceApprovalCaller, ExactServiceApprovalResult) {
     let caller = ExactServiceApprovalCaller {
+        delegation_restrictions: Default::default(),
         org_agent_access: None,
         assistant_group_id: None,
         agent_owner: None,

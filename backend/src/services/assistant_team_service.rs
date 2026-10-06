@@ -553,6 +553,7 @@ async fn create_thread_with_kind(
         model: agent.model.clone(),
         access_mode: AccessMode::Full,
         nyxagent_session_id: None,
+        nyxagent_instruction_binding: None,
         nyxagent_last_response_id: None,
         credential_api_key_id: String::new(),
         message_count: 0,
@@ -1600,6 +1601,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     let mut set = doc! {
                         "pending_events": [],
                         "nyxagent_session_id": bson::Bson::Null,
+                        "nyxagent_instruction_binding": bson::Bson::Null,
                         "nyxagent_last_response_id": bson::Bson::Null,
                     };
                     if live_turn(&row, now).is_some() {
@@ -1695,7 +1697,7 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
 // ---------------------------------------------------------------------------
 
 /// Obvious credential shapes never enter an agent's memory.
-fn looks_secret(text: &str) -> bool {
+pub(crate) fn looks_secret(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     // An OpenAI-style key: "sk-" at a word start followed by a long token
     // (not "task-oriented" or "risk-averse").

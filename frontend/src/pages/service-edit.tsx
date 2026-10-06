@@ -1,3 +1,4 @@
+import { ServiceConcurrency } from "@/components/services/service-concurrency";
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
 import {
   serviceFormPatch,
@@ -1141,6 +1142,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
             </div>
           </form>
         </Form>
+        {user?.is_admin && <ServiceConcurrency key={serviceId} serviceId={serviceId} />}
       </div>
     </div>
   );

@@ -42,7 +42,21 @@ export const skillPreviewSchema = z.object({
   size_bytes: z.number(),
 });
 
+export const authoredSkillPreviewSchema = z.object({
+  id: z.string(),
+  agent_id: z.string(),
+  agent_name: z.string(),
+  revision: z.number(),
+  skills_revision: z.number(),
+  current_skills_revision: z.number(),
+  status: z.string(),
+  name: z.string(),
+  version: z.string(),
+  files: z.array(z.object({ path: z.string(), content: z.string() })),
+});
+
 export const learningProposalSchema = z.object({
+  source: z.enum(["learned", "authored"]).default("learned"),
   id: z.string(),
   agent_id: z.string(),
   status: z.string(),
@@ -63,7 +77,7 @@ export const learningProposalSchema = z.object({
     safety_notes: z.string(),
     files: z.array(z.object({ path: z.string(), content: z.string() })).default([]),
     base_skill: z.unknown().optional(),
-  }).optional(),
+  }).nullish(),
 });
 export const learningProposalsSchema = z.object({ proposals: learningProposalSchema.array() });
 export const learningStatusSchema = z.object({

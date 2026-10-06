@@ -1135,6 +1135,7 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         .await?
         .map_or(0, |agent| agent.skills_revision);
     let proposal = AssistantAgentLearningProposal {
+        source: Default::default(),
         id: Uuid::new_v4().to_string(),
         agent_id: run.agent_id.clone(),
         owner_id: run.owner_id.clone(),

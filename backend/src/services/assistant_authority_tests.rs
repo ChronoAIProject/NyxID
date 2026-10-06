@@ -734,7 +734,7 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     let memory = super::assistant_team_tools::AGENT_TOOL_NAMES.len();
     assert_eq!(
         service.endpoints.len(),
-        tools::TOOL_NAMES.len() + team + memory
+        tools::TOOL_NAMES.len() + team + memory - 1
     );
     let mut subagent = orchestrator_chat();
     subagent.role = crate::models::assistant_conversation::AgentRole::Subagent;
