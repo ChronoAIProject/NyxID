@@ -318,13 +318,33 @@ and `/api/v1/mcp/config` for the whole user.
 
 ### Tool search semantics
 
+Personal service preference adds the third search key: matched words descending,
+words in name descending, authorized `preference_rank` ascending, then loader
+order. Relevance wins; the 25-result cap applies after this ordering. Search
+matches and connected-service rows carry `preference_rank` (1-based or null);
+connected services sort by preference first. Ranks are dense after visibility,
+including scoped/guest filtering. Platform-source catalog fallbacks are unranked.
+`GET/PUT /api/v1/service-preferences` edits the personal connection-ID order;
+`tools/list`, `/mcp/config`, catalog digests and explicit execution are unchanged.
+
+NyxID cannot make an independent client (Claude Code with its own Composio or
+browser tools, Cursor, OpenClaw) prefer a NyxID service over tools NyxID does not
+serve. The guarantee is exactly: within a NyxID discovery response, preferred
+services sort first at equal relevance, and every response row carries
+`preference_rank` so a client that wants to honor it can.
+
+
 `nyx__search_tools` splits the query on non-alphanumeric characters and matches
 each word as a case-insensitive substring of the qualified tool name
 (`<slug>__<operation>`), the service name and the description. Tools containing
-every word rank first, then partial matches in catalog order, capped at 25. Word
+every word rank first, then partial matches; ties use words in name, dense
+service preference and stable loader order, capped at 25 after sorting. Word
 order is irrelevant, so "skill search" and "search skills" both find
 `ornn-api__searchskills`, and concatenated operation names such as
-`getentitystate` match "entity state". An empty query lists the first 25 tools.
+`getentitystate` match "entity state". The pure search helper accepts an empty query and orders its first 25 tools by
+preference. The MCP transport requires a nonempty query. Unrankable native
+machine/upload search extras carry `preference_rank: null` and retain their
+existing append and cap behavior.
 
 ### Image tool results
 

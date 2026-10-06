@@ -128,6 +128,8 @@ Key files: `services/openclaw_channel_service.rs`, `handlers/openclaw_channel.rs
 
 ### 8. Streamlined Services Architecture
 
+- `service_preferences` is per acting identity, discovery-only (`nyx__search_tools`/`nyx__list_connected_services`, `/keys` `preference_rank`); never read on execution paths; `tools/list`/`/mcp/config` unchanged. Exposed ranks are dense after authorization; writes require verified first-party human auth on `/service-preferences` only.
+
 Services/connections/providers were unified into 3 user-managed collections plus one orchestration layer; old collections are kept for backward compatibility during migration.
 
 - Collections: `user_endpoints` (target URLs, custom or from catalog), `user_api_keys` (external credentials: API keys, OAuth tokens, bearer tokens), `user_services` (proxy routing config: endpoint + key + auth method + optional node + identity propagation + custom User-Agent override)

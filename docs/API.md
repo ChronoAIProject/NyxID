@@ -3182,6 +3182,33 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
+#### Service preference order
+
+`GET /api/v1/service-preferences` returns `{ "ordered": ["<UserService UUID>"],
+"version": 3, "updated_at": "<RFC3339>" }`. Missing documents return an empty
+order, version 0 and a null timestamp. Reads use read-only inventory, current
+platform grants, org scopes and agent allowlists. Hidden, deleted and inaccessible
+IDs are omitted; `preference_rank` on `GET /keys` and `GET /keys/{id_or_slug}` is
+a dense, 1-based position among authorized ranked connections, or null.
+Service accounts and relay tokens cannot read this route. General API keys and
+delegated exact `account:read` GETs may read authorized metadata.
+
+`PUT /api/v1/service-preferences` accepts only `{ "ordered": [...],
+"expected_version": 3 }` from a verified first-party human session/access token.
+API keys, delegated tokens, service accounts, relay and OAuth application tokens
+cannot write. IDs must be canonical lowercase UUID v4 strings, unique, visible
+and at most 200. The request limit is 16 KiB; unknown fields are rejected.
+Expected versions range from 0 through 9007199254740990. Validation returns
+400; a stale version or insert/CAS race returns 409 (`Conflict`, code 1004).
+The client refetches before explicitly overwriting. A no-op at the current version
+preserves the version/timestamp and emits no audit. Changed saves increment the
+version and append a chained `service_preference_updated` audit containing only
+count and version. Read filtering does not prune the stored document.
+Preference affects discovery only; it never changes an explicit target, retries
+execution, grants, approval or authority digests, billing or `/mcp/config`.
+Existing key slug routes and catalog-curation authorization remain unchanged.
+
+
 The unified keys API auto-provisions UserEndpoint + UserApiKey + UserService records from a single request. This is the primary entry point for users connecting external services.
 
 #### POST /api/v1/keys

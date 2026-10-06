@@ -902,3 +902,24 @@ Raw usage meters also retain the exact connection ID. Charged hourly and daily
 rollups retain it in existing cost-partition metadata, preserving established
 bucket/replay identities during mixed-version deployment. These metadata additions
 do not change pricing, settlement, or the routing policy.
+
+## Service preference order
+
+The acting person's `service_preferences` document stores ordered `UserService`
+connection UUIDs, optimistic version and BSON timestamps. Slugs may be reused;
+catalog-source MCP fallbacks have no connection and cannot be ranked. The editor
+on `/keys` uses a sortable ranked/unranked divider, keyboard and touch handles,
+and Rank/Unrank controls, including with one connected service. Preference breaks
+relevance ties. The auto-connected display toggle never changes saved pills.
+A failed read blocks editing; a 404 hides it for older servers. Conflicts retain
+local edits and refetch the version before an explicit overwrite. A validation
+failure refreshes inventory before removing stale IDs. At most 200 services can
+be ranked. Caches are separated by acting identity.
+
+Visibility is resolved before ranking, using existing read-only inventory,
+grants and scopes. Stale IDs stay inert without a write and exposed ranks are
+dense, so a scoped caller cannot infer hidden connections from gaps. Owner and
+guest chat keys use the owner's order restricted to authorized services.
+Org-owned keys retain legacy ordering because org users cannot author a human
+preference document. Preference is never consulted for explicit execution,
+retries, approvals, authority digests, platform grants, billing or catalog digests.

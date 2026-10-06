@@ -469,7 +469,19 @@ async fn list_user_services_inner(
     user_id: &str,
     include_disabled: bool,
 ) -> AppResult<Vec<UserService>> {
+    list_user_services_selected(db, user_id, include_disabled, None).await
+}
+
+async fn list_user_services_selected(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_disabled: bool,
+    selected: Option<&[String]>,
+) -> AppResult<Vec<UserService>> {
     let mut filter = doc! { "user_id": user_id };
+    if let Some(ids) = selected {
+        filter.insert("_id", doc! { "$in": ids });
+    }
     if !include_disabled {
         filter.insert("is_active", true);
     }
@@ -620,8 +632,27 @@ pub(crate) async fn list_user_services_with_sources_and_memberships(
     include_disabled: bool,
     memberships: &[crate::models::org_membership::OrgMembership],
 ) -> AppResult<Vec<UserServiceWithSource>> {
+    list_user_services_with_sources_selected(
+        db,
+        user_id,
+        include_scope_denied,
+        include_disabled,
+        memberships,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn list_user_services_with_sources_selected(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_scope_denied: bool,
+    include_disabled: bool,
+    memberships: &[crate::models::org_membership::OrgMembership],
+    selected: Option<&[String]>,
+) -> AppResult<Vec<UserServiceWithSource>> {
     let mut out: Vec<UserServiceWithSource> =
-        list_user_services_inner(db, user_id, include_disabled)
+        list_user_services_selected(db, user_id, include_disabled, selected)
             .await?
             .into_iter()
             .map(|s| UserServiceWithSource {
@@ -655,7 +686,8 @@ pub(crate) async fn list_user_services_with_sources_and_memberships(
             meta
         };
 
-        let org_services = list_user_services_inner(db, &m.org_user_id, include_disabled).await?;
+        let org_services =
+            list_user_services_selected(db, &m.org_user_id, include_disabled, selected).await?;
         for svc in org_services {
             // The normal listing drops services outside the effective member
             // scope because its response contains endpoint, key, and auth

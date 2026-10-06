@@ -3167,7 +3167,7 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    let services = match load_all_services_for_meta_tools(state, auth).await {
+    let (services, ranks) = match load_preferred_services_for_meta_tools(state, auth).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for search: {e}");
@@ -3177,7 +3177,7 @@ async fn handle_meta_search(
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
-    let search_result = mcp_service::search_all_tools(&services, query);
+    let search_result = mcp_service::search_all_tools_ranked(&services, query, &ranks);
 
     let mut results: Vec<serde_json::Value> = search_result
         .matches
@@ -3187,6 +3187,8 @@ async fn handle_meta_search(
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": webhook_tool_schema(auth, &t.input_schema),
+                "preference_rank": mcp_service::resolve_tool_call(&t.name, &services)
+                    .and_then(|(service, _)| ranks.get(&service.service_id).copied()),
             });
             if auth.chat.is_some()
                 && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)
@@ -3221,6 +3223,7 @@ async fn handle_meta_search(
                 "description": tool.description,
                 "inputSchema": tool.input_schema,
                 "hint": "Call this native tool directly by name.",
+                "preference_rank": null,
             })
         }));
     }
@@ -3228,7 +3231,7 @@ async fn handle_meta_search(
         "matches": results,
         "count": results.len(),
         "hint": "Use nyx__call_tool to invoke any of these tools by name. \
-            Pass the tool name and arguments as shown in the match results.",
+            Pass the tool name and arguments as shown in the match results. At equal relevance, tools from the owner's preferred services are listed first.",
     });
     if auth.chat.is_some() {
         response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
@@ -3261,6 +3264,17 @@ async fn load_all_services_for_meta_tools(
     );
     if let Some(chat) = auth.chat.as_ref() {
         let mut services = services;
+        if chat.guest {
+            services.retain(|service| match &service.source {
+                mcp_service::McpToolSource::UserManaged { .. } => {
+                    auth.allowed_service_ids.contains(&service.service_id)
+                }
+                mcp_service::McpToolSource::Platform { .. } => auth
+                    .allowed_platform_service_ids
+                    .contains(&service.service_id),
+                mcp_service::McpToolSource::Internal => false,
+            });
+        }
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
         services.push(crate::services::assistant_account_tools::virtual_service(
@@ -3270,6 +3284,18 @@ async fn load_all_services_for_meta_tools(
     } else {
         Ok(filter_services_by_scope(services, auth))
     }
+}
+
+async fn load_preferred_services_for_meta_tools(
+    state: &AppState,
+    auth: &McpAuthContext,
+) -> crate::errors::AppResult<(
+    Vec<mcp_service::McpToolService>,
+    std::collections::HashMap<String, u32>,
+)> {
+    let services = load_all_services_for_meta_tools(state, auth).await?;
+    crate::services::service_preference_service::order_discovery(&state.db, &auth.user_id, services)
+        .await
 }
 
 async fn handle_meta_list_connected(
@@ -3283,7 +3309,7 @@ async fn handle_meta_list_connected(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    let services = match load_all_services_for_meta_tools(state, auth).await {
+    let (services, ranks) = match load_preferred_services_for_meta_tools(state, auth).await {
         Ok(services) => services,
         Err(error) => {
             tracing::error!("Failed to load connected services: {error}");
@@ -3291,7 +3317,7 @@ async fn handle_meta_list_connected(
         }
     };
 
-    let mut result = mcp_service::list_connected_services(&services, query);
+    let mut result = mcp_service::list_connected_services_ranked(&services, query, &ranks);
     if auth.chat.is_some()
         && let Some(rows) = result["services"].as_array_mut()
     {

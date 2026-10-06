@@ -1,6 +1,17 @@
+import { useServicePreference } from "@/hooks/use-service-preference";
+import { ServicePreferenceEditor } from "@/components/dashboard/service-preference-editor";
+import { useAuthStore } from "@/stores/auth-store";
 import { ServiceConnectionTable } from "@/components/dashboard/service-connection-table";
 import { ArchivedServiceHistory } from "@/components/dashboard/service-history";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys, useCatalog } from "@/hooks/use-keys";
 import { GroupedServiceCards } from "@/components/dashboard/grouped-service-cards";
@@ -14,7 +25,13 @@ import { Button, ButtonIcon } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { KeySquare, Terminal, RefreshCw, Shield } from "lucide-react";
+import {
+  KeySquare,
+  Terminal,
+  RefreshCw,
+  Shield,
+  ArrowUpDown,
+} from "lucide-react";
 import { MagicKeyIcon } from "@/components/icons/empty-state";
 import {
   ViewToggle,
@@ -124,10 +141,12 @@ function LoadingSkeleton() {
 }
 
 function ExternalServicesTab({
+  preferenceAction,
   onAdd,
   onReconnect,
   viewMode,
 }: {
+  readonly preferenceAction?: (compact: boolean) => ReactNode;
   readonly onAdd: () => void;
   readonly onReconnect: (keyInfo: KeyInfo) => void;
   readonly viewMode: ViewMode;
@@ -170,12 +189,15 @@ function ExternalServicesTab({
       }))}
       catalog={catalog}
       actions={(compact) => (
-        <AddCtaButton
-          label="Connect Service"
-          onClick={onAdd}
-          compact={compact}
-          compactLabel="Connect"
-        />
+        <>
+          {preferenceAction?.(compact)}
+          <AddCtaButton
+            label="Connect Service"
+            onClick={onAdd}
+            compact={compact}
+            compactLabel="Connect"
+          />
+        </>
       )}
       renderTable={
         viewMode === "table"
@@ -311,10 +333,49 @@ export function KeysPage() {
   const [initialSetupServiceId, setInitialSetupServiceId] = useState<
     string | null
   >(null);
+  const identity = useAuthStore((state) => state.user?.id);
+  const preference = useServicePreference();
+  const [editorSnapshot, setEditorSnapshot] = useState<{
+    preference: NonNullable<ReturnType<typeof useServicePreference>["data"]>;
+    inventory: readonly KeyInfo[];
+  } | null>(null);
+  const [editingIdentity, setEditingIdentity] = useState<string | null>(null);
+  const editing =
+    editingIdentity !== null &&
+    editingIdentity === identity &&
+    tab === "services" &&
+    !previewActive;
+  const [preferenceDirty, setPreferenceDirty] = useState(false);
+  const [restoreFocusIdentity, setRestoreFocusIdentity] = useState<
+    string | null
+  >(null);
+  const [previousIdentity, setPreviousIdentity] = useState(identity);
+  if (previousIdentity !== identity) {
+    setPreviousIdentity(identity);
+    setEditingIdentity(null);
+    setEditorSnapshot(null);
+    setPreferenceDirty(false);
+    setRestoreFocusIdentity(null);
+  }
+  const reorderButton = useRef<HTMLButtonElement>(null);
+  function closeEditor(restoreFocus = true) {
+    setEditingIdentity(null);
+    setPreferenceDirty(false);
+    setRestoreFocusIdentity(
+      restoreFocus && editing && identity ? identity : null,
+    );
+  }
+  function discardOrder() {
+    return (
+      !editing || !preferenceDirty || window.confirm("Discard unsaved order?")
+    );
+  }
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
   // Shared query with ExternalServicesTab; only decides header CTA placement.
-  const { data: pageKeys } = useKeys();
+  const inventory = useKeys();
+  const pageKeys = inventory.data;
+  const keys = pageKeys;
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(
     null,
   );
@@ -389,7 +450,87 @@ export function KeysPage() {
     }
   }
 
+  const orderReadPending =
+    preference.isLoading ||
+    inventory.isLoading ||
+    preference.isFetching ||
+    inventory.isFetching;
+  const reorderUnavailable =
+    editing ||
+    orderReadPending ||
+    inventory.isError ||
+    preference.isError ||
+    !preference.data ||
+    !keys?.length;
+
+  useEffect(() => {
+    if (
+      !restoreFocusIdentity ||
+      restoreFocusIdentity !== identity ||
+      tab !== "services" ||
+      editing ||
+      reorderUnavailable
+    )
+      return;
+    const frame = requestAnimationFrame(() => {
+      const target = reorderButton.current;
+      if (target && !target.disabled) {
+        target.focus();
+        setRestoreFocusIdentity(null);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [restoreFocusIdentity, identity, tab, editing, reorderUnavailable]);
+
+  useEffect(() => {
+    if (!restoreFocusIdentity) return;
+    const cancel = () => setRestoreFocusIdentity(null);
+    document.addEventListener("pointerdown", cancel);
+    document.addEventListener("keydown", cancel);
+    document.addEventListener("wheel", cancel, { passive: true });
+    return () => {
+      document.removeEventListener("pointerdown", cancel);
+      document.removeEventListener("keydown", cancel);
+      document.removeEventListener("wheel", cancel);
+    };
+  }, [restoreFocusIdentity]);
+
+  const reorderAction = (compact = false) =>
+    preference.data !== null && !previewActive ? (
+      <Button
+        ref={reorderButton}
+        variant="outline"
+        size={compact ? "icon" : "default"}
+        aria-label="Reorder"
+        title={
+          editing
+            ? "Order editor is open"
+            : preference.isError || inventory.isError
+              ? "Retry the failed read to edit the order"
+              : orderReadPending
+                ? "Loading services and preference order"
+                : !keys?.length
+                  ? "Connect a service to set an order"
+                  : "Set the order agents see at equal relevance"
+        }
+        disabled={reorderUnavailable}
+        onClick={() => {
+          if (identity && preference.data && keys) {
+            setEditorSnapshot({ preference: preference.data, inventory: keys });
+            setEditingIdentity(identity);
+          }
+        }}
+      >
+        <ArrowUpDown className="h-4 w-4" />
+        {!compact && "Reorder"}
+      </Button>
+    ) : null;
+  const headerReorder =
+    editing || !pageKeys?.length || inventory.isLoading || inventory.isError;
+
   function setTab(value: string) {
+    if (!discardOrder()) return;
+    closeEditor(false);
     void navigate({
       to: "/keys",
       search: { tab: value, ...(previewActive ? { view: "routing" } : {}) },
@@ -405,7 +546,14 @@ export function KeysPage() {
         actions={
           import.meta.env.DEV && !previewActive ? (
             <Button variant="outline" asChild>
-              <Link to="/keys" search={{ view: "routing" }}>
+              <Link
+                to="/keys"
+                search={{ view: "routing" }}
+                onClick={(event) => {
+                  if (!discardOrder()) event.preventDefault();
+                  else closeEditor(false);
+                }}
+              >
                 Routing preview
               </Link>
             </Button>
@@ -420,24 +568,27 @@ export function KeysPage() {
             <TabsTrigger value="pools">Service Pools</TabsTrigger>
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
-          <div className="flex shrink-0 items-center justify-between gap-4 sm:pb-1">
+          <div className="flex flex-wrap items-center justify-between gap-3 sm:pb-1">
+            {tab === "services" && headerReorder && reorderAction()}
             {tab !== "pools" && !(tab === "services" && previewActive) && (
               <ViewToggle
                 viewMode={
                   tab === "services" ? servicesViewMode : agentKeysViewMode
                 }
-                onViewModeChange={
-                  tab === "services"
-                    ? setServicesViewMode
-                    : setAgentKeysViewMode
-                }
+                onViewModeChange={(mode) => {
+                  if (tab === "services") {
+                    if (!discardOrder()) return;
+                    closeEditor(false);
+                    setServicesViewMode(mode);
+                  } else setAgentKeysViewMode(mode);
+                }}
               />
             )}
             {/* Services keep Connect Service inside the sticky filter toolbar;
                 the empty state has no toolbar, so the header button stays. */}
             {(tab === "nyxid" ||
               tab === "pools" ||
-              (tab === "services" && !pageKeys?.length)) && (
+              (tab === "services" && (editing || !pageKeys?.length))) && (
               <AddButton
                 tab={tab}
                 onAddService={() => setAddServiceOpen(true)}
@@ -450,7 +601,62 @@ export function KeysPage() {
 
         <TabsContent value="services" className="mt-6">
           <CodexConnectionSection />
-          {previewActive && RoutingPreview ? (
+          {preference.isError && (
+            <ErrorBanner
+              message="Could not load preference order. Editing is unavailable."
+              onRetry={() => void preference.refetch()}
+            />
+          )}
+          {editing && inventory.isError && (
+            <ErrorBanner
+              message="Could not load services. Your preference edits are kept."
+              onRetry={() => void inventory.refetch()}
+            />
+          )}
+          {editing && (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                variant="outline"
+                disabled
+                aria-pressed="true"
+                aria-label="Auto-connected services: shown"
+              >
+                Auto-connected
+              </Button>
+              <p className="text-11 text-muted-foreground">
+                All authorized connections are shown while reordering. Your
+                filters and saved view return when you finish.
+              </p>
+            </div>
+          )}
+          {editing && editorSnapshot ? (
+            <ServicePreferenceEditor
+              key={identity}
+              preference={editorSnapshot.preference}
+              inventory={editorSnapshot.inventory}
+              viewMode={servicesViewMode}
+              blocked={
+                preference.isError ||
+                inventory.isError ||
+                inventory.isFetching ||
+                preference.isFetching
+              }
+              onClose={closeEditor}
+              onDirtyChange={setPreferenceDirty}
+              reloadPreference={async () => {
+                const result = await preference.refetch();
+                if (result.isError || !result.data)
+                  throw new Error("Could not load preference order");
+                return result.data;
+              }}
+              refreshInventory={async () => {
+                const result = await inventory.refetch();
+                if (result.isError || !result.data)
+                  throw new Error("Could not load services");
+                return result.data;
+              }}
+            />
+          ) : previewActive && RoutingPreview ? (
             <Suspense fallback={<Skeleton className="h-96 w-full" />}>
               <RoutingPreview
                 actions={(compact) => (
@@ -474,6 +680,7 @@ export function KeysPage() {
             </Suspense>
           ) : (
             <ExternalServicesTab
+              preferenceAction={headerReorder ? undefined : reorderAction}
               onAdd={() => setAddServiceOpen(true)}
               onReconnect={(keyInfo) => {
                 setReconnectKey(keyInfo);

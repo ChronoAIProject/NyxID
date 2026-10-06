@@ -167,3 +167,8 @@ pub mod assistant_voice;
 pub mod machine_access;
 
 pub mod admin_utility_inference;
+
+pub mod service_preference;
+
+#[cfg(test)]
+mod service_preference_tests;

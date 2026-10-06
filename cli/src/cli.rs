@@ -924,6 +924,22 @@ pub struct CatalogServiceArgs {
 }
 
 #[derive(Subcommand)]
+pub enum ServicePreferenceCommands {
+    /// Show the authorized saved order
+    Show {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Replace the order with IDs or slugs; no arguments clears the order
+    Set {
+        #[arg(value_name = "ID_OR_SLUG")]
+        services: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
 // The `Add` variant has accreted a lot of flags as catalog adds have
 // gained capabilities (org targeting, OpenAPI spec URL, WS frame
 // presets, multi-connection BYO Custom App credentials, etc.). Each
@@ -935,6 +951,11 @@ pub struct CatalogServiceArgs {
 // not load-bearing — accept the lint here.
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
+    /// Set discovery preference among connected services (breaks relevance ties)
+    Preference {
+        #[command(subcommand)]
+        command: ServicePreferenceCommands,
+    },
     /// Add a service from catalog or custom endpoint
     Add {
         #[command(flatten)]

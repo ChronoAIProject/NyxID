@@ -15,6 +15,7 @@ import { ServiceConnectionTable } from "./service-connection-table";
 import { ServiceAvatarStack } from "./service-avatar-stack";
 import { ServiceBillingSummary } from "./service-billing-summary";
 import { latestServiceEdit } from "@/lib/service-card-summary";
+import { preferredConnection } from "@/lib/service-preference";
 import {
   useServiceRoutingPools,
   type ServiceRoutingPools,
@@ -78,6 +79,7 @@ function GroupCard({
   readonly filtersRef: RefObject<HTMLDivElement | null>;
 }) {
   const identity = useAuthStore((state) => state.user?.id);
+  const preferred = preferredConnection(group.connections);
   const [routingOpen, setRoutingOpen] = useState(false);
   const [requestedPanel, setRequestedPanel] = useState<{
     id: string;
@@ -339,6 +341,13 @@ function GroupCard({
                   {count === 1 ? "connection" : "connections"}
                 </p>
               </div>
+              {!expanded && preferred?.preference_rank != null && (
+                <button type="button" onClick={() => onToggle(cardRef.current)} className="min-w-0 max-w-[55%] rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" aria-label={`Discovery order ${preferred.preference_rank} for ${preferred.label}. Expand ${group.name} connections`} title={`Discovery preference for connection ${preferred.label} (${preferred.slug}); current filters do not change this saved rank`}>
+                  <Badge variant="accent" className="max-w-full whitespace-normal break-words">
+                    Discovery #{preferred.preference_rank} · {preferred.label}
+                  </Badge>
+                </button>
+              )}
               {disabled > 0 && (
                 <Badge variant="secondary">{disabled} disabled</Badge>
               )}

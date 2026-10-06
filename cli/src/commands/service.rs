@@ -6,7 +6,7 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
 use crate::api::ApiClient;
-use crate::cli::{OutputFormat, ServiceCommands};
+use crate::cli::{OutputFormat, ServiceCommands, ServicePreferenceCommands};
 use crate::commands::display_endpoint;
 use crate::commands::lark_permission::print_permission_block;
 use crate::commands::node_credential::RciCliHintLines;
@@ -273,6 +273,7 @@ fn build_ws_frame_injections_body(preset: Option<&str>, clear: bool) -> Result<O
 
 pub async fn run(command: ServiceCommands) -> Result<()> {
     match command {
+        ServiceCommands::Preference { command } => run_service_preference(command).await,
         ServiceCommands::Add {
             catalog,
             platform_key,
@@ -1058,6 +1059,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         table.load_preset(UTF8_FULL_CONDENSED);
                         table.set_header([
                             "ID", "Slug", "Label", "Endpoint", "Status", "Access", "Node", "Key",
+                            "Pref",
                         ]);
 
                         for svc in items {
@@ -1071,6 +1073,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                             let status = display_status(svc);
                             let access = display_access_policy(svc);
                             let node = svc["node_id"].as_str().unwrap_or("--");
+                            let preference = display_preference(svc);
                             table.add_row([
                                 id,
                                 slug,
@@ -1080,6 +1083,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                                 access,
                                 node,
                                 credential_binding(svc),
+                                preference.as_str(),
                             ]);
                         }
                         eprintln!("{table}");
@@ -4184,6 +4188,53 @@ mod branch_tests {
     }
 
     #[tokio::test]
+    async fn service_preference_set_sends_version_and_reports_conflict() {
+        for status in [200, 409] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/service-preferences"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"ordered":[],"version":7,"updated_at":null}),
+                    ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET")).and(path("/api/v1/keys"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys":[{"id":"old","slug":"same","is_active":false},{"id":"active","slug":"same","is_active":true}]}))).expect(1).mount(&server).await;
+            Mock::given(method("PUT"))
+                .and(path("/api/v1/service-preferences"))
+                .and(body_partial_json(
+                    serde_json::json!({"ordered":["active"],"expected_version":7}),
+                ))
+                .respond_with(ResponseTemplate::new(status).set_body_json(
+                    serde_json::json!({"ordered":["active"],"version":8,"updated_at":null}),
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = run(ServiceCommands::Preference {
+                command: ServicePreferenceCommands::Set {
+                    services: vec!["same".into()],
+                    auth: mock_auth(server.uri()),
+                },
+            })
+            .await;
+            if status == 409 {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("preference order changed elsewhere; re-run")
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn update_resolves_node_and_clears_openapi() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -4599,4 +4650,105 @@ pub(crate) fn credential_binding(service: &Value) -> &str {
             "user"
         }
     })
+}
+
+fn display_preference(service: &Value) -> String {
+    service["preference_rank"]
+        .as_u64()
+        .map_or_else(|| "-".into(), |rank| rank.to_string())
+}
+
+fn resolve_preference_ids(items: &[Value], requested: &[String]) -> Result<Vec<String>> {
+    requested
+        .iter()
+        .map(|name| {
+            let row = items
+                .iter()
+                .find(|row| row["id"].as_str() == Some(name))
+                .or_else(|| {
+                    items.iter().find(|row| {
+                        row["slug"].as_str() == Some(name)
+                            && row["is_active"].as_bool() == Some(true)
+                    })
+                })
+                .or_else(|| items.iter().find(|row| row["slug"].as_str() == Some(name)))
+                .with_context(|| format!("Unknown service '{name}'"))?;
+            Ok(row["id"].as_str().context("Service has no id")?.to_string())
+        })
+        .collect()
+}
+
+async fn run_service_preference(command: ServicePreferenceCommands) -> Result<()> {
+    let (auth, requested) = match command {
+        ServicePreferenceCommands::Show { auth } => (auth, None),
+        ServicePreferenceCommands::Set { auth, services } => (auth, Some(services)),
+    };
+    let mut api = ApiClient::from_auth_checked(&auth).await?;
+    let current: Value = api.get("/service-preferences").await?;
+    let inventory: Value = api.get("/keys").await?;
+    let items = inventory["keys"]
+        .as_array()
+        .context("Invalid service inventory")?;
+    let result = if let Some(requested) = requested {
+        let ids = resolve_preference_ids(items, &requested)?;
+        let body = serde_json::json!({ "ordered": ids, "expected_version": current["version"].as_i64().context("Invalid preference version")? });
+        match api.put::<Value, _>("/service-preferences", &body).await {
+            Ok(result) => result,
+            Err(error)
+                if error
+                    .downcast_ref::<crate::api::ApiError>()
+                    .is_some_and(|error| error.status() == reqwest::StatusCode::CONFLICT) =>
+            {
+                bail!("preference order changed elsewhere; re-run")
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        current
+    };
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+        OutputFormat::Table => {
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_FULL_CONDENSED)
+                .set_header(["Rank", "Slug", "Label", "ID"]);
+            for (index, id) in result["ordered"]
+                .as_array()
+                .context("Invalid preference order")?
+                .iter()
+                .enumerate()
+            {
+                if let Some(row) = items.iter().find(|row| row["id"] == *id) {
+                    table.add_row([
+                        (index + 1).to_string(),
+                        row["slug"].as_str().unwrap_or("-").into(),
+                        row["label"].as_str().unwrap_or("-").into(),
+                        id.as_str().unwrap_or("-").into(),
+                    ]);
+                }
+            }
+            eprintln!("{table}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod service_preference_tests {
+    use super::*;
+    #[test]
+    fn service_preference_resolves_active_slug_and_displays_rank() {
+        let items = vec![
+            serde_json::json!({"id":"old", "slug":"same", "is_active":false}),
+            serde_json::json!({"id":"new", "slug":"same", "is_active":true, "preference_rank":2}),
+        ];
+        assert_eq!(
+            resolve_preference_ids(&items, &["same".into(), "old".into()]).unwrap(),
+            vec!["new", "old"]
+        );
+        assert!(resolve_preference_ids(&items, &["missing".into()]).is_err());
+        assert_eq!(display_preference(&items[0]), "-");
+        assert_eq!(display_preference(&items[1]), "2");
+    }
 }

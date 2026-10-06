@@ -2249,7 +2249,7 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__search_tools".to_string(),
         description: "Search connected tools by keyword. Use this when you have many \
-            tools and need to find a specific one."
+            tools and need to find a specific one. At equal relevance, preferred services are listed first."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -2290,7 +2290,7 @@ pub fn generate_tool_definitions(
         name: "nyx__list_connected_services".to_string(),
         description: "List services you are already connected to, including services that \
             are currently unavailable. Services that require no credential are auto-connected \
-            and appear here. This is the complement of nyx__discover_services."
+            and appear here. This is the complement of nyx__discover_services. Rows are sorted by the owner's preference order; preference_rank 1 is the most preferred."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -5318,7 +5318,28 @@ impl ToolSearch {
 
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
+pub fn order_services_by_preference(services: &mut [McpToolService], ranks: &HashMap<String, u32>) {
+    services.sort_by_key(|service| preference_rank(service, ranks).unwrap_or(u32::MAX));
+}
+
+fn preference_rank(service: &McpToolService, ranks: &HashMap<String, u32>) -> Option<u32> {
+    if service.source.is_user_service() {
+        ranks.get(&service.service_id).copied()
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
+    search_all_tools_ranked(services, query, &HashMap::new())
+}
+
+pub fn search_all_tools_ranked(
+    services: &[McpToolService],
+    query: &str,
+    ranks: &HashMap<String, u32>,
+) -> SearchResult {
     // Models phrase queries freely ("skill search", "light state"), so match
     // each query word independently against the qualified tool name, the
     // service identity and the description, then rank tools that contain
@@ -5361,6 +5382,11 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
             .0
             .cmp(&left.0)
             .then(right.1.cmp(&left.1))
+            .then(
+                preference_rank(left.3, ranks)
+                    .unwrap_or(u32::MAX)
+                    .cmp(&preference_rank(right.3, ranks).unwrap_or(u32::MAX)),
+            )
             .then(left.2.cmp(&right.2))
     });
     candidates.truncate(MAX_SEARCH_RESULTS);
@@ -5392,17 +5418,28 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
 // ---------------------------------------------------------------------------
 
 /// Summarize the connected services already loaded for an MCP caller.
+#[cfg(test)]
 pub fn list_connected_services(
     services: &[McpToolService],
     query: Option<&str>,
+) -> serde_json::Value {
+    list_connected_services_ranked(services, query, &HashMap::new())
+}
+
+pub fn list_connected_services_ranked(
+    services: &[McpToolService],
+    query: Option<&str>,
+    ranks: &HashMap<String, u32>,
 ) -> serde_json::Value {
     let query = query
         .map(str::trim)
         .filter(|query| !query.is_empty())
         .map(str::to_lowercase);
 
-    let results: Vec<serde_json::Value> = services
-        .iter()
+    let mut ordered: Vec<_> = services.iter().collect();
+    ordered.sort_by_key(|service| preference_rank(service, ranks).unwrap_or(u32::MAX));
+    let results: Vec<serde_json::Value> = ordered
+        .into_iter()
         .filter(|service| {
             query.as_ref().is_none_or(|query| {
                 service.service_name.to_lowercase().contains(query)
@@ -5428,6 +5465,7 @@ pub fn list_connected_services(
                 "source": source,
                 "executable": service.executable,
                 "tool_count": service.endpoints.len(),
+                "preference_rank": preference_rank(service, ranks),
                 "is_generic_proxy": service.is_generic_proxy,
             })
         })
@@ -6448,6 +6486,94 @@ mod tests {
     use crate::test_utils::{
         connect_test_database, test_encryption_keys, test_user_endpoint, test_user_service,
     };
+
+    #[test]
+    fn service_preference_stable_order_relevance_cap_and_legacy() {
+        let a = user_managed(
+            make_service(
+                "a",
+                "A",
+                "alpha",
+                (0..20)
+                    .map(|i| make_endpoint(&format!("search_{i}"), "search partial"))
+                    .collect(),
+            ),
+            "a",
+        );
+        let b = user_managed(
+            make_service(
+                "b",
+                "B",
+                "beta",
+                (0..20)
+                    .map(|i| make_endpoint(&format!("search_{i}"), "search partial"))
+                    .collect(),
+            ),
+            "b",
+        );
+        let c = user_managed(
+            make_service(
+                "c",
+                "C",
+                "gamma",
+                vec![make_endpoint("search_full", "search exact full")],
+            ),
+            "c",
+        );
+        let platform = make_service(
+            "platform",
+            "Platform",
+            "platform",
+            vec![make_endpoint("search", "search")],
+        );
+        let ranks = HashMap::from([
+            ("b".into(), 1),
+            ("a".into(), 2),
+            ("platform".into(), 3),
+            ("stale".into(), 4),
+        ]);
+        let mut services = vec![a, platform, c, b];
+        assert_eq!(
+            search_all_tools(&services, "search")
+                .matches
+                .iter()
+                .map(|t| &t.name)
+                .collect::<Vec<_>>(),
+            search_all_tools_ranked(&services, "search", &HashMap::new())
+                .matches
+                .iter()
+                .map(|t| &t.name)
+                .collect::<Vec<_>>()
+        );
+        let result = search_all_tools_ranked(&services, "search", &ranks);
+        assert_eq!(result.matches.len(), 25);
+        assert!(
+            result.matches[..20]
+                .iter()
+                .all(|tool| tool.name.starts_with("beta__"))
+        );
+        assert_eq!(
+            search_all_tools_ranked(&services, "search full exact", &ranks).matches[0].name,
+            "gamma__search_full"
+        );
+        assert_eq!(
+            search_all_tools_ranked(&services, "", &ranks).matches[0].name,
+            "beta__search_0"
+        );
+        order_services_by_preference(&mut services, &ranks);
+        assert_eq!(
+            services
+                .iter()
+                .map(|s| s.service_id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "a", "platform", "c"]
+        );
+        let listed = list_connected_services_ranked(&services, None, &ranks);
+        assert_eq!(listed["count"], 4);
+        assert_eq!(listed["services"][0]["preference_rank"], 1);
+        assert_eq!(listed["services"][1]["preference_rank"], 2);
+        assert!(listed["services"][2]["preference_rank"].is_null());
+    }
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {

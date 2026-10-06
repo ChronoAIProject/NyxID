@@ -383,6 +383,7 @@ export function useDeleteKey() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["service-preference"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
@@ -435,6 +436,7 @@ export function useUpdateKey() {
     },
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["service-preference"] });
       void queryClient.invalidateQueries({
         queryKey: ["keys", variables.keyId],
       });

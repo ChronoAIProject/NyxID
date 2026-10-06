@@ -990,3 +990,5 @@ proposes owner-reviewed widening; it cannot approve its own request. A v2 node
 receives signed, 45-second authority renewed every ten seconds, and stops work on revocation
 or lease expiry even after socket loss. Legacy assignments remain visibly shared;
 context IDs in this phase do not isolate files or browser sessions.
+
+Chat-key discovery rows carry dense authorized `preference_rank` and follow the owner's saved service order at equal relevance, including guest turns; execution targets and approval authority are unchanged.

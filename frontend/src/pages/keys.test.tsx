@@ -37,6 +37,8 @@ const { mockNavigate, mockPoolOwner, state } = vi.hoisted(() => ({
     },
     keys: [] as KeyInfo[],
     keysLoading: false,
+    keysFetching: false,
+    preferenceFetching: false,
     keysError: null as unknown,
     userServices: [] as unknown[],
     nodes: [] as { id: string; name: string }[],
@@ -71,7 +73,19 @@ vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({
     data: state.keys,
     isLoading: state.keysLoading,
+    isFetching: state.keysFetching,
+    isError: Boolean(state.keysError),
     error: state.keysError,
+    refetch: vi.fn(),
+  }),
+}));
+
+vi.mock("@/hooks/use-service-preference", () => ({
+  useServicePreference: () => ({
+    data: { ordered: [], version: 0, updated_at: null },
+    isLoading: false,
+    isFetching: state.preferenceFetching,
+    isError: false,
     refetch: vi.fn(),
   }),
 }));
@@ -232,6 +246,7 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 describe("KeysPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.removeItem("nyxid-view-mode:keys-services");
     useServiceCardView.setState({
       accountId: undefined,
       expanded: [],
@@ -240,9 +255,72 @@ describe("KeysPage", () => {
     state.search = {};
     state.keys = [];
     state.keysLoading = false;
+    state.keysFetching = false;
+    state.preferenceFetching = false;
     state.keysError = null;
     state.userServices = [];
     state.nodes = [];
+  });
+
+  it.each(["keysFetching", "preferenceFetching"] as const)(
+    "blocks entry from cached data during %s and enables entry once refreshed",
+    (pending) => {
+      state.keys = [makeKey()];
+      state[pending] = true;
+      const { rerender } = render(<KeysPage />);
+      const reorder = screen.getByRole("button", { name: "Reorder" });
+      expect(reorder).toBeDisabled();
+      expect(reorder).toHaveAttribute(
+        "title",
+        "Loading services and preference order",
+      );
+      state[pending] = false;
+      rerender(<KeysPage />);
+      expect(reorder).toBeEnabled();
+    },
+  );
+
+  it("shows connection preference pills in grouped and standalone tables without renumbering hidden rows", async () => {
+    state.keys = [
+      makeKey({ id: "gamma", label: "Gamma", preference_rank: 3 }),
+      makeKey({ id: "alpha", label: "Alpha", preference_rank: 2 }),
+      makeKey({
+        id: "auto",
+        label: "Auto",
+        auto_connected: true,
+        preference_rank: 1,
+      }),
+    ];
+    render(<KeysPage />);
+    expect(screen.getByLabelText("Preference order 2")).toHaveTextContent("#2");
+    expect(
+      screen.queryByLabelText("Preference order 1"),
+    ).not.toBeInTheDocument();
+    expandConnections();
+    expect(screen.getByLabelText("Preference order 2")).toHaveTextContent("#2");
+    expect(screen.getByLabelText("Preference order 3")).toHaveTextContent("#3");
+    const alpha = screen.getByRole("link", {
+      name: "View Alpha connection details (Personal)",
+    });
+    const gamma = screen.getByRole("link", {
+      name: "View Gamma connection details (Personal)",
+    });
+    expect(
+      alpha.compareDocumentPosition(gamma) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /table view/i }));
+    expect(screen.getByLabelText("Preference order 2")).toHaveTextContent("#2");
+    expect(screen.getByLabelText("Preference order 3")).toHaveTextContent("#3");
+    expect(
+      screen
+        .getByRole("link", { name: "View Alpha connection details (Personal)" })
+        .compareDocumentPosition(
+          screen.getByRole("link", {
+            name: "View Gamma connection details (Personal)",
+          }),
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /grid view/i }));
   });
 
   it("defaults to one collapsed card per service with duplicates inside", async () => {

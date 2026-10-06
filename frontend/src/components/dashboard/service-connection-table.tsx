@@ -309,6 +309,14 @@ export function ServiceConnectionTable({
                         aria-label={`View ${key.label} connection details (${owner})`}
                         className="inline-flex min-w-0 items-center gap-1 rounded-sm font-medium hover:text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                       >
+                        {key.preference_rank != null && (
+                          <Badge
+                            variant="accent"
+                            aria-label={`Discovery order ${key.preference_rank}`}
+                          >
+                            Discovery #{key.preference_rank}
+                          </Badge>
+                        )}
                         <ServiceIcon
                           slug={key.catalog_service_slug ?? key.slug}
                           iconUrl={key.icon_url}
