@@ -31,7 +31,7 @@ export function nyxAgentLiveRefresh(
   switch (event.type) {
     case "conversation": {
       const signature = `${event.turn_id ?? ""}:${String(event.messages)}`;
-      const listsChanged = seen.get(event.id) !== signature;
+      const listsChanged = event.title_changed || seen.get(event.id) !== signature;
       seen.set(event.id, signature);
       if (event.group_id) {
         // A hidden group member thread: only its group shows it.
@@ -49,6 +49,8 @@ export function nyxAgentLiveRefresh(
     }
     case "group":
       return { now: [nyxBotGroupKeys.messages(userId, event.id)], lists: [groupList] };
+    case "channel_thread":
+      return { now: [], lists: [nyxBotQueryKeys.channelChats(userId, event.channel_id), nyxBotQueryKeys.threads(userId)] };
     case "channels":
       return {
         now: [],

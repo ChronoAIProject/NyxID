@@ -58,6 +58,8 @@ import { cn } from "@/lib/utils";
 import { ChartView } from "./chart-view";
 import { AnalyticsSelect, PanelControls } from "./controls";
 import { SortablePanel } from "./sortable-panel";
+import { TokenMetricCaption, TokenMetricPicker } from "./token-metric-picker";
+import { sumTokenMetrics, type TokenMetric } from "./token-metrics";
 import "./operations.css";
 
 export type AnalyticsSample = (
@@ -162,6 +164,7 @@ function Summary({
   view: AnalyticsView;
   sample?: AnalyticsSample;
 }) {
+  const [tokenTypes, setTokenTypes] = useState<TokenMetric[]>(["total_tokens"]);
   const query = useUsageAnalytics(
     view.filters,
     {
@@ -204,10 +207,14 @@ function Summary({
       note: "One count per metered request",
     },
     {
-      label: "Total tokens",
-      value: formatAnalyticsValue(data.totals.total_tokens, "tokens", true),
+      label: "Tokens",
+      value: formatAnalyticsValue(
+        sumTokenMetrics(data.totals, tokenTypes),
+        "tokens",
+        true,
+      ),
       suffix: "tokens",
-      note: "Input + output tokens",
+      tokenControl: true,
     },
     {
       label: "Active users",
@@ -225,9 +232,18 @@ function Summary({
     >
       {stats.map((stat) => (
         <Card key={stat.label} className="min-w-0 px-4 py-4">
-          <p className="text-10 font-medium uppercase tracking-[1.5px] text-muted-foreground">
-            {stat.label}
-          </p>
+          {stat.tokenControl ? (
+            <TokenMetricPicker
+              label="Summary token types"
+              selected={tokenTypes}
+              onChange={setTokenTypes}
+              compact
+            />
+          ) : (
+            <p className="text-10 font-medium uppercase tracking-[1.5px] text-muted-foreground">
+              {stat.label}
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap items-baseline gap-x-2">
             <span className="font-display text-28 font-medium leading-none tracking-tight tabular-nums">
               {stat.value}
@@ -236,9 +252,15 @@ function Summary({
               {stat.suffix}
             </span>
           </div>
-          <p className="mt-2 text-10 leading-relaxed text-muted-foreground">
-            {stat.note}
-          </p>
+          {stat.tokenControl ? (
+            <TokenMetricCaption selected={tokenTypes} />
+          ) : (
+            stat.note && (
+              <p className="mt-2 text-10 leading-relaxed text-muted-foreground">
+                {stat.note}
+              </p>
+            )
+          )}
         </Card>
       ))}
     </div>

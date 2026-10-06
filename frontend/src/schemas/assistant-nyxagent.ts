@@ -1,5 +1,6 @@
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
+import { machineReceiptSchema } from "./machine-activity";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -7,6 +8,7 @@ export const nyxAgentTitleSchema = z.object({ title: z.string().trim().min(1).ma
 
 /// A tool call the assistant made during a turn: identifier and status only.
 export const nyxAgentTurnActivitySchema = z.object({
+  machine: machineReceiptSchema.nullable().optional(),
   id: z.string(),
   label: z.string(),
   status: z.enum(["running", "completed", "error"]),
@@ -15,11 +17,18 @@ export const nyxAgentTurnActivitySchema = z.object({
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
-/// An image a tool returned during a turn, fetched from the owner-only
-/// attachment route.
+/// A tool image or human upload, fetched from the owner-only attachment route.
 export const nyxAgentAttachmentSchema = z.object({
   id: z.string(),
-  content_type: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+  content_type: z.enum([
+    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain", "text/markdown", "text/csv", "application/json",
+  ]),
+  origin: z.enum(["tool", "user_upload", ""]).optional(),
+  pages: z.number().int().nonnegative().nullable().optional(),
+  expired: z.boolean().optional(),
+  image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
   size: z.number().int().nonnegative(),
   label: z.string(),
 });
@@ -54,6 +63,7 @@ export type NyxAgentConversationAgent = z.infer<typeof nyxAgentConversationAgent
 // chat runs with Full access, so it is deliberately not parsed.
 /** The channel bot and chat a thread answers. */
 export const nyxAgentChannelOriginSchema = z.object({
+  parent_chat_id: z.string().nullable().optional(), thread_id: z.string().nullable().optional(), parent_title: z.string().nullable().optional(),
   platform: z.string(),
   /** The channel bot connection; groups the bot's chats in the sidebar. */
   channel_agent_id: z.string().nullable().default(null),
@@ -67,6 +77,7 @@ export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
   id: conversationId,
   title: z.string(),
+  title_source: z.enum(["provisional", "generated", "user"]).optional(),
   model: z.string(),
   created_at: z.string(),
   last_message_at: z.string(),
@@ -75,6 +86,7 @@ export const nyxAgentConversationSchema = z.object({
   active_turn: z
     .object({
       turn_id: z.string(),
+      continuations: z.number().int().nonnegative().optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -109,11 +121,14 @@ export const nyxAgentMessageSchema = z.object({
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
+  execution_pending: z.boolean().optional(),
 });
 export const nyxAgentAcknowledgementSchema = z.object({
+  continuation_owner: z.literal("server").nullish(),
+  continuation_receipt_id: z.string().uuid().nullish(),
   trigger_run_id: z.string().nullable().optional(),
   id: z.string().uuid(),
-  kind: z.enum(["service", "account", "action"]),
+  kind: z.enum(["service", "account", "action", "operations", "skills"]),
   status: z.enum(["pending", "allowed", "denied", "expired", "used"]),
   summary: z.string(),
   /** `orchestrator`: a specialist's request that NyxBot decides (the user may too). */
@@ -177,9 +192,10 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     turn_id: z.string(),
     status: z.enum(["running", "waiting"]),
   }),
+  base.extend({ event: z.literal("turn.continuing"), turn_id: z.string(), continuation: z.number().int().positive() }),
   base.extend({
     event: z.literal("turn.notice"),
-    code: z.literal("context_reset"),
+    code: z.enum(["context_reset", "image_input_unavailable"]),
     message: z.string(),
   }),
   base.extend({
@@ -207,7 +223,18 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
 export type NyxAgentConversation = z.infer<typeof nyxAgentConversationSchema>;
 export type NyxAgentHistory = z.infer<typeof nyxAgentHistorySchema>;
 
+export const voicePreferencesSchema = z.object({
+  service_id: z.string().uuid(),
+  connection_id: z.string().uuid().nullable(),
+  key_source: z.enum(["platform", "own"]),
+  model: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.-]+$/),
+  voice: z.string().max(128).nullable(),
+  input_mode: z.enum(["push_to_talk", "automatic"]),
+  language: z.string().max(35).nullable(),
+  notify_on_completion: z.boolean(),
+});
 export const nyxAgentSettingsSchema = z.object({
+  voice: voicePreferencesSchema.nullish(),
   timezone: z.string().nullable().optional(),
   schedule_minimum_minutes: z
     .number()
@@ -216,6 +243,8 @@ export const nyxAgentSettingsSchema = z.object({
     .optional(),
   trigger_runs_per_hour: z.number().int().positive().optional(),
   trigger_runs_per_day: z.number().int().positive().optional(),
+  max_auto_continuations: z.number().int().min(0).max(32).optional(),
+  max_auto_continuations_limit: z.number().int().positive().optional(),
   skip_destructive_confirmation: z.boolean(),
   max_live_subagents: z.number().int().nonnegative(),
   max_concurrent_subagent_turns: z.number().int().nonnegative(),
@@ -236,11 +265,13 @@ export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
   Pick<
     NyxAgentSettings,
+    | "voice"
     | "timezone"
     | "schedule_minimum_minutes"
     | "trigger_runs_per_hour"
     | "trigger_runs_per_day"
     | "skip_destructive_confirmation"
+    | "max_auto_continuations"
     | "max_live_subagents"
     | "max_concurrent_subagent_turns"
     | "max_group_handoffs"
@@ -262,6 +293,7 @@ export function nyxAgentSettingsFormSchema(limits: {
       .min(min, `Must be at least ${String(min)}`)
       .max(max, `Must be at most ${String(max)}`);
   return z.object({
+    max_auto_continuations: whole(0, 32),
     confirm_destructive: z.boolean(),
     max_live_subagents: whole(0, limits.max_live_subagents_limit),
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),
@@ -291,6 +323,12 @@ export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
 export const assistantAgentSchema = z.object({
+  owner_id: z.string().optional(),
+  owner_name: z.string().nullable().optional(),
+  owner_kind: z.enum(["person", "org"]).optional(),
+  org_role: z.enum(["admin", "member", "viewer"]).nullable().optional(),
+  can_maintain: z.boolean().optional(),
+  can_use: z.boolean().optional(),
   id: z.string(),
   kind: assistantAgentKindSchema,
   /** The @handle (fixed "NyxBot" for NyxBot). */
@@ -409,6 +447,7 @@ const agentPersona = z
 
 /** "New agent": a specialist with its role, optional style and starting grants. */
 export const assistantAgentCreateSchema = z.object({
+  org: z.string().optional(),
   name: agentName,
   display_name: agentDisplayName.optional(),
   description: agentDescription,
@@ -466,6 +505,7 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
   id: z.string(),
   channel_bot_id: z.string(),
   platform: z.string(),
@@ -515,6 +555,14 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  parent_chat_id: z.string().nullable().optional(),
+  has_thread_history: z.boolean().optional(),
+  threads: z.enum(["follow", "off"]).catch("off").optional(),
+  threads_setting: z.enum(["follow", "off"]).nullable().catch(null).optional(),
+  thread_capabilities: z.object({ thread_reply: z.boolean(), thread_follow: z.boolean(), thread_history: z.boolean() }).optional(),
+  followed_thread_count: z.number().int().nonnegative().optional(),
+  follow_readiness: z.string().optional(),
+  follow_guidance: z.string().nullable().optional(),
   id: z.string(),
   channel_agent_id: z.string(),
   platform: z.string(),
@@ -551,6 +599,7 @@ export const nyxAgentChannelChatUpdatedSchema = z.object({
 });
 export type NyxAgentChannelChatUpdated = z.infer<typeof nyxAgentChannelChatUpdatedSchema>;
 export type NyxAgentChannelChatSettings = Partial<{
+  threads: "follow" | "off";
   reply_mode: "mention" | "all";
   /** `default` lets members talk once the user has talked there. */
   members: "everyone" | "owner" | "default";
@@ -579,7 +628,12 @@ export const assistantGroupMemberSchema = z.object({
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
 
+export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string() });
+
 export const assistantGroupSchema = z.object({
+  owner: z.object({ type: z.enum(["personal", "org"]), id: z.string(), name: z.string() }).optional(),
+  participants: z.array(groupPersonSchema).optional(),
+  your_role: z.enum(["creator", "admin", "participant"]).optional(),
   id: z.string(),
   name: z.string(),
   members: z.array(assistantGroupMemberSchema),
@@ -595,6 +649,9 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  activities: z.array(nyxAgentTurnActivitySchema).optional(),
+  author: groupPersonSchema.optional(),
+  attachments: z.array(nyxAgentAttachmentSchema).optional(),
   id: z.string(),
   seq: z.number().int().positive(),
   /** `notice` is a NyxID-authored system line (members joined, renamed, ...). */
@@ -612,11 +669,14 @@ export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;
 /** A member's action card waiting for the owner; answered by posting its phrase. */
 export const assistantGroupPendingActionSchema = z.object({
   conversation_id: z.string(),
-  acknowledgement_id: z.string(),
+  acknowledgement_id: z.string().optional(),
+  approval_request_id: z.string().optional(),
   agent_id: z.string().nullable().optional(),
   summary: z.string(),
   /** "yes 1234": posting it confirms; "no 1234" cancels. */
-  confirm_phrase: z.string().regex(/^yes \d{4}$/),
+  confirm_phrase: z.string().regex(/^yes \d{4}$/).optional(),
+  triggering_person: groupPersonSchema.optional(),
+  can_decide: z.boolean().optional(),
   expires_at: z.string(),
 });
 export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;
@@ -639,6 +699,9 @@ export type AssistantGroupPosted = z.infer<typeof assistantGroupPostedSchema>;
 
 /** "New group" and group settings: a name and its agents. */
 export const assistantGroupFormSchema = z.object({
+  org: z.string().optional(),
+  participant_user_ids: z.array(z.string()).max(16).optional(),
+  lead_agent_id: z.string().optional(),
   name: z
     .string()
     .trim()
@@ -650,4 +713,28 @@ export const assistantGroupFormSchema = z.object({
     .max(ASSISTANT_GROUP_MAX_MEMBERS, `A group has at most ${String(ASSISTANT_GROUP_MAX_MEMBERS)} agents`),
 });
 export type AssistantGroupForm = z.infer<typeof assistantGroupFormSchema>;
-export type AssistantGroupUpdate = Partial<AssistantGroupForm>;
+export type AssistantGroupUpdate = Partial<Omit<AssistantGroupForm, "org">> & { leave?: boolean };
+
+export const ASSISTANT_MEMORY_NOTE_MAX = 500;
+export const assistantMemoryNoteSchema = z.object({
+  text: z
+    .string()
+    .trim()
+    .min(1, "Enter a shared note")
+    .max(ASSISTANT_MEMORY_NOTE_MAX),
+});
+
+export const nyxAgentChannelThreadSchema = z.object({
+  busy_count: z.number().optional(), dropped_message_count: z.number().optional(),
+  id: z.string(), parent_chat_id: z.string().nullable(), conversation_id: z.string().nullable(),
+  agent_id: z.string().nullable(), label: z.string(),
+  state: z.enum(["opening", "active", "stopped", "expired", "unavailable"]).catch("unavailable"),
+  kind: z.string().nullable(), followed_at: z.string().nullable(), last_admitted_at: z.string().nullable(),
+  expires_at: z.string().nullable(), context_status: z.string(), context_message_count: z.number(),
+  follow_readiness: z.string(),
+});
+export type NyxAgentChannelThread = z.infer<typeof nyxAgentChannelThreadSchema>;
+export const nyxAgentChannelThreadListSchema = z.object({
+  threads: z.array(nyxAgentChannelThreadSchema), next_cursor: z.string().nullable(),
+});
+export const nyxAgentChannelThreadStoppedSchema = z.object({ thread: nyxAgentChannelThreadSchema });

@@ -555,7 +555,7 @@ export function NotificationSettingsPage() {
                 </div>
               ) : !pushDevices?.devices.length ? (
                 <div className="space-y-3">
-                  <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
                     No devices registered. Install the NyxID mobile app and sign
                     in to register a device.
                   </div>
@@ -828,7 +828,7 @@ export function NotificationSettingsPage() {
               ) : serviceConfigsError ? (
                 <ErrorBanner message="Failed to load per-service overrides. Try refreshing the page." onRetry={refetchServiceConfigs} />
               ) : serviceConfigs?.configs.length === 0 ? (
-                <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
                   No per-service overrides configured. All services use the
                   global default.
                 </div>

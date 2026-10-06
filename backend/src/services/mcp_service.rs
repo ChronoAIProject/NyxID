@@ -165,6 +165,9 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    pub org_agent_access: Option<&'a super::org_agent_service::RequestAccess>,
+    pub agent_owner: Option<&'a str>,
+    pub operation_scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
     /// API key ID that is acting on behalf of the user. Enables per-agent
     /// credential override via [`proxy_service::resolve_agent_credential_override`].
     pub api_key_id: Option<&'a str>,
@@ -2598,6 +2601,48 @@ pub fn generate_tool_definitions(
     tools
 }
 
+/// MCP behavior hints (`readOnlyHint`, `destructiveHint`, `openWorldHint`)
+/// for a tool listed by [`generate_tool_definitions`]. OpenAI plugin review
+/// requires all three as explicit booleans on every listed tool.
+///
+/// Meta-tools use a fixed table. Service tools derive the hints from their
+/// HTTP method; generic proxies accept any method and are therefore treated
+/// as potentially destructive. Unknown names return `None`.
+pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
+    let (read_only, destructive, open_world) = match name {
+        "nyx__search_tools"
+        | "nyx__discover_services"
+        | "nyx__list_connected_services"
+        | "nyx__wait_for_connection"
+        | "nyx__ssh_list_services"
+        | "nyx__oracle_pools"
+        | "nyx__oracle_result"
+        | "nyx__oracle_session" => (true, false, false),
+        "nyx__connect_service"
+        | "nyx__oracle_ask"
+        | "nyx__oracle_attach"
+        | "nyx__oracle_extract" => (false, false, true),
+        "nyx__call_tool" | "nyx__ssh_exec" => (false, true, true),
+        _ => {
+            let (service, endpoint) = resolve_tool_call(name, services)?;
+            if service.is_generic_proxy {
+                (false, true, true)
+            } else {
+                match endpoint.method.to_ascii_uppercase().as_str() {
+                    "GET" | "HEAD" | "OPTIONS" => (true, false, true),
+                    "POST" => (false, false, true),
+                    _ => (false, true, true),
+                }
+            }
+        }
+    };
+    Some(serde_json::json!({
+        "readOnlyHint": read_only,
+        "destructiveHint": destructive,
+        "openWorldHint": open_world,
+    }))
+}
+
 pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolService>> {
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -3427,6 +3472,51 @@ impl PreparedProxyCall {
         )
     }
 
+    pub(crate) fn authorize_agent_operations(
+        &self,
+        scopes: &crate::models::agent_operation_scope::OperationScopes,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+    ) -> AppResult<()> {
+        use super::agent_operation_scope_service as operations;
+        if operations::applicable(
+            scopes,
+            &service.service_id,
+            operations::mcp_catalog_id(service),
+        )
+        .next()
+        .is_none()
+        {
+            return Ok(());
+        }
+        let path = if self.is_generic_proxy_endpoint {
+            super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)?
+        } else {
+            super::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)?
+        };
+        operations::authorize(
+            scopes,
+            &service.service_id,
+            operations::mcp_catalog_id(service),
+            (!self.is_generic_proxy_endpoint
+                && producer_operation_generation(service, endpoint).is_some())
+            .then_some(endpoint.endpoint_id.as_str()),
+            self.method.as_str(),
+            &path,
+            self.carries_override(true),
+            false,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn canonical_path(&self) -> AppResult<super::proxy_authorization::CanonicalPath> {
+        if self.is_generic_proxy_endpoint {
+            super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)
+        } else {
+            super::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)
+        }
+    }
+
     /// The HTTP method this call is sent with.
     pub fn method(&self) -> &reqwest::Method {
         &self.method
@@ -3446,6 +3536,10 @@ impl PreparedProxyCall {
     /// server's parser may read it); a form body as a form (and JSON); text
     /// and binary bodies not at all. An empty body carries nothing.
     pub fn carries_method_override(&self) -> bool {
+        self.carries_override(false)
+    }
+
+    fn carries_override(&self, exact: bool) -> bool {
         fn normalized(key: &str) -> String {
             key.split(|c: char| c.is_control() || c == '[')
                 .next()
@@ -3468,7 +3562,12 @@ impl PreparedProxyCall {
             matches!(
                 key.as_str(),
                 "method" | "x_http_method_override" | "x_http_method" | "x_method_override"
-            ) && matches!(verb.as_str(), "POST" | "PUT" | "PATCH" | "DELETE" | "MERGE")
+            ) && (matches!(verb.as_str(), "POST" | "PUT" | "PATCH" | "DELETE" | "MERGE")
+                || (exact
+                    && matches!(
+                        verb.as_str(),
+                        "GET" | "HEAD" | "OPTIONS" | "CONNECT" | "TRACE"
+                    )))
                 && !verb.eq_ignore_ascii_case(sent)
         };
         let override_header = |name: &str| {
@@ -3518,6 +3617,40 @@ impl PreparedProxyCall {
                 }
             })
     }
+}
+
+pub(crate) fn http_carries_method_override(
+    method: &str,
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+    body: &[u8],
+) -> bool {
+    let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
+        return true;
+    };
+    PreparedProxyCall {
+        endpoint_target: None,
+        method,
+        path: String::new(),
+        query: query.map(str::to_owned),
+        parameter_headers: headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    value.to_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect(),
+        server_owned_headers: Vec::new(),
+        body: Some(bytes::Bytes::copy_from_slice(body)),
+        body_content_type: headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        is_generic_proxy_endpoint: true,
+    }
+    .carries_override(true)
 }
 
 /// Build and authorize the exact request before any approval, billing, node,
@@ -4048,6 +4181,17 @@ pub async fn execute_tool_response(
     exec_ctx: &McpExecContext<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<ToolResponse> {
+    super::org_agent_service::authorize_service_with_access(
+        db,
+        user_id,
+        exec_ctx.agent_owner,
+        Some(&service.service_id),
+        exec_ctx.org_agent_access,
+    )
+    .await?;
+    if let Some(scopes) = exec_ctx.operation_scopes {
+        prepared.authorize_agent_operations(scopes, service, endpoint)?;
+    }
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
     let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
@@ -4107,7 +4251,8 @@ pub async fn execute_tool_response(
             // Per-agent credential override: when acting as an API key with
             // an agent binding, swap in the override credential before execute.
             // Matches `execute_proxy_inner` in handlers/proxy.rs.
-            if let Some(ak_id) = exec_ctx.api_key_id
+            if exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
+                && let Some(ak_id) = exec_ctx.api_key_id
                 && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
                     db,
                     encryption_keys,
@@ -4478,6 +4623,31 @@ pub async fn execute_tool_resolved(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
 ) -> AppResult<McpToolExecutionOutcome> {
+    super::org_agent_service::authorize_service_with_access(
+        db,
+        user_id,
+        exec_ctx.agent_owner,
+        Some(&service.service_id),
+        exec_ctx.org_agent_access,
+    )
+    .await?;
+    if let Some(scopes) = exec_ctx.operation_scopes {
+        prepared.authorize_agent_operations(scopes, service, endpoint)?;
+        if super::agent_operation_scope_service::applicable(
+            scopes,
+            &service.service_id,
+            super::agent_operation_scope_service::mcp_catalog_id(service),
+        )
+        .next()
+        .is_some()
+        {
+            super::agent_operation_scope_service::validate_target(
+                &target,
+                prepared.method().as_str(),
+            )?;
+        }
+    }
+
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
@@ -5077,6 +5247,38 @@ const FILLER_WORDS: &[&str] = &[
     "i", "you", "with", "that", "this", "can", "please",
 ];
 
+/// Shared word matching and ranking for service and native tool discovery.
+pub struct ToolSearch {
+    tokens: Vec<String>,
+}
+impl ToolSearch {
+    pub fn new(query: &str) -> Self {
+        let tokens: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Self { tokens }
+    }
+    pub fn rank(&self, name: &str, description: &str) -> Option<(usize, usize)> {
+        let haystack = format!("{name}\n{description}").to_lowercase();
+        let matched = self
+            .tokens
+            .iter()
+            .filter(|token| haystack.contains(token.as_str()))
+            .count();
+        let lowered_name = name.to_lowercase();
+        let in_name = self
+            .tokens
+            .iter()
+            .filter(|token| !FILLER_WORDS.contains(&token.as_str()))
+            .filter(|token| lowered_name.contains(token.as_str()))
+            .count();
+        (self.tokens.is_empty() || matched > 0).then_some((matched, in_name))
+    }
+}
+
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
@@ -5085,12 +5287,7 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
     // service identity and the description, then rank tools that contain
     // every word above partial matches. Words are substrings so concatenated
     // operation names such as `getentitystate` still match "entity state".
-    let tokens: Vec<String> = query
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let matcher = ToolSearch::new(query);
     let mut candidates: Vec<(
         usize,
         usize,
@@ -5108,21 +5305,7 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name),
             );
-            let haystack = format!("{name}\n{description}").to_lowercase();
-            let matched = tokens
-                .iter()
-                .filter(|token| haystack.contains(token.as_str()))
-                .count();
-            // Among equally complete matches, a tool whose own name holds the
-            // words ("create agent" -> `spawn_subagent`) beats one that only
-            // mentions them in passing.
-            let lowered_name = name.to_lowercase();
-            let in_name = tokens
-                .iter()
-                .filter(|token| !FILLER_WORDS.contains(&token.as_str()))
-                .filter(|token| lowered_name.contains(token.as_str()))
-                .count();
-            if tokens.is_empty() || matched > 0 {
+            if let Some((matched, in_name)) = matcher.rank(&name, &description) {
                 let order = candidates.len();
                 candidates.push((
                     matched,
@@ -5392,6 +5575,9 @@ pub async fn discover_services_with_scope(
             result["inference"] =
                 serde_json::to_value(inference).map_err(|e| AppError::Internal(e.to_string()))?;
         }
+        result["capabilities"] =
+            serde_json::to_value(crate::services::inference_service::capabilities(service))
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         result["platform_key"] = serde_json::json!({ "available": available,
             "pricing": service.billing.as_ref().and_then(|b| b.platform_key_pricing.as_ref()).map(crate::services::inference_service::LanePricingView::from) });
         result["byok_pricing"] = serde_json::json!(
@@ -5816,6 +6002,9 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        org_agent_access: None,
+                        agent_owner: None,
+                        operation_scopes: None,
                         api_key_id: None,
                         allow_all_nodes: true,
                         allowed_node_ids: &[],
@@ -7349,6 +7538,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_machine_search_reuses_word_matching_and_full_match_ranking() {
+        for query in ["browser screenshot", "web page navigate"] {
+            let matcher = ToolSearch::new(query);
+            let mut matches: Vec<_> = crate::services::machine_tools::definitions()
+                .into_iter()
+                .filter_map(|tool| {
+                    matcher
+                        .rank(&tool.name, &tool.description)
+                        .map(|rank| (rank, tool.name))
+                })
+                .collect();
+            matches.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+            assert_eq!(matches[0].1, "nyx__machine_browser", "{query}");
+        }
+        let matcher = ToolSearch::new("browser screenshot");
+        assert!(
+            matcher.rank("browser", "screenshot").unwrap()
+                > matcher.rank("browser", "other").unwrap()
+        );
+    }
+
     // -- search_all_tools tests --
 
     #[test]
@@ -7477,6 +7688,68 @@ mod tests {
     }
 
     // -- list_connected_services tests --
+
+    #[test]
+    fn tool_annotations_cover_every_meta_tool_with_boolean_hints() {
+        for tool in generate_tool_definitions(&[], None) {
+            let annotations = tool_annotations(&tool.name, &[])
+                .unwrap_or_else(|| panic!("{} has no annotations", tool.name));
+            for hint in ["readOnlyHint", "destructiveHint", "openWorldHint"] {
+                assert!(
+                    annotations[hint].is_boolean(),
+                    "{} is missing boolean {hint}",
+                    tool.name
+                );
+            }
+        }
+        let call_tool = tool_annotations("nyx__call_tool", &[]).unwrap();
+        assert_eq!(call_tool["destructiveHint"], true);
+        let search = tool_annotations("nyx__search_tools", &[]).unwrap();
+        assert_eq!(search["readOnlyHint"], true);
+    }
+
+    #[test]
+    fn tool_annotations_follow_service_endpoint_method() {
+        let mut delete = make_endpoint("remove_item", "Remove an item");
+        delete.method = "DELETE".to_string();
+        let mut create = make_endpoint("create_item", "Create an item");
+        create.method = "post".to_string();
+        let services = [make_service(
+            "svc-1",
+            "Items",
+            "items",
+            vec![make_endpoint("list_items", "List items"), delete, create],
+        )];
+
+        let hints = |name: &str| {
+            let a = tool_annotations(name, &services).unwrap();
+            (a["readOnlyHint"].clone(), a["destructiveHint"].clone())
+        };
+        assert_eq!(
+            hints("items__list_items"),
+            (serde_json::json!(true), serde_json::json!(false))
+        );
+        assert_eq!(
+            hints("items__remove_item"),
+            (serde_json::json!(false), serde_json::json!(true))
+        );
+        assert_eq!(
+            hints("items__create_item"),
+            (serde_json::json!(false), serde_json::json!(false))
+        );
+        assert!(tool_annotations("items__unknown", &services).is_none());
+
+        let mut generic = make_service(
+            "svc-2",
+            "Proxy",
+            "items",
+            vec![make_endpoint("list_items", "List items")],
+        );
+        generic.is_generic_proxy = true;
+        let generic = [generic];
+        let a = tool_annotations("items__list_items", &generic).unwrap();
+        assert_eq!(a["destructiveHint"], true);
+    }
 
     #[test]
     fn list_connected_services_filters_by_name_slug_and_description() {

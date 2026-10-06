@@ -97,6 +97,7 @@ export function NyxBotSettingsDialog({ onClose }: { readonly onClose: () => void
 
 function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
   return {
+    max_auto_continuations: settings.max_auto_continuations ?? 8,
     confirm_destructive: !settings.skip_destructive_confirmation,
     max_live_subagents: settings.max_live_subagents,
     max_concurrent_subagent_turns: settings.max_concurrent_subagent_turns,
@@ -119,6 +120,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
     const dirty = form.formState.dirtyFields;
     // Send only what changed, so a concurrent edit elsewhere is not overwritten.
     const body: NyxAgentSettingsUpdate = {
+      ...(dirty.max_auto_continuations ? { max_auto_continuations: values.max_auto_continuations } : {}),
       ...(dirty.confirm_destructive
         ? { skip_destructive_confirmation: !values.confirm_destructive }
         : {}),
@@ -178,6 +180,14 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             </FormItem>
           )}
         />
+        <FormField control={form.control} name="max_auto_continuations" render={({ field }) => (
+          <FormItem>
+            <FormLabel>Automatic task continuations</FormLabel>
+            <FormControl><Input type="number" inputMode="numeric" min={0} max={32} step={1} {...field} value={Number.isNaN(field.value) ? "" : field.value} onChange={event => field.onChange(event.target.valueAsNumber)} /></FormControl>
+            <FormDescription className="text-11">Resume long tasks automatically when the assistant reaches a tool or time budget, keeping its context. Default 8; 0 turns this off, up to 32. Stop always ends the task. Continuing uses credits at the usual rates.</FormDescription>
+            <FormMessage />
+          </FormItem>
+        )} />
         <div className="grid gap-4 sm:grid-cols-2">
           <FormField
             control={form.control}

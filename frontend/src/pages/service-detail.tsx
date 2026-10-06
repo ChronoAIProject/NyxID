@@ -1058,7 +1058,7 @@ function AnonymousEndpointsSection({
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
-            <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
               No anonymous endpoints configured.
             </div>
           )}

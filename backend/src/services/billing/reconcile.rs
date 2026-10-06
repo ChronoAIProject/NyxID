@@ -77,6 +77,7 @@ impl BillingReconciler {
             Ok(count) => stats.abandoned += count,
             Err(error) => super::pool_attempt::record_recovery_error(&self.db, None, &error).await,
         }
+        stats.recovered_settlements += super::voice::reconcile(&self.db).await?;
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
         stats.funding_releases_recovered +=
             super::funding::recover_terminal_releases(&self.db).await?;

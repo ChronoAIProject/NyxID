@@ -107,10 +107,11 @@ pub async fn get_mcp_config(
         mcp_service::NodeScope::Allowed(auth_user.allowed_node_ids.as_slice())
     };
 
-    let chat = crate::services::assistant_acknowledgement_service::for_key(
+    let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
         &state.db,
         &user_id,
         auth_user.api_key_id.as_deref(),
+        auth_user.org_agent_access.as_ref(),
     )
     .await
     .map_err(|error| match error {
@@ -127,7 +128,7 @@ pub async fn get_mcp_config(
     } else {
         mcp_service::ServiceScope::Allowed(auth_user.allowed_service_ids.as_slice())
     };
-    let catalog = mcp_service::load_operation_catalog(
+    let mut catalog = mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &user_id,
@@ -136,6 +137,10 @@ pub async fn get_mcp_config(
     )
     .await?;
 
+    crate::services::agent_operation_scope_service::filter_catalog(
+        &auth_user.assistant_operation_scopes,
+        &mut catalog.services,
+    );
     let mcp_services = config_services(&catalog.services);
 
     let total_endpoints: usize = mcp_services.iter().map(|s| s.endpoints.len()).sum();

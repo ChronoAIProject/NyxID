@@ -58,17 +58,22 @@ pub(crate) struct ClientDisconnected;
 /// The work branch is biased so a completed upstream result wins a simultaneous
 /// disconnect race. Dropping the losing future performs cancellation through
 /// the upstream client's normal RAII semantics.
-pub(crate) async fn until_client_disconnect<F>(
+pub(crate) fn until_client_disconnect<F>(
     cancellation: &CancellationToken,
     work: F,
-) -> Result<F::Output, ClientDisconnected>
+) -> impl Future<Output = Result<F::Output, ClientDisconnected>>
 where
     F: Future,
 {
-    tokio::select! {
-        biased;
-        output = work => Ok(output),
-        () = cancellation.cancelled() => Err(ClientDisconnected),
+    // Allocate before constructing the select future. Otherwise every caller
+    // and cancellation layer embeds the full proxy/attempt future in its frame.
+    let work = Box::pin(work);
+    async move {
+        tokio::select! {
+            biased;
+            output = work => Ok(output),
+            () = cancellation.cancelled() => Err(ClientDisconnected),
+        }
     }
 }
 

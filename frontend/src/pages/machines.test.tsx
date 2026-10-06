@@ -11,9 +11,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 const state = vi.hoisted(() => ({
   navigate: vi.fn(),
   tab: undefined as string | undefined,
+  machine: undefined as string | undefined,
 }));
 vi.mock("@tanstack/react-router", () => ({
-  useSearch: () => ({ tab: state.tab }),
+  useSearch: () => ({ tab: state.tab, machine: state.machine }),
   useNavigate: () => state.navigate,
   Link: ({
     to,
@@ -40,6 +41,10 @@ vi.mock("@tanstack/react-router", () => ({
       {children}
     </a>
   ),
+}));
+vi.mock("@/hooks/use-machines", () => ({
+  useVerifiedUpdaterImage: () => ({ data: {version: "0.41.0", image: "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" + "ab".repeat(32)} }),
+  useMachineUpdates: () => ({ data: [] }),
 }));
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: nodes }) }));
 vi.mock("@/hooks/use-orgs", () => ({
@@ -70,6 +75,7 @@ const base = {
     computer: true,
     computer_ready: true,
     browser_isolated: false,
+    commands_isolated: false,
     roots: ["/workspace"],
     os: "linux",
     arch: "arm64",
@@ -103,6 +109,7 @@ afterEach(() => {
   cleanup();
   useAuthStore.setState(auth);
   state.tab = undefined;
+  state.machine = undefined;
   vi.clearAllMocks();
 });
 function show() {
@@ -162,4 +169,26 @@ it("Studio machine details are read-only and link to the assistant", () => {
   ).toBeInTheDocument();
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+});
+
+it("opens a guided-update machine link even when the machines page is already mounted", () => {
+  const view = show();
+  state.machine = "machine";
+  view.rerender(
+    <TooltipProvider>
+      <MachinesPage />
+    </TooltipProvider>,
+  );
+  expect(
+    within(screen.getByRole("dialog")).getByText("Settings form for My VM"),
+  ).toBeInTheDocument();
+  state.machine = "org";
+  view.rerender(
+    <TooltipProvider>
+      <MachinesPage />
+    </TooltipProvider>,
+  );
+  expect(
+    within(screen.getByRole("dialog")).getByText("Settings form for Team VM"),
+  ).toBeInTheDocument();
 });

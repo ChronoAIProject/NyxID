@@ -63,7 +63,7 @@ function AgentSelect({
       <SelectTrigger aria-label={label} className="h-7 w-[140px] rounded-md px-2">
         <SelectValue placeholder="Choose agent" />
       </SelectTrigger>
-      <SelectContent className="z-[90]">
+      <SelectContent>
         {agents.map((agent) => (
           <SelectItem key={agent.id} value={agent.id}>
             {agentLabel(agent)}

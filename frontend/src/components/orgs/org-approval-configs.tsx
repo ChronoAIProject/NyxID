@@ -324,12 +324,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               <ErrorBanner message="Failed to load org approval policies. Try refreshing the page." onRetry={refetchConfigs} />
             </div>
           ) : orgServices.length === 0 ? (
-            <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
               No org-owned services yet. Add a key to this org before
               configuring approval policies.
             </div>
           ) : serviceConfigs?.configs.length === 0 ? (
-            <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
               No org approval policies configured. Members use their personal
               approval settings.
             </div>
@@ -666,7 +666,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
             <ErrorBanner message="Failed to load org approval grants. Try refreshing the page." onRetry={refetch} />
           </div>
         ) : grants.length === 0 ? (
-          <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
             No active org approval grants.
           </div>
         ) : (

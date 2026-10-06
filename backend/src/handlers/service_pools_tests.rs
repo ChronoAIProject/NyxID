@@ -338,6 +338,7 @@ async fn service_pool_same_api_contract_is_enforced_by_writes_and_live_planning(
             },
             model_list: false,
             realtime: false,
+            voice: None,
         });
         db.collection::<DownstreamService>("downstream_services")
             .insert_one(&catalog)

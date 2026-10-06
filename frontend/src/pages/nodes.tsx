@@ -1,3 +1,4 @@
+import { MachineIsolationBadge } from "@/components/shared/machine-isolation";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ViewToggle, useViewMode } from "@/components/shared/view-toggle";
@@ -413,7 +414,7 @@ export function NodesPage() {
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
                   <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
-                  {node.machine?.shell && !node.machine.browser_isolated ? <Badge variant="warning">Not isolated</Badge> : null}
+                  {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                 </div>
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                   <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
@@ -459,7 +460,7 @@ export function NodesPage() {
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
                     <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
-                  {node.machine?.shell && !node.machine.browser_isolated ? <Badge variant="warning">Not isolated</Badge> : null}
+                  {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                   </div>
                   <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                     <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
@@ -513,7 +514,7 @@ export function NodesPage() {
                           status={node.status}
                           isConnected={node.is_connected}
                         />
-                        {node.machine?.shell && !node.machine.browser_isolated ? <Badge variant="warning">Not isolated</Badge> : null}
+                        {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}

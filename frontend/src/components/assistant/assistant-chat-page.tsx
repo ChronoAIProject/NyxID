@@ -13,6 +13,9 @@ import { AgentDetailsSheet } from "./nyxbot-agent-details";
 import { NewAgentDialog } from "./nyxbot-agent-forms";
 import { NewGroupDialog } from "./nyxbot-group-forms";
 import { NyxAgentGroupPage } from "./nyxbot-group-view";
+import { LazyVoicePanel as VoicePanel } from "./lazy-voice-panel";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { useNyxBotSettings } from "@/hooks/use-nyxbot-agents";
 import { NyxBotHome } from "./nyxbot-home";
 import { nyxBotOf, selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
@@ -44,6 +47,7 @@ import { useNyxAgentAssistantChat } from "@/hooks/use-assistant-nyxagent";
 import { Button } from "@/components/ui/button";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
+import { UploadComposer } from "@/components/assistant/upload-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
 import {
@@ -480,6 +484,9 @@ export function NyxAgentAssistantChatPage() {
 }
 
 function NyxAgentThreadPage() {
+  const voiceEnabled = useFeature("assistant:voice");
+  const voiceSettings = useNyxBotSettings(voiceEnabled);
+  const [voiceThread, setVoiceThread] = useState<string>();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const search = useRouterState({
@@ -584,6 +591,7 @@ function NyxAgentThreadPage() {
    * returns to its home (where the composer starts a new NyxBot thread).
    */
   function go(id?: string) {
+    setVoiceThread(undefined);
     setFocusRequest((value) => value + 1);
     if (id) navigateTo({ c: id });
     else if (selectedAgent?.kind === "specialist") {
@@ -595,7 +603,7 @@ function NyxAgentThreadPage() {
   // Threads carry the agent's handle; its display name lives on the agent list.
   const headerNamed = headerAgent ? withDisplayName(headerAgent, agents.data?.agents) : undefined;
   const agentName = headerNamed ? agentTitle(headerNamed) : "NyxBot";
-  const destroyed = Boolean(headerAgent?.destroyed);
+  const destroyed = Boolean(headerAgent?.destroyed) || selectedAgent?.can_use === false;
   const channelPlatform = selectedId ? (conversation?.channel?.platform ?? null) : null;
   // The home stays until the first message of its new NyxBot thread shows.
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
@@ -627,6 +635,10 @@ function NyxAgentThreadPage() {
   return (
     <AssistantShell
       title={showHome ? "Home" : chat.session.title}
+      titleKey={selectedId}
+      onRenameTitle={selectedId && !destroyed
+        ? (title) => chat.renameConversation(selectedId, title)
+        : undefined}
       headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
@@ -703,7 +715,8 @@ function NyxAgentThreadPage() {
           </div>
         ) : (
           <AssistantLinkModalHost>
-            {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} /> : null}
+            {chat.isStreaming && chat.continuations > 0 ? <p role="status" className="mx-auto w-full max-w-[758px] px-4 pb-2 text-11 text-muted-foreground">Continuing task…</p> : null}
+            {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
             <ChatMessageList
               session={chat.session}
               renderMessage={(message) => {
@@ -774,8 +787,21 @@ function NyxAgentThreadPage() {
             />
           </AssistantLinkModalHost>
         )}
+        {voiceEnabled && voiceThread && voiceThread === selectedId && !destroyed && !channelPlatform && (
+          <div className="absolute inset-x-0 top-3 z-20 mx-auto w-full max-w-[758px] px-4">
+            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={voiceSettings.data?.voice}
+              onClose={() => { setVoiceThread(undefined); setFocusRequest((n) => n + 1); }} />
+          </div>
+        )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
-          <ChatComposer
+          <UploadComposer
+            key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
+            onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {
+              if (selection.current !== selectedId) return;
+              setVoiceThread(id);
+              adopt(id);
+            } : undefined}
+            scope={{ kind: "conversations", id: selectedId, agentId: headerAgent?.id }}
             active={chat.isStreaming}
             sending={chat.isStreaming}
             disabled={Boolean(selectedId && chat.error) || destroyed}
@@ -790,9 +816,9 @@ function NyxAgentThreadPage() {
             focusRequest={focusRequest}
             // Model routing is server-side: there is no profile selector here.
             placeholder={`Message ${agentName}`}
-            onSend={async (text) => {
+            onSend={async (text, uploads) => {
               try {
-                await chat.send(text);
+                await chat.send(text, uploads);
               } catch (error) {
                 toast.error(
                   error instanceof Error ? error.message : "The assistant is unavailable.",

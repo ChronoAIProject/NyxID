@@ -19,6 +19,69 @@ pub(super) async fn load() -> Result<SigstoreTrustRoot> {
     load_from(client, METADATA.parse()?, TARGETS.parse()?).await
 }
 
+pub(super) async fn load_github(
+    client: reqwest::Client,
+    datastore: Option<&std::path::Path>,
+) -> Result<SigstoreTrustRoot> {
+    let base = "https://raw.githubusercontent.com/sigstore/root-signing/main/";
+    let loader = tough::RepositoryLoader::new(
+        &ROOT,
+        format!("{base}metadata/").parse()?,
+        format!("{base}targets/").parse()?,
+    )
+    .transport(GithubTransport(CliTransport(client)))
+    .expiration_enforcement(tough::ExpirationEnforcement::Safe);
+    // Scratch/read-only companions supply their private update-volume store.
+    // Native CLI/server callers retain tough's temporary datastore behavior.
+    let loader = match datastore {
+        Some(path) => loader.datastore(path),
+        None => loader,
+    };
+    let repository = loader.load().await?;
+    let bytes = repository
+        .read_target(&tough::TargetName::new("trusted_root.json")?)
+        .await?
+        .context("Missing authenticated trust root")?
+        .into_vec()
+        .await?;
+    SigstoreTrustRoot::from_trusted_root_json_unchecked(&bytes)
+        .context("Invalid authenticated trust root")
+}
+
+#[derive(Clone, Debug)]
+struct GithubTransport(CliTransport);
+#[tough::async_trait]
+impl Transport for GithubTransport {
+    async fn fetch(
+        &self,
+        mut url: url::Url,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<tough::Bytes, TransportError>>,
+        TransportError,
+    > {
+        // The Git mirror stores versioned roots in root_history and current
+        // metadata/targets without consistent-snapshot prefixes. tough still
+        // checks every version, length, hash, expiry and signature.
+        let path = url.path().to_owned();
+        let file = path.rsplit('/').next().unwrap_or_default();
+        if path.contains("/metadata/") && file.ends_with(".root.json") {
+            url.set_path(&path.replace("/metadata/", "/metadata/root_history/"));
+        } else if path.contains("/metadata/") {
+            if let Some((prefix, rest)) = file.split_once('.')
+                && prefix.bytes().all(|b| b.is_ascii_digit())
+            {
+                url.set_path(&format!("{}{rest}", &path[..path.len() - file.len()]));
+            }
+        } else if let Some((prefix, rest)) = file.split_once('.')
+            && prefix.len() == 64
+            && prefix.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            url.set_path(&format!("{}{rest}", &path[..path.len() - file.len()]));
+        }
+        self.0.fetch(url).await
+    }
+}
+
 async fn load_from(
     client: reqwest::Client,
     metadata: url::Url,
@@ -171,6 +234,18 @@ impl Download {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "Live GitHub TUF mirror; explicit release validation"]
+    async fn github_tuf_mirror_verifies_root_rotation_expiry_and_target_hash() {
+        let client = reqwest::Client::builder()
+            .https_only(true)
+            .no_proxy()
+            .user_agent("nyxid-update-validation")
+            .build()
+            .unwrap();
+        load_github(client, None).await.unwrap();
+    }
 
     #[tokio::test]
     async fn tuf_loader_rejects_unauthenticated_metadata_before_loading_trust_root() {

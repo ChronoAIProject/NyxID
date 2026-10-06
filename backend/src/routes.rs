@@ -77,6 +77,24 @@ macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/permission-execution/rest/{*path}",
+                "/api/v1/permission-execution/rest/{*path}",
+                "handlers::permission_keys::rest",
+                axum::routing::any(handlers::permission_keys::rest),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/permission-execution/mcp",
+                "/api/v1/permission-execution/mcp",
+                "handlers::permission_keys::mcp",
+                post(handlers::permission_keys::mcp),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/proxy/s/{slug}/{*path}",
                 "/api/v1/proxy/s/{slug}/{*path}",
                 "handlers::proxy::proxy_request_by_slug",
@@ -1034,6 +1052,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin::run_chain_verification),
         )
         .route(
+            "/settings/upload-retention",
+            get(handlers::admin_upload_retention::get)
+                .put(handlers::admin_upload_retention::put)
+                .delete(handlers::admin_upload_retention::reset),
+        )
+        .route(
+            "/settings/utility-inference",
+            get(handlers::admin_utility_inference::get).put(handlers::admin_utility_inference::put),
+        )
+        .route(
             "/settings/broker",
             get(handlers::admin::get_broker_settings)
                 .patch(handlers::admin::update_broker_settings),
@@ -1898,6 +1926,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Shared management routes; individual groups retain service-account gates.
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .route(
+            "/assistant-attachments/{id}/content",
+            get(handlers::assistant_uploads::thread_image),
+        )
         .route("/keys", get(handlers::service_account_key_reads::list_keys))
         .route(
             "/keys/{key_id}",
@@ -1964,10 +1996,33 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route(
+            "/nyxagent/conversations/{id}/machine-preview-policy",
+            get(handlers::machine_activity::get_preview_policy)
+                .put(handlers::machine_activity::preview_policy),
+        )
+        .route("/nyxagent/drafts", post(handlers::assistant_uploads::draft))
+        .route(
+            "/nyxagent/conversations/{id}/attachments",
+            post(handlers::assistant_uploads::upload),
+        )
+        .route(
+            "/nyxagent/groups/{id}/attachments",
+            post(handlers::assistant_uploads::upload),
+        )
+        .route(
+            "/nyxagent/groups/{id}/attachments/{attachment_id}",
+            get(handlers::assistant_uploads::group_content)
+                .delete(handlers::assistant_uploads::remove),
+        )
         .route("/nyxagent/machines", get(handlers::machine_desktop::list))
         .route(
             "/nyxagent/machines/{node_id}/desktop",
             get(handlers::machine_desktop::upgrade),
+        )
+        .route(
+            "/nyxagent/machines/{node_id}/contexts",
+            get(handlers::machine_desktop::contexts),
         )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
         .route(
@@ -1997,12 +2052,73 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::assistant_team::delete_agent),
         )
         .route(
+            "/nyxagent/skills/catalog",
+            get(handlers::agent_skills::catalog),
+        )
+        .route(
+            "/nyxagent/agents/{id}/skills",
+            get(handlers::agent_skills::get).put(handlers::agent_skills::set),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning",
+            get(handlers::assistant_agent_learning::status)
+                .put(handlers::assistant_agent_learning::configure),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/consent",
+            put(handlers::assistant_agent_learning::consent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals",
+            get(handlers::assistant_agent_learning::list),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/run",
+            post(handlers::assistant_agent_learning::run_now),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/reject",
+            post(handlers::assistant_agent_learning::reject),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
+            axum::routing::put(handlers::assistant_agent_learning::edit),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",
+            post(handlers::assistant_agent_learning::approve),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines",
+            get(handlers::machine_access::get),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}",
+            axum::routing::put(handlers::machine_access::put),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}/context-request",
+            post(handlers::machine_access::request_context),
+        )
+        .route(
+            "/nyxagent/agents/{id}/operations",
+            get(handlers::assistant_team::agent_operations),
+        )
+        .route(
+            "/nyxagent/agents/{id}/operations/{service_id}",
+            axum::routing::put(handlers::assistant_team::set_agent_operations),
+        )
+        .route(
             "/nyxagent/agents/{id}/grants",
             axum::routing::put(handlers::assistant_team::set_agent_grants),
         )
         .route(
             "/nyxagent/agents/{id}/destroy",
             post(handlers::assistant_team::destroy_agent_route),
+        )
+        .route(
+            "/nyxagent/agents/{id}/memory",
+            post(handlers::assistant_team::set_memory),
         )
         .route(
             "/nyxagent/agents/{id}/memory/{note_id}",
@@ -2038,6 +2154,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
         .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}/threads",
+            get(handlers::nyxbot::thread_controls::list_threads),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}/threads/{thread_id}/stop",
+            post(handlers::nyxbot::thread_controls::stop_thread),
+        )
+        .route(
             "/nyxagent/channels/{id}/chats",
             get(handlers::nyxbot::list_channel_chats),
         )
@@ -2051,7 +2175,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/nyxagent/conversations/{id}/attachments/{attachment_id}",
-            get(handlers::assistant_nyxagent::attachment),
+            get(handlers::assistant_nyxagent::attachment)
+                .delete(handlers::assistant_uploads::remove),
         )
         .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(
@@ -2104,6 +2229,56 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/machines/{node_id}/activity",
+            get(handlers::machine_activity::list),
+        )
+        .route(
+            "/assistant/nyxagent/voice/options",
+            get(handlers::assistant_voice::options),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions",
+            post(handlers::assistant_voice::start)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/active",
+            get(handlers::assistant_voice::active_session),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}",
+            get(handlers::assistant_voice::session_status),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/stream",
+            get(handlers::assistant_voice::stream),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/control",
+            post(handlers::assistant_voice::control),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}",
+            get(handlers::assistant_voice::request),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}/cancel",
+            post(handlers::assistant_voice::cancel),
+        )
+        .route(
+            "/machines/updater-image",
+            get(handlers::machine_update::updater_image),
+        )
+        .route("/machines/updates", get(handlers::machine_update::list))
+        .route(
+            "/machines/{id}/update",
+            post(handlers::machine_update::start),
+        )
+        .route(
+            "/machines/{id}/update-policy",
+            put(handlers::machine_update::policy),
+        )
         .route("/machines/setups", post(handlers::machine_setup::create))
         .route("/machines/setups/{id}", get(handlers::machine_setup::get))
         .route(
@@ -2274,6 +2449,17 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::devices::get_onboard_device_authorization),
         )
         .nest("/users", user_routes)
+        .route(
+            "/permission-keys",
+            post(handlers::permission_keys::create)
+                .layer(DefaultBodyLimit::max(nyxid_permissions::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/permission-keys/{id}",
+            get(handlers::permission_keys::get)
+                .patch(handlers::permission_keys::pause)
+                .delete(handlers::permission_keys::revoke),
+        )
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
         .route("/docs", get(handlers::docs::docs_ui))
@@ -2353,6 +2539,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/oauth-protected-resource",
             get(handlers::oidc_discovery::oauth_protected_resource),
+        )
+        .route(
+            "/openai-apps-challenge",
+            get(handlers::oidc_discovery::openai_apps_challenge),
         );
 
     let public_oauth = Router::new()

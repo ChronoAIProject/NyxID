@@ -25,11 +25,96 @@ use crate::{
     services::{api_key_mutation_service as mutations, audit_service, key_service},
 };
 
+/// The request-time authority snapshot for a per-conversation assistant key.
+/// It is populated while the conversation is loaded during authentication and
+/// never contains key material.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssistantTurnFence {
+    pub conversation_id: String,
+    pub turn_id: Option<String>,
+    pub turn_live: bool,
+    pub turn_stopped: bool,
+}
+
+impl AssistantTurnFence {
+    pub fn require_live(&self) -> AppResult<()> {
+        if self.turn_live && !self.turn_stopped {
+            return Ok(());
+        }
+        Err(AppError::AssistantTurnRequired)
+    }
+
+    pub fn refusal_reason(&self) -> &'static str {
+        if self.turn_id.is_none() {
+            "idle"
+        } else if self.turn_stopped {
+            "stopped"
+        } else {
+            "expired"
+        }
+    }
+}
+
+/// Apply the rollout-controlled request fence and emit a bounded, sampled
+/// metadata-only audit record for refusals. The fence itself is always
+/// computed by authentication; this function only controls enforcement.
+#[allow(clippy::too_many_arguments)]
+pub async fn enforce_turn_gate(
+    db: &Database,
+    fence: &AssistantTurnFence,
+    user_id: &str,
+    api_key_id: Option<&str>,
+    api_key_name: Option<&str>,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    route: &str,
+) -> AppResult<()> {
+    if !crate::services::feature_flag_service::personal_flag_enabled(
+        db,
+        user_id,
+        crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    if let Err(error) = fence.require_live() {
+        let sample_id = format!("{user_id}:{}", fence.conversation_id);
+        if crate::telemetry::should_sample_event("assistant_turn_gate_refused", &sample_id, 10) {
+            let _ = audit_service::log_actor_event(
+                db.clone(),
+                &audit_service::AuditActor {
+                    user_id: user_id.to_owned(),
+                    ip_address: ip_address.map(str::to_owned),
+                    user_agent: user_agent.map(str::to_owned),
+                    api_key_id: api_key_id.map(str::to_owned),
+                    api_key_name: api_key_name.map(str::to_owned),
+                },
+                "assistant_turn_gate_refused",
+                Some(json!({
+                    "route": route,
+                    "conversation_id": fence.conversation_id,
+                    "turn_id": fence.turn_id,
+                    "reason": fence.refusal_reason(),
+                    "sample_percent": 10,
+                })),
+            )
+            .await;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+    pub turn_id: Option<String>,
+    pub turn_stopped: bool,
+    pub turn_live: bool,
     pub machine_node_ids: Vec<String>,
     pub saved_login_ids: Vec<String>,
     pub conversation_id: String,
@@ -49,6 +134,35 @@ impl ChatAuthority {
     /// NyxBot threads run with Full access; specialists only with their grants.
     pub fn is_orchestrator(&self) -> bool {
         self.role == AgentRole::Orchestrator
+    }
+
+    pub fn turn_fence(&self) -> AssistantTurnFence {
+        AssistantTurnFence {
+            conversation_id: self.conversation_id.clone(),
+            turn_id: self.turn_id.clone(),
+            turn_live: self.turn_live,
+            turn_stopped: self.turn_stopped,
+        }
+    }
+
+    pub async fn ensure_live_turn(
+        &self,
+        db: &Database,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+        route: &str,
+    ) -> AppResult<()> {
+        enforce_turn_gate(
+            db,
+            &self.turn_fence(),
+            &self.user_id,
+            Some(&self.api_key_id),
+            None,
+            ip_address,
+            user_agent,
+            route,
+        )
+        .await
     }
 }
 impl std::fmt::Debug for ChatAuthority {
@@ -74,6 +188,17 @@ pub fn guest_refusal() -> Value {
         anything that needs their approval, or more than the owner lets guests do with a \
         service. Help with your services otherwise, and say that only the bot's owner can \
         ask for that."})
+}
+
+/// An org permission request may use the person's NyxBot only while that
+/// person maintains the agent. Otherwise a maintainer must make the change.
+const ORG_MAINTAINER_REQUIRED: &str = "This organization agent needs a permission or skill change that you cannot maintain. Ask an organization maintainer to update the agent; your personal NyxBot cannot approve it on your behalf.";
+
+pub fn organization_agent_refusal() -> Value {
+    json!({
+        "error": "organization_grant_required",
+        "instructions": ORG_MAINTAINER_REQUIRED
+    })
 }
 
 /// What a guest turn is told when a service call goes beyond what the owner
@@ -104,6 +229,15 @@ pub async fn for_key(
     user: &str,
     key: Option<&str>,
 ) -> AppResult<Option<ChatAuthority>> {
+    Box::pin(for_key_with_access(db, user, key, None)).await
+}
+
+pub async fn for_key_with_access(
+    db: &Database,
+    user: &str,
+    key: Option<&str>,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<Option<ChatAuthority>> {
     let Some(key) = key else { return Ok(None) };
     let Some(row) = db
         .collection::<bson::Document>(CREDENTIALS)
@@ -114,8 +248,24 @@ pub async fn for_key(
         return Ok(None);
     };
     let conversation_id = row.get_str("conversation_id").map_err(|_| not_found())?;
-    let conversation = super::assistant_nyxagent::get(db, user, conversation_id).await?;
-    let agent = super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
+    let (conversation, agent) = if let Some(access) = access {
+        // Authentication already resolved live membership. Retain the private
+        // thread/owner/agent fences while reusing that request's snapshot.
+        let conversation = access.conversation(db, user, conversation_id).await?;
+        let agent = access
+            .agent(
+                db,
+                user,
+                conversation.agent_id.as_deref().ok_or_else(not_found)?,
+            )
+            .await?;
+        (conversation, agent)
+    } else {
+        let conversation = super::assistant_nyxagent::get(db, user, conversation_id).await?;
+        let agent =
+            super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
+        (conversation, agent)
+    };
     if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
@@ -133,7 +283,15 @@ pub async fn for_key(
     } else {
         None
     };
+    let turn_live = super::assistant_nyxagent::live_turn(&conversation, Utc::now()).is_some();
     Ok(Some(ChatAuthority {
+        org_agent_access: access.cloned(),
+        turn_id: conversation.active_turn.as_ref().map(|t| t.turn_id.clone()),
+        turn_stopped: conversation
+            .active_turn
+            .as_ref()
+            .is_none_or(|t| t.stop_requested),
+        turn_live,
         machine_node_ids: agent.machine_node_ids.clone(),
         saved_login_ids: agent.saved_login_ids.clone(),
         user_id: user.into(),
@@ -180,7 +338,11 @@ async fn fence(
     db: &Database,
     chat: &ChatAuthority,
     session: &mut ClientSession,
-) -> AppResult<(AssistantConversation, ApiKey)> {
+) -> AppResult<(
+    AssistantConversation,
+    ApiKey,
+    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+)> {
     let credential = db
         .collection::<bson::Document>(CREDENTIALS)
         .update_one(
@@ -211,7 +373,31 @@ async fn fence(
     if key.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
         return Err(not_found());
     }
-    Ok((row, key))
+    // Cards are execution authority. Human decisions and internal NyxBot paths
+    // must enforce the same live org/group ACL as a new tool request.
+    let access = if let Some(owner) = row.agent_owner_id.as_deref() {
+        let access = super::org_agent_service::key_access_with_snapshot(
+            db,
+            &row.user_id,
+            Some(owner),
+            chat.org_agent_access.as_ref(),
+        )
+        .await?;
+        if let Some(access) = access.as_ref() {
+            super::org_group_service::check_thread_participation(db, &row, access).await?;
+            if row.group_request_id.is_some()
+                && let Some(id) = row.group_id.as_deref()
+            {
+                let group =
+                    super::org_group_service::get(db, &row.user_id, id, Some(access)).await?;
+                super::org_group_service::fence(db, &group, session).await?;
+            }
+        }
+        access
+    } else {
+        None
+    };
+    Ok((row, key, access))
 }
 
 pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<()> {
@@ -372,6 +558,46 @@ pub async fn request(
     Ok(request_tracked(db, chat, request).await?.0)
 }
 
+/// Create the same owner action card used by native machine tools, while
+/// retaining a bounded typed payload for the graphical context editor.
+pub async fn request_machine_context(
+    db: &Database,
+    chat: &ChatAuthority,
+    action: crate::models::machine_access::HumanContextAction,
+    summary: &str,
+) -> AppResult<AssistantAcknowledgement> {
+    let args = serde_json::json!({
+        "agent": action.agent_id,
+        "machine": action.node_id,
+        "selection": action.selection,
+        "source": "human_machine_settings"
+    });
+    let encoded = bson::to_bson(&action).map_err(|_| not_found())?;
+    let (row, _) = request_tracked_with_machine_context(
+        db,
+        chat,
+        Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__machine_capabilities"),
+            arguments: Some(&args),
+            summary,
+            platform: false,
+        },
+        Some(action),
+    )
+    .await?;
+    Ok(db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find_one_and_update(
+            doc! {"_id": &row.id, "status": "pending", "machine_context": {"$exists": false}},
+            doc! {"$set": {"machine_context": encoded}},
+        )
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?
+        .unwrap_or(row))
+}
+
 /// Like [`request`], also reporting whether a new row was created (a pending
 /// duplicate is returned as-is). Subagent requests are decided by the team's
 /// orchestrator; action confirmations always belong to the user.
@@ -380,10 +606,47 @@ pub async fn request_tracked(
     chat: &ChatAuthority,
     request: Request<'_>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
+    request_tracked_with_machine_context(db, chat, request, None).await
+}
+
+async fn request_tracked_with_machine_context(
+    db: &Database,
+    chat: &ChatAuthority,
+    request: Request<'_>,
+    machine_context: Option<crate::models::machine_access::HumanContextAction>,
+) -> AppResult<(AssistantAcknowledgement, bool)> {
+    if request.kind == "operations" {
+        Box::pin(
+            super::agent_operation_scope_service::require_configuration_enabled(db, &chat.user_id),
+        )
+        .await?;
+    }
     expire(db, &chat.user_id, &chat.conversation_id).await?;
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        skill_selection: if request.kind == "skills"
+            && request
+                .arguments
+                .is_some_and(|args| args.get("skills").is_some())
+        {
+            let selection: super::agent_skill_service::Selection =
+                serde_json::from_value(request.arguments.cloned().ok_or_else(not_found)?)
+                    .map_err(|_| AppError::ValidationError("Invalid skill request".into()))?;
+            super::agent_skill_service::validate(&selection)?;
+            Some(selection)
+        } else {
+            None
+        },
+        operation_selection: if request.kind == "operations" {
+            Some(
+                serde_json::from_value(request.arguments.cloned().ok_or_else(not_found)?).map_err(
+                    |_| AppError::ValidationError("Invalid operation permission request".into()),
+                )?,
+            )
+        } else {
+            None
+        },
         id: Uuid::new_v4().to_string(),
         conversation_id: chat.conversation_id.clone(),
         user_id: chat.user_id.clone(),
@@ -398,6 +661,8 @@ pub async fn request_tracked(
         summary: request.summary.into(),
         status: "pending".into(),
         requested_turn_id: None,
+        voice_request_id: None,
+        continuation_receipt_id: None,
         trigger_run_id: None,
         created_at: now,
         decided_at: None,
@@ -406,6 +671,7 @@ pub async fn request_tracked(
         request_excerpt: None,
         decided_by: None,
         reason: None,
+        machine_context,
     };
     let db = db.clone();
     let chat = chat.clone();
@@ -413,18 +679,29 @@ pub async fn request_tracked(
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation = async {
-                let (conversation, _) = fence(&db, &chat, session).await?;
+            // Do not embed the card transaction in MongoDB's retry frames.
+            let operation = Box::pin(async {
+                let (conversation, _, access) = Box::pin(fence(&db, &chat, session)).await?;
+                // Covers every permission kind, including machine/skill/scope
+                // requests and internal callers without an auth snapshot.
+                // Reuse the access already resolved or reused by the fence.
+                if orchestrated && access.as_ref().is_some_and(|a| !a.can_maintain()) {
+                    return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
+                }
                 let mut row = candidate.clone();
                 // Ordinary denials stay bound to the initiating user/orchestrator
                 // message across event turns. Only trigger runs use the active turn.
+                let mut initiating_filter = doc! {
+                    "conversation_id": &conversation.id, "user_id": &chat.user_id,
+                    "role": {"$in": ["user", "orchestrator"]},
+                    "execution_pending": {"$ne": true},
+                };
+                if let Some(seq) = conversation.active_turn.as_ref().and_then(|t| t.initiating_message_seq) {
+                    initiating_filter.insert("seq", doc! {"$lte": seq});
+                }
                 let started_by = db
                     .collection::<AssistantMessage>(MESSAGES)
-                    .find_one(doc! {
-                        "conversation_id": &conversation.id,
-                        "user_id": &chat.user_id,
-                        "role": {"$in": ["user", "orchestrator"]},
-                    })
+                    .find_one(initiating_filter)
                     .sort(doc! {"seq": -1})
                     .session(&mut *session)
                     .await?;
@@ -432,6 +709,7 @@ pub async fn request_tracked(
                     .filter(|turn| turn.trigger_run_id.is_some())
                     .map(|turn| turn.turn_id.clone())
                     .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
+                row.voice_request_id = conversation.active_turn.as_ref().and_then(|t| t.voice_request_id.clone());
                 row.trigger_run_id = conversation.active_turn.as_ref().and_then(|turn| turn.trigger_run_id.clone());
                 if row.decider == "orchestrator" {
                     row.request_excerpt = started_by.map(|message| {
@@ -449,21 +727,33 @@ pub async fn request_tracked(
                 "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
                     {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
                 // A valid allowed action can be reused only by explicitly presenting its id.
-                if let Some(existing) = db
+                if let Some(mut existing) = db
                     .collection::<AssistantAcknowledgement>(ACKS)
                     .find_one(filter)
                     .sort(doc! {"created_at": -1})
                     .session(&mut *session)
                     .await?
                 {
+                    // A pending text card may be encountered again from voice.
+                    // Keep its digest/expiry/initiating identity, and attach the
+                    // server continuation before returning that same record.
+                    if existing.status == "pending" && existing.voice_request_id.is_none()
+                        && row.voice_request_id.is_some() && row.decider == "user" {
+                        existing.voice_request_id = row.voice_request_id.clone();
+                        db.collection::<AssistantAcknowledgement>(ACKS)
+                            .replace_one(doc! {"_id":&existing.id},&existing)
+                            .session(&mut *session).await?;
+                        super::assistant_voice::await_confirmation(&db, &existing, session).await?;
+                    }
                     return Ok((existing, false));
                 }
                 db.collection::<AssistantAcknowledgement>(ACKS)
                     .insert_one(&row)
                     .session(&mut *session)
                     .await?;
+                super::assistant_voice::await_confirmation(&db, &row, session).await?;
                 Ok((row, true))
-            }
+            })
             .await;
             mutations::transaction_result(operation)
         })
@@ -488,6 +778,11 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "The user denied this request. Do not retry or request another \
                 card unless the user explicitly asks again in a later message."
             .into()
+    } else if row.voice_request_id.is_some() {
+        "NyxID is awaiting the owner's confirmation of this exact action. End this turn; \
+        the voice coordinator reads the server summary and handles the owner's decision. \
+        Never infer approval or confirm it yourself; NyxID resumes the task after a decision."
+            .into()
     } else {
         match row.kind.as_str() {
             "service" => format!(
@@ -511,7 +806,7 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "kind": row.kind, "acknowledgement_id": row.id, "service_slug": row.service_slug,
         "service_name": row.service_name, "summary": row.summary, "decider": row.decider,
         "instructions": instructions});
-    if row.kind == "action" && !denied {
+    if row.kind == "action" && !denied && row.voice_request_id.is_none() {
         value["confirm_phrase"] = json!(format!("yes {}", confirm_code(&row.id)));
     }
     value
@@ -625,12 +920,22 @@ pub async fn service_gate(
         return Ok(None);
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
+    let mut access = chat.org_agent_access.clone();
     let granted = if platform {
         key.allowed_platform_service_ids
             .iter()
             .any(|allowed| allowed == id)
     } else {
-        key_service::effective_allowed_service_ids(db, &key)
+        // This authority check already needed live access. Retain a newly
+        // resolved snapshot for the ungranted path and its card transaction.
+        access = super::org_agent_service::key_access_with_snapshot(
+            db,
+            &chat.user_id,
+            key.assistant_agent_owner_id.as_deref(),
+            access.as_ref(),
+        )
+        .await?;
+        key_service::effective_allowed_service_ids_with_access(db, &key, access.as_deref())
             .await?
             .iter()
             .any(|allowed| allowed == id)
@@ -642,6 +947,18 @@ pub async fn service_gate(
     if chat.guest {
         return Ok(Some((guest_refusal(), None)));
     }
+    access = super::org_agent_service::key_access_with_snapshot(
+        db,
+        &chat.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+        access.as_ref(),
+    )
+    .await?;
+    if access.as_ref().is_some_and(|a| !a.can_maintain()) {
+        return Ok(Some((organization_agent_refusal(), None)));
+    }
+    let mut request_chat = chat.clone();
+    request_chat.org_agent_access = access;
     let summary = if platform {
         format!("Use {name} (NyxID platform credential)")
     } else {
@@ -649,7 +966,7 @@ pub async fn service_gate(
     };
     let (row, created) = request_tracked(
         db,
-        chat,
+        &request_chat,
         Request {
             kind: "service",
             service: Some((id, slug, name)),
@@ -681,9 +998,21 @@ pub async fn account_gate(
     {
         return Ok(None);
     }
+    let access = super::org_agent_service::key_access_with_snapshot(
+        db,
+        &chat.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+        chat.org_agent_access.as_ref(),
+    )
+    .await?;
+    if access.as_ref().is_some_and(|a| !a.can_maintain()) {
+        return Ok(Some((organization_agent_refusal(), None)));
+    }
+    let mut request_chat = chat.clone();
+    request_chat.org_agent_access = access;
     let (row, created) = request_tracked(
         db,
-        chat,
+        &request_chat,
         Request {
             kind: "account",
             service: None,
@@ -705,6 +1034,8 @@ pub enum Decider {
     User,
     /// The owner's NyxBot deciding a specialist's request.
     Nyxbot,
+    /// NyxBot has consumed an owner action card bound to this exact decision.
+    NyxbotOwnerConfirmed,
 }
 
 /// Decide a card as the owner from its own conversation.
@@ -715,8 +1046,16 @@ pub async fn decide(
     id: &str,
     allow: bool,
 ) -> AppResult<AssistantAcknowledgement> {
-    super::assistant_nyxagent::get(db, user, conversation).await?;
-    decide_as(db, user, Some(conversation), id, allow, Decider::User, None).await
+    Box::pin(decide_as(
+        db,
+        user,
+        Some(conversation),
+        id,
+        allow,
+        Decider::User,
+        None,
+    ))
+    .await
 }
 
 /// Decide a card. The owner decides from the card's conversation; the owner's
@@ -731,17 +1070,32 @@ pub async fn decide_as(
     decider: Decider,
     reason: Option<&str>,
 ) -> AppResult<AssistantAcknowledgement> {
+    decide_with_voice(db, user, conversation, id, allow, decider, reason, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn decide_with_voice(
+    db: &Database,
+    user: &str,
+    conversation: Option<&str>,
+    id: &str,
+    allow: bool,
+    decider: Decider,
+    reason: Option<&str>,
+    voice: Option<super::voice::confirmation::DecisionFence>,
+) -> AppResult<AssistantAcknowledgement> {
     let db = db.clone();
     let user = user.to_owned();
     let conversation = conversation.map(str::to_owned);
     let id = id.to_owned();
-    let by_nyxbot = decider == Decider::Nyxbot;
+    let by_nyxbot = decider != Decider::User;
+    let allow_operation_widening = matches!(decider, Decider::User | Decider::NyxbotOwnerConfirmed);
     let reason = reason.map(|reason| super::assistant_nyxagent::excerpt(reason, 300));
     let mut session = db.client().start_session().await?;
     let row = session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation = async {
+            let operation = Box::pin(async {
                 let collection = db.collection::<AssistantAcknowledgement>(ACKS);
                 let mut filter = doc! {"_id": &id, "user_id": &user};
                 if let Some(conversation) = &conversation {
@@ -755,6 +1109,9 @@ pub async fn decide_as(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if let Some(voice)=&voice {
+                    super::voice::confirmation::fence_decision(&db,session,&row,voice).await?;
+                }
                 if row.status != "pending" || row.expires_at <= Utc::now() {
                     return Err(AppError::Conflict(
                         "Acknowledgement is no longer pending".into(),
@@ -766,7 +1123,19 @@ pub async fn decide_as(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if row.voice_request_id.is_some() {
+                    super::assistant_agent_credential_service::authority_in_session(
+                        &db,
+                        &target,
+                        &mut *session,
+                    )
+                    .await?;
+                }
                 let chat = ChatAuthority {
+                    org_agent_access: None,
+                    turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
+                    turn_stopped: target.active_turn.as_ref().is_none_or(|t| t.stop_requested),
+                    turn_live: super::assistant_nyxagent::live_turn(&target, Utc::now()).is_some(),
                     machine_node_ids: Vec::new(),
                     saved_login_ids: Vec::new(),
                     confirmation_policy: None,
@@ -778,7 +1147,13 @@ pub async fn decide_as(
                     agent_name: String::new(),
                     guest: target.guest_turn,
                 };
-                let (_, key) = fence(&db, &chat, session).await?;
+                // Decision requests have no inherited auth snapshot. The
+                // transaction's fence resolves live membership, including for
+                // cards created before delegation supported org specialists.
+                let (_, key, access) = Box::pin(fence(&db, &chat, session)).await?;
+                if by_nyxbot && access.as_ref().is_some_and(|a| !a.can_maintain()) {
+                    return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
+                }
                 let subagent = target.role == AgentRole::Subagent;
                 let now = Utc::now();
                 if row.kind == "service" {
@@ -818,10 +1193,24 @@ pub async fn decide_as(
                         let node = super::node_service::get_node_by_id(&db, id)
                             .await?
                             .ok_or_else(not_found)?;
+                        let access =
+                            super::org_service::resolve_owner_access(&db, &user, &node.user_id)
+                                .await?;
+                        let org_agent_node = if subagent {
+                            let agent = super::assistant_team_service::maintained_agent(
+                                &db,
+                                &user,
+                                target.agent_id.as_deref().ok_or_else(not_found)?,
+                            )
+                            .await?;
+                            agent.user_id != user && agent.user_id == node.user_id
+                        } else {
+                            false
+                        };
                         if !node.is_active
-                            || !super::org_service::resolve_owner_access(&db, &user, &node.user_id)
-                                .await?
-                                .can_write()
+                            || !(access.can_write()
+                                || (org_agent_node
+                                    && super::org_agent_service::can_maintain(&access)))
                         {
                             return Err(not_found());
                         }
@@ -829,35 +1218,35 @@ pub async fn decide_as(
                         super::saved_login_service::get(&db, &user, id).await?;
                     }
                     if allow && subagent {
-                        let field = if row.kind == "machine" {
-                            "machine_node_ids"
-                        } else {
-                            "saved_login_ids"
+                        let change = super::assistant_team_service::GrantChange::Machine {
+                            base: Box::new(super::assistant_team_service::GrantChange::Add(
+                                Default::default(),
+                            )),
+                            machines: (row.kind == "machine").then(|| vec![id.to_owned()]),
+                            logins: (row.kind == "saved_login").then(|| vec![id.to_owned()]),
+                            mode: super::assistant_team_service::MachineGrantMode::Add,
                         };
-                        let mut add = doc! {};
-                        add.insert(field, id);
-                        let result = db
-                            .collection::<bson::Document>(
-                                crate::models::assistant_agent::COLLECTION_NAME,
-                            )
-                            .update_one(
-                                doc! {
-                                    "_id": target.agent_id.as_deref().ok_or_else(not_found)?,
-                                    "user_id": &user,
-                                    "kind": "specialist",
-                                    "destroyed_at": bson::Bson::Null,
-                                },
-                                doc! {
-                                    "$addToSet": add,
-                                    "$set": { "updated_at": bson::DateTime::now() },
-                                },
-                            )
-                            .session(&mut *session)
-                            .await?;
-                        if result.matched_count != 1 {
-                            return Err(not_found());
-                        }
+                        Box::pin(super::assistant_team_service::apply_grants_in_session(
+                            &db,
+                            &user,
+                            target.agent_id.as_deref().ok_or_else(not_found)?,
+                            &change,
+                            session,
+                        ))
+                        .await?;
                     }
+                }
+                if allow && subagent && row.kind == "operations" {
+                    Box::pin(super::agent_operation_scope_service::apply_in_session(
+                        &db,
+                        &user,
+                        target.agent_id.as_deref().ok_or_else(not_found)?,
+                        row.service_id.as_deref().ok_or_else(not_found)?,
+                        row.operation_selection.as_ref().ok_or_else(not_found)?,
+                        allow_operation_widening,
+                        session,
+                    ))
+                    .await?;
                 }
                 if allow && subagent {
                     // A specialist's grant lives on its agent and converges on
@@ -873,13 +1262,13 @@ pub async fn decide_as(
                     }
                     if grant != Default::default() {
                         let agent_id = target.agent_id.as_deref().ok_or_else(not_found)?;
-                        super::assistant_team_service::apply_grants_in_session(
+                        Box::pin(super::assistant_team_service::apply_grants_in_session(
                             &db,
                             &user,
                             agent_id,
                             &super::assistant_team_service::GrantChange::Add(grant),
                             &mut *session,
-                        )
+                        ))
                         .await?;
                     }
                 } else if allow && row.kind == "service" {
@@ -916,6 +1305,8 @@ pub async fn decide_as(
                 if allow && row.kind == "action" {
                     row.expires_at = now + Duration::seconds(ACTION_SECONDS);
                 }
+                row.continuation_receipt_id =
+                    Box::pin(super::assistant_voice::continuation(&db, &row, session)).await?;
                 collection
                     .replace_one(filter, &row)
                     .session(&mut *session)
@@ -934,8 +1325,15 @@ pub async fn decide_as(
                         .session(&mut *session)
                         .await?;
                 }
+                if let Some(voice)=&voice {
+                    super::audit_service::log_actor_event_in_session(&db,session,voice.audit_key.as_ref().as_ref(),
+                        &super::audit_service::AuditActor{user_id:user.clone(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},
+                        "assistant_confirmation_decided",json!({"source":"voice","conversation_id":row.conversation_id,
+                            "session_id":voice.session.id,"acknowledgement_id":row.id,"request_id":row.voice_request_id,
+                            "continuation_receipt_id":row.continuation_receipt_id})).await?;
+                }
                 Ok(row)
-            }
+            })
             .await;
             mutations::transaction_result(operation)
         })
@@ -960,7 +1358,7 @@ pub async fn consume_action(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation = async {
-            fence(&db, &chat, session).await?;
+            Box::pin(fence(&db, &chat, session)).await?;
             let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
                 doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,
@@ -974,6 +1372,31 @@ pub async fn consume_action(
         }.await;
         mutations::transaction_result(operation)
     }).await.map_err(mutations::map_transaction_error)
+}
+
+/// Consume inside the caller's durable effect transaction. Learning uses this
+/// to bind one human card to exactly one publication operation before egress.
+pub(crate) async fn consume_action_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    tool: &str,
+    arguments: &Value,
+    session: &mut ClientSession,
+) -> AppResult<bool> {
+    Box::pin(fence(db, chat, session)).await?;
+    let result = db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .update_one(
+            doc! {"_id": id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
+            "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": tool,
+            "arguments_digest": arguments_digest(arguments), "status": "allowed",
+            "decider": "user", "decided_by": "user", "expires_at": {"$gt": bson::DateTime::now()}},
+            doc! {"$set": {"status": "used"}},
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(result.modified_count == 1)
 }
 
 pub async fn audit_decision(

@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        attachment_ids: Vec::new(),
         agent_id: None,
         conversation_id: id.map(str::to_owned),
         text: text.into(),
@@ -259,6 +260,8 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            voice: None,
+            execution_pending: false,
             id: Uuid::new_v4().to_string(),
             conversation_id: "c".into(),
             user_id: "u".into(),
@@ -482,7 +485,11 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        machine_previews: false,
+        title_source: Default::default(),
         automation_thread: false,
+        voice_parent_conversation_id: None,
+        agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
         user_id: "owner".into(),
         title: "Interrupted turn".into(),
@@ -493,6 +500,13 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            channel_event_id: None,
+            initiating_message_seq: None,
+            voice_request_id: None,
+            machine_node_ids: Vec::new(),
+            continuations: 0,
+            tool_progress: Default::default(),
+            lease_expires_at: None,
             trigger_run_id: None,
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -513,11 +527,13 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         updated_at: now,
         role: Default::default(),
         agent_id: None,
+        learning_epoch: None,
         report_to: None,
         pending_events: Vec::new(),
         event_streak: 0,
         channel: None,
         group_id: None,
+        group_request_id: None,
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,
@@ -969,4 +985,465 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
     );
     delete(&db, &owner, &row.id).await.unwrap();
     assert_eq!(count().await, 0, "deleted with the conversation");
+}
+
+#[test]
+fn upstream_codes_are_bounded_identifiers_and_budget_errors_preserve_the_session() {
+    for code in [
+        "tool_budget_exhausted",
+        "turn_timeout",
+        "continuation_no_progress",
+    ] {
+        let error = TurnError::new(code);
+        assert_eq!(error.code, code);
+        assert!(error.preserves_session());
+    }
+    assert_eq!(
+        TurnError::new("new_upstream_error")
+            .upstream_code
+            .as_deref(),
+        Some("new_upstream_error")
+    );
+    for code in [
+        "secret provider message",
+        "Bearer xxx",
+        "nyx_secret",
+        "sk_secret",
+        "new\nline",
+        &"a".repeat(65),
+    ] {
+        let error = TurnError::new(code);
+        assert!(error.upstream_code.is_none());
+        assert!(!serde_json::to_string(&error).unwrap().contains(code));
+    }
+}
+
+#[tokio::test]
+async fn voice_queue_claims_one_message_and_preserves_initiating_identity() {
+    use crate::services::feature_flag_service::FlagTarget;
+    use crate::services::{assistant_voice as voice, feature_flag_service as flags};
+    let db = connect_transaction_test_database("voice_admission").await;
+    ensure_indexes(&db).await.unwrap();
+    voice::ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    flags::set_platform_override(
+        &db,
+        flags::ASSISTANT_VOICE_FLAG_KEY,
+        &FlagTarget::Global,
+        true,
+        &user,
+    )
+    .await
+    .unwrap();
+    let first = Box::pin(begin_turn(
+        &db,
+        &user,
+        &request(None, "original request"),
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let session = Uuid::new_v4().to_string();
+    let a = voice::enqueue(
+        &db,
+        &user,
+        &first.id,
+        &session,
+        "call-1",
+        "first voice task",
+    )
+    .await
+    .unwrap();
+    let replay = voice::enqueue(
+        &db,
+        &user,
+        &first.id,
+        &session,
+        "call-1",
+        "ignored duplicate",
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.id, replay.id);
+    let b = voice::enqueue(
+        &db,
+        &user,
+        &first.id,
+        &session,
+        "call-2",
+        "later voice task",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        first.active_turn.as_ref().unwrap().initiating_message_seq,
+        Some(1)
+    );
+    assert!(matches!(
+        Box::pin(begin_turn_with_voice(
+            &db,
+            &user,
+            &request(Some(&first.id), "first voice task"),
+            &state.encryption_keys,
+            Some(&a.id)
+        ))
+        .await,
+        Err(AppError::AssistantTurnActive)
+    ));
+    let credential =
+        credentials::load_for_conversation(&db, &state.encryption_keys, &user, &first.id)
+            .await
+            .unwrap()
+            .unwrap();
+    Box::pin(finish_turn(
+        &db,
+        &first,
+        &credential.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: "done".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    ))
+    .await
+    .unwrap();
+    let claimed = Box::pin(begin_turn_with_voice(
+        &db,
+        &user,
+        &request(Some(&first.id), "first voice task"),
+        &state.encryption_keys,
+        Some(&a.id),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(claimed.active_turn.as_ref().unwrap().turn_id, a.turn_id);
+    assert_eq!(
+        claimed.active_turn.as_ref().unwrap().initiating_message_seq,
+        Some(a.message_seq)
+    );
+    let history = messages(&db, &user, &first.id, 100, None).await.unwrap();
+    assert_eq!(history.iter().filter(|m| m.id == a.message_id).count(), 1);
+    assert!(
+        !history
+            .iter()
+            .find(|m| m.id == a.message_id)
+            .unwrap()
+            .execution_pending
+    );
+    assert!(
+        history
+            .iter()
+            .find(|m| m.id == b.message_id)
+            .unwrap()
+            .execution_pending
+    );
+    use crate::services::assistant_acknowledgement_service as acks;
+    let chat = acks::for_key(&db, &user, Some(&credential.api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let card = Box::pin(acks::request(
+        &db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("test_action"),
+            arguments: Some(&json!({"id":"x"})),
+            summary: "Delete the selected object",
+            platform: false,
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(card.requested_turn_id.as_deref(), Some(a.turn_id.as_str()));
+    assert_eq!(card.voice_request_id.as_deref(), Some(a.id.as_str()));
+    assert!(acks::refusal(&card).get("confirm_phrase").is_none());
+    // Simulate a still-pending card created before the voice association existed.
+    db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&card.id},
+            doc! {"$unset":{"voice_request_id":""}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+        .update_one(
+            doc! {"_id":&a.id},
+            doc! {"$set":{"state":"claimed","pending_acknowledgement_ids":[]}},
+        )
+        .await
+        .unwrap();
+    let reused = Box::pin(acks::request(
+        &db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("test_action"),
+            arguments: Some(&json!({"id":"x"})),
+            summary: "A replacement summary must not win",
+            platform: false,
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(reused.id, card.id);
+    assert_eq!(reused.summary, card.summary);
+    assert_eq!(reused.arguments_digest, card.arguments_digest);
+    assert_eq!(reused.voice_request_id.as_deref(), Some(a.id.as_str()));
+    let pending = voice::get(&db, &user, &first.id, &a.id).await.unwrap();
+    assert_eq!(
+        pending.state,
+        crate::models::assistant_voice::RequestState::AwaitingConfirmation
+    );
+    assert_eq!(pending.pending_acknowledgement_ids, vec![card.id.clone()]);
+    // Click and a future authoritative voice decision share this transaction.
+    let (click, voice_decision) = tokio::join!(
+        Box::pin(acks::decide(&db, &user, &first.id, &card.id, true)),
+        Box::pin(acks::decide(&db, &user, &first.id, &card.id, false))
+    );
+    assert_ne!(click.is_ok(), voice_decision.is_ok());
+    let decision = click.or(voice_decision).unwrap();
+    let continuation = voice::get(
+        &db,
+        &user,
+        &first.id,
+        decision.continuation_receipt_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        continuation.parent_turn_id.as_deref(),
+        Some(a.turn_id.as_str())
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .count_documents(doc! {"source_id":format!("ack:{}",card.id)})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        Box::pin(acks::decide(&db, &user, &first.id, &card.id, true))
+            .await
+            .is_err()
+    );
+    voice::cancel(&db, &user, &first.id, &b.id).await.unwrap();
+    assert!(
+        !stop_requested(&db, &user, &first.id, &a.turn_id)
+            .await
+            .unwrap()
+    );
+    voice::cancel(&db, &user, &first.id, &a.id).await.unwrap();
+    assert!(
+        stop_requested(&db, &user, &first.id, &a.turn_id)
+            .await
+            .unwrap()
+    );
+    Box::pin(finish_turn(
+        &db,
+        &claimed,
+        &credential.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(TurnError::new("cancelled")),
+        },
+    ))
+    .await
+    .unwrap();
+    let input = messages(&db, &user, &first.id, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == continuation.message_id)
+        .unwrap()
+        .text;
+    assert!(matches!(
+        Box::pin(begin_turn_with_voice(
+            &db,
+            &user,
+            &request(Some(&first.id), &input),
+            &state.encryption_keys,
+            Some(&continuation.id)
+        ))
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn voice_queue_bounds_concurrent_admission_and_never_replays_lost_claims() {
+    Box::pin(async {
+        use crate::models::assistant_voice::{REQUESTS, RequestState, VoiceRequest};
+        use crate::services::{assistant_voice as voice, feature_flag_service as flags};
+        let db = connect_transaction_test_database("voice_queue_races").await;
+        ensure_indexes(&db).await.unwrap();
+        voice::ensure_indexes(&db).await.unwrap();
+        let user = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&user, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        flags::set_platform_override(
+            &db,
+            flags::ASSISTANT_VOICE_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            &user,
+        )
+        .await
+        .unwrap();
+        let first = Box::pin(begin_turn(
+            &db,
+            &user,
+            &request(None, "original"),
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let session = Uuid::new_v4().to_string();
+        let admissions = futures::future::join_all((0..11).map(|i| {
+            let (db, user, conversation, session) = (&db, &user, &first.id, &session);
+            async move {
+                voice::enqueue(
+                    db,
+                    user,
+                    conversation,
+                    session,
+                    &format!("source-{i}"),
+                    "queued",
+                )
+                .await
+            }
+        }))
+        .await;
+        assert_eq!(admissions.iter().filter(|r| r.is_ok()).count(), 10);
+        assert_eq!(
+            admissions
+                .iter()
+                .filter(|r| matches!(r, Err(AppError::VoiceQueueFull)))
+                .count(),
+            1
+        );
+        let credential =
+            credentials::load_for_conversation(&db, &state.encryption_keys, &user, &first.id)
+                .await
+                .unwrap()
+                .unwrap();
+        Box::pin(finish_turn(
+            &db,
+            &first,
+            &credential.api_key_id,
+            &Uuid::new_v4().to_string(),
+            &TurnResult {
+                text: "done".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        ))
+        .await
+        .unwrap();
+        let next = db
+            .collection::<VoiceRequest>(REQUESTS)
+            .find_one(doc! {"state":"queued"})
+            .sort(doc! {"message_seq":1})
+            .await
+            .unwrap()
+            .unwrap();
+        let later = db
+            .collection::<VoiceRequest>(REQUESTS)
+            .find_one(doc! {"state":"queued","message_seq":{"$gt":next.message_seq}})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            Box::pin(begin_turn_with_voice(
+                &db,
+                &user,
+                &request(Some(&first.id), "queued"),
+                &state.encryption_keys,
+                Some(&later.id)
+            ))
+            .await,
+            Err(AppError::AssistantTurnActive)
+        ));
+        assert_eq!(
+            voice::get(&db, &user, &first.id, &later.id)
+                .await
+                .unwrap()
+                .state,
+            RequestState::Queued
+        );
+        assert!(matches!(
+            Box::pin(begin_turn_with_voice(
+                &db,
+                &user,
+                &request(Some(&first.id), "substituted input"),
+                &state.encryption_keys,
+                Some(&next.id)
+            ))
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        let start = request(Some(&first.id), "queued");
+        let (one, two) = tokio::join!(
+            Box::pin(begin_turn_with_voice(
+                &db,
+                &user,
+                &start,
+                &state.encryption_keys,
+                Some(&next.id)
+            )),
+            Box::pin(begin_turn_with_voice(
+                &db,
+                &user,
+                &start,
+                &state.encryption_keys,
+                Some(&next.id)
+            ))
+        );
+        assert_ne!(one.is_ok(), two.is_ok());
+        let claimed = one.or(two).unwrap();
+        let old = bson::DateTime::from_chrono(Utc::now() - chrono::Duration::hours(2));
+        db.collection::<bson::Document>(REQUESTS)
+            .update_one(doc! {"_id":&next.id}, doc! {"$set":{"created_at":old}})
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&claimed.id},
+                doc! {"$set":{"active_turn.started_at":old}},
+            )
+            .await
+            .unwrap();
+        voice::recover(&db).await.unwrap();
+        voice::recover(&db).await.unwrap();
+        let recovered = voice::get(&db, &user, &first.id, &next.id).await.unwrap();
+        assert_eq!(recovered.state, RequestState::Cancelled);
+        assert!(matches!(
+            Box::pin(begin_turn_with_voice(
+                &db,
+                &user,
+                &start,
+                &state.encryption_keys,
+                Some(&next.id)
+            ))
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+    })
+    .await;
 }

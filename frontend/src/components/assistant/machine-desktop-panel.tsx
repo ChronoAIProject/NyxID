@@ -1,10 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ExternalLink, Maximize2, Monitor } from "lucide-react";
+import {
+  ExternalLink,
+  Maximize2,
+  Minimize2,
+  ChevronDown,
+  Monitor,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppForm } from "@/components/ui/form";
 import { usePublicConfig } from "@/hooks/use-public-config";
+import { useMachineContexts } from "@/hooks/use-machine-access";
 import { useMachineDesktops } from "@/hooks/use-machines";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   desktopFrame,
   desktopInput,
@@ -19,11 +33,44 @@ export function MachineDesktopPanel({
   nodeId,
   conversationId,
   reason,
+  name,
+  turnActive,
+  initialDisplay = "secure",
+  initialContextId,
 }: {
   readonly nodeId: string;
   readonly conversationId?: string;
   readonly reason?: string | null;
+  readonly name?: string;
+  readonly turnActive?: boolean;
+  readonly initialDisplay?: "secure" | "dev";
+  readonly initialContextId?: string | null;
 }) {
+  const collapseKey = conversationId
+    ? `nyxid:desktop-collapsed:${conversationId}:${nodeId}:${initialContextId ?? "legacy"}`
+    : null;
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return collapseKey ? localStorage.getItem(collapseKey) === "1" : false;
+    } catch {
+      return false;
+    }
+  });
+  const [activityAt, setActivityAt] = useState(0);
+  const [machineName, setMachineName] = useState(name);
+  const collapse = useCallback(
+    (value: boolean) => {
+      setCollapsed(value);
+      if (collapseKey) {
+        try {
+          localStorage.setItem(collapseKey, value ? "1" : "0");
+        } catch {
+          /* Storage may be disabled. */
+        }
+      }
+    },
+    [collapseKey],
+  );
   const canvas = useRef<HTMLCanvasElement>(null);
   const panel = useRef<HTMLElement>(null);
   const socket = useRef<WebSocket | null>(null);
@@ -37,13 +84,34 @@ export function MachineDesktopPanel({
     id: number;
     button: string;
   } | null>(null);
+  const [display, setDisplay] = useState<"secure" | "dev">(initialDisplay);
+  const [contextId, setContextId] = useState<string | undefined>(
+    initialContextId ?? undefined,
+  );
+  useEffect(() => {
+    setContextId(initialContextId ?? undefined);
+  }, [initialContextId]);
   const [attempt, setAttempt] = useState(0);
   const [connected, setConnected] = useState(false);
   const [controls, setControls] = useState(false);
   const [controller, setController] = useState("agent");
   const [action, setAction] = useState("");
   const [error, setError] = useState<string>();
+  const wasActive = useRef(Boolean(turnActive));
+  useEffect(() => {
+    if (turnActive) {
+      wasActive.current = true;
+      return;
+    }
+    if (!wasActive.current || controls || controller === "requested") return;
+    const timer = setTimeout(
+      () => collapse(true),
+      Math.max(0, 3000 - (Date.now() - activityAt)),
+    );
+    return () => clearTimeout(timer);
+  }, [turnActive, activityAt, controls, controller, collapse]);
   const { data: config } = usePublicConfig();
+  const contexts = useMachineContexts(nodeId);
   const control = useCallback((type: string, note?: string) => {
     if (socket.current?.readyState === WebSocket.OPEN)
       socket.current.send(JSON.stringify({ type, note }));
@@ -51,7 +119,13 @@ export function MachineDesktopPanel({
   useEffect(() => {
     const target = canvas.current;
     const ws = new WebSocket(
-      desktopUrl(nodeId, conversationId, config?.node_ws_url),
+      desktopUrl(
+        nodeId,
+        conversationId,
+        config?.node_ws_url,
+        display,
+        contextId,
+      ),
     );
     session.current = "";
     sequence.current = 0n;
@@ -107,6 +181,7 @@ export function MachineDesktopPanel({
         if (update) {
           activity = update;
           setAction(update.tool.replaceAll("_", " "));
+          setActivityAt(Date.now());
           paint();
           return;
         }
@@ -170,6 +245,7 @@ export function MachineDesktopPanel({
             message.type === "connected" &&
             typeof message.session_id === "string"
           ) {
+            if (typeof message.name === "string") setMachineName(message.name);
             session.current = message.session_id;
             sequence.current = 0n;
             setConnected(true);
@@ -225,7 +301,7 @@ export function MachineDesktopPanel({
       ws.close();
       target?.getContext("2d")?.clearRect(0, 0, target.width, target.height);
     };
-  }, [nodeId, conversationId, config?.node_ws_url, attempt]);
+  }, [nodeId, conversationId, config?.node_ws_url, attempt, display, contextId]);
   const input = useCallback(
     (tool: string, args: Record<string, unknown>) => {
       if (
@@ -290,9 +366,66 @@ export function MachineDesktopPanel({
       data-private="true"
       data-ph-no-capture
     >
+      <div
+        role="group"
+        aria-label="Desktop display"
+        className="flex flex-wrap gap-1"
+      >
+        {(["secure", "dev"] as const).map((value) => (
+          <Button
+            key={value}
+            size="sm"
+            variant={display === value ? "secondary" : "ghost"}
+            aria-pressed={display === value}
+            disabled={controls && display !== value}
+            onClick={() => {
+              setConnected(false);
+              setDisplay(value);
+            }}
+          >
+            {value === "secure" ? "Secure browser" : "Dev browser"}
+          </Button>
+        ))}
+        {controls ? (
+          <span className="self-center text-muted-foreground">
+            Hand back to switch displays.
+          </span>
+        ) : null}
+      </div>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">Workspace and browser</span>
+        <Select
+          value={contextId ?? "legacy"}
+          onValueChange={(value) => {
+            setConnected(false);
+            setContextId(value === "legacy" ? undefined : value);
+          }}
+          disabled={controls}
+        >
+          <SelectTrigger aria-label="Desktop context" className="max-w-full sm:w-80">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="legacy">Shared legacy desktop</SelectItem>
+            {(contexts.data ?? []).map((context) => (
+              <SelectItem key={context.context_id} value={context.context_id}>
+                {context.agent_name} · {context.actor_label}
+                {context.group_id ? " · group task" : ""} · generation {context.generation}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {contexts.isError ? (
+          <span role="status" className="text-muted-foreground">
+            Separated contexts are unavailable on this machine.
+          </span>
+        ) : null}
+      </div>
       <div className="flex flex-wrap items-center gap-2">
         <Monitor className="size-4" />
-        <span className="font-medium">Live desktop</span>
+        <span className="min-w-0 max-w-48 truncate font-medium">
+          {machineName ?? name ?? nodeId}
+        </span>
         <span className="text-muted-foreground">
           {!connected
             ? "Connecting…"
@@ -302,6 +435,22 @@ export function MachineDesktopPanel({
                 ? "Owner in control in another tab"
                 : "Watching the agent"}
         </span>
+        {conversationId ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label={collapsed ? "Show desktop" : "Minimise desktop"}
+            aria-expanded={!collapsed}
+            onClick={() => collapse(!collapsed)}
+          >
+            {collapsed ? <ChevronDown /> : <Minimize2 />}
+          </Button>
+        ) : null}
+        {collapsed && action ? (
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">
+            {action}
+          </span>
+        ) : null}
         <Button
           size="sm"
           variant="ghost"
@@ -318,7 +467,7 @@ export function MachineDesktopPanel({
           aria-label="Pop out desktop"
           onClick={() =>
             window.open(
-              `/assistant/machines/${encodeURIComponent(nodeId)}/desktop${conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ""}`,
+              `/assistant/machines/${encodeURIComponent(nodeId)}/desktop?display=${display}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}${contextId ? `&context_id=${encodeURIComponent(contextId)}` : ""}`,
               "_blank",
               "noopener,noreferrer",
             )
@@ -332,120 +481,123 @@ export function MachineDesktopPanel({
           NyxBot needs you on this machine: {reason ?? "Please take control."}
         </p>
       ) : null}
-      <canvas
-        ref={canvas}
-        width={1280}
-        height={800}
-        tabIndex={controls ? 0 : -1}
-        aria-label="Machine screen. Take control to use mouse and keyboard."
-        className={`block max-h-[65vh] w-full rounded-lg bg-background object-contain focus:outline-none focus:ring-1 focus:ring-primary ${controls ? "cursor-crosshair" : "cursor-default"}`}
-        onPointerMove={(event) => {
-          const position = point(event);
-          if (
-            position &&
-            !pointer.current &&
-            performance.now() - lastMove.current > 40
-          ) {
-            lastMove.current = performance.now();
-            input("move_cursor", position);
-          }
-        }}
-        onPointerDown={(event) => {
-          const position = point(event);
-          if (!controls || !position) return;
-          event.preventDefault();
-          event.currentTarget.focus();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          pointer.current = {
-            ...position,
-            at: performance.now(),
-            id: event.pointerId,
-            button:
-              event.button === 2
-                ? "right"
-                : event.button === 1
-                  ? "middle"
-                  : "left",
-          };
-        }}
-        onPointerUp={(event) => {
-          const start = pointer.current;
-          pointer.current = null;
-          if (!start || start.id !== event.pointerId) return;
-          event.currentTarget.releasePointerCapture(event.pointerId);
-          const end = point(event);
-          if (!end) return;
-          if (Math.hypot(end.x - start.x, end.y - start.y) > 4)
-            input("drag", {
-              from_x: start.x,
-              from_y: start.y,
-              to_x: end.x,
-              to_y: end.y,
-              button: start.button,
-              duration_ms: Math.min(
-                10000,
-                Math.round(performance.now() - start.at),
-              ),
-            });
-          else input("click", { ...end, button: start.button, count: 1 });
-        }}
-        onPointerCancel={() => {
-          pointer.current = null;
-        }}
-        onDoubleClick={(event) => {
-          const position = point(event);
-          if (position)
-            input("click", { ...position, button: "left", count: 2 });
-        }}
-        onContextMenu={(event) => {
-          if (controls) event.preventDefault();
-        }}
-        onCompositionEnd={(event) => {
-          if (controls && event.data) input("type_text", { text: event.data });
-        }}
-        onPaste={(event) => {
-          if (controls) {
+      <div hidden={collapsed}>
+        <canvas
+          ref={canvas}
+          width={1280}
+          height={800}
+          tabIndex={controls ? 0 : -1}
+          aria-label="Machine screen. Take control to use mouse and keyboard."
+          className={`block max-h-[65vh] w-full rounded-lg bg-background object-contain focus:outline-none focus:ring-1 focus:ring-primary ${controls ? "cursor-crosshair" : "cursor-default"}`}
+          onPointerMove={(event) => {
+            const position = point(event);
+            if (
+              position &&
+              !pointer.current &&
+              performance.now() - lastMove.current > 40
+            ) {
+              lastMove.current = performance.now();
+              input("move_cursor", position);
+            }
+          }}
+          onPointerDown={(event) => {
+            const position = point(event);
+            if (!controls || !position) return;
             event.preventDefault();
-            input("type_text", {
-              text: event.clipboardData.getData("text/plain").slice(0, 8192),
-            });
-          }
-        }}
-        onKeyDown={(event) => {
-          if (
-            !controls ||
-            event.nativeEvent.isComposing ||
-            event.key === "Shift" ||
-            event.key === "Control" ||
-            event.key === "Alt" ||
-            event.key === "Meta"
-          )
-            return;
-          if (
-            (event.metaKey || event.ctrlKey) &&
-            event.key.toLowerCase() === "v"
-          )
-            return;
-          event.preventDefault();
-          const modifiers = [
-            event.ctrlKey && "CTRL",
-            event.metaKey && "META",
-            event.altKey && "ALT",
-            event.shiftKey && "SHIFT",
-          ].filter(Boolean);
-          if (
-            event.key.length === 1 &&
-            !event.ctrlKey &&
-            !event.metaKey &&
-            !event.altKey
-          )
-            input("type_text", { text: event.key });
-          else if (modifiers.length)
-            input("hotkey", { keys: [...modifiers, desktopKey(event.key)] });
-          else input("press_key", { key: desktopKey(event.key) });
-        }}
-      />
-      {action && !controls && controller === "agent" ? (
+            event.currentTarget.focus();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            pointer.current = {
+              ...position,
+              at: performance.now(),
+              id: event.pointerId,
+              button:
+                event.button === 2
+                  ? "right"
+                  : event.button === 1
+                    ? "middle"
+                    : "left",
+            };
+          }}
+          onPointerUp={(event) => {
+            const start = pointer.current;
+            pointer.current = null;
+            if (!start || start.id !== event.pointerId) return;
+            event.currentTarget.releasePointerCapture(event.pointerId);
+            const end = point(event);
+            if (!end) return;
+            if (Math.hypot(end.x - start.x, end.y - start.y) > 4)
+              input("drag", {
+                from_x: start.x,
+                from_y: start.y,
+                to_x: end.x,
+                to_y: end.y,
+                button: start.button,
+                duration_ms: Math.min(
+                  10000,
+                  Math.round(performance.now() - start.at),
+                ),
+              });
+            else input("click", { ...end, button: start.button, count: 1 });
+          }}
+          onPointerCancel={() => {
+            pointer.current = null;
+          }}
+          onDoubleClick={(event) => {
+            const position = point(event);
+            if (position)
+              input("click", { ...position, button: "left", count: 2 });
+          }}
+          onContextMenu={(event) => {
+            if (controls) event.preventDefault();
+          }}
+          onCompositionEnd={(event) => {
+            if (controls && event.data)
+              input("type_text", { text: event.data });
+          }}
+          onPaste={(event) => {
+            if (controls) {
+              event.preventDefault();
+              input("type_text", {
+                text: event.clipboardData.getData("text/plain").slice(0, 8192),
+              });
+            }
+          }}
+          onKeyDown={(event) => {
+            if (
+              !controls ||
+              event.nativeEvent.isComposing ||
+              event.key === "Shift" ||
+              event.key === "Control" ||
+              event.key === "Alt" ||
+              event.key === "Meta"
+            )
+              return;
+            if (
+              (event.metaKey || event.ctrlKey) &&
+              event.key.toLowerCase() === "v"
+            )
+              return;
+            event.preventDefault();
+            const modifiers = [
+              event.ctrlKey && "CTRL",
+              event.metaKey && "META",
+              event.altKey && "ALT",
+              event.shiftKey && "SHIFT",
+            ].filter(Boolean);
+            if (
+              event.key.length === 1 &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              !event.altKey
+            )
+              input("type_text", { text: event.key });
+            else if (modifiers.length)
+              input("hotkey", { keys: [...modifiers, desktopKey(event.key)] });
+            else input("press_key", { key: desktopKey(event.key) });
+          }}
+        />
+      </div>
+      {!collapsed && action && !controls && controller === "agent" ? (
         <p className="text-muted-foreground" aria-live="polite">
           Agent action: {action}
         </p>
@@ -530,18 +682,31 @@ function DesktopControls({
 
 export function ConversationMachineDesktops({
   conversationId,
+  turnActive,
 }: {
   readonly conversationId: string;
+  readonly turnActive?: boolean;
 }) {
   const machines = useMachineDesktops(conversationId);
-  return machines.data?.length ? (
+  const desktops = [
+    ...new Map(
+      (machines.data ?? []).map((machine) => [
+        `${machine.node_id}:${machine.context_id ?? "legacy"}:${machine.display ?? "secure"}`,
+        machine,
+      ]),
+    ).values(),
+  ];
+  return desktops.length ? (
     <div className="mx-auto w-full max-w-[758px] space-y-3 px-4 pb-3">
-      {machines.data.map((machine) => (
+      {desktops.map((machine) => (
         <MachineDesktopPanel
-          key={machine.node_id}
+          key={`${machine.node_id}:${machine.context_id ?? "legacy"}:${machine.display ?? "secure"}`}
           nodeId={machine.node_id}
           conversationId={conversationId}
           reason={machine.reason}
+          initialDisplay={machine.display}
+          initialContextId={machine.context_id}
+          turnActive={turnActive}
         />
       ))}
     </div>

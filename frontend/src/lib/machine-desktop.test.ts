@@ -36,6 +36,9 @@ describe("desktop transport and input", () => {
     ).toBe(
       "wss://nyxid.example/api/v1/assistant/nyxagent/machines/node/desktop?conversation_id=thread",
     );
+    expect(
+      desktopUrl("node", "thread", "https://nyxid.example/api/v1/nodes/ws", "secure", "ctx-1"),
+    ).toContain("context_id=ctx-1");
   });
 });
 

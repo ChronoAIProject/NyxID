@@ -470,6 +470,12 @@ pub async fn forward_trigger_event(
     let user_id =
         uuid::Uuid::parse_str(owner_user_id).map_err(|_| AppError::TriggerDeliveryUnsupported)?;
     let auth_user = AuthUser {
+        org_agent_access: None,
+        assistant_group_id: None,
+        assistant_agent_owner_id: None,
+        assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
         user_id,
         session_id: None,
         scope: String::new(),
@@ -621,6 +627,7 @@ fn build_device_callback_payload(
         .map_err(|e| AppError::Internal(format!("failed to serialize event envelope: {e}")))?;
 
     Ok(CallbackPayload {
+        thread_context: None,
         activity: None,
         // NyxID-assigned message id so async replies via /channel-relay/reply
         // resolve to the persisted ChannelMessage. The client-supplied
@@ -783,6 +790,9 @@ mod tests {
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,

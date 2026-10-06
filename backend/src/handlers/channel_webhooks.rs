@@ -344,13 +344,33 @@ async fn handle_webhook_inner(
     .await
 }
 
-async fn handle_webhook_inner_with_deps(
+type WebhookResult = Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>;
+
+fn handle_webhook_inner_with_deps<'a>(
+    state: WebhookHandlerDeps<'a>,
+    bot_id: &'a str,
+    expected_platform: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+) -> futures::future::BoxFuture<'a, WebhookResult> {
+    // Construct the large dispatch future outside caller poll frames, including
+    // concurrent deliveries. Signature verification and admission stay inside.
+    Box::pin(handle_webhook_inner_impl(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+    ))
+}
+
+async fn handle_webhook_inner_impl(
     state: WebhookHandlerDeps<'_>,
     bot_id: &str,
     expected_platform: &str,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+) -> WebhookResult {
     // Look up the bot
     let bot = match channel_bot_service::get_bot(state.db, bot_id).await {
         Ok(b) => b,
@@ -1245,6 +1265,7 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
             agent_key_login_sweep_interval_secs: 60,
@@ -1504,6 +1525,9 @@ mod tests {
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,

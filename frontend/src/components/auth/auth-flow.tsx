@@ -23,9 +23,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { Mail } from "lucide-react";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { AUTH_PROVIDER_ICONS } from "@/components/auth/provider-icons";
 import { LoginMethods } from "@/components/auth/login-methods";
+import { LoginProviderRow } from "@/components/auth/login-provider-row";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -68,7 +70,7 @@ const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
     "This invite code has already been redeemed with this account.",
 };
 
-// Social provider buttons for the register methods panel (full-width list style)
+// Social provider rows for the register methods panel (same rows as login)
 const REGISTER_PROVIDERS = [
   {
     id: "google",
@@ -402,7 +404,9 @@ export function AuthFlow({
           style={{ transform: showEmailForm ? "translateX(-50%)" : "translateX(0)" }}
         >
         {/* Register Panel 1 — Method Selection */}
-        <div className="w-1/2 shrink-0">
+        <div
+          className={`w-1/2 shrink-0 transition-[visibility] duration-300 ${showEmailForm ? "invisible" : "visible"}`}
+        >
           <div className="mb-8">
             <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
               Create your account
@@ -499,50 +503,35 @@ export function AuthFlow({
           </Form>
           )}
 
-          {/* Step 2: Choose Method (becomes Step 1 when invite not required) */}
+          {/* Step 2: Choose Method (unlabelled, like login, when invite not required) */}
           <div className={`relative ${inviteRequired ? "pl-9" : ""}`}>
             {inviteRequired && (
+            <>
             <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-11 font-semibold text-nyx-secondary-400">
               2
             </div>
-            )}
             <p className="mb-3 text-13 font-medium leading-6 text-muted-foreground">
               Choose how to sign up
             </p>
+            </>
+            )}
 
             <div className="flex flex-col gap-2.5">
               {enabledProviders.map((provider) => (
-                <button
+                <LoginProviderRow
                   key={provider.id}
-                  type="button"
+                  icon={provider.icon}
+                  label={provider.label}
                   onClick={() => handleRegisterSocialLogin(provider.id)}
-                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-13 font-medium text-foreground transition-colors duration-200 hover:border-hairline-strong hover:bg-overlay active:scale-[0.99]"
-                >
-                  {provider.icon}
-                  {provider.label}
-                </button>
+                />
               ))}
 
               {emailAuthEnabled && (
-                <button
-                  type="button"
+                <LoginProviderRow
+                  icon={<Mail className="h-4 w-4" />}
+                  label="Continue with Email"
                   onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
-                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-13 font-medium text-foreground transition-colors duration-200 hover:border-hairline-strong hover:bg-overlay active:scale-[0.99]"
-                >
-                  <svg
-                    className="h-4 w-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <rect x="2" y="4" width="20" height="16" rx="2" />
-                    <path d="M22 7l-10 6L2 7" />
-                  </svg>
-                  Continue with Email
-                </button>
+                />
               )}
             </div>
           </div>
@@ -562,7 +551,7 @@ export function AuthFlow({
 
         {/* Register Panel 2 — Email Registration */}
         <div
-          className="w-1/2 shrink-0"
+          className={`w-1/2 shrink-0 transition-[visibility] duration-300 ${showEmailForm ? "visible" : "invisible"}`}
           onKeyDown={(e) => {
             if (e.key === "Escape") slideToPanel(1);
           }}

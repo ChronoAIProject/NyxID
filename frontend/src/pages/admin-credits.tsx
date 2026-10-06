@@ -42,7 +42,7 @@ import {
   type ScheduleForm,
 } from "@/schemas/billing-credits";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite } from "@/types/api";
+import { canAdminWrite, canManageCreditGrants } from "@/types/api";
 import {
   AllowanceDialog,
   GrantDialog,
@@ -105,6 +105,7 @@ const GRANTS_PER_PAGE = 50;
 export function AdminCreditsPage() {
   const currentUser = useAuthStore((state) => state.user);
   const canWrite = canAdminWrite(currentUser);
+  const canManageGrants = canManageCreditGrants(currentUser);
   const [grantPage, setGrantPage] = useState(1);
   const grantsQuery = useAdminCreditGrants(grantPage, GRANTS_PER_PAGE);
   const allowancesQuery = useAdminAllowances();
@@ -431,7 +432,7 @@ export function AdminCreditsPage() {
             <p className="text-12 text-muted-foreground">
               Promotional credits are consumed before purchased wallet credits.
             </p>
-            {canWrite ? (
+            {canManageGrants ? (
               <Button size="sm" variant="primary" onClick={openGrantDialog}>
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
@@ -450,7 +451,7 @@ export function AdminCreditsPage() {
           ) : (
             <CreditGrantsTable
               grants={grantsQuery.data?.grants ?? []}
-              canWrite={canWrite}
+              canWrite={canManageGrants}
               revokePending={revokeGrant.isPending}
               page={grantsQuery.data?.page ?? grantPage}
               perPage={grantsQuery.data?.per_page ?? GRANTS_PER_PAGE}

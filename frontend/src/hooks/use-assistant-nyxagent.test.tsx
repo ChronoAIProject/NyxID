@@ -308,7 +308,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
   }, 8000,
 );
 
-it.each(["specialist", "automation"])(
+it.each(["specialist", "automation", "voice"])(
   "leaves %s confirmation continuation to the server",
   async (kind) => {
     page.conversation.active_turn = null;
@@ -321,6 +321,8 @@ it.each(["specialist", "automation"])(
         summary: "Use GitHub",
         decider: kind === "specialist" ? "orchestrator" : "user",
         trigger_run_id: kind === "automation" ? "run-id" : null,
+        continuation_owner: kind === "voice" ? "server" : null,
+        continuation_receipt_id: kind === "voice" ? "12345678-1234-4123-8123-123456789013" : null,
         decided_by: null,
         reason: null,
         service_slug: "github",

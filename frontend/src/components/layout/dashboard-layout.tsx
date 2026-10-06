@@ -205,6 +205,7 @@ const SIDEBAR_ITEMS: Record<string, string> = {
   "/admin/invite-codes": "Invite Codes",
   "/admin/feature-flags": "Feature Flags",
   "/admin/platform-credentials": "Platform Credentials",
+  "/admin/upload-retention": "Upload retention",
   "/admin/nodes": "Nodes",
   "/admin/ownership": "Ownership transfers",
   "/admin/services": "Services",
@@ -667,7 +668,7 @@ function MobileNav({
                   </span>
                 </div>
                 <div className="flex flex-col gap-0.5">
-                  {ADMIN_NAV.filter((item) => item.to !== "/admin/platform-credentials" || canAdminWrite(user)).map((item) => (
+                  {ADMIN_NAV.filter((item) => !["/admin/platform-credentials", "/admin/upload-retention"].includes(item.to) || canAdminWrite(user)).map((item) => (
                     <MobileNavItem
                       key={item.to}
                       item={item}

@@ -47,6 +47,8 @@ export interface ProfileConfig {
 
 export interface UserCapabilities {
   readonly billing_available?: boolean;
+  /** Admin, or Operator with the Credits Manager role. Older backends omit it. */
+  readonly manage_credit_grants?: boolean;
   /**
    * Feature-flag keys enabled for this user in the personal (non-org) context,
    * resolved server-side. Powers `useFeature(flag)` with no org. Optional so
@@ -95,6 +97,18 @@ export function canAdminWrite(
 ): boolean {
   if (!user) return false;
   return resolvePlatformRole(user) === "admin";
+}
+
+/// True if the user may issue and revoke one-off credit grants: every admin,
+/// plus operators the backend reports as holding the Credits Manager role.
+/// Allowances and schedules remain gated by `canAdminWrite`.
+export function canManageCreditGrants(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return canAdminWrite(user) || user?.capabilities?.manage_credit_grants === true;
 }
 
 export interface ApiKey {
@@ -346,6 +360,7 @@ export interface WsFrameInjection {
 }
 
 export interface ServiceCapabilities {
+  readonly supports_realtime_voice?: boolean;
   readonly supports_proxy_read: boolean;
   readonly supports_proxy_write: boolean;
   readonly supports_proxy_binary_upload: boolean;

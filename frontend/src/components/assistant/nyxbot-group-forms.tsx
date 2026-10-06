@@ -22,6 +22,12 @@ import {
   useAppForm,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useOrgs } from "@/hooks/use-orgs";
+import { useOrgMembers } from "@/hooks/use-org-members";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   useCreateNyxBotGroup,
   useDeleteNyxBotGroup,
@@ -156,6 +162,49 @@ function AgentPicker({
   );
 }
 
+function GroupOwnerPicker({ value, onChange }: {
+  readonly value?: string;
+  readonly onChange: (id: string | undefined) => void;
+}) {
+  const orgs = useOrgs();
+  const enabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
+  return <div className="space-y-2">
+    <label htmlFor="group-owner" className="text-12 font-medium">Ownership</label>
+    <Select value={value ?? "personal"} onValueChange={(id) => onChange(id === "personal" ? undefined : id)}>
+      <SelectTrigger id="group-owner"><SelectValue /></SelectTrigger>
+      <SelectContent>
+        <SelectItem value="personal">Personal</SelectItem>
+        {(orgs.data ?? []).filter((org) => ["admin", "member"].includes(org.your_role)).map((org) =>
+          <SelectItem key={org.id} value={org.id} disabled={!enabled}>{org.display_name ?? org.slug}</SelectItem>)}
+      </SelectContent>
+    </Select>
+    {!enabled && (orgs.data?.length ?? 0) > 0 ? <p className="text-11 text-muted-foreground">Organization groups are not enabled yet.</p> : null}
+  </div>;
+}
+
+export function GroupParticipantPicker({ org, value, onChange }: {
+  readonly org: string;
+  readonly value: readonly string[];
+  readonly onChange: (ids: string[]) => void;
+}) {
+  const members = useOrgMembers(org);
+  const eligible = (members.data ?? []).filter((member) => !member.revoked_at && ["admin", "member"].includes(member.role));
+  return <div className="space-y-2">
+    <p className="text-12 font-medium">Participants ({value.length} of 16)</p>
+    <ul aria-label="Participants" className="assistant-scrollbar max-h-44 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+      {eligible.map((member) => <li key={member.user_id}>
+        <label className="flex items-center gap-2 text-12">
+          <Checkbox checked={value.includes(member.user_id)} disabled={value.length >= 16 && !value.includes(member.user_id)}
+            onCheckedChange={(checked) => onChange(checked ? [...value, member.user_id] : value.filter((id) => id !== member.user_id))} />
+          {member.display_name ?? "Member"}
+        </label>
+      </li>)}
+    </ul>
+    {members.isError ? <p role="alert" className="text-12 text-destructive">Could not load organization members.</p> : null}
+    <p className="text-11 text-muted-foreground">Only selected Admins and Members can read and participate. The creator is included when creating a group.</p>
+  </div>;
+}
+
 function GroupFields({
   form,
   rows,
@@ -214,19 +263,22 @@ export function NewGroupDialog({
   readonly onCreated: (group: AssistantGroup) => void;
 }) {
   const create = useCreateNyxBotGroup();
+  const userId = useAuthStore((state) => state.user?.id);
   const nyxbotId = nyxBotOf(agents)?.id;
   const form = useAppForm<AssistantGroupForm>({
     resolver: zodResolver(assistantGroupFormSchema),
     defaultValues: { name: "", member_agent_ids: nyxbotId ? [nyxbotId] : [] },
   });
   const [error, setError] = useState<string>();
+  const org = form.watch("org");
+  const people = form.watch("participant_user_ids") ?? [];
   const name = form.watch("name");
   const members = form.watch("member_agent_ids");
   // Agents may still be loading when the dialog opens; preselect NyxBot once known.
   useEffect(() => {
-    if (!nyxbotId || form.getValues("member_agent_ids").length) return;
+    if (org || !nyxbotId || form.getValues("member_agent_ids").length) return;
     form.setValue("member_agent_ids", [nyxbotId], { shouldDirty: false, shouldTouch: false });
-  }, [form, nyxbotId]);
+  }, [form, nyxbotId, org]);
 
   async function submit(values: AssistantGroupForm) {
     setError(undefined);
@@ -244,7 +296,7 @@ export function NewGroupDialog({
         if (!open && !create.isPending) onClose();
       }}
     >
-      <DialogContent scrollMode="body" className="z-[90] md:max-w-md">
+      <DialogContent scrollMode="body" className="md:max-w-md">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>New group</DialogTitle>
           <DialogDescription>
@@ -255,7 +307,15 @@ export function NewGroupDialog({
         <Form {...form}>
           <form noValidate onSubmit={form.handleSubmit(submit)}>
             <DialogBody className="space-y-4 pb-1">
-              <GroupFields form={form} rows={pickerRows(agents)} />
+              <GroupOwnerPicker value={org} onChange={(id) => {
+                form.setValue("org", id);
+                form.setValue("member_agent_ids", id ? [] : nyxbotId ? [nyxbotId] : []);
+                form.setValue("participant_user_ids", id && userId ? [userId] : undefined);
+              }} />
+              <GroupFields form={form} rows={pickerRows(agents.filter((agent) => org
+                ? agent.owner_kind === "org" && agent.owner_id === org
+                : true))} />
+              {org ? <GroupParticipantPicker org={org} value={people} onChange={(ids) => form.setValue("participant_user_ids", ids)} /> : null}
               {error ? (
                 <p role="alert" className="text-12 text-destructive">
                   {error}
@@ -297,6 +357,8 @@ export function GroupSettingsDialog({
   readonly onDeleted: () => void;
 }) {
   const update = useUpdateNyxBotGroup();
+  const org = group.owner?.type === "org" ? group.owner.id : undefined;
+  const canManage = !org || group.your_role === "creator" || group.your_role === "admin";
   const remove = useDeleteNyxBotGroup();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string>();
@@ -311,6 +373,8 @@ export function GroupSettingsDialog({
     resolver: zodResolver(assistantGroupFormSchema),
     defaultValues: {
       name: group.name,
+      participant_user_ids: group.participants?.map((person) => person.id),
+      lead_agent_id: org ? group.lead_agent_id : undefined,
       member_agent_ids: group.members.filter(alive).map((member) => member.id),
     },
   });
@@ -325,6 +389,8 @@ export function GroupSettingsDialog({
       await update.mutateAsync({
         id: group.id,
         ...(dirty.name ? { name: values.name } : {}),
+        ...(org && dirty.participant_user_ids ? { participant_user_ids: values.participant_user_ids } : {}),
+        ...(org && dirty.lead_agent_id ? { lead_agent_id: values.lead_agent_id } : {}),
         ...(dirty.member_agent_ids || goneMembers
           ? { member_agent_ids: values.member_agent_ids }
           : {}),
@@ -334,6 +400,13 @@ export function GroupSettingsDialog({
     } catch (cause) {
       setError(errorMessage(cause, "Could not save the group. Try again."));
     }
+  }
+
+  async function leaveGroup() {
+    try {
+      await update.mutateAsync({ id: group.id, leave: true });
+      onDeleted();
+    } catch (cause) { setError(errorMessage(cause, "Could not leave the group.")); }
   }
 
   async function deleteGroup() {
@@ -355,7 +428,7 @@ export function GroupSettingsDialog({
           if (!busy) onOpenChange(next);
         }}
       >
-        <DialogContent scrollMode="body" className="z-[90] md:max-w-md">
+        <DialogContent scrollMode="body" className="md:max-w-md">
           <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>Group settings</DialogTitle>
             <DialogDescription>{GROUP_ROUTING_COPY}</DialogDescription>
@@ -363,7 +436,20 @@ export function GroupSettingsDialog({
           <Form {...form}>
             <form aria-label="Group settings" noValidate onSubmit={form.handleSubmit(save)}>
               <DialogBody className="space-y-4 pb-1">
-                <GroupFields form={form} rows={pickerRows(agents, group)} />
+                {org ? <p className="text-12 text-muted-foreground">{group.owner?.name} · {canManage ? "You can manage this group." : "Only the creator and participating Admins manage this group."}</p> : null}
+                <fieldset disabled={!canManage} className="space-y-4">
+                  <GroupFields form={form} rows={pickerRows(agents.filter((agent) => org ? agent.owner_id === org : true), group)} />
+                  {org ? <>
+                    <GroupParticipantPicker org={org} value={form.watch("participant_user_ids") ?? []} onChange={(ids) => form.setValue("participant_user_ids", ids)} />
+                    <div className="space-y-2">
+                      <label htmlFor="group-lead" className="text-12 font-medium">Lead agent</label>
+                      <Select value={form.watch("lead_agent_id")} onValueChange={(id) => form.setValue("lead_agent_id", id)}>
+                        <SelectTrigger id="group-lead"><SelectValue /></SelectTrigger>
+                        <SelectContent>{agents.filter((agent) => members.includes(agent.id)).map((agent) => <SelectItem key={agent.id} value={agent.id}>{agentTitle(agent)}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </div>
+                  </> : null}
+                </fieldset>
                 {error ? (
                   <p role="alert" className="text-12 text-destructive">
                     {error}
@@ -384,7 +470,7 @@ export function GroupSettingsDialog({
                   variant="primary"
                   isLoading={update.isPending}
                   disabled={
-                    !(form.formState.isDirty || goneMembers) || !name.trim() || !members.length
+                    !canManage || !(form.formState.isDirty || goneMembers) || !name.trim() || !members.length
                   }
                 >
                   Save
@@ -392,7 +478,14 @@ export function GroupSettingsDialog({
               </DialogFooter>
             </form>
           </Form>
-          <section
+          {org ? <div className="space-y-2">
+            <p className="text-12 text-muted-foreground">
+              The creator or a participating Admin must remain. Leaving as the last participant deletes the group.
+              Wait for your running turns to finish before leaving or being removed.
+            </p>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => void leaveGroup()}>Leave group</Button>
+          </div> : null}
+          {canManage ? <section
             aria-label="Danger zone"
             className="mt-2 flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4"
           >
@@ -414,7 +507,7 @@ export function GroupSettingsDialog({
             >
               Delete
             </Button>
-          </section>
+          </section> : null}
         </DialogContent>
       </Dialog>
       <Dialog
@@ -423,7 +516,7 @@ export function GroupSettingsDialog({
           if (!next && !remove.isPending) setConfirmDelete(false);
         }}
       >
-        <DialogContent className="z-[90] md:max-w-md">
+        <DialogContent className="md:max-w-md">
           <DialogHeader>
             <DialogTitle>Delete {group.name}?</DialogTitle>
             <DialogDescription>

@@ -1,14 +1,14 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "0.40.0",
+  "version": "0.65.0",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs",
+    "build": "tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs",
     "build:credential-accept": "vite build --config vite.credential-accept.config.ts",
     "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs",
     "lint": "eslint .",

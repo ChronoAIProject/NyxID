@@ -32,6 +32,9 @@ pub struct BillingRouteContext {
     pub capture_tokens: bool,
     pub request_bytes: i64,
     pub requested_images: i64,
+    /// Duration reserved before forwarding a voice window. Ordinary routes use zero.
+    pub requested_voice_seconds: i64,
+    pub voice_initial_window: bool,
     /// Admin opt-in from the service's billing config: only services
     /// explicitly marked platform_billable charge the platform layer.
     pub(crate) service_platform_billable: bool,
@@ -153,6 +156,8 @@ impl BillingRouteContext {
                 }),
             request_bytes: 0,
             requested_images: 1,
+            requested_voice_seconds: 0,
+            voice_initial_window: false,
             service_platform_billable,
             platform_metered: false,
             platform_billable: false,
@@ -188,11 +193,19 @@ impl BillingRouteContext {
     }
 
     pub fn estimated_quantity(&self, metric: BillingMetric) -> i64 {
+        if self.requested_voice_seconds > 0 {
+            return match metric {
+                BillingMetric::VoiceSeconds => self.requested_voice_seconds,
+                BillingMetric::Requests => i64::from(self.voice_initial_window),
+                _ => 0,
+            };
+        }
         match metric {
             BillingMetric::Tokens | BillingMetric::InputTokens | BillingMetric::OutputTokens => {
                 crate::services::llm_usage_service::estimate_tokens_from_bytes(self.request_bytes)
             }
             BillingMetric::Images => self.requested_images,
+            BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens

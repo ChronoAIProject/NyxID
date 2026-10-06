@@ -26,13 +26,13 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 // `credential_mode: "both"` (platform OAuth app with BYO override, see
 // docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md), and this startup migration would
 // otherwise revert an ops-provisioned "both" back to "user" on every restart.
-// `twitter` is also excluded: its seed stays BYO-only, but an ops-provisioned
-// shared app ("both" or "admin") must survive this migration on restart.
+// `twitter` and `linkedin` are also excluded: their seeds stay BYO-only, but an
+// ops-provisioned shared app ("both" or "admin") must survive this migration
+// on restart.
 const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "facebook",
     "discord",
     "spotify",
-    "linkedin",
     "slack",
     "microsoft",
     "tiktok",
@@ -1536,6 +1536,7 @@ pub async fn seed_default_providers(
                 "email".to_string(),
                 "profile".to_string(),
                 "offline_access".to_string(),
+                "User.Read".to_string(),
             ]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1570,6 +1571,23 @@ pub async fn seed_default_providers(
         tracing::info!(slug = "microsoft", "Seeded default provider: Microsoft");
         seeded_count += 1;
     }
+
+    // The Microsoft Graph `/me` probe and profile tool require User.Read.
+    // Add it to the original system seed without overwriting an operator's
+    // customized scope list.
+    collection
+        .update_one(
+            doc! {
+                "slug": "microsoft",
+                "created_by": "system",
+                "default_scopes": { "$type": "array", "$nin": ["User.Read"] },
+            },
+            doc! {
+                "$addToSet": { "default_scopes": "User.Read" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(now) },
+            },
+        )
+        .await?;
 
     // 18. TikTok (OAuth2)
     if !slug_exists!("tiktok") {
@@ -3839,6 +3857,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         known_limitations: None,
     },
     DefaultServiceSeed {
+        provider_slug: "linkedin",
+        service_slug: "api-linkedin",
+        service_name: "LinkedIn",
+        base_url: "https://api.linkedin.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "LinkedIn profile and publishing tools for AI agents. Read the connected member profile and create posts with explicit approval.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.linkedin.com"),
+        auth_notes: Some(
+            "Connect a LinkedIn account using your LinkedIn developer app. The profile tool uses OpenID Connect scopes; publishing also requires the w_member_social permission.",
+        ),
+        known_limitations: Some(
+            "LinkedIn may require app review and product approval before publishing permissions are granted. Only the hosted profile and post operations are typed; other LinkedIn APIs remain available through the generic proxy.",
+        ),
+    },
+    DefaultServiceSeed {
         provider_slug: "discord",
         service_slug: "api-discord",
         service_name: "Discord API",
@@ -3897,19 +3938,25 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "microsoft",
         service_slug: "api-microsoft",
-        service_name: "Microsoft Graph API",
+        service_name: "Microsoft 365",
         base_url: "https://graph.microsoft.com/v1.0",
         injection_method: "bearer",
         injection_key: "Authorization",
         service_auth_method: None,
         service_auth_key_name: None,
-        description: None,
+        description: Some(
+            "Microsoft 365 mail, calendar, profile, and OneDrive tools for AI agents through Microsoft Graph.",
+        ),
         default_request_headers: None,
-        service_category: "internal",
-        requires_user_credential: false,
-        homepage_url: None,
-        auth_notes: None,
-        known_limitations: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.microsoft.com/microsoft-365"),
+        auth_notes: Some(
+            "Connect a Microsoft account using your Microsoft Entra application. Choose the Microsoft Graph permissions needed for the tools you intend to use, such as User.Read, Mail.Read, Mail.Send, Files.ReadWrite, or Calendars.ReadWrite.",
+        ),
+        known_limitations: Some(
+            "Microsoft Graph permissions are tenant- and administrator-consent dependent. Only the published mail, calendar, profile, and file operations are typed; other Graph APIs remain available through the generic proxy.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "tiktok",
@@ -5110,6 +5157,7 @@ pub async fn seed_default_services(
     const SERVICE_NAME_RENAMES: &[(&str, &str, &str)] = &[
         // (slug, old default name, new default name)
         ("api-github", "GitHub API", "GitHub OAuth"),
+        ("api-microsoft", "Microsoft Graph API", "Microsoft 365"),
     ];
     for (slug, old_name, new_name) in SERVICE_NAME_RENAMES {
         let renamed = service_col
@@ -5124,6 +5172,32 @@ pub async fn seed_default_services(
         if renamed.modified_count > 0 {
             tracing::info!(slug, new_name, "Renamed seeded OAuth service display name");
         }
+    }
+
+    // Microsoft Graph was originally seeded as an internal implementation
+    // service. Promote that system-owned row to a user-connectable AI
+    // service on existing installations. Customized rows are left alone.
+    let microsoft_promoted = service_col
+        .update_one(
+            doc! {
+                "slug": "api-microsoft",
+                "created_by": "system",
+                "service_category": "internal",
+            },
+            doc! {
+                "$set": {
+                    "service_category": "connection",
+                    "requires_user_credential": true,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
+    if microsoft_promoted.modified_count > 0 {
+        tracing::info!(
+            slug = "api-microsoft",
+            "Promoted Microsoft Graph to AI connection service"
+        );
     }
 
     // Backfill capability + streaming flags for seeded services whose
@@ -9954,14 +10028,14 @@ mod tests {
         // "user"; ops then PATCHes them to "both" to enable the platform app.
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github", "twitter"] } },
+                doc! { "slug": { "$in": ["google", "github", "linkedin", "twitter"] } },
                 doc! { "$set": { "credential_mode": "user" } },
             )
             .await
             .unwrap();
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github", "twitter"] } },
+                doc! { "slug": { "$in": ["google", "github", "linkedin", "twitter"] } },
                 doc! { "$set": { "credential_mode": "both" } },
             )
             .await
@@ -9969,7 +10043,7 @@ mod tests {
 
         // Restart: the social_user_mode_migration must leave them alone...
         super::seed_default_providers(&db, &enc).await.unwrap();
-        for slug in ["google", "github", "twitter"] {
+        for slug in ["google", "github", "linkedin", "twitter"] {
             let p = collection
                 .find_one(doc! { "slug": slug })
                 .await

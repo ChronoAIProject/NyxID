@@ -198,6 +198,13 @@ pub(crate) async fn release_org_channel(state: &AppState, row: &NyxbotChannel) -
         .await?
         .modified_count
         == 1;
+    crate::services::channel_thread_follow_service::suspend(
+        &state.db,
+        &row.user_id,
+        &row.id,
+        "org_access_lost",
+    )
+    .await?;
     if let Some(route_id) = row.route_id.as_deref() {
         match channel_routing_service::delete_conversation(&state.db, route_id, org).await {
             Ok(()) | Err(AppError::NotFound(_)) => {}
@@ -329,6 +336,8 @@ fn gateway_error_code(response: &GatewayResponse) -> &'static str {
 
 #[derive(Serialize)]
 pub struct ChannelAgentResponse {
+    /// Admission ships separately; gateway follow also needs a negotiated version.
+    follow_readiness: &'static str,
     id: String,
     channel_bot_id: String,
     platform: String,
@@ -356,6 +365,7 @@ pub struct ChannelAgentResponse {
 impl From<&NyxbotChannel> for ChannelAgentResponse {
     fn from(row: &NyxbotChannel) -> Self {
         Self {
+            follow_readiness: "unavailable",
             id: row.id.clone(),
             channel_bot_id: row.channel_bot_id.clone(),
             platform: row.platform.clone(),
@@ -543,6 +553,12 @@ pub async fn connect(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
+    if agent.user_id != owner {
+        return Err(AppError::Forbidden(
+            "Organization agents use private member threads; channel sharing is not available"
+                .into(),
+        ));
+    }
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
@@ -676,6 +692,8 @@ pub async fn connect(
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
     let row = NyxbotChannel {
+        follow_capacity_revision: 0,
+        follow_binding_generation: 0,
         id: id.clone(),
         user_id: owner.into(),
         channel_bot_id: bot.id.clone(),
@@ -1731,6 +1749,13 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
             "$unset": {"agent_key_ciphertext": "", "link_code_hash": ""}},
         )
         .await?;
+    crate::services::channel_thread_follow_service::suspend(
+        &state.db,
+        owner,
+        &row.id,
+        "disconnected",
+    )
+    .await?;
     audit(
         state,
         owner,
@@ -1906,6 +1931,12 @@ pub(crate) async fn setup_link_tool(
     label: Option<&str>,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(Value, bool)> {
+    if agent.user_id != owner {
+        return Err(AppError::Forbidden(
+            "Organization agents use private member threads; channel sharing is not available"
+                .into(),
+        ));
+    }
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
@@ -2079,6 +2110,7 @@ async fn resolve(state: &AppState, watch: &NyxbotWatch) {
     let result = match watch.kind.as_str() {
         "channel_bot" => channel_bot_watch(state, watch).await,
         "connect_link" => connect_link_watch(state, watch).await,
+        "machine_update" => machine_update_watch(state, watch).await,
         "machine_setup" => machine_setup_watch(state, watch).await,
         "machine_control" => machine_control_watch(state, watch).await,
         "trigger_created" => trigger_created_watch(state, watch).await,
@@ -2102,7 +2134,24 @@ pub fn spawn_live_dispatch(state: AppState) {
                 Err(broadcast::error::RecvError::Lagged(_)) => LiveEvent::Resync,
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+            if let LiveEvent::Machine { ref id, .. } = event {
+                let state = state.clone();
+                let id = id.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some(node)) =
+                        crate::services::node_service::get_node_by_id(&state.db, &id).await
+                    {
+                        let _ = crate::services::machine_update_service::observe(
+                            &state.db, &node, None,
+                        )
+                        .await;
+                    }
+                });
+            }
             let filter = match event {
+                LiveEvent::MachineUpdate { id, user_id } => {
+                    doc! {"kind":"machine_update","connect_link_id":id,"user_id":user_id}
+                }
                 LiveEvent::MachineDesktop { id, user_id } => {
                     doc! {"kind":"machine_control","connect_link_id":id,"user_id":user_id}
                 }
@@ -2292,6 +2341,12 @@ pub async fn link(
     channel_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<Value> {
+    if agent.user_id != owner {
+        return Err(AppError::Forbidden(
+            "Organization agents use private member threads; channel sharing is not available"
+                .into(),
+        ));
+    }
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
@@ -2301,22 +2356,7 @@ pub async fn link(
     {
         return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": false}));
     }
-    state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            doc! {"_id": &row.id, "user_id": owner},
-            doc! {"$set": {"agent_id": &agent.id, "updated_at": bson::DateTime::now()}},
-        )
-        .await?;
-    state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .update_many(
-            // Chats given their own agent keep it.
-            doc! {"channel_id": &row.id, "user_id": owner, "agent_id": bson::Bson::Null},
-            doc! {"$set": {"conversation_id": bson::Bson::Null}},
-        )
+    crate::services::channel_thread_follow_service::relink(&state.db, owner, &row.id, &agent.id)
         .await?;
     audit(
         state,
@@ -2332,10 +2372,18 @@ pub async fn link(
 
 pub(crate) async fn list_tool(state: &AppState, owner: &str) -> AppResult<Value> {
     let rows = list(state, owner).await?;
+    let on = thread_follow::enabled(state, owner).await?;
     let mut channel_agents = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
+        value["follow_readiness"] = json!(if thread_controls::capabilities(state, row, on, true)
+            .thread_follow
+        {
+            "ready"
+        } else {
+            "unavailable"
+        });
         // While the owner has not verified, say what NyxID saw from the bot
         // (for an org bot, only while they still administer the org).
         if org_access_holds(state, row).await?
@@ -2482,6 +2530,7 @@ const PRIVATE_REFUSAL: &str = "This bot answers only its owner. If this is your 
 /// account, a turn (as the owner or a guest), a short reply, or nothing.
 /// `addressed`: whether the message mentions or replies to the bot, `None`
 /// when the platform cannot tell (then only the owner is answered).
+#[allow(clippy::too_many_arguments)]
 async fn inbound_message(
     state: &AppState,
     row: &NyxbotChannel,
@@ -2489,6 +2538,7 @@ async fn inbound_message(
     sender: &Sender<'_>,
     text: &str,
     addressed: Option<bool>,
+    event_key: &str,
 ) -> AppResult<Inbound> {
     let private = chat.kind.as_deref() == Some("private");
     if let Some(linked) = link_owner(state, row, sender, text, private).await? {
@@ -2508,7 +2558,10 @@ async fn inbound_message(
         }
     };
     let addressed = chat.kind.as_deref() == Some("private") || addressed == Some(true);
-    start_chat_turn(state, row, chat, sender, text, guest, addressed).await
+    start_chat_turn(
+        state, row, chat, sender, text, guest, addressed, None, event_key,
+    )
+    .await
 }
 
 /// Link the owner's chat-app account: a sender presenting the owner's
@@ -2772,6 +2825,7 @@ async fn owner_thread(
 /// Run the chat's agent on a message from the owner or, as a guest, from
 /// someone else the chat lets talk to it. The owner's private chats continue
 /// the agent's own thread; groups and other people's chats have their own.
+#[allow(clippy::too_many_arguments)]
 async fn start_chat_turn(
     state: &AppState,
     row: &NyxbotChannel,
@@ -2780,6 +2834,8 @@ async fn start_chat_turn(
     text: &str,
     guest: bool,
     addressed: bool,
+    binding: Option<crate::models::channel_thread_follow::ThreadTurnBinding>,
+    event_key: &str,
 ) -> AppResult<Inbound> {
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
@@ -2793,6 +2849,7 @@ async fn start_chat_turn(
         }
     };
     let origin = ChannelOrigin {
+        thread: binding.map(Box::new),
         nyxbot_channel_id: row.id.clone(),
         partition: chat.partition.clone(),
         platform: row.platform.clone(),
@@ -2815,6 +2872,15 @@ async fn start_chat_turn(
         let exists = engine::get(&state.db, &row.user_id, &id).await.is_ok();
         (id, exists)
     };
+    if origin.thread.is_some() {
+        crate::services::channel_thread_follow_service::validate_delivery(
+            &state.db,
+            &row.user_id,
+            &origin,
+            &conversation_id,
+        )
+        .await?;
+    }
     let question_key = engine::question_key(text);
     // A chat app cannot show NyxID's confirmation cards: the verified owner
     // answers one in words (see `decide_reply` for which card it decides).
@@ -2886,6 +2952,11 @@ async fn start_chat_turn(
     };
     let title = if shared {
         None
+    } else if crate::services::channel_thread_follow_service::is_child(chat) {
+        Some(format!(
+            "Thread · {}",
+            chat.created_at.format("%Y-%m-%d %H:%M UTC")
+        ))
     } else if private {
         Some(chats::private_title(row, sender.id, sender.display_name))
     } else {
@@ -2898,7 +2969,13 @@ async fn start_chat_turn(
         };
         Some(looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform))))
     };
+    late_delivery::prepare(state, event_key, row, &origin, sender.id, guest, addressed).await?;
     let start = TurnStart {
+        channel_event_id: Some(event_key.to_owned()),
+        org_access: None,
+        attachment_ids: Vec::new(),
+        group_request_id: None,
+        group_attachments: Vec::new(),
         trigger: None,
         conversation_id: exists.then(|| conversation_id.clone()),
         new_id: (!exists).then(|| conversation_id.clone()),
@@ -2937,9 +3014,20 @@ async fn start_chat_turn(
     {
         Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
         Ok(Started::Busy | Started::PoolFull) => {
+            if let Some(binding) = origin.thread.as_deref() {
+                crate::services::channel_thread_follow_service::note_busy(
+                    &state.db,
+                    binding,
+                    true,
+                    guest || !exists,
+                )
+                .await;
+            }
+
             // The same question is never worked on twice: a repeat waits for
             // the answer in progress (sent to this chat too) or already queued.
             if exists
+                && (!guest || origin.thread.is_none())
                 && let Some(key) = question_key.as_deref()
                 && let Some(reply) =
                     repeated_question(state, row, &conversation_id, key, &origin).await?
@@ -2974,9 +3062,26 @@ async fn start_chat_turn(
             let mut event = crate::services::assistant_team_service::event("message", note, None);
             event.question_key = question_key;
             event.reply_to = vec![origin.clone()];
-            let queued =
-                engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event]).await?;
-            if queued.is_none() {
+            let queued = if origin.thread.is_some() {
+                crate::services::channel_thread_follow_service::enqueue(
+                    &state.db,
+                    &row.user_id,
+                    &conversation_id,
+                    event,
+                )
+                .await?
+            } else {
+                engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event])
+                    .await?
+                    .is_some()
+            };
+            if !queued {
+                if let Some(binding) = origin.thread.as_deref() {
+                    crate::services::channel_thread_follow_service::note_busy(
+                        &state.db, binding, false, true,
+                    )
+                    .await;
+                }
                 return Ok(Inbound::Busy);
             }
             if shared {
@@ -3006,6 +3111,25 @@ async fn repeated_question(
     key: &str,
     origin: &ChannelOrigin,
 ) -> AppResult<Option<String>> {
+    if origin.thread.is_some() {
+        return Box::pin(crate::services::channel_thread_follow_service::coalesce(
+            &state.db,
+            &row.user_id,
+            conversation_id,
+            key,
+            origin,
+        ))
+        .await
+        .map(|queued| {
+            queued.map(|queued| {
+                if queued {
+                    "That question is already queued; I'll answer it in this thread.".into()
+                } else {
+                    "I'm already working on that question and will answer in this thread.".into()
+                }
+            })
+        });
+    }
     let current = engine::get(&state.db, &row.user_id, conversation_id).await?;
     if let Some(turn) = current
         .active_turn
@@ -3095,6 +3219,8 @@ async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String,
                 Some("turn.completed") => {
                     return if event["status"] == "completed" {
                         Ok(text)
+                    } else if !text.trim().is_empty() {
+                        Ok(late_delivery::answer(&text, true))
                     } else {
                         Err(event["error"]["code"]
                             .as_str()
@@ -3461,6 +3587,9 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
     };
     let now = Utc::now();
     let admitted = NyxbotEvent {
+        delivery: None,
+        resolved_thread_id: None,
+        resolved_conversation_id: None,
         id: event_key.clone(),
         channel_id: row.id.clone(),
         user_id: row.user_id.clone(),
@@ -3501,6 +3630,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         },
         &text,
         human,
+        &event_key,
     )
     .await;
     let finish = |status: &'static str, conversation: Option<String>| {
@@ -3544,33 +3674,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
             response
         }
         Ok(Inbound::Turn(receiver)) => {
-            let state = state.clone();
-            let stream = async_stream::stream! {
-                yield created;
-                let outcome = final_reply(receiver).await;
-                let (status, conversation) = match &outcome {
-                    Ok(_) => ("completed", None),
-                    Err(_) => ("failed", None::<String>),
-                };
-                let _ = state.db.collection::<NyxbotEvent>(EVENTS).update_one(
-                    doc! {"_id": &event_key},
-                    doc! {"$set": {"status": status, "conversation_id": conversation}},
-                ).await;
-                match outcome {
-                    Ok(text) => {
-                        for frame in message_frames(&response_id, Some(&bounded_reply(&text))) {
-                            yield frame;
-                        }
-                    }
-                    Err(code) => {
-                        yield json!({"type": "response.failed", "response": {
-                            "id": &response_id, "status": "failed",
-                            "error": {"code": identifier(&code), "message": "NyxBot could not finish this turn."},
-                        }});
-                    }
-                }
-            };
-            sse(stream)
+            late_delivery::provider_stream(state, event_key, response_id, created, receiver, now)
         }
         Err(_) => {
             let _ = events.delete_one(doc! {"_id": &event_key}).await;
@@ -3592,6 +3696,7 @@ async fn gateway_inbound(
     sender: &Sender<'_>,
     text: &str,
     human: bool,
+    event_key: &str,
 ) -> AppResult<Inbound> {
     let conversation = &activity["conversation"];
     let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
@@ -3656,7 +3761,7 @@ async fn gateway_inbound(
                 None => false,
             },
     );
-    inbound_message(state, row, &chat, sender, text, addressed).await
+    inbound_message(state, row, &chat, sender, text, addressed, event_key).await
 }
 
 fn is_duplicate(error: &mongodb::error::Error) -> bool {
@@ -3751,6 +3856,9 @@ pub async fn deliver_to(
     text: &str,
 ) {
     let result: AppResult<()> = async {
+        if origin.thread.is_some() {
+            return thread_follow::send(state, &row.user_id, origin, &row.id, text).await;
+        }
         let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
             return Ok(());
         };
@@ -3911,7 +4019,14 @@ pub async fn relay_callback(
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     // Dedup redeliveries of the same inbound message.
-    let event_key = sha256_hex(format!("{}\0{}", row.id, claims.message_id));
+    let event_key = if payload["thread_context"].is_object() {
+        sha256_hex(format!(
+            "thread-follow:v1\0{}\0{}",
+            row.channel_bot_id, claims.message_id
+        ))
+    } else {
+        sha256_hex(format!("{}\0{}", row.id, claims.message_id))
+    };
     let now = Utc::now();
     let kind = chats::chat_kind(
         payload["conversation"]["type"]
@@ -3937,6 +4052,9 @@ pub async fn relay_callback(
         chats::group_partition(&chat_id, thread_id.as_deref())
     };
     let admitted = NyxbotEvent {
+        delivery: None,
+        resolved_thread_id: None,
+        resolved_conversation_id: None,
         id: event_key,
         channel_id: row.id.clone(),
         user_id: row.user_id.clone(),
@@ -3991,6 +4109,17 @@ pub async fn relay_callback(
     let message_id = claims.message_id.clone();
     tokio::spawn(async move {
         let result: AppResult<()> = async {
+            if Box::pin(thread_follow::inbound(
+                &state,
+                &row,
+                &payload,
+                &message_id,
+                &text,
+            ))
+            .await?
+            {
+                return Ok(());
+            }
             let chat = chats::record_chat(
                 &state,
                 &row,
@@ -4037,16 +4166,19 @@ pub async fn relay_callback(
                 display_name: display.as_deref(),
             };
             let reply =
-                match inbound_message(&state, &row, &chat, &sender, &text, addressed).await? {
+                match inbound_message(&state, &row, &chat, &sender, &text, addressed, &admitted.id)
+                    .await?
+                {
                     Inbound::Reply(text) => Some(text),
                     Inbound::Silent => None,
                     Inbound::Busy => Some(
                         "I'm still working on the previous message. I'll pick this up next.".into(),
                     ),
-                    Inbound::Turn(receiver) => match final_reply(receiver).await {
-                        Ok(text) => Some(bounded_reply(&text)),
-                        Err(_) => Some("I could not finish that. Please try again.".into()),
-                    },
+                    Inbound::Turn(receiver) => {
+                        let _ = final_reply(receiver).await;
+                        late_delivery::process(&state, &admitted.id).await;
+                        None
+                    }
                 };
             if let Some(reply) = reply
                 && let Err(error) = direct_reply(
@@ -4089,6 +4221,67 @@ mod tests;
 #[path = "nyxbot_status.rs"]
 mod status;
 pub(crate) use status::{WaitingItem, check_deliveries, waiting};
+
+pub(crate) async fn machine_update_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
+    use crate::services::machine_update_service as updates;
+    let Some(id) = watch.connect_link_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(row) = updates::watched(&state.db, id).await? else {
+        return Ok(());
+    };
+    if row.requested_by.as_deref() != Some(watch.user_id.as_str()) {
+        return Ok(());
+    }
+    if let Some(node) = updates::node_for_record(&state.db, &row).await? {
+        updates::observe(&state.db, &node, None).await?;
+    } else {
+        updates::finish(&state.db, &row, "failed", Some("machine_unavailable")).await?;
+    }
+    let Some(row) = updates::watched(&state.db, id).await? else {
+        return Ok(());
+    };
+    if row.pending() {
+        return Ok(());
+    }
+    let successful = row.phase == "connected";
+    let message = if successful && row.replace_companion {
+        format!(
+            "Machine {} now reports valid companion version metadata. The legacy updater replacement completed without restarting the machine. Verify the updater status in nyx__machine_list, then continue the interrupted task; offer a machine update if still needed.",
+            row.node_id
+        )
+    } else if successful {
+        format!(
+            "Machine {} reconnected on {}. Verify nyx__machine_list reports the target version, run a computer get_window_state AX check and nyx__machine_browser snapshot, then continue the interrupted task. Report a specific health failure and offer recovery if a check fails.",
+            row.node_id,
+            row.target_version.as_deref().unwrap_or_default()
+        )
+    } else {
+        format!(
+            "Machine {} update ended: {} ({}). Explain this outcome and offer the prefilled host recovery command or another owner-identified granted Docker host. Do not claim the upgrade succeeded.",
+            row.node_id,
+            row.phase,
+            row.code.as_deref().unwrap_or("update_failed")
+        ) + " "
+            + row
+                .code
+                .as_deref()
+                .and_then(nyxid_machine::update::failure_guidance)
+                .unwrap_or("")
+    };
+    machine_wake(
+        state,
+        watch,
+        "machine_update_finished",
+        message,
+        if successful {
+            None
+        } else {
+            Some(row.code.as_deref().unwrap_or("update_failed"))
+        },
+    )
+    .await
+}
 
 async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
     use crate::models::{
@@ -4224,7 +4417,11 @@ async fn machine_control_watch(state: &AppState, watch: &NyxbotWatch) -> AppResu
     {
         return Ok(());
     }
-    machine_wake(state,watch,"machine_control_returned",format!("The owner handed machine {node} back. Observe its state fresh, then continue. Owner note: {}",row.handback_note.unwrap_or_default()),None).await?;
+    let display = match row.display {
+        nyxid_machine::desktop::Display::Secure => "secure browser",
+        nyxid_machine::desktop::Display::Dev => "dev browser",
+    };
+    machine_wake(state,watch,"machine_control_returned",format!("The owner handed machine {} ({display}) back. Observe its state fresh, then continue. Owner note: {}",row.node_id,row.handback_note.unwrap_or_default()),None).await?;
     Ok(())
 }
 
@@ -4312,3 +4509,12 @@ async fn trigger_created_watch(state: &AppState, watch: &NyxbotWatch) -> AppResu
     }
     Ok(())
 }
+
+#[path = "nyxbot_thread_follow.rs"]
+pub(crate) mod thread_follow;
+
+#[path = "nyxbot_thread_controls.rs"]
+pub(crate) mod thread_controls;
+
+#[path = "nyxbot_late_delivery.rs"]
+pub(crate) mod late_delivery;

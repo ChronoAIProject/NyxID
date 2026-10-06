@@ -1,3 +1,4 @@
+pub mod voice_start;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -88,6 +89,11 @@ pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    /// Known unusable stored credential, distinct from malformed requests or
+    /// infrastructure failures. Keep the established public bad-request contract.
+    #[error("Bad request: {0}")]
+    CredentialUnavailable(String),
+
     #[error("{context} request body exceeds the configured limit of {max_bytes} bytes")]
     RequestBodyTooLarge { max_bytes: usize, context: String },
 
@@ -105,6 +111,21 @@ pub enum AppError {
 
     #[error("A turn is already active in this conversation")]
     AssistantTurnActive,
+    #[error("The voice request queue is full")]
+    VoiceQueueFull,
+    #[error("Voice provider adapters are not enabled")]
+    VoiceProviderUnavailable,
+    /// Adds safe startup context while preserving the underlying numeric code/status.
+    #[error("Voice startup failed")]
+    VoiceStartFailed(Box<voice_start::Failure>),
+
+    #[error(
+        "This assistant key is only valid while its conversation has a live turn; start or resume the conversation"
+    )]
+    AssistantTurnRequired,
+
+    #[error("Attachment expired per retention policy. Upload it again to continue.")]
+    AssistantAttachmentExpired,
 
     #[error("Grant cascade confirmation required")]
     GrantCascadeConfirmationRequired(Box<GrantCascadePayload>),
@@ -239,7 +260,7 @@ pub enum AppError {
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
 
-    // 12400–12413: machine access, controller privacy and saved-login filling.
+    // 12400–12422: machine access, controller privacy and saved-login filling.
     #[error("Machine capability is disabled; the owner must enable it on the node")]
     MachineCapabilityDisabled,
 
@@ -285,6 +306,34 @@ pub enum AppError {
         "Managed browser filling is unavailable; install the protected browser policies during setup"
     )]
     MachineBrowserUnavailable,
+
+    #[error(
+        "Computer driver is restarting; retry after a short delay and observe before repeating an action"
+    )]
+    MachineDriverRestarting,
+    #[error("Enable Accessibility and Screen Recording for this node")]
+    MachineComputerPermissionMissing,
+    #[error("This computer tool is not supported; choose an advertised tool or browser action")]
+    MachineComputerToolUnsupported,
+    #[error("The machine display is unavailable; start its desktop session")]
+    MachineDisplayUnavailable,
+    #[error("The owner stopped this turn; wait for a new turn")]
+    MachineTurnStopped,
+    #[error("Machine authority v2 is required; update the machine before configuring capabilities")]
+    MachineAuthorityUnsupported,
+    #[error(
+        "Machine permission was revoked or is not granted; request the capability from the owner through NyxBot"
+    )]
+    MachinePermissionRevoked,
+    #[error(
+        "Machine authority lease expired or revision changed; start a freshly authorized operation"
+    )]
+    MachineAuthorityStale,
+
+    #[error(
+        "This machine has too many active operations; retry when an operation finishes. Running work continues."
+    )]
+    MachineAuthorityBusy,
 
     #[error("Node not found: {0}")]
     NodeNotFound(String),
@@ -695,7 +744,10 @@ pub enum AppError {
 impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
+            Self::VoiceStartFailed(failure) => failure.source.status_code(),
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) | Self::ValidationError(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
@@ -704,6 +756,10 @@ impl AppError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive => StatusCode::CONFLICT,
+            Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::AssistantTurnRequired => StatusCode::CONFLICT,
+            Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -753,6 +809,16 @@ impl AppError {
             Self::MachineLoginOriginMismatch => StatusCode::FORBIDDEN,
             Self::MachineLoginWrongField => StatusCode::BAD_REQUEST,
             Self::MachineBrowserUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MachineDriverRestarting | Self::MachineDisplayUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::MachineComputerPermissionMissing => StatusCode::FORBIDDEN,
+            Self::MachineComputerToolUnsupported => StatusCode::BAD_REQUEST,
+            Self::MachineTurnStopped => StatusCode::CONFLICT,
+            Self::MachineAuthorityUnsupported => StatusCode::CONFLICT,
+            Self::MachinePermissionRevoked => StatusCode::FORBIDDEN,
+            Self::MachineAuthorityStale => StatusCode::CONFLICT,
+            Self::MachineAuthorityBusy => StatusCode::TOO_MANY_REQUESTS,
             Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
@@ -900,13 +966,19 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
-            Self::BadRequest(_) => 1000,
+            Self::VoiceStartFailed(failure) => failure.source.error_code(),
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
+            Self::VoiceQueueFull => 12500,
+            Self::VoiceProviderUnavailable => 12501,
+            // 12101 is already the public upload-retention code.
+            Self::AssistantTurnRequired => 12102,
+            Self::AssistantAttachmentExpired => 12101,
             Self::RateLimited => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
@@ -961,6 +1033,15 @@ impl AppError {
             Self::MachineLoginOriginMismatch => 12411,
             Self::MachineLoginWrongField => 12412,
             Self::MachineBrowserUnavailable => 12413,
+            Self::MachineDriverRestarting => 12414,
+            Self::MachineComputerPermissionMissing => 12415,
+            Self::MachineComputerToolUnsupported => 12416,
+            Self::MachineDisplayUnavailable => 12417,
+            Self::MachineTurnStopped => 12418,
+            Self::MachineAuthorityUnsupported => 12419,
+            Self::MachinePermissionRevoked => 12420,
+            Self::MachineAuthorityStale => 12421,
+            Self::MachineAuthorityBusy => 12422,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
@@ -1144,13 +1225,18 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
-            Self::BadRequest(_) => "bad_request",
+            Self::VoiceStartFailed(failure) => failure.source.error_key(),
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
+            Self::VoiceQueueFull => "voice_queue_full",
+            Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::AssistantTurnRequired => "assistant_turn_required",
+            Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
@@ -1208,6 +1294,15 @@ impl AppError {
             Self::MachineLoginOriginMismatch => "machine_login_origin_mismatch",
             Self::MachineLoginWrongField => "machine_login_wrong_field",
             Self::MachineBrowserUnavailable => "machine_browser_unavailable",
+            Self::MachineDriverRestarting => "driver_restarting",
+            Self::MachineComputerPermissionMissing => "computer_permission_missing",
+            Self::MachineComputerToolUnsupported => "computer_tool_not_supported",
+            Self::MachineDisplayUnavailable => "display_unavailable",
+            Self::MachineTurnStopped => "machine_turn_stopped",
+            Self::MachineAuthorityUnsupported => "machine_authority_unsupported",
+            Self::MachinePermissionRevoked => "machine_permission_revoked",
+            Self::MachineAuthorityStale => "machine_authority_stale",
+            Self::MachineAuthorityBusy => "machine_authority_busy",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",
@@ -1363,6 +1458,9 @@ impl AppError {
 impl AppError {
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::VoiceStartFailed(failure) = self {
+            return failure.response();
+        }
         let mfa_session_token = match &self {
             AppError::MfaRequired { session_token } => Some(session_token.clone()),
             _ => None,
@@ -1401,6 +1499,7 @@ impl AppError {
                 | AppError::PoolAttemptTransport(_)
                 | AppError::DatabaseError(_) => "An internal error occurred".to_string(),
                 AppError::MfaRequired { .. } => "MFA verification required".to_string(),
+                AppError::AssistantTurnRequired => "This assistant key is only valid while its conversation has a live turn; start or resume the conversation".to_string(),
                 AppError::ConsentRequired { .. } => {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
@@ -1430,6 +1529,8 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         // Log server errors at error level; client errors at warn level.
         match &self {
+            // Already logged once with bounded structured fields by the startup boundary.
+            AppError::VoiceStartFailed(_) => {}
             AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
             AppError::PoolAttemptTransport(kind) => {
                 tracing::error!(?kind, "Pool attempt transport failure")
@@ -1470,6 +1571,23 @@ mod tests {
         assert_eq!(payload["error"], "request_body_too_large");
         assert_eq!(payload["error_code"], 11700);
         assert!(payload["message"].as_str().unwrap().contains("2048 bytes"));
+    }
+
+    #[tokio::test]
+    async fn credential_unavailable_preserves_bad_request_wire_contract() {
+        let error = AppError::CredentialUnavailable("API key is failed".into());
+        assert_eq!(error.oauth_error_code(), "invalid_request");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let previous =
+            serde_json::to_value(AppError::BadRequest("API key is failed".into()).response_body())
+                .unwrap();
+        assert_eq!(payload, previous);
+        assert_eq!(payload["error_code"], 1000);
+        assert_eq!(payload["error"], "bad_request");
+        assert_eq!(payload["message"], "Bad request: API key is failed");
     }
 
     #[test]
@@ -1751,9 +1869,19 @@ mod tests {
     }
 
     #[test]
+    fn assistant_turn_required_contract() {
+        let error = AppError::AssistantTurnRequired;
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 12102);
+        assert_eq!(error.error_key(), "assistant_turn_required");
+        assert!(error.response_body().message.len() < 2_000);
+    }
+
+    #[test]
     fn error_codes_unique() {
         let codes = vec![
             AppError::AssistantTurnActive.error_code(),
+            AppError::AssistantTurnRequired.error_code(),
             AppError::AdminUsageQueryTimeout.error_code(),
             AppError::WorkspaceDestinationsNotActivated.error_code(),
             AppError::NodeHttpSignatureUnsupported.error_code(),

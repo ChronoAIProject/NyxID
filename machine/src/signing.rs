@@ -45,7 +45,14 @@ fn canonical(value: &serde_json::Value) -> Vec<u8> {
 
 fn request_mac(request: &Request, secret: &[u8]) -> Hmac<Sha256> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
-    mac.update(b"nyxid.machine.request.v1\0");
+    if request.version == crate::authority::VERSION {
+        mac.update(b"nyxid.machine.request.v2\0");
+        let authority = serde_json::to_value(&request.authority).expect("authority");
+        mac.update(&Sha256::digest(canonical(&authority)));
+        mac.update(&request.version.to_be_bytes());
+    } else {
+        mac.update(b"nyxid.machine.request.v1\0");
+    }
     let operation = serde_json::to_vec(&request.operation).expect("operation");
     let canonical = zeroize::Zeroizing::new(canonical(&request.parameters));
     let digest = Sha256::digest(canonical.as_slice());
@@ -90,20 +97,7 @@ impl ReplayGuard {
         secret: &[u8],
         now: i64,
     ) -> Result<(), Rejection> {
-        if request.node_id != node_id
-            || uuid::Uuid::parse_str(&request.request_id).is_err()
-            || uuid::Uuid::parse_str(&request.nonce).is_err()
-            || secret.is_empty()
-        {
-            return Err(Rejection::Malformed);
-        }
-        if request.timestamp.abs_diff(now) > WINDOW_SECS as u64 {
-            return Err(Rejection::Stale);
-        }
-        let provided = hex::decode(&request.signature).map_err(|_| Rejection::Signature)?;
-        request_mac(request, secret)
-            .verify_slice(&provided)
-            .map_err(|_| Rejection::Signature)?;
+        self.verify_signature_and_freshness(request, node_id, secret, now)?;
         self.nonces.retain(|_, expires| *expires >= now);
         if self.nonces.contains_key(&request.nonce) {
             return Err(Rejection::Replay);
@@ -117,6 +111,36 @@ impl ReplayGuard {
         );
         Ok(())
     }
+
+    /// Verify the signed request identity without consuming its nonce. This is
+    /// used by the machine receipt ledger before serving a cached or in-flight
+    /// result; replay consumption remains exclusive to first execution.
+    pub fn verify_signature_and_freshness(
+        &self,
+        request: &Request,
+        node_id: &str,
+        secret: &[u8],
+        now: i64,
+    ) -> Result<(), Rejection> {
+        if !matches!(request.version, 1 | 2)
+            || (request.version == 1 && request.authority.is_some())
+            || (request.version == 2 && request.authority.is_none())
+            || request.node_id != node_id
+            || uuid::Uuid::parse_str(&request.request_id).is_err()
+            || uuid::Uuid::parse_str(&request.nonce).is_err()
+            || secret.is_empty()
+        {
+            return Err(Rejection::Malformed);
+        }
+        if request.timestamp.abs_diff(now) > WINDOW_SECS as u64 {
+            return Err(Rejection::Stale);
+        }
+        let provided = hex::decode(&request.signature).map_err(|_| Rejection::Signature)?;
+        request_mac(request, secret)
+            .verify_slice(&provided)
+            .map_err(|_| Rejection::Signature)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +150,8 @@ mod tests {
 
     fn request() -> Request {
         let mut request = Request {
+            version: 1,
+            authority: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             node_id: "node-a".into(),
             operation: Operation::Exec,
@@ -170,5 +196,119 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn identity_check_verifies_signature_and_freshness_without_consuming_nonce() {
+        let request = request();
+        let guard = ReplayGuard::default();
+        assert_eq!(
+            guard.verify_signature_and_freshness(&request, "node-a", b"test signing secret", 1000,),
+            Ok(())
+        );
+        assert_eq!(
+            guard.verify_signature_and_freshness(&request, "node-a", b"test signing secret", 1061,),
+            Err(Rejection::Stale)
+        );
+        assert_eq!(
+            guard
+                .verify_signature_and_freshness(&request, "node-a", b"wrong signing secret", 1000,),
+            Err(Rejection::Signature)
+        );
+        let mut consuming = guard;
+        assert_eq!(
+            consuming.verify(&request, "node-a", b"test signing secret", 1000),
+            Ok(())
+        );
+        assert_eq!(
+            consuming.verify(&request, "node-a", b"test signing secret", 1000),
+            Err(Rejection::Replay)
+        );
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    #[test]
+    fn v2_authenticates_authority_and_cannot_be_downgraded() {
+        let id = || uuid::Uuid::new_v4().to_string();
+        let a = crate::authority::Authority {
+            require_v2: true,
+            context_id: id(),
+            generation: 1,
+            mode: "shared_legacy".into(),
+            agent_id: id(),
+            owner_id: id(),
+            actor_id: id(),
+            group_id: None,
+            runtime_id: id(),
+            conversation_id: id(),
+            turn_id: id(),
+            lease_id: id(),
+            revision: 1,
+            expires_at_ms: 1005000,
+            capabilities: Default::default(),
+        };
+        let mut r = crate::Request {
+            version: 2,
+            authority: Some(Box::new(a)),
+            request_id: id(),
+            node_id: id(),
+            operation: crate::Operation::ReadFile,
+            parameters: serde_json::json!({}),
+            timestamp: 1000,
+            nonce: id(),
+            signature: String::new(),
+        };
+        r.signature = sign(&r, b"test");
+        assert_eq!(
+            ReplayGuard::default().verify(&r, &r.node_id, b"test", 1000),
+            Ok(())
+        );
+        let mut value = serde_json::to_value(&r).unwrap();
+        for field in [
+            "require_v2",
+            "context_id",
+            "generation",
+            "agent_id",
+            "owner_id",
+            "actor_id",
+            "group_id",
+            "runtime_id",
+            "conversation_id",
+            "turn_id",
+            "lease_id",
+            "revision",
+            "expires_at_ms",
+            "capabilities",
+            "mode",
+        ] {
+            let mut changed = value.clone();
+            changed["authority"][field] = match field {
+                "require_v2" => false.into(),
+                "generation" | "revision" => 2.into(),
+                "expires_at_ms" => 1005001.into(),
+                "capabilities" => serde_json::json!({"shell":true}),
+                "mode" => "isolated".into(),
+                "group_id" => format!("nyxg-{}", uuid::Uuid::new_v4().simple()).into(),
+                _ => id().into(),
+            };
+            let changed = serde_json::from_value::<crate::Request>(changed).unwrap();
+            assert!(
+                ReplayGuard::default()
+                    .verify(&changed, &r.node_id, b"test", 1000)
+                    .is_err(),
+                "unsigned modification: {field}"
+            );
+        }
+        value["version"] = 1.into();
+        value["authority"] = serde_json::Value::Null;
+        let changed = serde_json::from_value(value).unwrap();
+        assert!(
+            ReplayGuard::default()
+                .verify(&changed, &r.node_id, b"test", 1000)
+                .is_err()
+        );
     }
 }

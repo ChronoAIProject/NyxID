@@ -1,11 +1,15 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MachineDesktopPanel } from "./machine-desktop-panel";
+const { contexts } = vi.hoisted(() => ({ contexts: vi.fn() }));
 vi.mock("@/hooks/use-public-config", () => ({
   usePublicConfig: () => ({ data: { node_ws_url: "https://nyxid.example" } }),
 }));
 vi.mock("@/hooks/use-machines", () => ({
   useMachineDesktops: () => ({ data: [] }),
+}));
+vi.mock("@/hooks/use-machine-access", () => ({
+  useMachineContexts: contexts,
 }));
 class Socket {
   static OPEN = 1;
@@ -19,7 +23,9 @@ class Socket {
   onerror: (() => void) | null = null;
   send = vi.fn();
   close = vi.fn();
-  constructor() {
+  readonly url: string;
+  constructor(url: string) {
+    this.url = url;
     Socket.instances.push(this);
   }
   message(value: unknown) {
@@ -27,6 +33,7 @@ class Socket {
   }
 }
 beforeEach(() => {
+  contexts.mockReturnValue({ data: [], isError: false });
   Socket.instances = [];
   vi.stubGlobal("WebSocket", Socket);
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
@@ -161,4 +168,141 @@ it("paints ordered dirty rectangles and requests a full frame when a base is mis
   expect(JSON.parse(socket.send.mock.lastCall![0])).toEqual({
     type: "refresh_frame",
   });
+});
+
+it("remembers a collapsed strip per conversation and keeps its Stop control", () => {
+  localStorage.clear();
+  const view = render(
+    <MachineDesktopPanel
+      nodeId="node"
+      conversationId="collapse-thread"
+      name="Work machine"
+      turnActive
+    />,
+  );
+  act(() =>
+    Socket.instances[0]!.message({
+      type: "connected",
+      session_id: "id",
+      controller: "agent",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Minimise desktop" }));
+  expect(screen.getByRole("button", { name: "Show desktop" })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  expect(screen.getByLabelText(/Machine screen/)).not.toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+  expect(JSON.parse(Socket.instances[0]!.send.mock.lastCall![0])).toEqual({
+    type: "stop",
+  });
+  view.unmount();
+  const reopened = render(
+    <MachineDesktopPanel nodeId="node" conversationId="collapse-thread" />,
+  );
+  expect(
+    screen.getByRole("button", { name: "Show desktop" }),
+  ).toBeInTheDocument();
+  reopened.unmount();
+  render(<MachineDesktopPanel nodeId="node" conversationId="another-thread" />);
+  expect(
+    screen.getByRole("button", { name: "Minimise desktop" }),
+  ).toBeInTheDocument();
+  localStorage.clear();
+});
+
+it("collapses after a turn ends without recent machine activity", () => {
+  vi.useFakeTimers();
+  const view = render(
+    <MachineDesktopPanel
+      nodeId="node"
+      conversationId="idle-thread"
+      turnActive
+    />,
+  );
+  act(() =>
+    Socket.instances[0]!.message({
+      type: "connected",
+      session_id: "id",
+      controller: "agent",
+    }),
+  );
+  view.rerender(
+    <MachineDesktopPanel
+      nodeId="node"
+      conversationId="idle-thread"
+      turnActive={false}
+    />,
+  );
+  act(() => vi.advanceTimersByTime(3001));
+  expect(
+    screen.getByRole("button", { name: "Show desktop" }),
+  ).toBeInTheDocument();
+  view.unmount();
+  vi.useRealTimers();
+  localStorage.clear();
+});
+
+it("switches capture sockets by display and keeps owner input on its controller", () => {
+  const view = render(<MachineDesktopPanel nodeId="node" />);
+  const secure = Socket.instances[0]!;
+  expect(secure.url).not.toContain("display=dev");
+  expect(
+    screen.getByRole("button", { name: "Secure browser" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: "Dev browser" }));
+  expect(secure.close).toHaveBeenCalledOnce();
+  const dev = Socket.instances[1]!;
+  expect(dev.url).toContain("display=dev");
+  act(() =>
+    dev.message({
+      type: "connected",
+      session_id: "12345678-1234-4234-8234-123456789abc",
+      controller: "owner",
+      controls: true,
+    }),
+  );
+  expect(screen.getByRole("button", { name: "Secure browser" })).toBeDisabled();
+  fireEvent.keyDown(screen.getByLabelText(/Machine screen/), {
+    key: "ArrowLeft",
+  });
+  expect(dev.send).toHaveBeenCalledOnce();
+  expect(secure.send).not.toHaveBeenCalled();
+  view.unmount();
+});
+
+it("offers named context choices without exposing context ids in labels", () => {
+  contexts.mockReturnValue({
+    data: [{
+      context_id: "ctx-secret",
+      agent_id: "agent-secret",
+      agent_name: "Luna",
+      actor_label: "Owner session",
+      group_id: null,
+      generation: 2,
+    }],
+    isError: false,
+  });
+  render(<MachineDesktopPanel nodeId="node" />);
+  fireEvent.click(screen.getByRole("combobox", { name: "Desktop context" }));
+  expect(screen.getByRole("option", { name: /Luna · Owner session/ })).toBeInTheDocument();
+  expect(screen.queryByText("ctx-secret")).not.toBeInTheDocument();
+});
+
+it("labels an unattributed persisted context as Unknown agent", () => {
+  contexts.mockReturnValue({
+    data: [{
+      context_id: "legacy-context",
+      agent_id: "old-agent",
+      agent_name: "Unknown agent",
+      actor_label: "Owner session",
+      group_id: null,
+      generation: 1,
+    }],
+    isError: false,
+  });
+  render(<MachineDesktopPanel nodeId="node" />);
+  fireEvent.click(screen.getByRole("combobox", { name: "Desktop context" }));
+  expect(screen.getByRole("option", { name: /Unknown agent · Owner session/ })).toBeInTheDocument();
 });

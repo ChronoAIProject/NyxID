@@ -563,6 +563,8 @@ pub struct KeyView {
     pub platform_key_available: bool,
     pub platform_key_pricing: Option<super::inference_service::LanePricingView>,
     pub byok_pricing: Option<super::inference_service::LanePricingView>,
+    pub inference: Option<super::inference_service::InferenceView>,
+    pub capabilities: Option<super::inference_service::ServiceCapabilitiesView>,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -2653,6 +2655,15 @@ pub async fn list_keys_read_only_with_grants(
                 owner,
                 grants,
             );
+            view.inference = super::inference_service::view(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id))
+                    .map(|p| p.slug.as_str()),
+                view.platform_key_available,
+            );
         }
         let enc = view
             .api_key_id
@@ -2726,9 +2737,27 @@ pub async fn get_key(
     );
 
     if let Some(catalog) = catalog_ds.as_ref() {
-        view.platform_key_available =
-            super::platform_key_service::available(db, catalog, user_id).await?;
+        let provider = if let Some(id) = &catalog.provider_config_id {
+            db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
+                .find_one(doc! {"_id": id})
+                .await?
+        } else {
+            None
+        };
+        view.platform_key_available = super::platform_key_service::available_with_provider(
+            db,
+            catalog,
+            provider.as_ref(),
+            user_id,
+        )
+        .await?;
+        view.inference = super::inference_service::view(
+            catalog,
+            provider.as_ref().map(|p| p.slug.as_str()),
+            view.platform_key_available,
+        );
     }
+
     enrich_view_with_oauth_client_id(
         encryption_keys,
         &mut view,
@@ -4464,6 +4493,8 @@ fn build_key_view(
         .and_then(|id| app_name_map.get(id).cloned());
 
     KeyView {
+        inference: catalog_ds.and_then(|c| super::inference_service::view(c, None, false)),
+        capabilities: catalog_ds.and_then(super::inference_service::capabilities),
         platform_key_available: false,
         platform_key_pricing: catalog_ds
             .and_then(|c| c.billing.as_ref())

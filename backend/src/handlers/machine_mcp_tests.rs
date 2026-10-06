@@ -43,7 +43,7 @@ async fn trigger_auth(
     authenticated_machine_chat(f).await
 }
 
-async fn authenticated_machine_chat(f: &Fixture) -> McpAuthContext {
+pub(super) async fn authenticated_machine_chat(f: &Fixture) -> McpAuthContext {
     let key = crate::services::assistant_agent_credential_service::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,
@@ -420,6 +420,8 @@ async fn machine_tools_add_no_database_work_for_non_chat_callers() {
 #[tokio::test]
 async fn machine_mcp_tools_are_only_discovered_and_called_by_owner_chat_keys() {
     let f = orchestrator_fixture("machine_mcp_audience").await;
+    // Execution tools require an assignment as well as the correct audience.
+    node(&f, &f.owner).await;
     let list = JsonRpcRequest {
         jsonrpc: JSONRPC_VERSION.into(),
         id: Some(json!(1)),
@@ -462,6 +464,21 @@ async fn machine_mcp_tools_are_only_discovered_and_called_by_owner_chat_keys() {
         assert_eq!(value["result"]["isError"], true);
     }
     let specialist = fixture("machine_mcp_specialist").await;
+    let machine = node(&specialist, &specialist.owner).await;
+    use crate::services::assistant_team_service as team;
+    Box::pin(team::set_grants(
+        &specialist.state.db,
+        &specialist.owner,
+        &specialist.chat.agent_id,
+        team::GrantChange::Machine {
+            base: Box::new(team::GrantChange::Add(Default::default())),
+            machines: Some(vec![machine.id]),
+            logins: None,
+            mode: team::MachineGrantMode::Add,
+        },
+    ))
+    .await
+    .unwrap();
     for (state, chat) in [(&f.state, &f.chat), (&specialist.state, &specialist.chat)] {
         for guest in [false, true] {
             let mut auth = McpAuthContext::user(chat.user_id.clone(), AuthMethod::ApiKey);
@@ -490,5 +507,62 @@ async fn machine_mcp_tools_are_only_discovered_and_called_by_owner_chat_keys() {
         }
     }
     specialist.state.db.drop().await.unwrap();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_receipt_records_correlated_cards_without_arguments_or_output() {
+    let f = orchestrator_fixture("machine_receipt_mcp").await;
+    let node = node(&f, &f.owner).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&node.id},
+            doc! {"$set":{"machine_confirm":"none"}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticated_machine_chat(&f).await;
+    let (task, mut requests) = peer(
+        &f,
+        &node,
+        json!({"status":"finished","exit_code":3,"stdout":"output-private-sentinel"}),
+    )
+    .await;
+    let response=Box::pin(handle_tools_call(&f.state,&auth,None,&JsonRpcRequest {
+        jsonrpc:JSONRPC_VERSION.into(),id:Some(json!(1)),method:"tools/call".into(),params:Some(json!({
+            "name":"nyx__call_tool","arguments":{"tool_name":"nyx__machine_exec","arguments":{"machine":node.id,"command":"command-private-sentinel","services":[]}}
+        })),
+    },false,crate::services::billing::route_inventory::internal_node_dispatch_permit())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    requests.recv().await.unwrap();
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let activity = row.active_turn.unwrap().activities.pop().unwrap();
+    let receipt = activity.machine.unwrap();
+    assert_eq!(receipt.action, "command.exec");
+    assert_eq!(receipt.status, "error");
+    assert_eq!(receipt.exit_code, Some(3));
+    assert!(receipt.preview_id.is_none());
+    let encoded = serde_json::to_string(&receipt).unwrap();
+    assert!(!encoded.contains("private-sentinel"));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let audit = loop {
+        if let Some(row)=f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc!{"event_type":"machine_operation","event_data.operation_id":&receipt.operation_id}).await.unwrap(){break row;}
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "audit was not appended"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("activity_id").unwrap(), activity.id);
+    assert_eq!(data.get_str("agent_id").unwrap(), f.chat.agent_id);
+    assert_eq!(data.get_str("outcome").unwrap(), "error");
+    assert!(!format!("{audit:?}").contains("private-sentinel"));
+    task.abort();
     f.state.db.drop().await.unwrap();
 }

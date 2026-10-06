@@ -65,6 +65,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       cli: ${{ steps.filter.outputs.cli }}
       machine: ${{ steps.filter.outputs.machine }}
+      permissions: ${{ steps.filter.outputs.permissions }}
       rust: ${{ steps.filter.outputs.rust }}
       frontend: ${{ steps.filter.outputs.frontend }}
       mobile: ${{ steps.filter.outputs.mobile }}
@@ -87,22 +88,37 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            permissions:
+              - 'permissions/**'
+              - 'scripts/test-drive-permissions-poc.py'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             machine:
               - 'frontend/scripts/machine-seccomp.ts'
+              - 'frontend/src/schemas/machines.ts'
+              - 'cli/src/commands/update_attestation*'
+              - 'cli/src/commands/update_attestation/**'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'cli/src/node/machine/**'
               - 'cli/resources/machine-browser/**'
               - 'cli/resources/machine-container/**'
               - 'cli/container/**'
               - 'cli/Dockerfile.machine'
+              - 'cli/Dockerfile.machine-updater'
+              - 'cli/src/machine_updater/**'
+              - 'cli/src/commands/machine_native_update.rs'
               - 'cli/tests/machine*'
               - 'cli/tests/Dockerfile.machine'
+              - 'cli/tests/Dockerfile.updater-browser'
               - 'cli/Cargo.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
             backend:
               - 'backend/**'
+              - 'permissions/**'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cloud-auth/**'
               - 'service-adapters/**'
@@ -119,6 +135,7 @@ jobs:
             cli:
               - 'cli/**'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'skills/nyxid/scripts/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
@@ -138,10 +155,12 @@ jobs:
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cli/**'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
               - 'mcp-demo/**'
+              - 'permissions/**'
               - 'docs/AI_AGENT_PLAYBOOK.md'
               - '.dockerignore'
               - 'scripts/check-backend-docker-embeds.py'
@@ -190,8 +209,46 @@ jobs:
               - '.github/scripts/**'
 
   # ---------------------------------------------------------------------------
-  # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
+  # Reusable workflow permissions: a ci.yml job requesting a scope that the
+  # Publish Images `ci-gate` call does not grant passes on PRs but makes Publish
+  # Images fail to start on main and tags. Cheap enough to run every time.
   # ---------------------------------------------------------------------------
+  workflow-permissions:
+    name: Workflow Permissions
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+      - name: Check reusable workflow permissions against their callers
+        run: python3 scripts/check-reusable-workflow-permissions.py
+
+  # ---------------------------------------------------------------------------
+  # Permission engine: no database or Google credentials required.
+  # ---------------------------------------------------------------------------
+  permissions-test:
+    name: Google Permissions
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.permissions == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -p nyxid-permissions --check
+      - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
+      - run: cargo test -p nyxid-permissions --locked
+      - run: python3 scripts/test-drive-permissions-poc.py
+
+  # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
   cursor-plugin-validate:
     name: Cursor Plugin Validate
     needs: changes
@@ -298,6 +355,10 @@ jobs:
 
       - name: Run backend tests
         run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
 
       - name: Publish test summary
         if: always()
@@ -350,6 +411,10 @@ jobs:
           key: backend-billing-smoke
       - name: Billing route coverage smoke
         run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
 
       - name: Upload resource samples
         if: always()
@@ -390,6 +455,7 @@ jobs:
     needs: changes
     permissions:
       contents: read
+      attestations: read
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -409,10 +475,26 @@ jobs:
         run: |
           docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
           docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
+          python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
+          docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
+      - name: Verify existing-profile migration, signed updates and rollback
+        env:
+          MACHINE_IMAGE: nyxid-node-machine:ci
+          MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
+        run: sh cli/tests/machine_updater_e2e.sh
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install command-rendering dependencies
+        run: npm ci --ignore-scripts --prefix frontend
+      - name: Verify read-only production updater and rendered commands
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node cli/tests/machine_updater_production.mjs
       - name: Remove test images and build cache
         if: always()
         run: |
-          docker image rm -f nyxid-machine-e2e:ci nyxid-node-machine:ci || true
+          docker image rm -f nyxid-machine-e2e:ci nyxid-node-machine:ci nyxid-machine-updater-e2e:local nyxid-machine-updater:production-test || true
           docker builder prune -f
 
   cli-test:
@@ -443,7 +525,7 @@ jobs:
         run: node --test cli/tests/machine_filler.test.mjs
 
       - name: Run CLI tests
-        run: cargo nextest run -p nyxid-cli -p nyxid-machine --profile ci
+        run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
 
       - name: Publish test summary
         if: always()
@@ -674,6 +756,10 @@ jobs:
       # workspace (whose tests this job does not run).
       - name: Measure (head)
         run: python3 .github/scripts/ci_resources.py coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
       - name: Export head coverage
         run: |
           cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
@@ -781,6 +867,10 @@ jobs:
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
         run: python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Test MongoDB diagnostics
+        if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/dump-test-mongodb.sh"
       - name: Export base coverage
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
@@ -1082,11 +1172,13 @@ jobs:
     if: always()
     needs:
       - changes
+      - workflow-permissions
       - cursor-plugin-validate
       - oracle-worker-test
       - rust-fmt
       - rust-clippy
       - backend-test
+      - permissions-test
       - backend-billing-smoke
       - backend-image-inputs
       - cli-test
@@ -1109,11 +1201,13 @@ jobs:
           # coverage drops below the enforced threshold.
           RESULTS: |
             changes=${{ needs.changes.result }}
+            workflow-permissions=${{ needs.workflow-permissions.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             oracle-worker-test=${{ needs.oracle-worker-test.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}
             backend-test=${{ needs.backend-test.result }}
+            permissions-test=${{ needs.permissions-test.result }}
             backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
             cli-test=${{ needs.cli-test.result }}

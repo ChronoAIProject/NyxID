@@ -18,6 +18,19 @@ use tokio::{
 use zeroize::Zeroizing;
 
 const LIMIT: u64 = 5 * 1024 * 1024;
+const UPLOAD_LIMIT: u64 = nyxid_machine::MAX_ATTACHMENT_UPLOAD_BYTES as u64;
+
+fn transfer_limit(operation: Operation, metadata: &Value) -> Result<u64> {
+    let ceiling = match operation {
+        Operation::SaveAttachment => UPLOAD_LIMIT,
+        Operation::ShareFile => LIMIT,
+        _ => bail!("invalid file operation"),
+    };
+    metadata["max_bytes"]
+        .as_u64()
+        .filter(|size| *size <= ceiling)
+        .context("file transfer limit exceeded")
+}
 
 /// Closing the pipes cancels the worker; cleanup/reaping never delays takeover.
 struct Worker(Option<tokio::process::Child>);
@@ -69,20 +82,18 @@ pub async fn execute(
     })
     .await;
     if !matches!(result, Ok(Ok(()))) {
-        let reason = match result {
-            Ok(Err(ref error))
-                if matches!(
-                    error.downcast_ref::<super::MachineError>(),
-                    Some(super::MachineError::OwnerInControl)
-                ) =>
-            {
-                "owner_in_control"
-            }
-            _ => "Machine file transfer refused, interrupted, or exceeded its limit",
+        let reason = match &result {
+            Ok(Err(error)) => match error.downcast_ref::<super::MachineError>() {
+                Some(super::MachineError::OwnerInControl) => "owner_in_control",
+                Some(super::MachineError::AuthorityStale) => "machine_authority_stale",
+                Some(super::MachineError::TurnStopped) => "machine_turn_stopped",
+                _ => "machine_transfer_refused",
+            },
+            _ => "machine_transfer_refused",
         };
         let _ = sender
             .send(NodeWsMessage::Text(
-                json!({"type":"proxy_error","request_id":id,"status":403,"error":reason})
+                json!({"type":"proxy_error","request_id":id,"status":403,"error":reason,"reason":reason,"retryable":true})
                     .to_string(),
             ))
             .await;
@@ -123,7 +134,13 @@ impl Runtime {
             let file = tempfile::Builder::new()
                 .prefix("nyxid-clipboard-")
                 .suffix(&suffix)
-                .tempfile()?;
+                .tempfile_in(
+                    self.browser_identity
+                        .desktop
+                        .as_ref()
+                        .map(|d| d.runtime.clone())
+                        .unwrap_or_else(std::env::temp_dir),
+                )?;
             let mut target = tokio::fs::File::from_std(file.reopen()?);
             let mut output = child.stdout.take().context("file worker unavailable")?;
             let mut buffer = Zeroizing::new(vec![0; nyxid_machine::STREAM_CHUNK_BYTES]);
@@ -146,7 +163,7 @@ impl Runtime {
                 bail!("clipboard file is outside the agent's workspace or unreadable");
             }
             target.flush().await?;
-            let browser = super::process::Identity::resolve(self.config.browser_user.as_deref())?;
+            let browser = self.browser_identity.clone();
             super::browser::chown(file.path(), browser.uid, browser.gid)?;
             Ok(file)
         })
@@ -154,20 +171,76 @@ impl Runtime {
     }
 
     async fn transfer(
-        &self,
+        self: &Arc<Self>,
         metadata: &Value,
         upload: VerifiedUpload,
         sender: &mpsc::Sender<NodeWsMessage>,
     ) -> Result<()> {
-        let mut control = self.owner_control.subscribe();
-        if *control.borrow_and_update() & 1 != 0 {
+        self.ensure_authority_watch();
+        let authority: Option<Box<nyxid_machine::authority::Authority>> =
+            serde_json::from_value(metadata["_authority"].clone())?;
+        let mut authority_stop = if let Some(authority) = &authority {
+            if !authority.capabilities.allows(upload.operation(), metadata)
+                || metadata["conversation_id"] != authority.conversation_id
+                || metadata["turn_id"] != authority.turn_id
+            {
+                return Err(super::MachineError::AuthorityStale.into());
+            }
+            Some(
+                self.authority
+                    .admit(authority, &self.runtime_id, None)
+                    .map_err(|_| super::MachineError::AuthorityStale)?,
+            )
+        } else {
+            if self.authority.enrolled() {
+                return Err(super::MachineError::AuthorityStale.into());
+            }
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let context = if let Some(a) = authority.as_ref().filter(|a| a.mode == "separated") {
+            Some(Box::pin(self.context_instance(a)).await?)
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let executor = context.as_deref().unwrap_or(self);
+        #[cfg(not(target_os = "linux"))]
+        let executor = {
+            if authority.as_ref().is_some_and(|a| a.mode == "separated") {
+                bail!("separated_requires_linux");
+            }
+            self.as_ref()
+        };
+        let _admission = self.operation_admission.read().await;
+        if self.upgrading.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(super::MachineError::TurnStopped.into());
+        }
+        let scope: super::cancellation::Scope = serde_json::from_value(metadata.clone())?;
+        let mut stopped = self.turns.subscribe(&scope);
+        if *stopped.borrow_and_update() {
+            return Err(super::MachineError::TurnStopped.into());
+        }
+        let mut control = executor.owner_control.subscribe();
+        let mut dev_control = executor.dev_owner_control.subscribe();
+        if *control.borrow_and_update() & 1 != 0 || *dev_control.borrow_and_update() & 1 != 0 {
             return Err(super::MachineError::OwnerInControl.into());
         }
-        tokio::select! {
+        let result = tokio::select! {
             biased;
+            _ = async { if let Some(stop)=&mut authority_stop {let _=stop.changed().await;} else {std::future::pending::<()>().await;} } => Err(super::MachineError::AuthorityStale.into()),
+            _ = stopped.changed() => Err(super::MachineError::TurnStopped.into()),
             _ = control.changed() => Err(super::MachineError::OwnerInControl.into()),
-            result = self.transfer_inner(metadata, upload, sender) => result,
+            _ = dev_control.changed() => Err(super::MachineError::OwnerInControl.into()),
+            result = executor.transfer_inner(metadata, upload, sender) => result,
+        };
+        if let Some(authority) = authority {
+            if !self.authority.live(&authority.lease_id) {
+                return Err(super::MachineError::AuthorityStale.into());
+            }
+            self.authority.finish(&authority.lease_id);
         }
+        result
     }
 
     async fn transfer_inner(
@@ -183,10 +256,7 @@ impl Runtime {
         if !matches!(operation, Operation::SaveAttachment | Operation::ShareFile) {
             bail!("invalid file operation");
         }
-        let limit = metadata["max_bytes"]
-            .as_u64()
-            .filter(|n| *n <= LIMIT)
-            .context("file transfer limit exceeded")?;
+        let limit = transfer_limit(operation, metadata)?;
         let id = string(metadata, "request_id")?;
         let request = FileRequest {
             roots: self.config.roots.clone(),
@@ -283,10 +353,7 @@ pub fn worker() -> Result<()> {
     let request: FileRequest = serde_json::from_slice(&header)?;
     let roots = Roots::new(&request.roots, &request.excluded)?;
     let path = string(&request.parameters, "path")?;
-    let limit = request.parameters["max_bytes"]
-        .as_u64()
-        .filter(|n| *n <= LIMIT)
-        .context("invalid file transfer limit")?;
+    let limit = transfer_limit(request.operation, &request.parameters)?;
     let mut output = std::io::stdout().lock();
     match request.operation {
         Operation::SaveAttachment => {
@@ -304,4 +371,30 @@ pub fn worker() -> Result<()> {
     }
     output.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_attachment_limit_does_not_widen_image_or_clipboard_reads() {
+        let large = json!({"max_bytes": UPLOAD_LIMIT});
+        assert_eq!(
+            transfer_limit(Operation::SaveAttachment, &large).unwrap(),
+            UPLOAD_LIMIT
+        );
+        assert!(
+            transfer_limit(
+                Operation::SaveAttachment,
+                &json!({"max_bytes": UPLOAD_LIMIT + 1})
+            )
+            .is_err()
+        );
+        assert!(transfer_limit(Operation::ShareFile, &large).is_err());
+        assert_eq!(
+            transfer_limit(Operation::ShareFile, &json!({"max_bytes": LIMIT})).unwrap(),
+            LIMIT
+        );
+    }
 }

@@ -21,6 +21,7 @@ test("all three analytics approaches are interactive and saved views survive rel
     .click();
   await select(page, "Show", "Top 10 + Other");
   await select(page, "Chart type", "Bar");
+  await select(page, "Data table", "Accordion");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(
@@ -28,6 +29,26 @@ test("all three analytics approaches are interactive and saved views survive rel
       name: "Service mix: bar chart. Values available in the data table.",
       exact: true,
     }),
+  ).toBeVisible();
+  const serviceMix = page.getByRole("article", { name: "Service mix" });
+  await expect(
+    serviceMix.getByRole("table", { name: "Service mix data" }),
+  ).toBeHidden();
+  await serviceMix.getByText("Data table", { exact: true }).click();
+  await expect(
+    serviceMix.getByRole("table", { name: "Service mix data" }),
+  ).toBeVisible();
+  await serviceMix.getByText("Data table", { exact: true }).click();
+  await expect(
+    serviceMix.getByRole("table", { name: "Service mix data" }),
+  ).toBeHidden();
+  await page
+    .getByRole("button", { name: "Configure Service mix", exact: true })
+    .click();
+  await select(page, "Data table", "Always open");
+  await page.keyboard.press("Escape");
+  await expect(
+    serviceMix.getByRole("table", { name: "Service mix data" }),
   ).toBeVisible();
   await page.getByRole("button", { name: /Overview GA inspired/ }).click();
   await expect(
@@ -103,8 +124,9 @@ test("all three analytics approaches are interactive and saved views survive rel
   await expect(
     page.getByRole("img", { name: /Explore service usage: pie/ }),
   ).toBeVisible();
-  await page.getByText("View data table", { exact: true }).click();
-  await expect(page.getByRole("table")).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "Explore service usage data" }),
+  ).toBeVisible();
   await page
     .getByRole("button", { name: "Use in Operations", exact: true })
     .click();
@@ -979,7 +1001,6 @@ for (const chart of ["bar", "line", "combo", "pie"] as const) {
     await expect(
       panel.locator('[title="Service 0: 9,007,199,254.740993 credits"]'),
     ).toBeVisible();
-    await panel.getByText("View data table", { exact: true }).click();
     await expect(panel.getByRole("table")).toContainText(
       "9,007,199,254.740993",
     );

@@ -190,6 +190,20 @@ impl Roots {
     }
 
     fn parent(&self, resolved: &Path) -> Result<(OwnedFd, CString)> {
+        // Traversing an ancestor does not require listing it. In a Landlock
+        // context, granting read-directory on / would expose the entire tree.
+        #[cfg(target_os = "linux")]
+        const TRAVERSE: i32 = libc::O_PATH;
+        #[cfg(not(target_os = "linux"))]
+        const TRAVERSE: i32 = libc::O_RDONLY;
+        let readable = |directory: &OwnedFd| {
+            open_at(
+                directory.as_raw_fd(),
+                std::ffi::OsStr::new("."),
+                libc::O_RDONLY | libc::O_DIRECTORY,
+                0,
+            )
+        };
         let root = self
             .roots
             .iter()
@@ -199,38 +213,28 @@ impl Roots {
         let mut directory = open_at(
             libc::AT_FDCWD,
             std::ffi::OsStr::new("/"),
-            libc::O_RDONLY | libc::O_DIRECTORY,
+            TRAVERSE | libc::O_DIRECTORY,
             0,
         )?;
         for component in root.components() {
             if let Component::Normal(name) = component {
-                directory = open_at(
-                    directory.as_raw_fd(),
-                    name,
-                    libc::O_RDONLY | libc::O_DIRECTORY,
-                    0,
-                )?;
+                directory = open_at(directory.as_raw_fd(), name, TRAVERSE | libc::O_DIRECTORY, 0)?;
             }
         }
         let components: Vec<_> = resolved.strip_prefix(root)?.components().collect();
         if components.is_empty() {
-            return Ok((directory, CString::new(".")?));
+            return Ok((readable(&directory)?, CString::new(".")?));
         }
         for component in &components[..components.len() - 1] {
             let Component::Normal(name) = component else {
                 return Err(super::MachineError::PathOutsideRoots.into());
             };
-            directory = open_at(
-                directory.as_raw_fd(),
-                name,
-                libc::O_RDONLY | libc::O_DIRECTORY,
-                0,
-            )?;
+            directory = open_at(directory.as_raw_fd(), name, TRAVERSE | libc::O_DIRECTORY, 0)?;
         }
         let Component::Normal(name) = components[components.len() - 1] else {
             return Err(super::MachineError::PathOutsideRoots.into());
         };
-        Ok((directory, cstring(name)?))
+        Ok((readable(&directory)?, cstring(name)?))
     }
 
     fn open(&self, resolved: &Path, flags: i32) -> Result<File> {
@@ -592,7 +596,7 @@ mod tests {
     fn streamed_writes_validate_size_and_hash_before_atomic_commit() {
         let temp = tempfile::tempdir().unwrap();
         let roots = Roots::new(&[temp.path().into()], &[]).unwrap();
-        let bytes = vec![b'X'; 2 * 1024 * 1024];
+        let bytes = vec![b'X'; 20 * 1024 * 1024];
         let expected = hex::encode(Sha256::digest(&bytes));
         let mut reader = std::io::Cursor::new(&bytes);
         assert_eq!(

@@ -14,6 +14,10 @@ pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default)]
+    pub follow_capacity_revision: i64,
+    #[serde(default)]
+    pub follow_binding_generation: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -149,6 +153,8 @@ impl std::fmt::Debug for NyxbotChannel {
 /// `kind`, so the gateway's conversation registry keeps working.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotThread {
+    #[serde(flatten, default)]
+    pub follow: super::channel_thread_follow::ThreadFollow,
     #[serde(rename = "_id")]
     pub id: String,
     pub channel_id: String,
@@ -226,6 +232,13 @@ impl std::fmt::Debug for NyxbotThread {
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    /// Present only on turns admitted by the durable-delivery implementation.
+    #[serde(default)]
+    pub delivery: Option<ChannelTurnDelivery>,
+    #[serde(default)]
+    pub resolved_thread_id: Option<String>,
+    #[serde(default)]
+    pub resolved_conversation_id: Option<String>,
     /// SHA-256 of `binding_id` and the idempotency key.
     #[serde(rename = "_id")]
     pub id: String,
@@ -317,4 +330,28 @@ impl std::fmt::Debug for TriggerPrefill {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("TriggerPrefill { [REDACTED] }")
     }
+}
+
+/// Metadata-only turn delivery barrier. References are encrypted capabilities;
+/// neither they nor sender identifiers appear in Debug, logs or audit.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChannelTurnDelivery {
+    pub version: i32,
+    /// waiting (stream), pending (async), streamed, sending, sent, unknown, refused.
+    pub state: String,
+    pub origin: super::assistant_conversation::ChannelOrigin,
+    pub sender_id: String,
+    pub guest: bool,
+    pub addressed: bool,
+    pub transport: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub stream_deadline: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub checked_at: DateTime<Utc>,
+    #[serde(default)]
+    pub claim_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub target_ciphertext: Option<Vec<u8>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub target_expires_at: Option<DateTime<Utc>>,
 }

@@ -685,7 +685,8 @@ describe("ChatComposer measured layout", () => {
         "Every agent action is brokered, scoped, and audit-logged by NyxID.",
       ),
     ).not.toBeInTheDocument();
-    expect(composer).toHaveClass("ml-[30px]", "flex", "items-start");
+    expect(composer).toHaveClass("flex", "items-start");
+    expect(composer.closest("[data-composer-input]")).toHaveClass("ml-[30px]");
     expect(button).toHaveClass("h-8");
     expect(textarea).toHaveClass("min-h-8", "px-0");
   });
@@ -876,4 +877,21 @@ describe("ChatComposer @mentions (group chats)", () => {
     });
     expect(baseProps.onSend).toHaveBeenCalledWith("@stranger hello");
   });
+});
+
+it("offers voice only for an empty eligible composer and keeps Stop reachable", () => {
+  useAssistantDraftStore.setState({ownerUserId:null,drafts:{}});
+  const onVoice=vi.fn();
+  const {rerender}=render(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} />);
+  fireEvent.click(screen.getByRole("button",{name:"Open voice call"}));expect(onVoice).toHaveBeenCalledTimes(1);
+  fireEvent.change(screen.getByRole("textbox"),{target:{value:"An unsent draft"}});
+  expect(screen.queryByRole("button",{name:"Open voice call"})).not.toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"Send message"})).toBeEnabled();
+  fireEvent.change(screen.getByRole("textbox"),{target:{value:""}});
+  rerender(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} uploadBlocked />);
+  expect(screen.queryByRole("button",{name:"Open voice call"})).not.toBeInTheDocument();
+  rerender(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} hasAttachments />);
+  expect(screen.getByRole("button",{name:"Send message"})).toBeEnabled();
+  rerender(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} active />);
+  expect(screen.getByRole("button",{name:"Stop assistant turn"})).toBeEnabled();
 });

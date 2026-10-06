@@ -1,5 +1,5 @@
 # NyxID machine supervisor with isolated browser and command users.
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.98.1-bookworm AS builder
 
 # libdbus-1-dev is required at compile time by the keyring crate
 RUN apt-get update \
@@ -17,16 +17,18 @@ COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
 COPY service-adapters/ service-adapters/
+COPY permissions/ permissions/
 COPY mcp-demo/ mcp-demo/
 COPY nyxid-crypto/ nyxid-crypto/
 COPY machine/ machine/
+COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)
 ARG TARGETARCH
 RUN --mount=type=cache,id=nyxid-machine-target-${TARGETARCH},target=/build/target,sharing=locked \
     --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build --release -p nyxid-cli && mkdir -p /out && cp target/release/nyxid /out/nyxid
+    cargo build --release -p nyxid-cli --bin nyxid && mkdir -p /out && cp target/release/nyxid /out/nyxid
 
 
 # Ubuntu LTS with signed Debian Chromium packages (Ubuntu's chromium is a snap).
@@ -35,7 +37,7 @@ FROM ubuntu:24.04 AS desktop
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git python3 nodejs npm ripgrep build-essential pkg-config \
-    xvfb xauth x11-utils openbox dbus-x11 fonts-liberation libdbus-1-3 openssl tini util-linux libasound2t64 libgbm1 \
+    xvfb xauth x11-utils openbox dbus-x11 bubblewrap at-spi2-core fonts-liberation libdbus-1-3 openssl tini util-linux libasound2t64 libgbm1 \
     debian-archive-keyring && rm -rf /var/lib/apt/lists/*
 RUN printf '%s\n' \
     'deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian bookworm main' \
@@ -44,12 +46,14 @@ RUN printf '%s\n' \
     && printf '%s\n' 'Package: *' 'Pin: release o=Debian' 'Pin-Priority: 50' '' \
     'Package: chromium chromium-common chromium-sandbox' 'Pin: release o=Debian' 'Pin-Priority: 990' \
     > /etc/apt/preferences.d/nyxid-chromium \
-    && apt-get update && apt-get install -y --no-install-recommends chromium chromium-sandbox \
+    && apt-get update && apt-get install -y --no-install-recommends chromium \
+    && rm -f /usr/lib/chromium/chrome-sandbox \
     && rm -rf /var/lib/apt/lists/*
 RUN userdel -r ubuntu 2>/dev/null || true
 RUN useradd --uid 1000 --create-home --shell /bin/sh agent \
     && useradd --uid 1001 --create-home --shell /usr/sbin/nologin browser \
-    && chmod 0700 /home/browser \
+    && useradd --uid 1002 --create-home --shell /usr/sbin/nologin devbrowser \
+    && chmod 0700 /home/browser /home/devbrowser \
     && mkdir -p /workspace /var/lib/nyxid-machine/desktop \
     && chown agent:agent /workspace \
     && chmod 0711 /var/lib/nyxid-machine /var/lib/nyxid-machine/desktop
@@ -77,10 +81,13 @@ with tempfile.TemporaryDirectory() as directory:
 INSTALL
 COPY --from=builder /out/nyxid /usr/local/bin/nyxid
 COPY cli/container/entrypoint.sh /usr/local/bin/nyxid-machine-entrypoint
+COPY cli/container/desktop-session.sh /usr/local/bin/nyxid-desktop-session
 ENV DISPLAY=:99 XAUTHORITY=/var/lib/nyxid-machine/desktop/Xauthority \
     CUA_DRIVER_RS_TELEMETRY_ENABLED=false
-RUN chmod 0755 /usr/local/bin/nyxid-machine-entrypoint \
-    && /usr/local/bin/nyxid node machine-browser-install --port 32248
+RUN chmod 0755 /usr/local/bin/nyxid-machine-entrypoint /usr/local/bin/nyxid-desktop-session \
+    && NYXID_MACHINE_CONTAINER=1 /usr/local/bin/nyxid node machine-browser-install --port 32248
 VOLUME ["/workspace", "/var/lib/nyxid-machine"]
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-machine-entrypoint"]
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=3 CMD ["nyxid", "node", "machine-updater", "health"]

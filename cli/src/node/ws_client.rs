@@ -812,7 +812,16 @@ async fn run_connection_loop(
 ) {
     let mut backoff = ReconnectBackoff::new();
     let proxy_uploads = Arc::new(super::proxy_upload::Uploads::default());
-    let machine = if config.machine.shell || config.machine.files || config.machine.computer {
+    // Replay protection spans WebSocket reconnects. A request can be delivered
+    // again while the caller is recovering a lost response; the machine
+    // runtime's receipt ledger then returns its original outcome without
+    // executing the operation twice.
+    let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
+    let machine = if config.machine.shell
+        || config.machine.files
+        || config.machine.computer
+        || config.machine.browser_enabled()
+    {
         match super::machine::Runtime::new(&config.machine, &config.node.id, config_dir) {
             Ok(runtime) => Some(runtime),
             Err(_) => {
@@ -844,6 +853,7 @@ async fn run_connection_loop(
             shutdown.clone(),
             machine.clone(),
             proxy_uploads.clone(),
+            replay_guard.clone(),
         )
         .await;
         proxy_uploads.disconnect().await;
@@ -888,6 +898,7 @@ async fn connect_and_serve(
     mut shutdown: watch::Receiver<bool>,
     machine: Option<Arc<super::machine::Runtime>>,
     proxy_uploads: Arc<super::proxy_upload::Uploads>,
+    replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
@@ -923,23 +934,36 @@ async fn connect_and_serve(
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     }
 
-    // 3. Wait for auth_ok
-    let response = tokio::select! {
-        response = tokio::time::timeout(Duration::from_secs(10), ws_stream.next()) => {
-            response
-                .map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))?
-                .ok_or_else(|| Error::AuthFailed("Connection closed during auth".to_string()))?
-                .map_err(|e| Error::WebSocket(format!("Read error during auth: {e}")))?
-        }
+    // 3. Wait for auth_ok. Intermediaries may send ping/pong frames (or a
+    // stale control frame) while the server is claiming the node connection;
+    // those frames are not authentication failures. Keep reading until the
+    // actual auth response or the bounded handshake timeout.
+    let parsed = tokio::select! {
+        response = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let message = ws_stream
+                    .next()
+                    .await
+                    .ok_or_else(|| Error::AuthFailed("Connection closed during auth".to_string()))?
+                    .map_err(|e| Error::WebSocket(format!("Read error during auth: {e}")))?;
+                let Message::Text(text) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        return Err(Error::AuthFailed("Connection closed during auth".to_string()));
+                    }
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    tracing::debug!("Ignoring non-JSON control frame during node authentication");
+                    continue;
+                };
+                match value["type"].as_str() {
+                    Some("auth_ok" | "auth_error") => return Ok(value),
+                    _ => tracing::debug!("Ignoring non-auth control frame during node authentication"),
+                }
+            }
+        }) => response.map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))??,
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     };
-
-    let text = match response {
-        Message::Text(t) => t.to_string(),
-        _ => return Err(Error::AuthFailed("Unexpected message type".to_string())),
-    };
-
-    let parsed: serde_json::Value = serde_json::from_str(&text)?;
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
             let enabled = parsed["capabilities"]["proxy_binary_chunks"]
@@ -967,9 +991,15 @@ async fn connect_and_serve(
             return Err(Error::AuthFailed(msg.to_string()));
         }
         _ => {
-            return Err(Error::AuthFailed(format!("Unexpected response: {text}")));
+            return Err(Error::AuthFailed(
+                "Unexpected authentication response".to_string(),
+            ));
         }
     };
+
+    if let Some(machine) = &machine {
+        machine.report_connected();
+    }
 
     // Derive the idle watchdog from the server's heartbeat cadence so
     // installations that customize NODE_HEARTBEAT_INTERVAL_SECS don't trigger
@@ -1042,7 +1072,7 @@ async fn connect_and_serve(
             tracing::warn!("Machine gateway could not start");
         }
     }
-    let caps_msg = serde_json::json!({
+    let mut caps_msg = serde_json::json!({
         "type": "status_update",
         "agent_version": env!("CARGO_PKG_VERSION"),
         "capabilities": capabilities,
@@ -1051,8 +1081,6 @@ async fn connect_and_serve(
 
     // Shared state for the reader loop
     let metrics = Arc::new(NodeMetrics::new());
-    let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
-
     let serving_started = tokio::time::Instant::now();
 
     // 5. Reader loop: process incoming messages from the server
@@ -1131,6 +1159,19 @@ async fn connect_and_serve(
 
         match parsed["type"].as_str() {
             Some("heartbeat_ping") => {
+                if let Some(machine) = &machine {
+                    machine.report_connected();
+                    let ready = machine.updater_ready();
+                    let updater = serde_json::json!(machine.updater_status());
+                    if caps_msg["capabilities"]["machine"]["updater_ready"] != ready
+                        || caps_msg["capabilities"]["machine"]["updater"] != updater
+                    {
+                        caps_msg["capabilities"]["machine"]["updater"] = updater;
+                        caps_msg["capabilities"]["machine"]["updater_ready"] =
+                            serde_json::json!(ready);
+                        let _ = send_ws_message(&tx, caps_msg.to_string()).await;
+                    }
+                }
                 let pong = serde_json::json!({
                     "type": "heartbeat_pong",
                     "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -1156,7 +1197,7 @@ async fn connect_and_serve(
                         .await;
                 }
             }
-            Some("machine_request") => {
+            Some("machine_request" | "machine_request_v2") => {
                 if let (Some(machine), Some(secret)) = (machine.clone(), signing_secret.clone())
                     && let Ok(request) =
                         serde_json::from_value::<nyxid_machine::Request>(parsed.clone())
@@ -1165,18 +1206,21 @@ async fn connect_and_serve(
                     tokio::spawn(async move {
                         let request_id = request.request_id.clone();
                         let operation = request.operation;
-                        let revision = machine.control_revision();
+                        let mut parameters = request.parameters.clone();
+                        parameters["_signed_authority"] = serde_json::to_value(&request.authority)
+                            .unwrap_or(serde_json::Value::Null);
+                        let revision = machine.control_revision(operation, &parameters).await;
                         let signing_bytes = zeroize::Zeroizing::new(
                             hex::decode(secret.as_str()).unwrap_or_default(),
                         );
                         let result = machine.handle(request, &signing_bytes).await;
                         machine
-                            .send_result(&tx, &request_id, operation, revision, result)
+                            .send_result(&tx, &request_id, operation, revision, &parameters, result)
                             .await;
                     });
                 }
             }
-            Some("proxy_upload") => {
+            Some("proxy_upload" | "proxy_upload_v2") => {
                 let request_id = parsed["request_id"].as_str().unwrap_or_default().to_owned();
                 let verified = if let Some(secret) = signing_secret.as_ref() {
                     proxy_uploads
@@ -5026,6 +5070,8 @@ mod tests {
             let uploads = Arc::new(super::super::proxy_upload::Uploads::default());
             let id = uuid::Uuid::new_v4();
             let mut opening = Request {
+                version: 1,
+                authority: None,
                 request_id: id.to_string(),
                 node_id: config.node.id.clone(),
                 operation: Operation::ProxyUpload,
@@ -5400,6 +5446,10 @@ mod tests {
             let auth: serde_json::Value = serde_json::from_str(auth.to_text().unwrap()).unwrap();
             assert_eq!(auth["type"], "auth");
             if authenticated {
+                // A control frame can arrive before auth_ok when a proxy or
+                // the server heartbeat task is already active. It must not
+                // force an unnecessary reconnect.
+                socket.send(Message::Ping(Vec::new().into())).await.unwrap();
                 socket
                     .send(Message::Text(
                         serde_json::json!({"type": "auth_ok"}).to_string().into(),
@@ -5407,7 +5457,15 @@ mod tests {
                     .await
                     .unwrap();
                 // Read capability advertisement to ensure the serving loop is entered.
-                assert!(socket.next().await.unwrap().unwrap().is_text());
+                let mut capability = None;
+                while let Some(message) = socket.next().await {
+                    let message = message.unwrap();
+                    if message.is_text() {
+                        capability = Some(message);
+                        break;
+                    }
+                }
+                assert!(capability.is_some());
             }
             if clean_close {
                 socket

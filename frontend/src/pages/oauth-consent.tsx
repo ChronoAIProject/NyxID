@@ -21,8 +21,11 @@ import {
   Mail,
   RefreshCw,
   Save,
+  ShieldCheck,
   ShieldQuestion,
   UserRound,
+  UsersRound,
+  Waypoints,
 } from "lucide-react";
 import { OAUTH_SCOPE_META } from "@/lib/constants";
 import { useApplyTheme } from "@/hooks/use-theme";
@@ -177,19 +180,19 @@ function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
   );
 }
 
+const SCOPE_ICONS: Readonly<Record<string, typeof CircleUserRound>> = {
+  openid: CircleUserRound,
+  profile: UserRound,
+  email: Mail,
+  roles: ShieldCheck,
+  groups: UsersRound,
+  proxy: Waypoints,
+  offline_access: RefreshCw,
+  "urn:nyxid:scope:broker_binding": KeyRound,
+};
+
 function ScopeIcon({ scope }: { readonly scope: string }) {
-  const Icon =
-    scope === "openid"
-      ? CircleUserRound
-      : scope === "profile"
-        ? UserRound
-        : scope === "email"
-          ? Mail
-          : scope === "offline_access"
-            ? RefreshCw
-            : scope === "urn:nyxid:scope:broker_binding"
-              ? KeyRound
-              : ShieldQuestion;
+  const Icon = SCOPE_ICONS[scope] ?? ShieldQuestion;
   return <Icon className="h-4 w-4" aria-hidden="true" />;
 }
 
@@ -301,8 +304,8 @@ function StandardConsentPage({
   const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
   // Server-resolved hints: the app's declared default services matched to
-  // this user (pre-selected), and declared services the user has no match
-  // for (informational only).
+  // this user (fixed on the consent screen), and declared services the
+  // user has no match for (informational only).
   const bindingReview =
     search.get("binding_review") === "true" && Boolean(bindingGrantId);
   const currentBindingAllowsAllServices =
@@ -369,16 +372,21 @@ function StandardConsentPage({
     () =>
       Array.from(
         new Set([
+          ...preselectServiceIds,
           ...requiredServiceIds,
           ...resourceSelectedServiceIds,
           ...selectedServiceIds,
         ]),
       ).filter(
         (id) =>
-          requiredServiceIds.includes(id) || !deselectedServiceIds.includes(id),
+          preselectServiceIds.includes(id) ||
+          requiredServiceIds.includes(id) ||
+          resourceSelectedServiceIds.includes(id) ||
+          !deselectedServiceIds.includes(id),
       ),
     [
       deselectedServiceIds,
+      preselectServiceIds,
       requiredServiceIds,
       resourceSelectedServiceIds,
       selectedServiceIds,
@@ -401,11 +409,8 @@ function StandardConsentPage({
           secondary: service ? serviceSecondaryText(service) : "",
           description: service?.catalog_service_description?.trim() || "",
           orgName: service ? serviceOrgName(service) : null,
-          requestedByApp:
-            preselectServiceIds.includes(id) ||
-            resourceSelectedServiceIds.includes(id) ||
-            requiredServiceIds.includes(id),
           requiredByApp:
+            preselectServiceIds.includes(id) ||
             resourceSelectedServiceIds.includes(id) ||
             requiredServiceIds.includes(id),
           currentlyAuthorized:
@@ -430,7 +435,13 @@ function StandardConsentPage({
   );
 
   function toggleService(serviceId: string, checked: boolean) {
-    if (!checked && requiredServiceIds.includes(serviceId)) return;
+    if (
+      !checked &&
+      (preselectServiceIds.includes(serviceId) ||
+        resourceSelectedServiceIds.includes(serviceId) ||
+        requiredServiceIds.includes(serviceId))
+    )
+      return;
     setSelectedServiceIds((current) => {
       if (checked) {
         return current.includes(serviceId) ? current : [...current, serviceId];
@@ -514,10 +525,7 @@ function StandardConsentPage({
         </h2>
         <div className="mt-4 divide-y divide-border/60">
           {scopes.map((item) => {
-            const meta = OAUTH_SCOPE_META[item] ?? {
-              title: "Custom permission",
-              description: "This app is requesting a non-standard permission.",
-            };
+            const meta = OAUTH_SCOPE_META[item];
             return (
               <div
                 key={`meta-${item}`}
@@ -527,12 +535,21 @@ function StandardConsentPage({
                   <ScopeIcon scope={item} />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="break-words text-13 font-medium text-foreground">
-                    {meta.title}
+                  <p
+                    className={`text-13 font-medium text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
+                  >
+                    {meta?.title ?? item}
                   </p>
-                  <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
-                    {meta.description}
-                  </p>
+                  {meta && (
+                    <>
+                      <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                        {meta.description}
+                      </p>
+                      <code className="mt-1 block break-all text-11 text-muted-foreground">
+                        {item}
+                      </code>
+                    </>
+                  )}
                 </div>
               </div>
             );
@@ -618,16 +635,10 @@ function StandardConsentPage({
                           Authorized now
                         </Badge>
                       )}
-                      {item.requiredByApp ? (
+                      {item.requiredByApp && (
                         <Badge variant="secondary" className="text-10">
                           Required by app
                         </Badge>
-                      ) : (
-                        item.requestedByApp && (
-                          <Badge variant="secondary" className="text-10">
-                            Requested by app
-                          </Badge>
-                        )
                       )}
                       {item.newlySelected && (
                         <Badge variant="accent" className="text-10">
@@ -672,6 +683,10 @@ function StandardConsentPage({
                   ) : selectableServices.length > 0 ? (
                     selectableServices.map((service) => {
                       const orgName = serviceOrgName(service);
+                      const requiredByApp =
+                        preselectServiceIds.includes(service.id) ||
+                        resourceSelectedServiceIds.includes(service.id) ||
+                        requiredServiceIds.includes(service.id);
                       return (
                         <div
                           key={service.id}
@@ -682,7 +697,7 @@ function StandardConsentPage({
                             checked={effectiveSelectedServiceIds.includes(
                               service.id,
                             )}
-                            disabled={requiredServiceIds.includes(service.id)}
+                            disabled={requiredByApp}
                             onCheckedChange={(checked) =>
                               toggleService(service.id, checked === true)
                             }
@@ -690,7 +705,7 @@ function StandardConsentPage({
                           <div className="min-w-0">
                             <Label
                               htmlFor={`oauth-service-${service.id}`}
-                              className="cursor-pointer text-13 leading-5 text-foreground"
+                              className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-13 leading-5 text-foreground`}
                             >
                               <span className="block break-words font-medium">
                                 {serviceDisplayName(service)}
@@ -735,7 +750,7 @@ function StandardConsentPage({
                                     Authorized now
                                   </Badge>
                                 )}
-                              {requiredServiceIds.includes(service.id) && (
+                              {requiredByApp && (
                                 <Badge
                                   variant="secondary"
                                   className="text-10"

@@ -1,6 +1,8 @@
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { useOverlayLayer } from "@/lib/overlay-layer";
 import { cn } from "@/lib/utils";
 
 const Dialog = DialogPrimitive.Root;
@@ -38,9 +40,12 @@ interface DialogContentProps extends React.ComponentPropsWithoutRef<
 const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, children, scrollMode = "content", ...props }, ref) => (
+>(({ className, children, scrollMode = "content", style, ...props }, ref) => {
+  const layer = useOverlayLayer();
+  return (
+  <OverlayLayer layer={layer}>
   <DialogPortal>
-    <DialogOverlay />
+    <DialogOverlay style={{ zIndex: layer - 1 }} />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
@@ -56,6 +61,7 @@ const DialogContent = React.forwardRef<
         className,
       )}
       {...props}
+      style={{ ...style, zIndex: layer }}
     >
       <div
         className={cn(
@@ -79,7 +85,9 @@ const DialogContent = React.forwardRef<
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>
-));
+  </OverlayLayer>
+  );
+});
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
 const DialogBody = ({

@@ -1,4 +1,7 @@
+import { ThreadTitle } from "@/components/assistant/thread-title";
 import { useEffect, useState, type ReactNode } from "react";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { ASSISTANT_OVERLAY_BASE } from "@/lib/overlay-layer";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { LogOut, Menu, Settings, User, X } from "lucide-react";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
@@ -19,11 +22,15 @@ export function AssistantShell({
   title,
   sidebar,
   headerActions,
+  onRenameTitle,
+  titleKey,
   children,
 }: {
   readonly title: string;
   readonly sidebar: ReactNode;
   readonly headerActions?: ReactNode;
+  readonly onRenameTitle?: (title: string) => Promise<void>;
+  readonly titleKey?: string;
   readonly children: ReactNode;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -99,6 +106,7 @@ export function AssistantShell({
   );
 
   return (
+    <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}>
     <div
       className="flex h-dvh flex-col overflow-hidden bg-background"
       style={{
@@ -129,7 +137,7 @@ export function AssistantShell({
             /
           </span>
           <div className="min-w-0 flex-1 truncate text-12 text-muted-foreground">
-            {title}
+            {onRenameTitle ? <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} /> : title}
           </div>
           {headerActions}
           <ThemeToggle className="shrink-0" />
@@ -202,5 +210,6 @@ export function AssistantShell({
         </div>
       )}
     </div>
+    </OverlayLayer>
   );
 }

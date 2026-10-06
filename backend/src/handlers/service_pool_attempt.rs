@@ -12,6 +12,8 @@ pub(super) struct AttemptContext {
     pub policy: crate::models::service_pool::FailoverPolicy,
     pub timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub lease_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set before completion settles; a renew failing after this is expected.
+    pub settling: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub status: std::sync::Arc<std::sync::atomic::AtomicU16>,
     pub node_dispatched: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub retry_after: std::sync::Arc<std::sync::Mutex<Option<std::time::Duration>>>,
@@ -343,6 +345,13 @@ impl Completion {
     }
 
     async fn finish_inner(&mut self, cause: PoolCompletionCause) -> AppResult<()> {
+        // Settlement releases the meter rows, after which a renew still in
+        // flight matches nothing. Mark settlement first so the heartbeat keeps
+        // the lease alive until then but never reports a settled attempt as
+        // lease-lost (an infrastructure failure).
+        self.context
+            .settling
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let cause = *self.cause.get_or_insert(cause);
         let complete_body = cause == PoolCompletionCause::Complete;
         self.context.audit.body_finished(self.status, cause);
@@ -656,6 +665,7 @@ pub(super) async fn response_body(
     let heartbeat_request = completion.context.request_id.clone();
     let heartbeat_cancel = cancellation.clone();
     let lease_lost = completion.context.lease_lost.clone();
+    let settling = completion.context.settling.clone();
     completion.heartbeat = Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
@@ -666,6 +676,10 @@ pub(super) async fn response_body(
                     let next_lease = chrono::Utc::now() + lease;
                     let result = tokio::time::timeout(remaining, crate::services::billing::pool_attempt::renew(&heartbeat_db, &heartbeat_request, next_lease, expected_rows)).await;
                     if !matches!(result, Ok(Ok(true))) {
+                        if settling.load(std::sync::atomic::Ordering::SeqCst) {
+                            // Settlement released the rows; the lease is no longer needed.
+                            return;
+                        }
                         lease_lost.store(true, std::sync::atomic::Ordering::Release);
                         heartbeat_cancel.cancel();
                         return;
@@ -918,6 +932,7 @@ mod tests {
             ticket,
             policy: Default::default(),
             lease_lost: Default::default(),
+            settling: Default::default(),
             timed_out: Default::default(),
             status: Default::default(),
             node_dispatched: Default::default(),
