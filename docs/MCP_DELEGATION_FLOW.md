@@ -52,7 +52,7 @@ An admin configures the downstream service in NyxID with:
 
 - **Delegation Token Injection** enabled (`inject_delegation_token: true`)
 - **Delegation Token Scope** set (e.g., `llm:proxy`)
-- **Identity Propagation** set to `headers` (or `jwt` or `both`)
+- **Identity Propagation** optionally set to `headers`, `jwt` or `both`; delegation injection also works with `none`
 - **Endpoints** defined as MCP tools (method, path, parameters, descriptions)
 
 ### Step-by-Step Flow
@@ -163,6 +163,20 @@ Key fields:
 - `act.sub` -- the service slug (identifies which downstream service is acting)
 - `delegated: true` -- distinguishes delegation tokens from direct user tokens
 - `scope` -- constrained to only the configured delegation scope
+
+REST and MCP use the same token signer and authenticated restriction projection.
+The subject remains the calling person or service account (not the billing
+owner). Catalog-backed aliases use the canonical catalog slug in `act.sub`;
+custom services use their own slug. Resource restrictions and effective
+service/node allowlists, including live organization-agent intersections and
+relay restrictions, are preserved. Both direct and node-routed calls carry the
+header, independently of identity-header propagation. Services without
+`inject_delegation_token` receive no generated delegation header. Tokens are
+never included in logs or audit records.
+
+Scheduled-invocation keys require the REST durable proxy protocol and cannot
+use MCP to bypass its grant admission. MCP applies the same API-key purpose
+guard before tool execution or delegation-token generation.
 
 #### Example: Calling the LLM Gateway
 

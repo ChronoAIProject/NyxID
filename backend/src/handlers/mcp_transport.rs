@@ -413,6 +413,8 @@ async fn is_voice_task_conversation(
 struct McpAuthContext {
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
+    scope: String,
+    resource_uris: Option<Vec<String>>,
     user_id: String,
     auth_method: AuthMethod,
     acting_client_id: Option<String>,
@@ -447,6 +449,8 @@ impl McpAuthContext {
         Self {
             chat: None,
             account_acknowledged: false,
+            scope: String::new(),
+            resource_uris: None,
             user_id,
             auth_method,
             acting_client_id: None,
@@ -586,6 +590,10 @@ async fn authenticate_mcp(
                 if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
+                // Scheduled keys require REST's durable-grant admission; MCP
+                // cannot mint a downstream delegation token around that gate.
+                auth::ensure_api_key_purpose_route(&api_key, "/mcp")
+                    .map_err(axum::response::IntoResponse::into_response)?;
                 if !auth::scope_allows_rest_proxy(&api_key.scopes) {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
@@ -631,6 +639,8 @@ async fn authenticate_mcp(
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
                 return Ok(McpAuthContext {
+                    scope: api_key.scopes.clone(),
+                    resource_uris: None,
                     chat,
                     account_acknowledged: api_key
                         .scopes
@@ -792,6 +802,11 @@ async fn authenticate_mcp(
                         .await
                         .map_err(|_| mcp_401(&state.config.base_url))?;
                     }
+                }
+                ctx.scope = claims.scope.clone();
+                // REST service-account authentication has no resource claims.
+                if ctx.auth_method != AuthMethod::ServiceAccount {
+                    ctx.resource_uris = claims.resources.clone();
                 }
                 ctx.acting_client_id = claims.act.map(|a| a.sub);
                 ctx.approval_owner_user_id = approval_owner_user_id;
@@ -2239,6 +2254,14 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        delegation_restrictions: Box::new(jwt::TokenRestrictionClaims::from_authenticated_scope(
+            &auth.scope,
+            auth.resource_uris.as_deref(),
+            auth.allow_all_services,
+            &auth.allowed_service_ids,
+            auth.allow_all_nodes,
+            &auth.allowed_node_ids,
+        )),
         org_agent_access: auth.org_agent_access.as_deref(),
         agent_owner: auth.assistant_agent_owner_id.as_deref(),
         operation_scopes: Some(&auth.assistant_operation_scopes),
@@ -4605,6 +4628,8 @@ mod tests {
         McpAuthContext {
             chat: None,
             account_acknowledged: false,
+            scope: String::new(),
+            resource_uris: None,
             user_id: "user-1".into(),
             auth_method: AuthMethod::ApiKey,
             acting_client_id: None,
@@ -6211,6 +6236,15 @@ mod org_agent_mcp_tests {
             .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", credential.raw_key.parse().unwrap());
+        // The live org-agent service/node intersection must survive delegation.
+        let (_, key, credential_id) =
+            crate::services::key_service::validate_api_key(&f.state.db, &credential.raw_key)
+                .await
+                .unwrap();
+        let rest = auth::api_key_auth_user(&f.state.db, &key, credential_id, None, None)
+            .await
+            .unwrap();
+        let expected = jwt::TokenRestrictionClaims::from_auth_user(&rest);
         memberships.store(0, Ordering::SeqCst);
         let ctx = authenticate_mcp(&f.state, &headers, false)
             .await
@@ -6223,6 +6257,12 @@ mod org_agent_mcp_tests {
         );
         assert_eq!(ctx.user_id, f.admin);
         assert!(ctx.chat.is_some());
+        let actual = mcp_exec_context(&ctx).delegation_restrictions;
+        assert_eq!(actual.resources, expected.resources);
+        assert_eq!(actual.allowed_service_ids, expected.allowed_service_ids);
+        assert_eq!(actual.allow_all_services, expected.allow_all_services);
+        assert_eq!(actual.allowed_node_ids, expected.allowed_node_ids);
+        assert_eq!(actual.allow_all_nodes, expected.allow_all_nodes);
         assert!(
             matches!(mcp_service_scope(&ctx), mcp_service::ServiceScope::Allowed(ids) if ids.is_empty())
         );
@@ -6313,3 +6353,7 @@ mod typed_outcome_tests {
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_delegation_tests.rs"]
+mod delegation_tests;

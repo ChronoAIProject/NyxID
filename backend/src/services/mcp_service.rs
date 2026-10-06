@@ -165,6 +165,8 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    /// Authenticated caller restrictions, including resources and catalog limits.
+    pub delegation_restrictions: Box<crate::crypto::jwt::TokenRestrictionClaims>,
     pub org_agent_access: Option<&'a super::org_agent_service::RequestAccess>,
     pub agent_owner: Option<&'a str>,
     pub operation_scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
@@ -4194,8 +4196,7 @@ pub async fn execute_tool_response(
     }
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
-    let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
-    {
+    let resolved = match &service.source {
         McpToolSource::Internal => {
             return Err(AppError::Forbidden(
                 "Native tools require chat acknowledgement dispatch".into(),
@@ -4348,6 +4349,7 @@ pub async fn execute_tool_response(
                 nr,
                 has_cred_for_fallback,
                 billing_context_builder,
+                resolution.catalog_service_slug,
             )
         }
         McpToolSource::Platform {
@@ -4425,9 +4427,13 @@ pub async fn execute_tool_response(
                 nr,
                 has_cred,
                 McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
+                None,
             )
         }
     };
+
+    let (target, node_route, has_server_credential, billing_context_builder, catalog_service_slug) =
+        resolved;
 
     let mut target = target;
     prepared.resolve_destination(&mut target)?;
@@ -4454,6 +4460,7 @@ pub async fn execute_tool_response(
         node_route,
         has_server_credential,
         billing_context_builder,
+        catalog_service_slug.as_deref(),
     ))
     .await?
     {
@@ -4622,6 +4629,7 @@ pub async fn execute_tool_resolved(
     node_route: Option<node_routing_service::NodeRoute>,
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<&str>,
 ) -> AppResult<McpToolExecutionOutcome> {
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -4769,6 +4777,25 @@ pub async fn execute_tool_resolved(
                     "Failed to resolve RBAC for delegation headers"
                 );
             }
+        }
+    }
+
+    // Build before the direct/node split, exactly as the REST proxy does.
+    if target.service.inject_delegation_token {
+        let subject = uuid::Uuid::parse_str(user_id)
+            .map_err(|_| AppError::Internal("Invalid authenticated MCP subject".into()))?;
+        match identity_service::generate_proxy_delegation_token(
+            jwt_keys,
+            config,
+            &subject,
+            &target.service.delegation_token_scope,
+            &target.service.slug,
+            catalog_service_slug,
+            Some(&exec_ctx.delegation_restrictions),
+        ) {
+            Ok(token) => identity_headers.push(("X-NyxID-Delegation-Token".into(), token)),
+            Err(_) => tracing::warn!(service_id = %service.service_id,
+                "Failed to generate delegation token for MCP tool"),
         }
     }
 
@@ -6002,6 +6029,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        delegation_restrictions: Default::default(),
                         org_agent_access: None,
                         agent_owner: None,
                         operation_scopes: None,

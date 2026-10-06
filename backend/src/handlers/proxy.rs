@@ -155,33 +155,6 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
     }
 }
 
-/// Sign the delegation token with the downstream's canonical catalog identity.
-///
-/// UserService slugs may be disambiguated aliases, while downstream services
-/// validate `act.sub` against the catalog service they implement. Custom and
-/// legacy services have no separate catalog identity and keep their own slug.
-fn generate_proxy_delegation_token(
-    keys: &crate::crypto::jwt::JwtKeys,
-    config: &crate::config::AppConfig,
-    user_id: &uuid::Uuid,
-    scope: &str,
-    service_slug: &str,
-    catalog_service_slug: Option<&str>,
-    restrictions: Option<&crate::crypto::jwt::TokenRestrictionClaims>,
-) -> AppResult<String> {
-    let acting_service_slug = catalog_service_slug.unwrap_or(service_slug);
-
-    crate::crypto::jwt::generate_delegated_access_token(
-        keys,
-        config,
-        user_id,
-        scope,
-        acting_service_slug,
-        crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        restrictions,
-    )
-}
-
 /// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
 /// outer proxy wrappers when the upstream returned 2xx. Mirror of
 /// `emit_proxy_error_telemetry`: `resolved_slug` MUST be the slug of the
@@ -4730,7 +4703,7 @@ async fn execute_resolved_proxy_inner(
         let user_uuid = auth_user.user_id;
         let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
 
-        match generate_proxy_delegation_token(
+        match identity_service::generate_proxy_delegation_token(
             &state.jwt_keys,
             &state.config,
             &user_uuid,
@@ -8301,15 +8274,16 @@ mod tests {
         apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
         ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
-        generate_proxy_delegation_token, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, read_proxy_request_body, should_enforce_runtime_approval,
-        should_retry_node_failure, single_system_header, strip_durable_idempotency_defaults,
-        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
+        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
+        read_proxy_request_body, should_enforce_runtime_approval, should_retry_node_failure,
+        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
+        websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
     use crate::mw::auth::AuthMethod;
     use crate::services::billing::{BillingRouteContext, MeteredProxyContext, NodeIntent};
+    use crate::services::identity_service::generate_proxy_delegation_token;
     use crate::services::{
         llm_usage_service,
         proxy_service::{self, validate_requested_proxy_path},

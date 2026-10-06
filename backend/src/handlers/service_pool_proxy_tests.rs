@@ -196,13 +196,13 @@ async fn try_call(fixture: &Fixture, body: &'static str) -> crate::errors::AppRe
     request
         .extensions_mut()
         .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
-    super::proxy::proxy_request_by_slug(
+    Box::pin(super::proxy::proxy_request_by_slug(
         State(fixture.state.clone()),
         fixture.auth.clone(),
         crate::telemetry::TelemetryContext::default(),
         Path(("review-route".into(), "perform".into())),
         request,
-    )
+    ))
     .await
 }
 
