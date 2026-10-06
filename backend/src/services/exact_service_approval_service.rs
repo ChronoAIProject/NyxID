@@ -480,6 +480,7 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            caller_token: None,
             delegation_restrictions: caller.delegation_restrictions.clone(),
             org_agent_access: caller.org_agent_access.as_deref(),
             agent_owner: caller.agent_owner.as_deref(),

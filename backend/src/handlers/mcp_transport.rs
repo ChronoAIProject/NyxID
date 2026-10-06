@@ -411,6 +411,7 @@ async fn is_voice_task_conversation(
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    caller_token: Option<proxy_service::CallerToken>,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
     scope: String,
@@ -447,6 +448,7 @@ struct McpAuthContext {
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            caller_token: None,
             chat: None,
             account_acknowledged: false,
             scope: String::new(),
@@ -639,6 +641,7 @@ async fn authenticate_mcp(
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
                 return Ok(McpAuthContext {
+                    caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
                     chat,
@@ -747,6 +750,8 @@ async fn authenticate_mcp(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                ctx.caller_token =
+                    proxy_service::caller_bearer_token_for_downstream(headers, false);
                 if matches!(
                     ctx.auth_method,
                     AuthMethod::AccessToken | AuthMethod::Delegated
@@ -2254,6 +2259,7 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        caller_token: auth.caller_token.as_deref(),
         delegation_restrictions: Box::new(jwt::TokenRestrictionClaims::from_authenticated_scope(
             &auth.scope,
             auth.resource_uris.as_deref(),
@@ -4626,6 +4632,7 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            caller_token: None,
             chat: None,
             account_acknowledged: false,
             scope: String::new(),

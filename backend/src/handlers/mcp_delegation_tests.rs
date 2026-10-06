@@ -22,6 +22,8 @@ struct Fixture {
     state: AppState,
     owner: String,
     service: String,
+    catalog: String,
+    paths: Arc<Mutex<Vec<String>>>,
     node: String,
     key_id: String,
     key: String,
@@ -46,9 +48,12 @@ impl Fixture {
             .unwrap();
         let headers = Arc::new(Mutex::new(Vec::new()));
         let captured = headers.clone();
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let captured_paths = paths.clone();
         let upstream = Router::new().route(
             "/{*path}",
-            any(move |headers: HeaderMap| {
+            any(move |uri: axum::http::Uri, headers: HeaderMap| {
+                captured_paths.lock().unwrap().push(uri.to_string());
                 captured.lock().unwrap().push(headers);
                 async { axum::Json(json!({"ok": true})) }
             }),
@@ -137,6 +142,8 @@ impl Fixture {
             state,
             owner,
             service,
+            catalog: catalog.id,
+            paths,
             node: node.id,
             key_id: key.id,
             key: key.full_key,
@@ -169,12 +176,22 @@ impl Fixture {
         headers
     }
     async fn call(&self, mcp: bool, universal: bool, headers: &HeaderMap) {
+        self.call_service("sandbox-alias", mcp, universal, headers, json!({}))
+            .await;
+    }
+    async fn call_service(
+        &self,
+        slug: &str,
+        mcp: bool,
+        universal: bool,
+        headers: &HeaderMap,
+        arguments: Value,
+    ) {
         let body = if mcp {
-            let arguments = json!({});
             let params = if universal {
-                json!({"name":"nyx__call_tool", "arguments":{"tool_name":"sandbox-alias__execute", "arguments_json":arguments.to_string()}})
+                json!({"name":"nyx__call_tool", "arguments":{"tool_name":format!("{slug}__execute"), "arguments_json":arguments.to_string()}})
             } else {
-                json!({"name":"sandbox-alias__execute", "arguments":arguments})
+                json!({"name":format!("{slug}__execute"), "arguments":arguments})
             };
             json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":params})
         } else {
@@ -183,9 +200,9 @@ impl Fixture {
         let mut request = Request::builder()
             .method("POST")
             .uri(if mcp {
-                "/mcp"
+                "/mcp".to_string()
             } else {
-                "/api/v1/proxy/s/sandbox-alias/execute"
+                format!("/api/v1/proxy/s/{slug}/execute")
             })
             .body(Body::from(body.to_string()))
             .unwrap();
@@ -501,3 +518,6 @@ async fn mcp_delegation_service_account_keeps_its_subject_not_its_owner() {
     assert_eq!(claims.allow_all_services, Some(true));
     assert_eq!(claims.allow_all_nodes, Some(true));
 }
+
+#[path = "mcp_proxy_parity_tests.rs"]
+mod proxy_parity;

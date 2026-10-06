@@ -165,6 +165,8 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    /// Supplied caller bearer; absent for API-key-only or session-fallback calls.
+    pub caller_token: Option<&'a str>,
     /// Authenticated caller restrictions, including resources and catalog limits.
     pub delegation_restrictions: Box<crate::crypto::jwt::TokenRestrictionClaims>,
     pub org_agent_access: Option<&'a super::org_agent_service::RequestAccess>,
@@ -3800,17 +3802,6 @@ pub fn prepare_exact_proxy_tool_call(
     Ok(prepared)
 }
 
-fn apply_server_owned_headers(
-    mut headers: Vec<(String, String)>,
-    server_owned_headers: &[(String, String)],
-) -> Vec<(String, String)> {
-    for (name, value) in server_owned_headers {
-        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-        headers.push((name.clone(), value.clone()));
-    }
-    headers
-}
-
 pub fn build_mcp_operation_descriptor(
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
@@ -4809,10 +4800,15 @@ pub async fn execute_tool_resolved(
         McpToolSource::Platform {
             downstream_service_id,
         } => {
+            // This principal is resolved from authentication, just like REST's
+            // AuthUser::proxy_resolution_user_id: a service account uses its
+            // verified effective owner. It is not the later billing payer.
+            let delegated_owner =
+                proxy_service::delegated_credential_owner(billing_principal_user_id, None);
             match delegation_service::resolve_delegated_credentials(
                 db,
                 encryption_keys,
-                user_id,
+                delegated_owner,
                 downstream_service_id,
                 Some(connection_expiry_notifier),
             )
@@ -4877,43 +4873,30 @@ pub async fn execute_tool_resolved(
     if let Some(ref nr) = node_route {
         let method_str = method.to_string();
 
-        let mut all_headers: Vec<(String, String)> = identity_headers.clone();
-        for (name, value) in &req_headers {
-            if let Ok(v) = value.to_str() {
-                all_headers.push((name.to_string(), v.to_string()));
-            }
-        }
-
-        // NyxID#356: service-level default headers must be injected on
-        // node-routed MCP calls too, not just on the direct HTTP proxy
-        // path. Without this, required defaults (e.g. `x-openclaw-scopes`)
-        // would reach the downstream for regular proxy requests but go
-        // missing for MCP tool invocations of the same service.
-        all_headers = crate::models::default_request_header::merge_into_header_list(
-            all_headers,
-            &[
-                target.catalog_default_headers.as_slice(),
-                target.user_service_default_headers.as_slice(),
-            ],
-        );
-        all_headers = apply_server_owned_headers(all_headers, &server_owned_headers);
-
-        // Strip any default whose name collides with what the node
-        // agent will append locally as the service credential. Matches
-        // the trim on the node-routed HTTP / WS paths in
-        // `handlers/proxy.rs`; without it, a default `x-api-key` (or
-        // equivalent) would ride along in the frame and the node would
-        // put the real credential on top of it, leaving two values on
-        // the wire.
-        if let Some(cred_name) = crate::services::proxy_service::credential_header_name(&target) {
-            all_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
-        }
-
+        let base_headers = req_headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.to_string(), value.to_string()))
+            })
+            .collect();
         super::destination_routing::validate_node_outbound_destination(
             &target,
             method.as_str(),
             &path,
             &delegated,
+        )?;
+        let prepared = proxy_service::prepare_node_request(
+            &target,
+            &path,
+            query.as_deref(),
+            base_headers,
+            &identity_headers,
+            &delegated,
+            exec_ctx.caller_token,
+            &server_owned_headers,
         )?;
         let node_request = NodeProxyRequest {
             target_id: target.target_id.clone(),
@@ -4922,9 +4905,9 @@ pub async fn execute_tool_resolved(
             service_slug: target.service.slug.clone(),
             base_url: target.base_url.clone(),
             method: method_str,
-            path: path.clone(),
-            query: query.clone(),
-            headers: all_headers,
+            path: prepared.path,
+            query: prepared.query,
+            headers: prepared.headers,
             body: body.as_ref().map(|b| b.to_vec()),
         };
 
@@ -5062,7 +5045,7 @@ pub async fn execute_tool_resolved(
         proxy_service::ProxyBody::Buffered(body),
         identity_headers,
         delegated,
-        None,
+        exec_ctx.caller_token,
         token_exchange_cache,
         cloud_response_cache,
         server_owned_headers,
@@ -6029,6 +6012,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        caller_token: None,
                         delegation_restrictions: Default::default(),
                         org_agent_access: None,
                         agent_owner: None,
@@ -11933,7 +11917,7 @@ mod tests {
         assert!(prepared.server_owned_headers.is_empty());
 
         assert_eq!(
-            apply_server_owned_headers(
+            proxy_service::apply_server_owned_headers(
                 vec![("idempotency-key".to_string(), "default".to_string())],
                 &[("Idempotency-Key".to_string(), "effect-key".to_string())],
             ),

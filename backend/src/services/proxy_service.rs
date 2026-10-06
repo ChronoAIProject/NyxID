@@ -418,11 +418,62 @@ pub(crate) fn build_effective_outbound_headers(
         });
     }
     outbound_headers.extend(delegated_headers.iter().cloned());
-    for (name, value) in extra_outbound_headers {
-        outbound_headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-        outbound_headers.push((name.clone(), value.clone()));
+    apply_server_owned_headers(outbound_headers, extra_outbound_headers)
+}
+
+pub(crate) fn apply_server_owned_headers(
+    mut headers: Vec<(String, String)>,
+    server_owned_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    for (name, value) in server_owned_headers {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
     }
-    outbound_headers
+    headers
+}
+
+/// Request-local bearer material. Never persisted in MCP sessions or exposed by Debug.
+#[derive(Clone)]
+pub(crate) struct CallerToken(zeroize::Zeroizing<String>);
+
+impl std::ops::Deref for CallerToken {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for CallerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallerToken([REDACTED])")
+    }
+}
+
+/// The REST passthrough contract: only a supplied Bearer header, never a
+/// synthesized token or an x-api-key. Scheduled invocation credentials stay
+/// inside NyxID. Authentication must succeed before using this value.
+pub(crate) fn caller_bearer_token_for_downstream(
+    headers: &axum::http::HeaderMap,
+    scheduled_invocation: bool,
+) -> Option<CallerToken> {
+    if scheduled_invocation {
+        return None;
+    }
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|value| CallerToken(zeroize::Zeroizing::new(value.to_owned())))
+}
+
+/// Credential ownership follows the resolved service, falling back to the
+/// authenticated proxy principal (the effective owner for a service account).
+/// This is independent of the caller subject and the eventual billing payer.
+pub(crate) fn delegated_credential_owner<'a>(
+    proxy_resolution_user_id: &'a str,
+    effective_service_owner: Option<&'a str>,
+) -> &'a str {
+    effective_service_owner.unwrap_or(proxy_resolution_user_id)
 }
 
 /// A server-owned Authorization header must survive caller bearer forwarding.
@@ -1016,6 +1067,49 @@ pub(crate) fn prepare_delegated_request(
         path: build_forward_path(path, delegated_credentials)?,
         query: forwarded_query,
         delegated_headers,
+    })
+}
+
+pub(crate) struct PreparedNodeRequest {
+    pub path: String,
+    pub query: Option<String>,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Prepare the same URL substitutions and header precedence for REST and MCP
+/// node frames. The node still owns its local service credential injection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_node_request(
+    target: &ProxyTarget,
+    path: &str,
+    query: Option<&str>,
+    mut base_headers: Vec<(String, String)>,
+    identity_headers: &[(String, String)],
+    delegated: &[DelegatedCredential],
+    caller_token: Option<&str>,
+    extra_outbound_headers: &[(String, String)],
+) -> AppResult<PreparedNodeRequest> {
+    let mut node_delegated = delegated.to_vec();
+    extend_with_path_credential(&mut node_delegated, target);
+    let prepared = prepare_delegated_request(path, query, &node_delegated)?;
+    let path = if prepared.path.starts_with('/') {
+        prepared.path.clone()
+    } else {
+        format!("/{}", prepared.path)
+    };
+    if let Some(token) = forwarded_caller_token(target, caller_token, extra_outbound_headers) {
+        base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
+    }
+    Ok(PreparedNodeRequest {
+        path,
+        query: prepared.query,
+        headers: build_effective_outbound_headers(
+            target,
+            base_headers,
+            identity_headers,
+            &prepared.delegated_headers,
+            extra_outbound_headers,
+        ),
     })
 }
 
