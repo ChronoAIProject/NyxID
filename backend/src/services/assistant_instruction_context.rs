@@ -35,6 +35,7 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    #[cfg(test)]
     pub fn new(
         key: &[u8],
         row: &AssistantConversation,

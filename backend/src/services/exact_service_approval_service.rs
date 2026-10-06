@@ -33,6 +33,7 @@ pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_requ
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
+    pub delegation_restrictions: Box<crate::crypto::jwt::TokenRestrictionClaims>,
     pub assistant_group_id: Option<String>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub agent_owner: Option<String>,
@@ -485,6 +486,8 @@ pub async fn redeem_request(
         };
         let exec_ctx = mcp_service::McpExecContext {
             actor_user_id: Some(&caller.actor_user_id),
+            caller_token: None,
+            delegation_restrictions: caller.delegation_restrictions.clone(),
             org_agent_access: caller.org_agent_access.as_deref(),
             agent_owner: caller.agent_owner.as_deref(),
             operation_scopes: Some(&caller.operation_scopes),
@@ -568,6 +571,7 @@ pub async fn redeem_request(
             node_route,
             has_cred_for_fallback,
             billing_context_builder,
+            execution.resolution.catalog_service_slug.as_deref(),
         ))
         .await;
 
@@ -1841,6 +1845,7 @@ mod tests {
 
     fn caller() -> ExactServiceApprovalCaller {
         ExactServiceApprovalCaller {
+            delegation_restrictions: Default::default(),
             assistant_group_id: None,
             agent_owner: None,
             org_agent_access: None,

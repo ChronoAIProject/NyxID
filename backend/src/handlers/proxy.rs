@@ -156,33 +156,6 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
     }
 }
 
-/// Sign the delegation token with the downstream's canonical catalog identity.
-///
-/// UserService slugs may be disambiguated aliases, while downstream services
-/// validate `act.sub` against the catalog service they implement. Custom and
-/// legacy services have no separate catalog identity and keep their own slug.
-fn generate_proxy_delegation_token(
-    keys: &crate::crypto::jwt::JwtKeys,
-    config: &crate::config::AppConfig,
-    user_id: &uuid::Uuid,
-    scope: &str,
-    service_slug: &str,
-    catalog_service_slug: Option<&str>,
-    restrictions: Option<&crate::crypto::jwt::TokenRestrictionClaims>,
-) -> AppResult<String> {
-    let acting_service_slug = catalog_service_slug.unwrap_or(service_slug);
-
-    crate::crypto::jwt::generate_delegated_access_token(
-        keys,
-        config,
-        user_id,
-        scope,
-        acting_service_slug,
-        crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        restrictions,
-    )
-}
-
 /// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
 /// outer proxy wrappers when the upstream returned 2xx. Mirror of
 /// `emit_proxy_error_telemetry`: `resolved_slug` MUST be the slug of the
@@ -882,20 +855,6 @@ fn single_system_header(
         .to_str()
         .map_err(|_| AppError::DurableGrantMismatch(format!("{name} must be valid ASCII text")))?;
     Ok(Some(value.to_string()))
-}
-
-fn caller_bearer_token_for_downstream(
-    headers: &axum::http::HeaderMap,
-    scheduled_invocation: bool,
-) -> Option<String> {
-    if scheduled_invocation {
-        return None;
-    }
-    headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(String::from)
 }
 
 async fn finish_durable_operation(
@@ -4252,8 +4211,10 @@ async fn execute_resolved_proxy_inner(
     }
 
     // Extract the caller's raw Bearer token for nyxid_token passthrough.
-    let caller_token =
-        caller_bearer_token_for_downstream(&all_headers, scheduled_api_key_id.is_some());
+    let caller_token = proxy_service::caller_bearer_token_for_downstream(
+        &all_headers,
+        scheduled_api_key_id.is_some(),
+    );
 
     // Check for WebSocket upgrade BEFORE consuming the request body.
     let is_ws = is_ws_candidate;
@@ -4630,9 +4591,11 @@ async fn execute_resolved_proxy_inner(
     let delegated = if resolved_user_service_id.is_some() {
         Vec::new()
     } else {
-        let delegated_owner = effective_owner_for_approval
-            .as_deref()
-            .unwrap_or(&user_id_str);
+        let proxy_resolution_user_id = auth_user.proxy_resolution_user_id();
+        let delegated_owner = proxy_service::delegated_credential_owner(
+            &proxy_resolution_user_id,
+            effective_owner_for_approval.as_deref(),
+        );
         match Box::pin(delegation_service::resolve_delegated_credentials(
             &state.db,
             &state.encryption_keys,
@@ -4775,7 +4738,7 @@ async fn execute_resolved_proxy_inner(
         let user_uuid = auth_user.user_id;
         let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
 
-        match generate_proxy_delegation_token(
+        match identity_service::generate_proxy_delegation_token(
             &state.jwt_keys,
             &state.config,
             &user_uuid,
@@ -5023,39 +4986,23 @@ async fn execute_resolved_proxy_inner(
             path,
             &delegated,
         )?;
-        let mut node_delegated = delegated.clone();
-        proxy_service::extend_with_path_credential(&mut node_delegated, &target);
-        let prepared =
-            proxy_service::prepare_delegated_request(path, query.as_deref(), &node_delegated)?;
-        let node_path = if prepared.path.starts_with('/') {
-            prepared.path.clone()
-        } else {
-            format!("/{}", prepared.path)
-        };
+        let prepared = proxy_service::prepare_node_request(
+            &target,
+            path,
+            query.as_deref(),
+            node_forward_headers,
+            &identity_headers,
+            &delegated,
+            caller_token.as_deref(),
+            &extra_outbound_headers,
+        )?;
         let node_location_context = AsyncLocationContext::new(
             &target.base_url,
-            &node_path,
+            &prepared.path,
             prepared.query.as_deref(),
             caller_proxy_prefix.clone(),
         )
         .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
-        let mut base_headers = node_forward_headers;
-        // Forward the caller's NyxID access token when the service is configured for it.
-        if let Some(token) = proxy_service::forwarded_caller_token(
-            &target,
-            caller_token.as_deref(),
-            &extra_outbound_headers,
-        ) {
-            base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
-        }
-        let enriched_headers = proxy_service::build_effective_outbound_headers(
-            &target,
-            base_headers,
-            &identity_headers,
-            &prepared.delegated_headers,
-            &extra_outbound_headers,
-        );
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
@@ -5065,9 +5012,9 @@ async fn execute_resolved_proxy_inner(
             service_slug: target.service.slug.clone(),
             base_url: target.base_url.clone(),
             method: method_str.clone(),
-            path: node_path,
+            path: prepared.path,
             query: prepared.query,
-            headers: enriched_headers,
+            headers: prepared.headers,
             body: body.as_ref().map(|b| b.to_vec()),
         };
 
@@ -8355,18 +8302,20 @@ mod tests {
     use super::{
         ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats,
         add_websocket_usage_provenance, apply_agent_attribution_headers,
-        apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
-        collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
-        ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
-        generate_proxy_delegation_token, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, read_proxy_request_body, should_enforce_runtime_approval,
-        should_retry_node_failure, single_system_header, strip_durable_idempotency_defaults,
-        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
+        apply_proxy_request_id_header, auth_kind_label, collect_ws_forward_headers,
+        compose_pre_resolved_node_ids, enforce_node_route_scope, ensure_proxy_request_id,
+        final_credential_class, forwarded_response_header_value, is_chat_completions_proxy_path,
+        is_codex_transport_path, is_ws_upgrade_request, read_proxy_request_body,
+        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
+        strip_durable_idempotency_defaults, validate_range_header,
+        websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
     use crate::mw::auth::AuthMethod;
     use crate::services::billing::{BillingRouteContext, MeteredProxyContext, NodeIntent};
+    use crate::services::identity_service::generate_proxy_delegation_token;
+    use crate::services::proxy_service::caller_bearer_token_for_downstream;
     use crate::services::{
         llm_usage_service,
         proxy_service::{self, validate_requested_proxy_path},
@@ -8519,7 +8468,7 @@ mod tests {
             caller_bearer_token_for_downstream(&headers, false).as_deref(),
             Some("nyxid_ag_example")
         );
-        assert_eq!(caller_bearer_token_for_downstream(&headers, true), None);
+        assert!(caller_bearer_token_for_downstream(&headers, true).is_none());
     }
 
     #[test]

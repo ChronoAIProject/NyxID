@@ -520,6 +520,8 @@ pub(crate) async fn mcp_call(
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
             actor_user_id: None,
+            caller_token: None,
+            delegation_restrictions: Default::default(),
             org_agent_access: None,
             agent_owner: None,
             operation_scopes: None,
