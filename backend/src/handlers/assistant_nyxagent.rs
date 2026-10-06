@@ -985,6 +985,7 @@ async fn proxy(
 struct Events {
     sender: broadcast::Sender<Value>,
     cursor: u64,
+    reset_notified: bool,
 }
 impl Events {
     fn emit(&mut self, event: &str, mut data: Value) {
@@ -994,6 +995,10 @@ impl Events {
         let _ = self.sender.send(data);
     }
     fn notice(&mut self) {
+        if self.reset_notified {
+            return;
+        }
+        self.reset_notified = true;
         self.emit(
             "turn.notice",
             json!({"code": "context_reset", "message": engine::CONTEXT_NOTICE}),
@@ -1107,7 +1112,11 @@ pub(crate) async fn start_turn_with_voice(
         credential,
         policy,
         permit,
-        Events { sender, cursor: 0 },
+        Events {
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        },
     ));
     Ok((row, receiver))
 }
@@ -1265,6 +1274,7 @@ async fn run_turn(
         }),
     );
     let mut partial = String::new();
+    let mut instruction_context = None;
     let mut result = {
         // Execution includes upload planning and upstream streaming. Keep that
         // state off the caller's stack when this task is created by a tool.
@@ -1278,6 +1288,7 @@ async fn run_turn(
             &mut events,
             &block_id,
             &mut partial,
+            &mut instruction_context,
         ));
         tokio::select! {
             result = &mut execution => result,
@@ -1315,12 +1326,13 @@ async fn run_turn(
         events,
         Duration::from_secs(engine::SETTLEMENT_GRACE_SECS),
         || {
-            engine::finish_turn(
+            engine::finish_turn_with_instructions(
                 &state.db,
                 &row,
                 &credential.api_key_id,
                 &message_id,
                 &result,
+                instruction_context.as_ref().map(|context| &context.binding),
             )
         },
     )
@@ -1455,6 +1467,7 @@ async fn execute_turn(
     events: &mut Events,
     block_id: &str,
     partial: &mut String,
+    instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
 ) -> Result<TurnResult, TurnError> {
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
     let mut history = engine::messages(
@@ -1512,13 +1525,33 @@ async fn execute_turn(
         };
     decisions
         .push_str(&super::assistant_team::turn_notes(state, row, agent.as_ref(), previous).await);
+    let prepared = crate::services::assistant_instruction_context::Prepared::new(
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+        row,
+        agent.as_ref(),
+        &history,
+    )
+    .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    *instruction_context = Some(prepared);
+    let context = instruction_context.as_mut().expect("prepared above");
     let mut binding = row.nyxagent_session_id.clone();
-    let mut prompt = if binding.is_none() && row.context_reset_reason.is_some() {
+    if context.reset {
+        engine::clear_binding(
+            &state.db,
+            &row.user_id,
+            &row.id,
+            turn_id,
+            "instructions_changed",
+        )
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
+        binding = None;
+    }
+    let recap = binding.is_none() && (context.reset || row.context_reset_reason.is_some());
+    if recap {
         events.notice();
-        engine::instructions(row, agent.as_ref(), &history)
-    } else {
-        engine::base_prompt(row, agent.as_ref())
-    } + &decisions;
+    }
+    let mut prompt = context.instructions(&history, recap);
     let mut attachments = crate::services::assistant_upload_service::turn_attachments(
         &state.db,
         &row.user_id,
@@ -1587,7 +1620,7 @@ async fn execute_turn(
             json!(omitted)
         ));
     }
-    prompt.push_str(&listing);
+    decisions.push_str(&listing);
     // Persist the delivery outcome on metadata, so a reload does not hide the fallback.
     for item in attachments
         .iter()
@@ -1711,8 +1744,21 @@ async fn execute_turn(
                 "POST",
                 "v1/responses",
                 Some({
+                    let input = context.input(
+                        if continuations.count == 0 || binding.is_none() {
+                            // Recovery into a fresh session must restore the
+                            // turn facts that its discarded session had seen.
+                            &decisions
+                        } else {
+                            // Documents have no image part. Keep their listing
+                            // and availability notices visible on continuations
+                            // too, once per request, without repeating events.
+                            &listing
+                        },
+                        input,
+                    );
                     let mut body =
-                        engine::upstream_body(&row.model, input, binding.as_deref(), &prompt);
+                        engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
                     if continuations.count == 0 && !image_parts.is_empty() {
                         let mut content = vec![json!({"type":"input_text", "text":input})];
                         content.extend(image_parts.clone());
@@ -1788,8 +1834,8 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     binding = None;
-                    prompt =
-                        engine::instructions(row, agent.as_ref(), &history) + &decisions + &listing;
+                    context.fresh_session();
+                    prompt = context.instructions(&history, true);
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
@@ -1803,8 +1849,8 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("agent_key_required"))?;
                     binding = None;
-                    prompt =
-                        engine::instructions(row, agent.as_ref(), &history) + &decisions + &listing;
+                    context.fresh_session();
+                    prompt = context.instructions(&history, true);
                     events.notice();
                 }
                 RecoveryAction::Backoff => {
@@ -1857,9 +1903,11 @@ async fn execute_turn(
             let chunk = chunk.map_err(|_| TurnError::new("invalid_stream"))?;
             let decoded = decoder.push(&chunk);
             *partial = completed.clone()
-                + &decoder
-                    .text
-                    .replace(credential.raw_key.as_str(), "[redacted]");
+                + &context.redact(
+                    &decoder
+                        .text
+                        .replace(credential.raw_key.as_str(), "[redacted]"),
+                );
             if partial.len() > engine::MAX_OUTPUT_BYTES {
                 return Err(TurnError::new("output_too_large"));
             }
@@ -1870,7 +1918,9 @@ async fn execute_turn(
             // Hold a key-length suffix so a reflected key split across deltas
             // cannot leak before the next fragment reveals the full match.
             if decoder.terminal.is_none() {
-                let mut safe_end = partial.len().saturating_sub(credential.raw_key.len());
+                let mut safe_end = partial
+                    .len()
+                    .saturating_sub(credential.raw_key.len().max(context.reflection_window()));
                 while !partial.is_char_boundary(safe_end) {
                     safe_end -= 1;
                 }
@@ -1886,9 +1936,11 @@ async fn execute_turn(
         let mut result = decoder
             .terminal
             .ok_or_else(|| TurnError::new("invalid_stream"))?;
-        result.text = result
-            .text
-            .replace(credential.raw_key.as_str(), "[redacted]");
+        result.text = context.redact(
+            &result
+                .text
+                .replace(credential.raw_key.as_str(), "[redacted]"),
+        );
         binding = result.session_id.clone().or(binding);
         if let Some(error) = &result.error {
             match continue_turn(

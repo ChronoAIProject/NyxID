@@ -203,6 +203,10 @@ pub struct AssistantConversation {
     #[serde(default)]
     pub access_mode: AccessMode,
     pub nyxagent_session_id: Option<String>,
+    /// Server-only instruction state, committed with the upstream session.
+    /// Older rows/replicas may omit it. Never expose its marker in a DTO or Debug.
+    #[serde(default)]
+    pub nyxagent_instruction_binding: Option<InstructionBinding>,
     pub nyxagent_last_response_id: Option<String>,
     pub credential_api_key_id: String,
     pub message_count: i64,
@@ -275,6 +279,21 @@ pub struct AssistantConversation {
     /// restricted.
     #[serde(default)]
     pub guest_turn: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct InstructionBinding {
+    pub session_id: String,
+    pub fingerprint: String,
+    /// None when adopting a legacy session whose initial context had no marker.
+    pub marker: Option<String>,
+    pub guest: bool,
+}
+
+impl std::fmt::Debug for InstructionBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstructionBinding").finish_non_exhaustive()
+    }
 }
 
 impl AssistantConversation {

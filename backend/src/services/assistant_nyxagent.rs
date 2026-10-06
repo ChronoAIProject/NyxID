@@ -139,7 +139,7 @@ pub fn excerpt(text: &str, limit: usize) -> String {
 }
 
 /// Role prompt for one thread: NyxBot's, or a specialist's with its name and
-/// role description, plus channel guidance for threads that answer a bot.
+/// role description and configuration. Per-turn facts belong in input.
 pub fn base_prompt(
     row: &AssistantConversation,
     agent: Option<&crate::models::assistant_agent::AssistantAgent>,
@@ -177,6 +177,56 @@ pub fn base_prompt(
             ));
         }
     }
+    if row.guest_turn {
+        prompt.push_str(guest_note(row.is_subagent()));
+    } else {
+        if let Some(agent) = agent {
+            if agent.user_id != row.user_id {
+                if row.group_request_id.is_some() {
+                    prompt.push_str("\n\nThis is a shared organization group. Never read or disclose a member's private threads. Shared agent memory must never contain a member's private content.");
+                } else {
+                    prompt.push_str("\n\nThis specialist belongs to an organization. Its memory notes are shared organization data, visible to maintainers. NEVER store a member's private messages, personal content or secrets in shared memory. This thread is private to the acting member; never read or disclose another member's thread.");
+                }
+            }
+            prompt.push_str(&super::assistant_team_service::memory_note(agent));
+            if !agent.machine_node_ids.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(super::machine_tools::USE_INSTRUCTIONS);
+            }
+        }
+        if !row.is_subagent() {
+            prompt.push_str("\n\n");
+            prompt.push_str(super::machine_tools::SETUP_INSTRUCTIONS);
+        }
+    }
+    prompt
+}
+
+/// The instructions of a turn for someone other than the owner. NyxBot holds
+/// every service of the owner, so it uses none for other people.
+fn guest_note(specialist: bool) -> &'static str {
+    if specialist {
+        "\n\nThis turn answers someone other than the owner (a member of a chat your channel \
+        bot is in). Help them with your services as far as the owner lets guests use each \
+        one (by default look things up, turn things on or off, send and create, but not \
+        change or delete what exists). Only the owner can ask for account actions, new connections, more access or \
+        more than that: NyxID refuses those, so say that only the bot's owner can ask for \
+        that. Never reveal the owner's private information (their account, other \
+        chats, memory or credentials)."
+    } else {
+        "\n\nThis turn answers someone other than the owner (a member of a chat the owner's \
+        channel bot is in). Answer from the conversation only: you use no tools or services \
+        for them, and only the owner can ask you to act. If they need a service, say the \
+        owner can give this chat its own agent with just that service. Never reveal the \
+        owner's private information (their account, services, other chats, memory or \
+        credentials)."
+    }
+}
+
+/// Delivery location varies by turn, including a home thread used from the web
+/// and several chat apps. It must never participate in the stable fingerprint.
+pub fn channel_note(row: &AssistantConversation) -> String {
+    let mut prompt = String::new();
     // Where this turn's reply is read: the channel thread's chat, or for the
     // owner's own thread the chat app that asked (or, for an asynchronous
     // reply, the one they last wrote from).
@@ -254,7 +304,7 @@ pub struct TurnStart {
     pub channel: Option<ChannelOrigin>,
     /// New rows only; defaults to the start of `text`.
     pub title: Option<String>,
-    /// Turn-only context for the instructions (bounded, NyxID-authored).
+    /// Turn-only input context (bounded, NyxID-authored).
     pub note: Option<String>,
     /// New rows only: a reserved conversation ID (channel threads reserve one
     /// before the first turn so concurrent first messages share one chat).
@@ -1239,6 +1289,7 @@ pub async fn begin_turn_with_voice(
                         model: start.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()),
                         access_mode: AccessMode::Full,
                         nyxagent_session_id: None,
+                        nyxagent_instruction_binding: None,
                         nyxagent_last_response_id: None,
                         credential_api_key_id: String::new(),
                         message_count: 0,
@@ -1358,7 +1409,7 @@ pub async fn begin_turn_with_voice(
                     .await?;
                 }
                 // Every turn drains queued events: an event turn renders them as
-                // its message; other turns carry them in their instructions.
+                // its message; other turns carry them in their input context.
                 if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
                     return Err(AppError::Conflict("No pending events".into()));
                 }
@@ -1396,11 +1447,12 @@ pub async fn begin_turn_with_voice(
                 // tool results may hold more than the chat saw): it starts from
                 // the transcript alone.
                 let guest = start.guest;
-                if guest && !row.guest_turn && row.nyxagent_session_id.is_some() {
+                if guest != row.guest_turn && row.nyxagent_session_id.is_some() {
                     row.nyxagent_session_id = None;
+                    row.nyxagent_instruction_binding = None;
                     row.nyxagent_last_response_id = None;
                     row.context_reset_at = Some(now);
-                    row.context_reset_reason = Some("guest_turn".into());
+                    row.context_reset_reason = Some(if guest { "guest_turn" } else { "audience_changed" }.into());
                 }
                 row.guest_turn = guest;
                 let (role, text) = match start.origin {
@@ -1437,14 +1489,14 @@ pub async fn begin_turn_with_voice(
                 };
 
                 let credential =
-                    super::assistant_agent_credential_service::load_or_provision_in_session(
+                    Box::pin(super::assistant_agent_credential_service::load_or_provision_in_session(
                         db,
                         &keys,
                         user_id,
                         &id,
                         &authority,
                         &mut *session,
-                    )
+                    ))
                     .await?;
                 let credential_id = credential.api_key_id.as_str();
                 if voice_request
@@ -1467,6 +1519,7 @@ pub async fn begin_turn_with_voice(
                 }
                 if start.conversation_id.is_some() && row.credential_api_key_id != credential_id {
                     row.nyxagent_session_id = None;
+                    row.nyxagent_instruction_binding = None;
                     row.nyxagent_last_response_id = None;
                     row.context_reset_at = Some(now);
                     row.context_reset_reason = Some("credential_replaced".into());
@@ -1496,6 +1549,7 @@ pub async fn begin_turn_with_voice(
                         .session(&mut *session)
                         .await?;
                     row.nyxagent_session_id = None;
+                    row.nyxagent_instruction_binding = None;
                     row.nyxagent_last_response_id = None;
                     row.context_reset_at = Some(now);
                     row.context_reset_reason = Some("turn_failed".into());
@@ -1746,6 +1800,7 @@ pub async fn clear_binding(
             filter,
             doc! {"$set": {
                 "nyxagent_session_id": bson::Bson::Null,
+                "nyxagent_instruction_binding": bson::Bson::Null,
                 "nyxagent_last_response_id": bson::Bson::Null,
                 "context_reset_at": bson::DateTime::from_chrono(Utc::now()),
                 "context_reset_reason": reason,
@@ -1794,6 +1849,7 @@ impl std::fmt::Debug for TurnResult {
 }
 /// Store the reply before clearing the fence. A stop committed before settlement
 /// wins; credential revocation committed before settlement prevents rebinding.
+#[cfg(test)]
 pub async fn finish_turn(
     db: &Database,
     row: &AssistantConversation,
@@ -1801,6 +1857,18 @@ pub async fn finish_turn(
     message_id: &str,
     result: &TurnResult,
 ) -> AppResult<Option<TurnError>> {
+    finish_turn_with_instructions(db, row, credential_id, message_id, result, None).await
+}
+
+pub async fn finish_turn_with_instructions(
+    db: &Database,
+    row: &AssistantConversation,
+    credential_id: &str,
+    message_id: &str,
+    result: &TurnResult,
+    instruction_binding: Option<&crate::models::assistant_conversation::InstructionBinding>,
+) -> AppResult<Option<TurnError>> {
+    let instruction_binding = instruction_binding.cloned();
     let turn_id = row
         .active_turn
         .as_ref()
@@ -1915,6 +1983,7 @@ pub async fn finish_turn(
                 current.active_turn = None;
                 if error.as_ref().is_some_and(|e| !e.preserves_session()) || !credential_alive {
                     current.nyxagent_session_id = None;
+                    current.nyxagent_instruction_binding = None;
                     current.nyxagent_last_response_id = None;
                     current.context_reset_at = Some(now);
                     current.context_reset_reason = Some(
@@ -1927,6 +1996,13 @@ pub async fn finish_turn(
                     );
                 } else {
                     current.nyxagent_session_id = result.session_id.clone().or(current.nyxagent_session_id);
+                    if let Some(session) = current.nyxagent_session_id.as_ref()
+                        && let Some(prepared) = instruction_binding.as_ref()
+                    {
+                        let mut prepared = prepared.clone();
+                        prepared.session_id = session.clone();
+                        current.nyxagent_instruction_binding = Some(prepared);
+                    }
                     current.nyxagent_last_response_id = result.response_id.clone();
                     current.credential_api_key_id = credential_id.clone();
                 }
@@ -2429,22 +2505,6 @@ pub async fn delete(
         crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
     );
     Ok(rows)
-}
-
-pub fn instructions(
-    row: &AssistantConversation,
-    agent: Option<&crate::models::assistant_agent::AssistantAgent>,
-    history: &[AssistantMessage],
-) -> String {
-    let base = base_prompt(row, agent);
-    if history.is_empty() {
-        return base;
-    }
-    let recap = bounded_recap(history);
-    if recap.is_empty() {
-        return base;
-    }
-    format!("{base}{recap}")
 }
 
 /// Render the bounded prior-thread recap used by instructions and by a new

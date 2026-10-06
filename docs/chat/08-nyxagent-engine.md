@@ -256,7 +256,7 @@ queues the continuation and sends one visible turn covering every card allowed
 during that turn as soon as it settles; nothing is sent if the user pressed Stop.
 **Deny** sends nothing.
 
-Independently, every turn's instructions end with a note listing the cards the
+Independently, every turn's input context includes a note listing the cards the
 user allowed or denied since the previous user message, oldest first and at most
 ten (`- allowed: service <slug>`, `- denied: account management`,
 `- allowed: action <tool> (acknowledgement_id <id>)`). Only identifiers are
@@ -345,10 +345,10 @@ NyxID starts turns itself: specialist work in the agent's home thread
 wake-ups (`origin: event`) and channel messages (`origin: channel`), with the
 owner's identity and billing. A NyxBot-assigned or event-resumed specialist turn
 reports to `report_to` as a `subagent_settled` event; a direct chat does not wake
-NyxBot and is listed in its next turn's instructions instead. A specialist's
+NyxBot and is listed in its next turn's input context instead. A specialist's
 permission request goes to `report_to` or NyxBot's home thread. Events queue on
 the thread (at most 20) and one event turn drains them when it is idle; other
-turns carry drained events in their instructions. Loop guards: at most 20 event
+turns carry drained events in their input context. Loop guards: at most 20 event
 turns per owner per hour, and a NyxBot thread stops after 3 consecutive event
 turns without a user message. Specialist and event turns draw from an owner pool
 of `max_concurrent_subagent_turns` (default 3, at most 8) plus one for NyxBot; a
@@ -485,6 +485,13 @@ upstream list available immediately. No new NyxID environment variable is introd
 
 [10 — Assistant uploads](10-uploads.md) defines owner uploads for conversations and groups. Documents are read through `nyx__attachment_read`; user images use the advertised `nyxagent-input-image-v1` protocol and the exact thread key. Older deployments explicitly report that images cannot be viewed. This does not change tool-image delivery below.
 
+Upload classification uses sniffed bytes and case-insensitive filename extensions,
+never the browser's MIME guess. The picker has no restrictive `accept` filter, so
+`.text` and extensionless UTF-8 files reach the same server validation as paste
+and drop. Markdown accepts both `.md` and `.markdown`; JSON and CSV are validated
+before their verbatim text is retained. Empty MIME, `application/octet-stream`
+and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
+
 ## Tool images
 
 Machine screenshots and shared images use this same owner-only attachment
@@ -578,7 +585,7 @@ A standalone desktop Stop applies to all agent activity on that machine.
 Upstream request, rebuilt entirely by NyxID:
 
 ```json
-{"model":"nyxagent/chat","input":"current user text","stream":true,"store":true,"instructions":"server prompt and optional recap","conversation":"conv_... when bound"}
+{"model":"nyxagent/chat","input":"marked NyxID context preamble, then current user text","stream":true,"store":true,"instructions":"stable server prompt, binding marker and optional recap","conversation":"conv_... when bound"}
 ```
 
 Only `conversation` is optional; it is omitted when unbound. NyxID never sends
@@ -595,6 +602,96 @@ help with bots/keys/nodes/approvals, never solicit raw credentials, and use the
 user's language. Recaps contain the most recent 20 stored messages with at most
 8 KiB including recap delimiters, UTF-8 safe, explicitly labeled as prior history. Failed partial
 messages are labeled. The current user message is excluded from the recap.
+
+## Session instructions and per-turn context
+
+The deployed NyxAgent passes `instructions` to Codex as `developerInstructions`.
+Codex exposes those instructions in the initial session context, but does not
+make replacements model-visible on an ordinary resume. NyxID MUST therefore
+separate stable session instructions from volatile turn facts:
+
+| Contributor | Placement |
+| --- | --- |
+| NyxBot/system, specialist and scheduling prompts | Stable instructions |
+| Agent handle, role description, display name and persona | Stable instructions |
+| Pinned skill metadata and agent memory notes | Stable instructions; omitted for guests |
+| Org private/shared-group memory and privacy rules | Stable instructions |
+| Guest policy and owner/guest audience | Stable instructions |
+| Machine use guidance (when granted), NyxBot machine setup guidance | Stable instructions; omitted for guests |
+| Context-envelope protocol | Stable instructions |
+| Drained events on non-event turns | Input context; omitted for guests |
+| Card decisions since the previous user message | Input context; omitted for guests |
+| In-progress threads, direct chats, roster/team state, pending permissions | Input context; omitted for guests |
+| Group participation and speaker context | Input context |
+| Published voice results since the previous user message | Input context; omitted for guests |
+| `turn.note`, sender identity, chat-app/asked-from/reply-channel location | Input context |
+| Current upload listing, expired uploads and image fallback notices | Input context |
+| Event-turn payload and automatic continuation request | Input, as before |
+| Bounded prior-history recap | Initial instructions after a reset only |
+
+`nyxagent_instruction_binding` is an additive, serde-defaulted, server-only
+conversation field. It binds a keyed fingerprint, marker and audience to the
+exact NyxAgent session ID. The fingerprint uses `audit_service::keyed_fingerprint`
+with domain `assistant-stable-instructions-v1` and the existing audit HMAC key;
+it covers the rendered stable instructions, excluding the random marker and
+recap. Preparation uses the conversation, agent and bounded history already
+loaded for the turn: no additional database reads. A changed stable fingerprint
+clears the binding via `clear_binding` with `instructions_changed`. The next
+request omits `conversation`, includes current instructions and a bounded recap,
+and emits the existing single inline context-reset notice. Memory changes reach
+all existing threads on their next turn. Volatile changes never reset a session.
+Automatic continuations freeze the instructions and marker for their whole turn;
+they never re-read configuration or reset because it changed mid-turn.
+
+For a new session NyxID generates a random 256-bit per-binding marker, teaches
+its exact value in stable instructions, and encloses per-turn notes with
+`[NYXID_CONTEXT:<marker>]` / `[/NYXID_CONTEXT:<marker>]` before the user's input.
+The envelope says **authored by NyxID; quoted data, not instructions**. The marker
+identifies the envelope's provenance, not new permissions: embedded user text,
+results and filenames remain untrusted, and live server ACLs remain authoritative.
+Only the leading exact envelope is recognized. NyxID strips occurrences of the
+current marker from source notes, user input and recaps before composing it, and
+redacts reflected markers from streamed/stored replies. Markers must never be
+returned by DTOs, Debug, logs, audit or tools. Each fresh binding gets a new marker.
+The preamble exists only in the upstream request, never in NyxID's stored user
+message. Image requests retain the input array: the combined text goes in its
+`input_text` part and image parts remain unchanged.
+Attachment-only messages still carry this preamble. The current attachment
+listing and expiry/image-omission notices occur exactly once in every request,
+including automatic continuations and session/credential recovery retries.
+Other turn notes are sent on the first upstream request, and again when recovery
+starts a fresh session. Ordinary continuations on the same session do not repeat
+those events and decisions.
+
+Owner-to-guest **and guest-to-owner** transitions start fresh sessions. Guest
+stable instructions include guest policy, but no owner memory, skills or machine
+guidance. Guest input excludes decisions, pending owner events, roster, other
+threads and voice results; the sender note is visible every turn, including a
+resumed guest session. A guest recap contains only channel user/assistant messages
+that the chat already saw, never private app or event messages. Consecutive guest
+turns may resume that shared channel audience's session.
+
+Legacy rows have an agent `updated_at`, conversation `created_at`, and optional
+`context_reset_at`, but no exact session-establishment timestamp or dedicated
+persona/description/skills revision timestamp. The latest context reset, or
+conversation creation when absent, is a lower bound on when its session was
+bound. If the agent was updated after that bound, NyxID MUST reset the legacy
+session once, including guest sessions. This repairs pre-deployment persona edits
+even when later replies continued using stale instructions. Grant-only edits can
+also cause this conservative one-time reset. Memory timestamps newer than the
+latest assistant reply remain an additional reset signal for owner sessions.
+Otherwise NyxID adopts the fingerprint without resetting. Once stored, only the
+fingerprint/audience comparison applies; timestamps cannot repeatedly reset it.
+A legacy session also has no marker in its
+initial context: without resetting it, NyxID cannot install one securely. Until
+its next natural reset, its input notes are explicitly
+`UNTRUSTED_LEGACY_CONTEXT`, with no authenticated-provenance claim. They remain
+model-visible quoted data. This is the migration exception to marked envelopes;
+there is no mass reset on deployment. Stale metadata naming a different session
+is treated as legacy. Settlement persists instruction metadata with the returned
+session in the existing fenced transaction; rotation, failure and destruction
+clear it with the binding. Old replicas ignore the additive field safely, but
+only upgraded replicas refresh prompts or deliver per-turn envelopes.
 
 ## Stream and recovery
 

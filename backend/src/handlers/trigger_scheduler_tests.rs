@@ -230,7 +230,7 @@ async fn schedule_fake_agent_latency_authority_and_event_streak() {
     assert_eq!(calls.len(), 1);
     assert!(calls[0].authorization.contains("nyxid_"));
     assert!(
-        calls[0].body["instructions"]
+        calls[0].body["input"]
             .as_str()
             .unwrap()
             .contains("Started by trigger")
