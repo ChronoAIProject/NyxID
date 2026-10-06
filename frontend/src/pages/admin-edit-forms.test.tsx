@@ -56,6 +56,10 @@ vi.mock("@/components/providers/provider-services", () => ({
     </div>
   ),
 }));
+vi.mock("@/hooks/use-service-concurrency", () => ({
+  useServiceConcurrency: () => ({ data: { policy: null }, isPending: false, isError: false }),
+  useUpdateServiceConcurrency: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
 vi.mock("@/hooks/use-services", () => ({
   useService: () => mock.service,
   useUpdateService: () => ({

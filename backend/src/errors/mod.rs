@@ -133,6 +133,9 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
+    #[error("Service concurrency limit reached; retry after an in-flight request completes")]
+    ServiceConcurrencyLimited,
+
     #[error("Internal server error: {0}")]
     Internal(String),
 
@@ -760,6 +763,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
+            Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -979,6 +983,7 @@ impl AppError {
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantAttachmentExpired => 12101,
+            Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
@@ -1238,6 +1243,7 @@ impl AppError {
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
+            Self::ServiceConcurrencyLimited => "service_concurrency_limited",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
@@ -1538,7 +1544,14 @@ impl IntoResponse for AppError {
             AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
             _ => tracing::warn!(error = %self, "Client error"),
         }
-        (self.status_code(), axum::Json(self.response_body())).into_response()
+        let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
+        if self.error_key() == Self::ServiceConcurrencyLimited.error_key() {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
 

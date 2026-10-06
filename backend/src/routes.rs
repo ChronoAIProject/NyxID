@@ -632,6 +632,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let service_routes = Router::new()
+        .route(
+            "/{service_id}/concurrency",
+            get(handlers::service_concurrency::get).put(handlers::service_concurrency::put),
+        )
         .route("/", get(handlers::services::list_services))
         .route("/", post(handlers::services::create_service))
         .route("/{service_id}", get(handlers::services::get_service))

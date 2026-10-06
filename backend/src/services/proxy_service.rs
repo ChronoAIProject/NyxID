@@ -3132,6 +3132,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     inference: Option<crate::models::downstream_service::ServiceInference>,
     workspace_destinations_pending: bool,
     destination_targets: std::collections::BTreeMap<String, String>,
@@ -3160,6 +3161,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        concurrency_policy: service.concurrency_policy.clone(),
         inference: service.inference.clone(),
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -3175,6 +3177,7 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    service.concurrency_policy = authorization.concurrency_policy.clone();
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
     service.destination_targets = authorization.destination_targets.clone();
@@ -3762,6 +3765,7 @@ fn build_minimal_downstream_service(
         capabilities: None,
         inference: None,
         git_http: None,
+        concurrency_policy: None,
         inference_admin_modified: false,
         billing,
         auth_notes: None,
@@ -5964,6 +5968,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7292,6 +7297,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7637,6 +7643,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7868,6 +7875,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -8116,6 +8124,7 @@ mod tests {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

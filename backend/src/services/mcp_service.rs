@@ -165,6 +165,8 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    /// Acting person/SA when credential resolution runs as another owner.
+    pub actor_user_id: Option<&'a str>,
     pub org_agent_access: Option<&'a super::org_agent_service::RequestAccess>,
     pub agent_owner: Option<&'a str>,
     pub operation_scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
@@ -4489,6 +4491,7 @@ impl std::fmt::Debug for ToolMedia {
 /// are unchanged; `media` is set only for verified images.
 #[derive(Debug)]
 pub struct ToolResponse {
+    pub concurrency: Option<super::service_concurrency_service::Lease>,
     pub status: u16,
     pub text: String,
     pub media: Option<ToolMedia>,
@@ -4537,6 +4540,7 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
 
 fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]) -> ToolResponse {
     ToolResponse {
+        concurrency: None,
         status,
         text: String::from_utf8_lossy(body).to_string(),
         media: tool_media(status, content_type, body),
@@ -4601,6 +4605,120 @@ async fn collect_node_stream_response(
 /// this so the attested resolution is the one that produces the effect.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool_resolved(
+    http_client: &reqwest::Client,
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &std::sync::Arc<NodeWsManager>,
+    billing: &std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &str,
+    billing_principal_user_id: &str,
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
+    connection_expiry_notifier: &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &McpExecContext<'_>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+) -> AppResult<McpToolExecutionOutcome> {
+    let lease = super::service_concurrency_service::acquire(
+        db,
+        &target.service,
+        exec_ctx.actor_user_id.unwrap_or(user_id),
+    )
+    .await?;
+    let execution = execute_tool_resolved_boxed(
+        http_client,
+        db,
+        encryption_keys,
+        node_ws_manager,
+        billing,
+        user_id,
+        billing_principal_user_id,
+        service,
+        endpoint,
+        prepared,
+        jwt_keys,
+        config,
+        connection_expiry_notifier,
+        token_exchange_cache,
+        cloud_response_cache,
+        exec_ctx,
+        billing_egress_permit,
+        target,
+        node_route,
+        has_server_credential,
+        billing_context_builder,
+    );
+    match lease {
+        Some(lease) => {
+            let mut outcome = lease.run(execution).await?;
+            if let McpToolExecutionOutcome::Response(response) = &mut outcome {
+                response.concurrency = Some(lease);
+            }
+            Ok(outcome)
+        }
+        None => execution.await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_tool_resolved_boxed<'a>(
+    http_client: &'a reqwest::Client,
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    config: &'a crate::config::AppConfig,
+    connection_expiry_notifier: &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &'a McpExecContext<'a>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
+    Box::pin(execute_tool_resolved_inner(
+        http_client,
+        db,
+        encryption_keys,
+        node_ws_manager,
+        billing,
+        user_id,
+        billing_principal_user_id,
+        service,
+        endpoint,
+        prepared,
+        jwt_keys,
+        config,
+        connection_expiry_notifier,
+        token_exchange_cache,
+        cloud_response_cache,
+        exec_ctx,
+        billing_egress_permit,
+        target,
+        node_route,
+        has_server_credential,
+        billing_context_builder,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_tool_resolved_inner(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -5122,6 +5240,7 @@ pub async fn execute_tool_resolved(
 
     destination_audit.complete(status);
     Ok(McpToolExecutionOutcome::Response(ToolResponse {
+        concurrency: None,
         status,
         text: body_text,
         media,
@@ -6002,6 +6121,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        actor_user_id: None,
                         org_agent_access: None,
                         agent_owner: None,
                         operation_scopes: None,
@@ -12025,6 +12145,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,

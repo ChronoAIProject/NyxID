@@ -56,6 +56,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
 - 12400-12422 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`, 12414 `MachineDriverRestarting`, 12415 `MachineComputerPermissionMissing`, 12416 `MachineComputerToolUnsupported`, 12417 `MachineDisplayUnavailable`, 12418 `MachineTurnStopped`, 12419 `MachineAuthorityUnsupported`, 12420 `MachinePermissionRevoked`, 12421 `MachineAuthorityStale`, 12422 `MachineAuthorityBusy`. Nodes also use 12419 for `separated_context_unavailable` and 12421 for `context_quarantine_pending`.
 
+- 12600 service concurrency: 12600 `ServiceConcurrencyLimited` (HTTP 429, `Retry-After: 1`); client capacity rejection, never a server fault.
 - 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).
 
 ### 4. Frontend Patterns

@@ -14,6 +14,10 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
   useParams: () => ({ serviceId: source.data?.id }),
 }));
+vi.mock("@/hooks/use-service-concurrency", () => ({
+  useServiceConcurrency: () => ({ data: { policy: null }, isPending: false, isError: false }),
+  useUpdateServiceConcurrency: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
 vi.mock("@/hooks/use-services", () => ({
   useService: () => ({
     ...source,

@@ -210,22 +210,37 @@ pub async fn ssh_tunnel_ws(
             .and_then(|v| v.to_str().ok()),
     );
 
+    let concurrency = crate::services::service_concurrency_service::acquire_policy(
+        &state.db,
+        auth_context.concurrency_policy.as_ref(),
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+
     Ok(ws
         .on_upgrade(move |socket| async move {
-            handle_ssh_socket(
-                state,
-                auth_user,
-                service_id,
-                service_slug,
-                ssh_service,
-                socket,
-                session_guard,
-                client_meta,
-                tele,
-                auth_context.owner_user_id,
-                billing_egress_permit,
-            )
-            .await;
+            let work = async {
+                handle_ssh_socket(
+                    state,
+                    auth_user,
+                    service_id,
+                    service_slug,
+                    ssh_service,
+                    socket,
+                    session_guard,
+                    client_meta,
+                    tele,
+                    auth_context.owner_user_id,
+                    billing_egress_permit,
+                )
+                .await;
+                Ok(())
+            };
+            if let Some(lease) = concurrency {
+                let _ = lease.run(work).await;
+            } else {
+                let _ = work.await;
+            }
         })
         .into_response())
 }
@@ -1472,6 +1487,7 @@ mod tests {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
