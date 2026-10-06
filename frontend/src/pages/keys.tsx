@@ -435,7 +435,9 @@ export function KeysPage() {
             )}
             {/* Services keep Connect Service inside the sticky filter toolbar;
                 the empty state has no toolbar, so the header button stays. */}
-            {(tab === "nyxid" || (tab === "services" && !pageKeys?.length)) && (
+            {(tab === "nyxid" ||
+              tab === "pools" ||
+              (tab === "services" && !pageKeys?.length)) && (
               <AddButton
                 tab={tab}
                 onAddService={() => setAddServiceOpen(true)}

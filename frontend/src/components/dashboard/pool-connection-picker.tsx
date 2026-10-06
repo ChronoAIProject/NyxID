@@ -213,7 +213,10 @@ export function PoolConnectionPicker({
               </div>
             )}
             {busy && (
-              <p role="status" className="p-2 text-12 text-muted-foreground">
+              <p
+                role="status"
+                className="p-2 text-12 text-muted-foreground"
+              >
                 {isLoading ? "Loading connections…" : "Searching connections…"}
               </p>
             )}
@@ -297,7 +300,10 @@ export function PoolConnectionPicker({
               ))}
             </div>
             {!busy && !isError && rows.length === 0 && (
-              <p role="status" className="p-2 text-12 text-muted-foreground">
+              <p
+                role="status"
+                className="p-2 text-12 text-muted-foreground"
+              >
                 {search
                   ? "No connections match this search."
                   : "No connections yet. Connect a service in the Services tab first, then return here."}

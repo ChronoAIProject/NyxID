@@ -158,7 +158,10 @@ export function PolicyEditor({
         <legend className="text-12 font-medium">Retry causes</legend>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {retryTriggers.map((trigger) => (
-            <label key={trigger} className="flex items-center gap-2 text-12">
+            <label
+              key={trigger}
+              className="flex items-center gap-2 text-12"
+            >
               <Checkbox
                 checked={policy.retry_on.includes(trigger)}
                 onCheckedChange={(v) =>

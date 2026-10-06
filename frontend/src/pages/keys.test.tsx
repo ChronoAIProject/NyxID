@@ -311,7 +311,7 @@ describe("KeysPage", () => {
     ).toBeVisible();
     expect(screen.getByText("My OpenAI")).toBeVisible();
     expect(screen.getByText("/api/v1/proxy/s/my-pool")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Create pool" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Create Pool" })).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Configure pool" }),
     ).toBeVisible();

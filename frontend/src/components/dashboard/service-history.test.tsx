@@ -169,7 +169,7 @@ describe("service authorship and history", () => {
       client.invalidateQueries({ queryKey: ["service-history"] }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "current access to this connection",
+      "currently permitted organization admins",
     );
     expect(
       screen.queryByText(/Other service settings updated/),

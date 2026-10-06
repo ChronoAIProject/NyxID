@@ -1309,9 +1309,6 @@ pub async fn list_keys(
         grants.memberships(),
     )
     .await?;
-    for key in &mut keys {
-        restrict_connection_configuration(key);
-    }
     Ok(Json(KeyListResponse { keys }))
 }
 
@@ -1354,7 +1351,6 @@ pub async fn get_key(
         std::slice::from_mut(&mut response),
     )
     .await?;
-    restrict_connection_configuration(&mut response);
     Ok(Json(response))
 }
 
@@ -2934,29 +2930,6 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
 
 /// Apply after discovery enrichment, which can add instance configuration.
 /// Execution and authorization-evidence projections keep their own contracts.
-fn restrict_connection_configuration(key: &mut KeyResponse) {
-    if key.can_edit_configuration {
-        return;
-    }
-    key.endpoint_url = None;
-    key.auth_key_name.clear();
-    key.identity_jwt_audience = None;
-    key.delegation_token_scope.clear();
-    key.custom_user_agent = None;
-    key.oauth_client_id = None;
-    key.default_request_headers = None;
-    key.ws_frame_injections.clear();
-    key.ssh_host = None;
-    key.ssh_port = None;
-    key.ssh_ca_public_key = None;
-    key.ssh_allowed_principals = None;
-    key.ssh_certificate_ttl_minutes = None;
-    key.openapi_spec_url = None;
-    key.permission_setup_url = None;
-    key.permission_setup_scopes = None;
-    key.error_message = None;
-}
-
 async fn enrich_key_node_metadata(
     db: &mongodb::Database,
     ws_manager: &crate::services::node_ws_manager::NodeWsManager,
@@ -3288,11 +3261,8 @@ mod tests {
             ssh_allowed_principals: None,
             ssh_certificate_ttl_minutes: None,
         };
-        let mut response = super::key_response_from_result(&result);
-        response.can_edit_configuration = false;
-        super::restrict_connection_configuration(&mut response);
+        let response = super::key_response_from_result(&result);
         assert_eq!(response.oauth_app_source.as_deref(), Some("platform"));
-        assert!(response.oauth_client_id.is_none());
         assert_aevatar_secret_free(&serde_json::to_value(&response).unwrap());
     }
 
@@ -5584,7 +5554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_configuration_requires_editor_for_list_and_detail() {
+    async fn connection_configuration_flag_requires_editor_without_hiding_data() {
         let db =
             crate::test_utils::connect_transaction_test_database("configuration_read_acl").await;
         let actor = uuid::Uuid::new_v4().to_string();
@@ -5622,19 +5592,15 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(detail.can_edit_configuration, editable);
-            assert_eq!(detail.endpoint_url.is_some(), editable);
-            assert!(
-                detail.authorship.is_some(),
-                "all scoped readers receive history metadata"
-            );
+            // The flag only gates editing UI; readers keep the configuration.
+            assert!(detail.endpoint_url.is_some());
             let Json(list) = super::list_keys(State(state.clone()), test_auth_user(&actor))
                 .await
                 .unwrap();
             let row = list.keys.iter().find(|row| row.id == service).unwrap();
             assert_eq!(row.can_edit_configuration, editable);
-            assert_eq!(row.endpoint_url.is_some(), editable);
-            assert!(row.authorship.is_some());
-            assert_eq!(row.custom_user_agent.is_some(), editable);
+            assert!(row.endpoint_url.is_some());
+            assert!(row.custom_user_agent.is_some());
             let Json(services) = crate::handlers::user_services_handler::list_user_services(
                 State(state.clone()),
                 test_auth_user(&actor),
@@ -5646,31 +5612,8 @@ mod tests {
                 .iter()
                 .find(|row| row.id == service)
                 .unwrap();
-            assert_eq!(row.custom_user_agent.is_some(), editable);
-            if !editable {
-                assert!(row.default_request_headers.is_none());
-                assert!(row.ws_frame_injections.is_empty());
-                assert!(row.auth_key_name.is_empty());
-            }
+            assert!(row.custom_user_agent.is_some());
         }
-    }
-
-    #[test]
-    fn configuration_projection_removes_private_values_but_keeps_usage_identity() {
-        let mut response = poisoned_key_response();
-        response.can_edit_configuration = false;
-        response.openapi_spec_url = Some("https://private.example/spec".into());
-        response.ssh_host = Some("private.internal".into());
-        response.custom_user_agent = Some("custom-client".into());
-        super::restrict_connection_configuration(&mut response);
-        assert!(response.endpoint_url.is_none());
-        assert!(response.openapi_spec_url.is_none());
-        assert!(response.ssh_host.is_none());
-        assert!(response.custom_user_agent.is_none());
-        assert!(response.default_request_headers.is_none());
-        assert!(response.ws_frame_injections.is_empty());
-        assert_eq!(response.slug, "example");
-        assert_eq!(response.id, "service-1");
     }
 
     // ---- get_key org scoping tests ----

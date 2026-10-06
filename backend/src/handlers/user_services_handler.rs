@@ -332,14 +332,6 @@ pub async fn list_user_services(
             response.catalog_service_name = catalog_display.map(|(name, _)| name.clone());
             response.catalog_service_description =
                 catalog_display.and_then(|(_, description)| description.clone());
-            if !response.credential_source.can_edit_configuration() {
-                response.auth_key_name.clear();
-                response.identity_jwt_audience = None;
-                response.delegation_token_scope.clear();
-                response.custom_user_agent = None;
-                response.default_request_headers = None;
-                response.ws_frame_injections.clear();
-            }
             response
         })
         .collect();

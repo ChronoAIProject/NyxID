@@ -384,7 +384,7 @@ async fn archive_scope_roles_deleted_owner_and_group_pagination() {
         )
         .await
         .unwrap();
-    assert!(read::can_read(&db, &reader, &org, &s.id).await.unwrap());
+    assert!(!read::can_read(&db, &reader, &org, &s.id).await.unwrap());
     db.collection::<Document>("users")
         .delete_one(doc! { "_id": &org })
         .await
@@ -810,21 +810,8 @@ async fn archived_discovery_respects_current_roles_scopes_and_uuid_identity() {
             )
             .await
             .unwrap();
-        let visible = read::archived(&db, &reader, None, 20).await.unwrap();
-        assert_eq!(visible.services.len(), 1);
-        assert_eq!(visible.services[0].service_id, first.id);
         assert!(
-            read::list(&db, &reader, &first.id, None, &[], 20)
-                .await
-                .is_ok()
-        );
-        assert!(
-            read::list(&db, &reader, &second.id, None, &[], 20)
-                .await
-                .is_err()
-        );
-        assert!(
-            read::archived(&db, &restricted, None, 20)
+            read::archived(&db, &reader, None, 20)
                 .await
                 .unwrap()
                 .services
@@ -1134,7 +1121,7 @@ async fn new_and_rebound_references_are_included_in_retried_backing_fanout() {
 }
 
 #[tokio::test]
-async fn reader_authorship_summaries_preserve_membership_and_key_scopes() {
+async fn authorship_summaries_stay_admin_only_within_membership_and_key_scopes() {
     use crate::models::org_membership::OrgRole;
     let (db, mut service) = fixture().await;
     let actor_id = service.user_id.clone();
@@ -1164,6 +1151,11 @@ async fn reader_authorship_summaries_preserve_membership_and_key_scopes() {
         let summaries = read::summaries(&db, &reader, &ids, std::slice::from_ref(&membership))
             .await
             .unwrap();
+        if role != OrgRole::Admin {
+            // Members and viewers do not receive history metadata.
+            assert!(summaries.is_empty());
+            continue;
+        }
         assert_eq!(summaries.len(), 1);
         assert!(summaries.contains_key(&service.id));
         let excluded = vec![other.id.clone()];

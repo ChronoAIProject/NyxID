@@ -96,7 +96,11 @@ export function PoolOperationCheck({
         </Button>
       </div>
       {error && (
-        <p id={`${id}-error`} role="alert" className="text-12 text-destructive">
+        <p
+          id={`${id}-error`}
+          role="alert"
+          className="text-12 text-destructive"
+        >
           {error}
         </p>
       )}

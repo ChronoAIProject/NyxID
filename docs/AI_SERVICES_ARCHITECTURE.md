@@ -815,23 +815,19 @@ state, configuration summary, and latest recorded change. Row disclosure exposes
 additional metadata without nested connection cards. History has a separate action
 for every visible connection; it is not conditional on a recorded creator.
 
-`GET /keys` and `GET /keys/{id}` include `can_edit_configuration`. Personal owners
-and scoped org admins can inspect connection configuration; auto-connected rows
-remain platform managed. Read-only projections omit upstream URLs, private spec
-URLs, SSH targets, custom header values, WebSocket templates, custom User-Agent,
-OAuth app identifiers, and configuration error text. `/user-services` also omits
-private custom settings from inherited read-only rows; endpoint listing enforces
-admin service scope, and operation discovery hides its private source-spec URL
-from non-editors while retaining usable operation descriptions. Execution and
-minimal authorization-evidence representations keep their existing contracts.
+`GET /keys` and `GET /keys/{id}` include an additive `can_edit_configuration` flag:
+true for personal owners and scoped org admins, false for auto-connected rows and
+org members/viewers. It only gates editing affordances in the new comparison UI.
+Responses keep their existing fields for every reader, so API clients and the CLI
+(for example `nyxid ssh terminal` default principals and `nyxid service show`) are
+unchanged; `/user-services` and endpoint discovery keep their existing contracts.
+The full connection detail page keeps its existing read-only view for org members.
 
-The frontend uses the explicit denial when available and known personal/org-admin
-ownership on older servers. It hides configuration on both the listing and direct
-connection pages. Owners, admins, members and viewers retain scoped history access,
-including archived history, under the active-owner and current-membership checks
-in [SERVICE_HISTORY.md](SERVICE_HISTORY.md). This is independent of proxy-use
-permission. Last editor and credential-preparation time are never labeled last
-caller or successful upstream execution.
+History access is unchanged: personal owners and scoped org admins can read it under
+the checks in [SERVICE_HISTORY.md](SERVICE_HISTORY.md). Other readers who open a
+row's History see the existing "unavailable" message. Last editor and
+credential-preparation time are never labeled last caller or successful upstream
+execution.
 
 ### Billing and caller information inside service cards
 
