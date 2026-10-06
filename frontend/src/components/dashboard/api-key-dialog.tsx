@@ -79,7 +79,7 @@ export function ApiKeyDialog({
               href={provider.api_key_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-12 text-primary hover:underline"
+              className="inline-flex items-center gap-1.5 text-12 text-primary-text hover:underline"
             >
               Get your API key
               <ExternalLink className="h-3 w-3" />

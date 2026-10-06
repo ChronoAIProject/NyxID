@@ -680,7 +680,7 @@ function ConnectionBillingPanel({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-          <CreditCard className="size-4 text-primary" /> Billing
+          <CreditCard className="size-4 text-primary-text" /> Billing
         </h4>
         {insight.billing?.context !== "configuration" &&
           !!insight.usage?.access.keys.length && (
@@ -801,7 +801,7 @@ export function ConnectionInsightPanel({
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-            <UsersRound className="size-4 text-primary" />{" "}
+            <UsersRound className="size-4 text-primary-text" />{" "}
             {usage.access.basis === "configuration"
               ? "Agent keys in scope"
               : "Agent keys with access"}
@@ -836,7 +836,7 @@ export function ConnectionInsightPanel({
                       <Link
                         to="/keys/api-key/$keyId"
                         params={{ keyId: key.id }}
-                        className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline"
+                        className="inline-flex items-center gap-1.5 font-medium text-primary-text hover:underline"
                       >
                         <Bot className="size-3.5" />
                         {key.name}
@@ -924,7 +924,7 @@ export function ConnectionInsightPanel({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-          <Activity className="size-4 text-primary" /> Recent requests
+          <Activity className="size-4 text-primary-text" /> Recent requests
         </h4>
         <span className="text-11 text-muted-foreground">
           {usage.activity.visibility === "own_requests"

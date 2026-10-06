@@ -1,4 +1,4 @@
-import { GitBranch } from "lucide-react";
+import { Cable } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -11,6 +11,7 @@ import {
   poolStrategyLabel,
 } from "@/lib/service-pool-display";
 import type { ServicePool } from "@/schemas/pools";
+import { PoolStrategyIcon, ServicePoolIcon } from "./service-pool-icons";
 
 export function ServicePoolSummary({
   pools,
@@ -82,10 +83,20 @@ export function ServicePoolSummary({
             onClick={onOpen}
           >
             <span className="flex w-full min-w-0 items-center gap-2">
-              <GitBranch
-                className="size-3.5 shrink-0 text-muted-foreground"
-                aria-hidden="true"
-              />
+              {first &&
+              pools.every((pool) => pool.strategy === first.strategy) ? (
+                <PoolStrategyIcon
+                  strategy={first.strategy}
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                />
+              ) : first || loading || incomplete ? (
+                <ServicePoolIcon className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <Cable
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden="true"
+                />
+              )}
               <span className="truncate font-medium">
                 {first ? config : name}
               </span>
@@ -109,8 +120,14 @@ export function ServicePoolSummary({
         >
           {pools.map((pool) => (
             <div key={pool.id}>
-              <p className="font-medium">
-                {pool.name} · {poolStrategyLabel(pool)}
+              <p className="flex items-start gap-1.5 font-medium">
+                <PoolStrategyIcon
+                  strategy={pool.strategy}
+                  className="mt-0.5 size-3.5 shrink-0"
+                />
+                <span>
+                  {pool.name} · {poolStrategyLabel(pool)}
+                </span>
               </p>
               <p>
                 {pool.members.filter((member) => member.enabled).length} of{" "}

@@ -339,7 +339,7 @@ function EndpointSection({
     <Card className="h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Globe className="h-4 w-4 text-primary" />
+          <Globe className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Endpoint</CardTitle>
         </div>
         <CardDescription>Target URL for proxied requests</CardDescription>
@@ -457,7 +457,7 @@ function OpenApiSpecSection({
     <Card className="h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <FileJson className="h-4 w-4 text-primary" />
+          <FileJson className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">OpenAPI Spec</CardTitle>
         </div>
         <CardDescription>
@@ -582,7 +582,7 @@ function RecommendedSkillsSection({
     <Card className="h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <FileJson className="h-4 w-4 text-primary" />
+          <FileJson className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Recommended Skills</CardTitle>
         </div>
         <CardDescription>
@@ -712,7 +712,7 @@ function ApiKeySection({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <KeyRound className="h-4 w-4 text-primary" />
+            <KeyRound className="h-4 w-4 text-primary-text" />
             <CardTitle className="text-15">API Key</CardTitle>
           </div>
           {showRotateInHeader && (
@@ -926,7 +926,7 @@ function ServiceSection({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Server className="h-4 w-4 text-primary" />
+            <Server className="h-4 w-4 text-primary-text" />
             <CardTitle className="text-15">Service</CardTitle>
           </div>
           {/* Disable is reversible, so it is not a destructive action —
@@ -1047,7 +1047,7 @@ function UserAgentOverrideSection({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Server className="h-4 w-4 text-primary" />
+          <Server className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">User-Agent override</CardTitle>
         </div>
         <CardDescription>
@@ -1174,7 +1174,7 @@ function NodeSetupHelper({
     <Card className="min-w-0 md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Terminal className="h-4 w-4 text-primary" />
+          <Terminal className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Node Setup</CardTitle>
         </div>
         <CardDescription>
@@ -1246,7 +1246,7 @@ function SshConnectionSection({
     <Card className="md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Shield className="h-4 w-4 text-primary" />
+          <Shield className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">SSH Connection</CardTitle>
         </div>
         <CardDescription>
@@ -1567,7 +1567,7 @@ function ApiUsageSection({
       <CardHeader className="pb-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-center gap-2">
-            <Code className="h-4 w-4 text-primary" />
+            <Code className="h-4 w-4 text-primary-text" />
             <CardTitle className="text-15">API Usage</CardTitle>
           </div>
           {showAgentSetup && (
@@ -1651,7 +1651,7 @@ function ApiUsageSection({
                 <Link
                   to="/keys"
                   search={{ tab: "nyxid" }}
-                  className="font-medium text-primary underline-offset-4 hover:underline"
+                  className="font-medium text-primary-text underline-offset-4 hover:underline"
                 >
                   Agent Keys
                 </Link>{" "}
@@ -2080,7 +2080,7 @@ function AccessPolicySection({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <ShieldCheck className="h-4 w-4 text-primary" />
+          <ShieldCheck className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Access policy</CardTitle>
         </div>
         <CardDescription>
@@ -2186,7 +2186,7 @@ function DefaultHeadersSection({
     <Card className="md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <FileJson className="h-4 w-4 text-primary" />
+          <FileJson className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Default request headers</CardTitle>
         </div>
         <CardDescription>
@@ -2586,7 +2586,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
       {import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1" && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-xs">
           <p>Local preview · full details from production. Account changes and execution are disabled.</p>
-          <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary hover:underline">Back to services</Link>
+          <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary-text hover:underline">Back to services</Link>
         </div>
       )}
       <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-xs text-muted-foreground hover:text-foreground">

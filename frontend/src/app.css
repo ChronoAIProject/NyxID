@@ -17,11 +17,11 @@
    on the never-themed public pages. */
 @custom-variant light (&:where(.theme-light, .theme-light *));
 
-@utility text-control {
+@utility min-h-control {
   min-height: calc(1lh + var(--spacing) * 2);
 }
 
-@utility text-input {
+@utility min-h-input {
   min-height: calc(1lh + var(--spacing) * 3 + 2px);
 }
 
@@ -64,6 +64,7 @@
 
   /* ── Primary / Accent ── */
   --color-primary: #5A2AF1;
+  --color-primary-text: var(--color-primary);
   --color-primary-foreground: #FFFFFF;
   --color-secondary: #A672FB10;
   --color-secondary-foreground: #A3A3A3;
@@ -225,6 +226,10 @@ html.theme-dark {
   --color-popover-foreground: #EFEFF1;
   --color-sidebar: #141416;
   --color-surface: #222225;
+
+  /* Text needs a lighter accent than solid button fills.
+     Derive it from primary so custom accent colors still apply. */
+  --color-primary-text: color-mix(in srgb, var(--color-primary) 45%, #FFFFFF);
 
   --color-secondary-foreground: #BABAC1;
   --color-accent-foreground: #EFEFF1;

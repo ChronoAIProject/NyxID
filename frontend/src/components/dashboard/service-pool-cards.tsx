@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronRight, GitBranch } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useKeys } from "@/hooks/use-keys";
@@ -12,6 +12,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { ServicePool } from "@/schemas/pools";
 import { ServicePoolRoutingPanel } from "./service-pool-routing-panel";
+import { PoolStrategyIcon, ServicePoolIcon } from "./service-pool-icons";
 
 export function ServicePoolCards({
   pools,
@@ -58,7 +59,7 @@ export function ServicePoolCards({
               <div className="flex flex-1 flex-col gap-3 p-4">
                 <div className="flex items-start gap-3">
                   <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-background/50">
-                    <GitBranch className="size-5" />
+                    <ServicePoolIcon className="size-5" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <h3 className="truncate text-15 font-semibold">
@@ -79,7 +80,13 @@ export function ServicePoolCards({
                 </p>
                 <div className="mt-auto space-y-1.5 text-xs">
                   <div className="flex items-center justify-between gap-2">
-                    <span>{poolStrategyLabel(pool)}</span>
+                    <span className="flex items-center gap-1.5">
+                      <PoolStrategyIcon
+                        strategy={pool.strategy}
+                        className="size-3.5 shrink-0"
+                      />
+                      {poolStrategyLabel(pool)}
+                    </span>
                     <Badge variant="secondary">
                       {pool.is_active ? "Enabled" : "Disabled"}
                     </Badge>

@@ -345,7 +345,7 @@ function ArchiveList() {
             <Link
               to="/keys/$keyId"
               params={{ keyId: row.service_id }}
-              className="break-all text-primary underline underline-offset-2"
+              className="break-all text-primary-text underline underline-offset-2"
             >
               {row.service_slug} · View history
             </Link>

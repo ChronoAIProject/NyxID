@@ -57,7 +57,7 @@ export function PlatformCard({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Monitor className="h-4 w-4 text-primary" />
+          <Monitor className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Platform</CardTitle>
         </div>
         <CardDescription>

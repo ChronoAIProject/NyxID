@@ -121,7 +121,7 @@ export function ServiceOverviewPage() {
               href={entry.documentation_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-primary hover:underline"
+              className="text-primary-text hover:underline"
             >
               Service documentation
             </a>

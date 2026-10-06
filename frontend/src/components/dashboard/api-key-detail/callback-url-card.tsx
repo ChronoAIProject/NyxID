@@ -74,7 +74,7 @@ export function CallbackUrlCard({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Link2 className="h-4 w-4 text-primary" />
+          <Link2 className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Callback URL</CardTitle>
         </div>
         <CardDescription>

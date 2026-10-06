@@ -226,9 +226,11 @@ describe("live grouped services", () => {
     const card = within(
       screen.getByRole("region", { name: "Twitter / X API" }),
     );
-    expect(
+    const summary = within(
       card.getByRole("button", { name: "Show billing for Twitter / X API" }),
-    ).toHaveTextContent(/^3 NyxID · 1 BYOK$/);
+    );
+    expect(summary.getByText("3 NyxID managed · 1 BYOK")).toBeVisible();
+    expect(summary.getByText("3 platform managed connections")).toBeVisible();
     expect(card.getByText("1 disabled")).toBeVisible();
   });
   it("verifies an internal service's absent billing from the full catalog when insights lack that metadata", () => {
@@ -481,7 +483,7 @@ describe("live grouped services", () => {
     const summary = card.getByRole("button", {
       name: "Show billing for Twitter",
     });
-    expect(summary).toHaveTextContent("2 NyxID · 1 BYOK · 1 unverified");
+    expect(summary).toHaveTextContent("2 NyxID managed · 1 BYOK · 1 unverified");
     await user.hover(summary);
     const tooltip = await screen.findByRole("tooltip");
     for (const text of [
@@ -536,7 +538,7 @@ describe("live grouped services", () => {
         usage: null,
       });
     render(preview());
-    expect(screen.getByText("1 NyxID · 5 BYOK")).toBeVisible();
+    expect(screen.getByText("1 NyxID managed · 5 BYOK")).toBeVisible();
     expect(screen.getByText("1 disabled")).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "Show billing for OpenAI" }),
@@ -545,7 +547,7 @@ describe("live grouped services", () => {
       screen.getByRole("region", { name: "Billing for App 3" }),
     ).toBeVisible();
     expect(screen.getByText("Uses NyxID credits")).toBeVisible();
-    expect(screen.getByText("NyxID")).toBeVisible();
+    expect(screen.getByText("NyxID managed")).toBeVisible();
   });
   it("identifies supplied API keys without requiring published prices", () => {
     insightConnections.set("mine", {
@@ -641,7 +643,7 @@ describe("live grouped services", () => {
     ).toBeInTheDocument();
     const card = screen.getByRole("region", { name: "OpenAI" });
     expect(within(card).getByText("3 connections")).toBeVisible();
-    expect(within(card).getByText("1 NyxID · 2 BYOK")).toBeVisible();
+    expect(within(card).getByText("1 NyxID managed · 2 BYOK")).toBeVisible();
     expect(within(card).queryByText("Sources")).not.toBeInTheDocument();
     for (const source of ["Personal", "Chrono", "NyxID platform", "Personal"]) {
       await user.hover(
@@ -1233,7 +1235,7 @@ describe("live grouped services", () => {
     for (const name of [
       "Owner / Credential",
       "Access & requests",
-      "Billing",
+      "Billing & usage",
       "Connection / Slug",
       "Configuration",
     ]) {

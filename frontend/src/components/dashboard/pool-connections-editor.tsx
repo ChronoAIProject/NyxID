@@ -18,6 +18,7 @@ import { Choice, NumberInput, Toggle } from "./pool-controls";
 import { bindingLabel, reason } from "./pool-labels";
 import { PoolConnectionPicker } from "./pool-connection-picker";
 import { PoolOperationCheck, type PoolOperation } from "./pool-operation-check";
+import { PoolStrategyIcon } from "./service-pool-icons";
 
 function newMember(id: string): ServicePoolMember {
   return {
@@ -219,8 +220,26 @@ export function PoolConnectionsEditor({
             label="Connections with the same priority"
             value={values.tier_balance ?? "round_robin"}
             options={[
-              ["round_robin", "Take turns"],
-              ["weighted", "Share by weight"],
+              [
+                "round_robin",
+                <span className="flex items-center gap-2">
+                  <PoolStrategyIcon
+                    strategy="round_robin"
+                    className="size-3.5 shrink-0"
+                  />
+                  Take turns
+                </span>,
+              ],
+              [
+                "weighted",
+                <span className="flex items-center gap-2">
+                  <PoolStrategyIcon
+                    strategy="weighted"
+                    className="size-3.5 shrink-0"
+                  />
+                  Share by weight
+                </span>,
+              ],
             ]}
             onChange={(value) => {
               form.setValue(

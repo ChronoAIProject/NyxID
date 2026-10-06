@@ -773,7 +773,7 @@ function KeyForm({
           href={catalogEntry.api_key_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
         >
           Get API key
           <ExternalLink className="h-3 w-3" />
@@ -1356,7 +1356,7 @@ function NodeSetupStep({
 
       <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
         <div className="flex items-center gap-2">
-          <Terminal className="h-4 w-4 text-primary" />
+          <Terminal className="h-4 w-4 text-primary-text" />
           <p className="text-12 font-medium">Node Setup Instructions</p>
         </div>
 
@@ -1390,7 +1390,7 @@ function NodeSetupStep({
                 href={catalogEntry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
               >
                 Get API key
                 <ExternalLink className="h-3 w-3" />
@@ -2609,7 +2609,7 @@ function DeviceCodeStep({
           Your code
         </p>
         <div className="flex items-center gap-3">
-          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary">
+          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
             {userCode}
           </code>
           <Button
@@ -2734,7 +2734,7 @@ function OAuthCredentialsStep({
           href={catalogEntry.documentation_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
         >
           How to create an OAuth app
           <ExternalLink className="h-3 w-3" />

@@ -254,7 +254,7 @@ export function DataTableFilterPopover<FilterKey extends string>({
           <Filter className="h-3.5 w-3.5" aria-hidden="true" />
           <span>{triggerLabel}</span>
           {activeCount > 0 && (
-            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary">
+            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary-text">
               {String(activeCount)}
             </span>
           )}
@@ -343,7 +343,7 @@ function DataTableFilterPanel<FilterKey extends string>({
               <span className="min-w-0 flex-1 break-words">{field.label}</span>
               {active && (
                 <span
-                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary"
+                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary-text"
                   aria-label={`${String(selectedValueCount)} selected`}
                 >
                   {String(selectedValueCount)}

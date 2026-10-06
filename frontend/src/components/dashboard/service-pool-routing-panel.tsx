@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GitBranch, Settings2 } from "lucide-react";
+import { Settings2 } from "lucide-react";
 import { ServiceIcon } from "@/components/service-icon";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +30,7 @@ import { connectionSource, connectionSourceLabel } from "@/lib/service-view";
 import { defaultFailoverPolicy, type ServicePool } from "@/schemas/pools";
 import type { KeyInfo } from "@/types/keys";
 import { ServiceOwnerAvatar } from "./service-owner-avatar";
+import { PoolStrategyIcon, ServicePoolIcon } from "./service-pool-icons";
 
 export function ServicePoolRoutingPanel({
   pool,
@@ -71,12 +72,18 @@ export function ServicePoolRoutingPanel({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-            <GitBranch className="size-4" aria-hidden="true" />
+            <ServicePoolIcon className="size-4 shrink-0" />
             <span>{pool.name}</span>
-            <Badge variant="secondary">{poolStrategyLabel(pool)}</Badge>
+            <Badge variant="secondary" className="gap-1.5">
+              <PoolStrategyIcon
+                strategy={pool.strategy}
+                className="size-3 shrink-0"
+              />
+              {poolStrategyLabel(pool)}
+            </Badge>
             {!pool.is_active && <Badge variant="secondary">Disabled</Badge>}
           </div>
-          <code className="block break-all text-xs text-primary">
+          <code className="block break-all text-xs text-primary-text">
             /api/v1/proxy/s/{pool.slug}
           </code>
           {ai && (
@@ -96,7 +103,11 @@ export function ServicePoolRoutingPanel({
         <span>{poolFailoverLabel(pool)}</span>
         {priority && (
           <>
-            <span className="text-muted-foreground">
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <PoolStrategyIcon
+                strategy={pool.tier_balance ?? "round_robin"}
+                className="size-3 shrink-0"
+              />
               {pool.tier_balance === "weighted" ? "Weighted" : "Round-robin"}{" "}
               within each priority
             </span>
