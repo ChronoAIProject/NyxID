@@ -410,7 +410,19 @@ fn pipeline() -> Vec<Document> {
         doc! {"$match": {
             "operationType": {"$in": ["insert", "update", "replace"]},
             "$or": [
-                {"ns.coll": {"$in": [CONVERSATIONS, GROUPS, GROUP_MESSAGES]}},
+                // Heartbeats are deliberately invisible to the browser live
+                // stream. They keep the durable fence alive without causing a
+                // conversation reload every ten seconds. Any other
+                // conversation update remains observable.
+                {"ns.coll": CONVERSATIONS, "$or": [
+                    {"operationType": {"$in": ["insert", "replace"]}},
+                    {"operationType": "update", "updateDescription.updatedFields.active_turn.heartbeat_at": {"$exists": false}},
+                    {"operationType": "update", "$expr": {"$gt": [
+                        {"$size": {"$objectToArray": {"$ifNull": ["$updateDescription.updatedFields", {}]}}},
+                        1,
+                    ]}},
+                ]},
+                {"ns.coll": {"$in": [GROUPS, GROUP_MESSAGES]}},
                 {"ns.coll": CHANNEL_THREADS,"$or":[
                     {"operationType":{"$in":["insert","replace"]}},
                     {"updateDescription.updatedFields.follow_state":{"$exists":true}},

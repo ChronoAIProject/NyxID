@@ -1704,6 +1704,9 @@ async fn dispatch_groups(
             let group =
                 crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
                     .await?;
+            let access =
+                crate::services::org_group_service::get(db, owner, &group.id, None).await?;
+            super::assistant_group::stop_group_threads(state, &access).await?;
             crate::services::assistant_group_service::delete(db, owner, &group.id).await?;
             (json!({"deleted": group.name}), false)
         }
@@ -1792,6 +1795,7 @@ async fn dispatch_org_groups(
         ));
     }
     if name == "delete_group" {
+        super::assistant_group::stop_group_threads(state, &access).await?;
         groups::delete(db, &access).await?;
         return Ok(Some((json!({"deleted":access.group.name}), false)));
     }
@@ -2722,6 +2726,20 @@ pub fn spawn_sweeps(state: AppState) {
             }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
+            }
+            match crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await {
+                Ok(rows) => {
+                    for row in rows {
+                        super::assistant_team::after_turn_boxed(
+                            state.clone(),
+                            row,
+                            String::new(),
+                            Some(TurnError::new("turn_lost")),
+                        )
+                        .await;
+                    }
+                }
+                Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
             }
             // Things the owner finished outside the chat queue events first.
             if let Err(error) = super::nyxbot::process_watches(&state).await {

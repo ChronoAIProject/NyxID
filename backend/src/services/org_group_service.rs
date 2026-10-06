@@ -422,6 +422,13 @@ pub async fn update(
     if access.group.participant_user_ids.is_empty() {
         // Last-person leave has the same active-turn fence and complete cascade
         // as explicit deletion. The original participant list fences races.
+        if threads(db, &before)
+            .await?
+            .iter()
+            .any(|row| super::assistant_nyxagent::live_turn(row, Utc::now()).is_some())
+        {
+            return Err(AppError::AssistantTurnActive);
+        }
         Box::pin(delete_contents(db, &before, Some(&access.actor))).await?;
         audit(db, &access.actor, &before, "last_participant_left").await;
         return Ok(access);
@@ -529,6 +536,11 @@ pub async fn threads(
 
 pub async fn delete(db: &Database, access: &Access) -> AppResult<()> {
     access.require_manage()?;
+    for row in threads(db, &access.group).await? {
+        if super::assistant_nyxagent::live_turn(&row, Utc::now()).is_some() {
+            super::assistant_nyxagent::request_stop(db, &row.user_id, &row.id).await?;
+        }
+    }
     delete_contents(db, &access.group, Some(&access.actor)).await?;
     audit(db, &access.actor, &access.group, "deleted").await;
     Ok(())
@@ -619,9 +631,10 @@ async fn delete_threads_in_session(
         .await?;
     let rows: Vec<assistant_conversation::AssistantConversation> =
         cursor.stream(&mut *session).try_collect().await?;
-    if rows
-        .iter()
-        .any(|r| super::assistant_nyxagent::live_turn(r, Utc::now()).is_some())
+    if actors.is_some()
+        && rows
+            .iter()
+            .any(|r| super::assistant_nyxagent::live_turn(r, Utc::now()).is_some())
     {
         return Err(AppError::AssistantTurnActive);
     }

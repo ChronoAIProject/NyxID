@@ -8,6 +8,7 @@ use mongodb::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
@@ -32,6 +33,12 @@ pub const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 pub const TURN_EXECUTION_SECS: u64 = 1800;
 pub const SETTLEMENT_GRACE_SECS: u64 = 300;
 pub const ACTIVE_TURN_TTL_SECS: i64 = (TURN_EXECUTION_SECS + SETTLEMENT_GRACE_SECS) as i64;
+/// Workers renew their durable liveness marker while executing and settling.
+pub const ACTIVE_TURN_HEARTBEAT_SECS: u64 = 10;
+/// A heartbeat older than this is sufficient evidence that the worker is gone.
+pub const ACTIVE_TURN_HEARTBEAT_STALE_SECS: i64 = 75;
+/// Stop gives a live worker a few seconds to observe the stop flag and settle.
+pub const STOP_SETTLEMENT_GRACE_SECS: u64 = 5;
 
 /// A crashed worker cannot hold a conversation beyond execution and settlement.
 pub fn live_turn(row: &AssistantConversation, now: DateTime<Utc>) -> Option<&ActiveTurn> {
@@ -723,6 +730,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             CONVERSATIONS,
             doc! {"user_id": 1, "agent_id": 1, "updated_at": -1},
+            false,
+        ),
+        (
+            CONVERSATIONS,
+            doc! {"active_turn.heartbeat_at": 1, "_id": 1},
             false,
         ),
         (
@@ -1519,6 +1531,7 @@ pub async fn begin_turn_with_voice(
                     continuations: 0,
                     tool_progress: Default::default(),
                     lease_expires_at: None,
+                    heartbeat_at: Some(now),
                     trigger_run_id: start.trigger.as_ref().map(|c| c.run_id.clone()),
                     turn_id: turn_id.clone(),
                     origin: start.origin,
@@ -1756,16 +1769,75 @@ pub async fn clear_binding(
 }
 
 pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
-    let row = get(db, user_id, id).await?;
-    if let Some(turn) = live_turn(&row, Utc::now()) {
-        db.collection::<AssistantConversation>(CONVERSATIONS)
-            .update_one(
-                doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": &turn.turn_id},
-                doc! {"$set": {"active_turn.stop_requested": true}},
-            )
-            .await?;
+    let now = Utc::now();
+    let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
+    let existing = get(db, user_id, id).await?;
+    let Some(existing_turn) = existing.active_turn.as_ref() else {
+        return Ok(());
+    };
+    // Rows written before heartbeat support retain the old lease boundary: an
+    // already-expired legacy fence is reclaimed by the next send instead.
+    if existing_turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
+        return Ok(());
     }
+    let expected_turn_id = existing_turn.turn_id.clone();
+    let row = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one_and_update(
+            doc! {
+                "_id": id,
+                "user_id": user_id,
+                "active_turn.turn_id": &expected_turn_id,
+            },
+            doc! {"$set": {"active_turn.stop_requested": true}},
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+    let Some(row) = row else {
+        // A concurrent settlement, delete, or new turn won the exact fence.
+        return Ok(());
+    };
+    let Some(turn) = row.active_turn.as_ref() else {
+        return Ok(());
+    };
+    // A legacy row has no worker liveness signal. Keep its historical Stop
+    // behavior: the worker may observe the durable flag, while an absent worker
+    // is reclaimed only by the existing lease/TTL path.
+    let Some(heartbeat) = turn.heartbeat_at else {
+        return Ok(());
+    };
+    let turn_id = turn.turn_id.clone();
+    let delay = if heartbeat <= stale_before {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(STOP_SETTLEMENT_GRACE_SECS)
+    };
+    let db = db.clone();
+    let user_id = user_id.to_owned();
+    let id = id.to_owned();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        if let Err(error) = force_stop(&db, &user_id, &id, &turn_id).await
+            && !matches!(error, AppError::NotFound(_))
+        {
+            tracing::debug!(conversation_id = %id, turn_id = %turn_id, %error, "Forced assistant stop deferred");
+        }
+    });
     Ok(())
+}
+
+/// Renew one worker's liveness marker. The turn-id predicate fences a late
+/// heartbeat after a forced stop, reclamation, or deletion.
+pub async fn heartbeat(db: &Database, user_id: &str, id: &str, turn_id: &str) -> AppResult<bool> {
+    Ok(db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": turn_id},
+            doc! {"$set": {"active_turn.heartbeat_at": bson::DateTime::now()}},
+        )
+        .await?
+        .matched_count
+        == 1)
 }
 pub async fn stop_requested(
     db: &Database,
@@ -1801,6 +1873,17 @@ pub async fn finish_turn(
     message_id: &str,
     result: &TurnResult,
 ) -> AppResult<Option<TurnError>> {
+    finish_turn_inner(db, row, credential_id, message_id, result, None).await
+}
+
+async fn finish_turn_inner(
+    db: &Database,
+    row: &AssistantConversation,
+    credential_id: &str,
+    message_id: &str,
+    result: &TurnResult,
+    heartbeat_before: Option<DateTime<Utc>>,
+) -> AppResult<Option<TurnError>> {
     let turn_id = row
         .active_turn
         .as_ref()
@@ -1832,12 +1915,22 @@ pub async fn finish_turn(
                     return Ok(saved.error_code.as_deref().map(TurnError::new));
                 }
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
-                let mut current = collection
-                    .find_one(doc! {
+                let mut active_filter = doc! {
                         "_id": &row.id,
                         "user_id": &row.user_id,
                         "active_turn.turn_id": &turn_id,
-                    })
+                    };
+                if let Some(before) = heartbeat_before {
+                    active_filter.insert(
+                        "active_turn.heartbeat_at",
+                        doc! {
+                            "$type": "date",
+                            "$lte": bson::DateTime::from_chrono(before),
+                        },
+                    );
+                }
+                let mut current = collection
+                    .find_one(active_filter)
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
@@ -1904,12 +1997,23 @@ pub async fn finish_turn(
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
-                    let state = if error.is_some() { bson::Bson::String("cancelled".into()) } else {
-                        bson::Bson::Document(doc! {"$cond":[{"$gt":[{"$size":{"$ifNull":["$pending_acknowledgement_ids",[]]}},0]},"awaiting_confirmation","completed"]})
+                    let update = if error.is_some() {
+                        vec![doc! {"$set": {
+                            "state": "cancelled",
+                            "pending_acknowledgement_ids": [],
+                        }}]
+                    } else {
+                        vec![doc! {"$set": {
+                            "state": {"$cond":[
+                                {"$gt":[{"$size":{"$ifNull":["$pending_acknowledgement_ids",[]]}},0]},
+                                "awaiting_confirmation",
+                                "completed",
+                            ]},
+                        }}]
                     };
                     db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
                         .update_one(doc! {"_id":request_id,"state":{"$in":["claimed","awaiting_confirmation"]}},
-                            vec![doc! {"$set":{"state":state}}])
+                            update)
                         .session(&mut *session).await?;
                 }
                 current.active_turn = None;
@@ -1972,6 +2076,87 @@ pub async fn finish_turn(
         })
         .await
         .map_err(transactions::map_transaction_error)
+}
+
+/// Force a stopped turn through the same fenced settlement used by its worker.
+/// A worker that races this transaction can only observe the old turn id and
+/// therefore cannot overwrite the forced reply.
+pub async fn force_stop(db: &Database, user_id: &str, id: &str, turn_id: &str) -> AppResult<bool> {
+    let Some(row) = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": turn_id})
+        .await?
+    else {
+        return Ok(false);
+    };
+    finish_turn(
+        db,
+        &row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(TurnError::new("cancelled")),
+        },
+    )
+    .await
+    .map(|_| true)
+}
+
+/// Reclaim only turns whose heartbeat is durably stale. The heartbeat predicate
+/// is part of the fenced transaction, so a concurrent renewal wins.
+#[cfg(test)]
+pub async fn sweep_orphaned_turns(db: &Database) -> AppResult<u64> {
+    Ok(sweep_orphaned_turn_rows(db).await?.len() as u64)
+}
+
+/// Reclaim stale turns and return the snapshots that won the fenced
+/// settlement. Callers with the application state can run the normal
+/// post-settlement delivery hooks for those rows.
+pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantConversation>> {
+    let now = Utc::now();
+    let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
+    let mut cursor = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find(doc! {
+            "active_turn.turn_id": {"$exists": true},
+            "active_turn.heartbeat_at": {
+                "$type": "date",
+                "$lte": bson::DateTime::from_chrono(stale_before),
+            },
+        })
+        .sort(doc! {"active_turn.heartbeat_at": 1, "_id": 1})
+        .limit(100)
+        .await?;
+    let mut settled = Vec::new();
+    while let Some(row) = cursor.try_next().await? {
+        let Some(turn) = row.active_turn.as_ref() else {
+            continue;
+        };
+        let result = finish_turn_inner(
+            db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &TurnResult {
+                text: String::new(),
+                session_id: None,
+                response_id: None,
+                error: Some(TurnError::new("turn_lost")),
+            },
+            Some(stale_before),
+        )
+        .await;
+        match result {
+            Ok(_) => settled.push(row.clone()),
+            Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        tracing::info!(conversation_id = %row.id, turn_id = %turn.turn_id, "Reclaimed stale assistant turn");
+    }
+    Ok(settled)
 }
 
 /// A pending proxy approval request raised by this chat's key. The chat renders
@@ -2348,10 +2533,6 @@ pub async fn delete(
                 let children: Vec<AssistantConversation> =
                     child_cursor.stream(&mut *session).try_collect().await?;
                 rows.extend(children);
-                let now = Utc::now();
-                if rows.iter().any(|row| live_turn(row, now).is_some()) {
-                    return Err(AppError::AssistantTurnActive);
-                }
                 let mut children = Vec::new();
                 for row in &rows {
                     let id = row.id.as_str();

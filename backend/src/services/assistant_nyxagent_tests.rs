@@ -507,6 +507,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             continuations: 0,
             tool_progress: Default::default(),
             lease_expires_at: None,
+            heartbeat_at: None,
             trigger_run_id: None,
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -549,6 +550,7 @@ async fn expire_turn(db: &Database, row: &AssistantConversation) {
                 "active_turn.started_at": bson::DateTime::from_chrono(
                     Utc::now() - chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
                 ),
+                "active_turn.heartbeat_at": bson::Bson::Null,
                 "nyxagent_session_id": "old-session",
             }},
         )
@@ -652,6 +654,163 @@ async fn stale_fences_allow_rename_delete_and_stop_is_a_noop() {
         Err(AppError::NotFound(_))
     ));
     assert!(messages(&db, "owner", &row.id, 100, None).await.is_err());
+}
+
+#[tokio::test]
+async fn legacy_stop_keeps_the_existing_lease_fence() {
+    let db = connect_transaction_test_database("nyxa_legacy_stop").await;
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "legacy question"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$unset": {"active_turn.heartbeat_at": ""}},
+        )
+        .await
+        .unwrap();
+    request_stop(&db, "owner", &row.id).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let saved = get(&db, "owner", &row.id).await.unwrap();
+    assert!(saved.active_turn.is_some());
+    assert!(saved.active_turn.unwrap().stop_requested);
+}
+
+#[tokio::test]
+async fn dead_worker_stop_is_forced_within_grace_and_late_settlement_is_fenced() {
+    let db = connect_transaction_test_database("nyxa_forced_stop").await;
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "question"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let credential =
+        credentials::load_for_conversation(&db, &state.encryption_keys, "owner", &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    request_stop(&db, "owner", &row.id).await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(STOP_SETTLEMENT_GRACE_SECS + 2),
+        async {
+            loop {
+                if get(&db, "owner", &row.id)
+                    .await
+                    .unwrap()
+                    .active_turn
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        },
+    )
+    .await
+    .expect("forced stop did not settle within grace");
+    let settled = get(&db, "owner", &row.id).await.unwrap();
+    assert_eq!(settled.nyxagent_session_id, None);
+    assert_eq!(
+        messages(&db, "owner", &row.id, 10, None)
+            .await
+            .unwrap()
+            .last()
+            .and_then(|message| message.error_code.as_deref()),
+        Some("cancelled")
+    );
+    let late = finish_turn(
+        &db,
+        &row,
+        &credential.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: "late response".into(),
+            session_id: Some("late-session".into()),
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    assert!(matches!(late, Err(AppError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns() {
+    let db = connect_transaction_test_database("nyxa_heartbeat_sweep").await;
+    let state = test_app_state(db.clone());
+    let stale = begin_turn(
+        &db,
+        "owner",
+        &request(None, "stale"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let fresh = begin_turn(
+        &db,
+        "owner",
+        &request(None, "fresh"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let legacy = begin_turn(
+        &db,
+        "owner",
+        &request(None, "legacy"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let old = bson::DateTime::from_chrono(
+        Utc::now() - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS + 1),
+    );
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &stale.id},
+            doc! {"$set": {"active_turn.heartbeat_at": old}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &legacy.id},
+            doc! {"$unset": {"active_turn.heartbeat_at": ""}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(sweep_orphaned_turns(&db).await.unwrap(), 1);
+    assert!(
+        get(&db, "owner", &stale.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
+    );
+    assert!(
+        get(&db, "owner", &fresh.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
+    assert!(
+        get(&db, "owner", &legacy.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
 }
 
 #[test]

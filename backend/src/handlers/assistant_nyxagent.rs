@@ -21,7 +21,8 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
 use crate::{
@@ -787,14 +788,48 @@ pub async fn delete(
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     let target = engine::get(&state.db, &user_id, &id).await?;
-    let ids = vec![target.id.clone()];
+    // Preserve the existing voice live-slot rule before recording a stop. The
+    // delete service repeats this check in its transaction for race safety.
+    if state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_voice_session::COLLECTION_NAME,
+        )
+        .find_one(doc! {"user_id": &user_id, "conversation_id": &id, "live_slot": true})
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "End the voice call before deleting this conversation".into(),
+        ));
+    }
+    // Deletion is an explicit Stop followed by removal. Stop every related
+    // hidden voice thread as well; workers that settle later see a missing row
+    // and quietly become no-ops.
+    let mut related = vec![target];
+    let mut child_cursor = state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find(doc! {"user_id": &user_id, "voice_parent_conversation_id": &id})
+        .await?;
+    while let Some(child) = child_cursor.next().await {
+        related.push(child?);
+    }
+    for row in &related {
+        engine::request_stop(&state.db, &user_id, &row.id).await?;
+        super::machine_cancel::conversation(&state, &user_id, &row.id).await?;
+    }
     let mut credentials_by_id = HashMap::new();
-    for member in &ids {
-        if let Some(credential) =
-            credentials::load_for_conversation(&state.db, &state.encryption_keys, &user_id, member)
-                .await?
+    for member in &related {
+        if let Some(credential) = credentials::load_for_conversation(
+            &state.db,
+            &state.encryption_keys,
+            &user_id,
+            &member.id,
+        )
+        .await?
         {
-            credentials_by_id.insert(member.clone(), credential);
+            credentials_by_id.insert(member.id.clone(), credential);
         }
     }
     let rows = engine::delete(&state.db, &user_id, &id).await?;
@@ -1247,6 +1282,34 @@ async fn run_turn(
         .clone();
     let message_id = Uuid::new_v4().to_string();
     let block_id = format!("{message_id}-text");
+    let (heartbeat_stop, mut heartbeat_stop_rx) = oneshot::channel();
+    let heartbeat_db = state.db.clone();
+    let heartbeat_user = row.user_id.clone();
+    let heartbeat_conversation = row.id.clone();
+    let heartbeat_turn = turn_id.clone();
+    // AbortOnDropHandle ties the child to this worker: a panic or task abort
+    // cannot leave a fresh heartbeat behind to hide an orphaned turn.
+    let heartbeat_task = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = &mut heartbeat_stop_rx => break,
+                _ = interval.tick() => {
+                    match engine::heartbeat(&heartbeat_db, &heartbeat_user, &heartbeat_conversation, &heartbeat_turn).await {
+                        Ok(true) => {}
+                        // The turn was fenced (stopped, reclaimed or deleted).
+                        Ok(false) => break,
+                        // A transient database error must not silence a live
+                        // worker: the orphan sweep would reclaim its turn. Retry
+                        // on the next tick.
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+    }));
     events.emit(
         "turn.status",
         json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running"}),
@@ -1306,6 +1369,7 @@ async fn run_turn(
         .text
         .replace(credential.raw_key.as_str(), "[redacted]");
     let settled = complete_turn(
+        &state.db,
         &row,
         &turn_id,
         &message_id,
@@ -1341,12 +1405,15 @@ async fn run_turn(
         )
         .await;
     }
+    let _ = heartbeat_stop.send(());
+    let _ = heartbeat_task.await;
 }
 
 /// Bound both individual database attempts and backoff by one settlement deadline.
 /// Owning the permit here guarantees release after either settlement or expiry.
 #[allow(clippy::too_many_arguments)]
 async fn complete_turn<F, Fut>(
+    db: &mongodb::Database,
     row: &AssistantConversation,
     turn_id: &str,
     message_id: &str,
@@ -1366,8 +1433,31 @@ where
     let error = loop {
         match tokio::time::timeout_at(deadline, persist()).await {
             Ok(Ok(error)) => break error,
-            // Deleted conversations and reclaimed turns must never be recreated.
-            Ok(Err(AppError::NotFound(_))) => return None,
+            // A deleted conversation stays quiet. A forced stop or orphan
+            // reclaim leaves a durable reply; mirror that outcome to the still
+            // connected worker so subscribers receive the normal terminal SSE.
+            Ok(Err(AppError::NotFound(_))) => {
+                let forced = db
+                    .collection::<AssistantMessage>(
+                        crate::models::assistant_message::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {
+                        "conversation_id": &row.id,
+                        "user_id": &row.user_id,
+                        "turn_id": turn_id,
+                        "role": "assistant",
+                    })
+                    .sort(doc! {"created_at": -1})
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|message| message.error_code)
+                    .map(|code| TurnError::new(&code));
+                if let Some(error) = forced {
+                    break Some(error);
+                }
+                return None;
+            }
             Ok(Err(_)) => {
                 attempt = attempt.saturating_add(1);
                 let backoff = Duration::from_millis(100 * (1 << attempt.min(8)));
