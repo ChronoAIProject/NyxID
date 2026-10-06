@@ -21,6 +21,7 @@ import {
 } from "@/hooks/use-service-routing-pools";
 import { ServicePoolRoutingPanel } from "./service-pool-routing-panel";
 import { ServicePoolSummary } from "./service-pool-summary";
+import { PoolStrategyIcon } from "./service-pool-icons";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   connectionSourceLabel as sourceLabel,
@@ -327,7 +328,7 @@ function GroupCard({
                     onClick={() => onToggle(cardRef.current)}
                     aria-expanded={expanded}
                     aria-controls={contentId}
-                    className="max-w-full cursor-pointer truncate text-left hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+                    className="max-w-full cursor-pointer truncate text-left hover:text-primary-text focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
                   >
                     {group.name}
                   </button>
@@ -483,7 +484,7 @@ function GroupCard({
                 to="/keys/services/$groupId"
                 params={{ groupId: group.id }}
                 aria-label={`View all ${group.name} service details`}
-                className="text-xs text-primary hover:underline"
+                className="text-xs text-primary-text hover:underline"
               >
                 Service details
               </Link>
@@ -510,6 +511,7 @@ function GroupCard({
                       }
                       onClick={() => setRouteId(pool.id)}
                     >
+                      <PoolStrategyIcon strategy={pool.strategy} />
                       {pool.name}
                     </Button>
                   ))}
@@ -524,7 +526,7 @@ function GroupCard({
                           ? selectedPool.user_id
                           : undefined,
                     }}
-                    className="ml-auto text-xs text-primary hover:underline"
+                    className="ml-auto text-xs text-primary-text hover:underline"
                   >
                     Manage in Service Pools
                   </Link>

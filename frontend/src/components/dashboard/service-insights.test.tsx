@@ -338,7 +338,9 @@ describe("service card billing and caller details", () => {
   });
   it("exposes payer, credential and actual last caller directly in the expanded table", () => {
     mount();
-    expect(screen.getByRole("columnheader", { name: "Billing" })).toBeVisible();
+    expect(
+      screen.getByRole("columnheader", { name: "Billing & usage" }),
+    ).toBeVisible();
     expect(screen.getByText("You pay · 0.25 credits/request")).toBeVisible();
     expect(screen.getByText(/NyxID key/)).toBeVisible();
     expect(
@@ -346,7 +348,7 @@ describe("service card billing and caller details", () => {
         screen.getByRole("button", { name: "Recent requests for Team OpenAI" }),
       ).getByText(/Codex CI/),
     ).toBeVisible();
-    expect(screen.getByText("NyxID")).toBeVisible();
+    expect(screen.getByText("NyxID managed")).toBeVisible();
     expect(screen.getByText(/· 1 override$/)).toBeVisible();
     expect(screen.getByTitle(/^Your keys with access/)).toBeVisible();
     expect(screen.queryByText("Provisioning app")).not.toBeInTheDocument();

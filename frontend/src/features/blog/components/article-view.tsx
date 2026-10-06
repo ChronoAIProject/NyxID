@@ -21,13 +21,13 @@ export function ArticleView({ article, previewBanner = false }: ArticleViewProps
 
         <Link
           to="/blog"
-          className="font-mono text-xs tracking-wider text-gray-500 transition-colors hover:text-primary"
+          className="font-mono text-xs tracking-wider text-gray-500 transition-colors hover:text-primary-text"
         >
           ← Back to Field Notes
         </Link>
 
         {article.tags[0] ? (
-          <p className="mt-8 font-mono text-11 tracking-[1.5px] text-primary uppercase">
+          <p className="mt-8 font-mono text-11 tracking-[1.5px] text-primary-text uppercase">
             {article.tags[0].name}
             {article.series ? (
               <>
@@ -109,7 +109,7 @@ function AuthorBio({ article }: { readonly article: BlogArticle }) {
         {(author.last_name?.[0] ?? "").toUpperCase()}
       </span>
       <div>
-        <p className="font-mono text-11 tracking-[1.5px] text-primary uppercase">
+        <p className="font-mono text-11 tracking-[1.5px] text-primary-text uppercase">
           Written by
         </p>
         <p className="mt-1 font-serif text-xl text-white">

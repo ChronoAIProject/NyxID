@@ -302,7 +302,7 @@ export function AiSetupPage() {
         <CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-start gap-3">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/10">
-              <Shield className="h-4 w-4 text-primary" />
+              <Shield className="h-4 w-4 text-primary-text" />
             </div>
             <div className="space-y-1">
               <h3 className="text-13 font-semibold text-foreground">

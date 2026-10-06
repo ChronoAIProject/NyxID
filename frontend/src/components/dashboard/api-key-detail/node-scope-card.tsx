@@ -94,7 +94,7 @@ export function NodeScopeCard({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <HardDrive className="h-4 w-4 text-primary" />
+          <HardDrive className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Node Scope</CardTitle>
         </div>
         <CardDescription>

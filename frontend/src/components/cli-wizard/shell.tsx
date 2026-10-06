@@ -15,7 +15,7 @@
  *   --border      → border-border
  *   --muted       → text-muted-foreground
  *   --wordmark    → text-nyx-200
- *   --primary     → text-primary
+ *   --primary     → text-primary-text
  */
 
 import type { ReactNode } from "react"

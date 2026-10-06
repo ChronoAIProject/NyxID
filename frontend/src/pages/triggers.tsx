@@ -513,7 +513,7 @@ export function TriggersPage() {
         description="Relay verified inbound events to agents, webhooks, or notifications."
         actions={
           <>
-            <Link to="/assistant/automations" className="text-12 text-primary underline">
+            <Link to="/assistant/automations" className="text-12 text-primary-text underline">
               Automations
             </Link>
             <AddCtaButton

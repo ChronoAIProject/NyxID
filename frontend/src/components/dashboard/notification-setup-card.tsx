@@ -111,7 +111,7 @@ export function NotificationSetupCard() {
         <div className="flex flex-col gap-5">
           {/* Header */}
           <div className="flex items-center gap-3">
-            <Bell className="h-5 w-5 text-primary" aria-hidden="true" />
+            <Bell className="h-5 w-5 text-primary-text" aria-hidden="true" />
             <div className="flex flex-col gap-0.5">
               <h3 className="text-22 font-normal leading-tight">
                 Notifications & Approvals
@@ -146,7 +146,7 @@ export function NotificationSetupCard() {
           {allDone && (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
               <div className="flex items-center gap-2">
-                <Shield className="h-4 w-4 text-primary" />
+                <Shield className="h-4 w-4 text-primary-text" />
                 <span className="text-13 font-medium">
                   Approval protection is active
                 </span>
@@ -155,7 +155,7 @@ export function NotificationSetupCard() {
                 AI agents must request your approval before accessing services.{" "}
                 <Link
                   to="/approvals/settings"
-                  className="text-primary hover:underline"
+                  className="text-primary-text hover:underline"
                 >
                   Manage settings
                 </Link>

@@ -567,14 +567,14 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                               complete
                                 ? "font-semibold text-success"
                                 : latest
-                                  ? "font-semibold text-primary"
+                                  ? "font-semibold text-primary-text"
                                   : "text-muted-foreground"
                             }
                           >
                             <span className="sr-only">Step {index + 1}: </span>
                             {label}
                             <span
-                              className={`mt-1 block text-10 font-normal ${complete ? "text-success" : latest ? "text-primary" : "text-muted-foreground"}`}
+                              className={`mt-1 block text-10 font-normal ${complete ? "text-success" : latest ? "text-primary-text" : "text-muted-foreground"}`}
                             >
                               {reviewing
                                 ? "Reviewing"
@@ -741,7 +741,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                       <span className="flex h-full flex-col gap-3 rounded-xl border border-border bg-background/30 p-4 transition-colors group-hover:bg-overlay peer-checked:border-primary/70 peer-checked:bg-primary/5 peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-primary peer-disabled:cursor-not-allowed peer-disabled:opacity-60">
                         <span className="flex items-center justify-between">
                           <span
-                            className={`flex size-9 items-center justify-center rounded-lg border ${mode === value ? "border-primary/25 bg-primary/10 text-primary" : "border-border bg-muted/40 text-muted-foreground"}`}
+                            className={`flex size-9 items-center justify-center rounded-lg border ${mode === value ? "border-primary/25 bg-primary/10 text-primary-text" : "border-border bg-muted/40 text-muted-foreground"}`}
                           >
                             <Icon
                               aria-hidden="true"
