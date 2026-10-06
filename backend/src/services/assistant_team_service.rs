@@ -1695,7 +1695,7 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
 // ---------------------------------------------------------------------------
 
 /// Obvious credential shapes never enter an agent's memory.
-fn looks_secret(text: &str) -> bool {
+pub(crate) fn looks_secret(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     // An OpenAI-style key: "sk-" at a word start followed by a long token
     // (not "task-oriented" or "risk-averse").

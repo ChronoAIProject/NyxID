@@ -625,6 +625,7 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    authored_skill: Option<Value>,
     continuation_owner: Option<&'static str>,
     continuation_receipt_id: Option<String>,
     trigger_run_id: Option<String>,
@@ -648,7 +649,8 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
         Self {
-            continuation_owner: row.continuation_receipt_id.as_ref().map(|_| "server"),
+            continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
+            authored_skill: row.authored_skill.map(|s| json!({"agent_id":s.agent_id,"proposal_id":s.proposal_id,"revision":s.revision,"skills_revision":s.skills_revision})),
             continuation_receipt_id: row.continuation_receipt_id,
             id: row.id,
             kind: row.kind,
@@ -687,6 +689,12 @@ pub async fn decide_acknowledgement(
 ) -> AppResult<Json<AcknowledgementResponse>> {
     let user = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user).await?;
+    if let Some(card) = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .find_one(doc! {"_id":&ack_id,"user_id":&user,"conversation_id":&id,"authored_skill":{"$ne":bson::Bson::Null}}).await? {
+        super::login_client_context::require_first_party_human(&auth)?;
+        let card = Box::pin(super::assistant_agent_learning::decide_authored(&state, &auth, card, matches!(body.decision, Decision::Allow))).await?;
+        return Ok(Json(card.into()));
+    }
     let row = acknowledgements::decide(
         &state.db,
         &user,

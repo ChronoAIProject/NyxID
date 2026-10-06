@@ -2082,7 +2082,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
-            axum::routing::put(handlers::assistant_agent_learning::edit),
+            get(handlers::assistant_agent_learning::authored_preview)
+                .put(handlers::assistant_agent_learning::edit),
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",

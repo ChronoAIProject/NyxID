@@ -1519,9 +1519,9 @@ async fn handle_tools_list(
         &mut services,
     );
     if let Some(chat) = auth.chat.as_ref() {
-        services.push(crate::services::assistant_account_tools::virtual_service(
-            chat,
-        ));
+        services.push(
+            crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
+        );
     }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -3213,9 +3213,9 @@ async fn load_all_services_for_meta_tools(
         let mut services = services;
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
-        services.push(crate::services::assistant_account_tools::virtual_service(
-            chat,
-        ));
+        services.push(
+            crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
+        );
         Ok(services)
     } else {
         Ok(filter_services_by_scope(services, auth))
@@ -6311,5 +6311,183 @@ mod typed_outcome_tests {
             "error"
         );
         f.state.db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod skill_authoring_discovery_tests {
+    use super::*;
+    use crate::{
+        models::{assistant_conversation::AgentRole, feature_flag_override},
+        services::{
+            assistant_acknowledgement_service::ChatAuthority,
+            assistant_agent_learning,
+            feature_flag_service::{self, FlagTarget},
+        },
+        test_utils::{connect_test_database_with_command_handler, test_app_state},
+    };
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn chat_auth(role: AgentRole, guest: bool) -> McpAuthContext {
+        let mut auth = McpAuthContext::user("owner".into(), AuthMethod::ApiKey);
+        auth.is_api_key = true;
+        auth.api_key_id = Some("chat-key".into());
+        auth.chat = Some(ChatAuthority {
+            org_agent_access: None,
+            turn_id: Some("turn".into()),
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: Vec::new(),
+            saved_login_ids: Vec::new(),
+            conversation_id: "conversation".into(),
+            user_id: auth.user_id.clone(),
+            api_key_id: "chat-key".into(),
+            role,
+            agent_id: "agent".into(),
+            agent_name: "agent".into(),
+            guest,
+            confirmation_policy: None,
+        });
+        auth
+    }
+
+    async fn observed_state(name: &str) -> (AppState, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("find").ok()
+                    == Some(feature_flag_override::COLLECTION_NAME)
+                && event
+                    .command
+                    .get_document("filter")
+                    .ok()
+                    .and_then(|filter| filter.get_str("flag_key").ok())
+                    == Some(assistant_agent_learning::FLAG_KEY)
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let db = connect_test_database_with_command_handler(name, handler)
+            .await
+            .expect("MongoDB required");
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                "owner",
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        (test_app_state(db), reads)
+    }
+
+    async fn tool_names(state: &AppState, auth: &McpAuthContext) -> Vec<String> {
+        let request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".into(),
+            params: None,
+        };
+        let response = Box::pin(handle_tools_list(state, auth, None, &request)).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value.get("error").is_none(), "{value}");
+        value["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn only_owner_nyxbot_tools_list_reads_authoring_flag() {
+        let (state, reads) = observed_state("authoring_discovery_reads").await;
+        feature_flag_service::set_platform_override(
+            &state.db,
+            assistant_agent_learning::FLAG_KEY,
+            &FlagTarget::User("owner".into()),
+            true,
+            "owner",
+        )
+        .await
+        .unwrap();
+        for auth in [
+            chat_auth(AgentRole::Subagent, false),
+            chat_auth(AgentRole::Orchestrator, true),
+            chat_auth(AgentRole::Subagent, true),
+            McpAuthContext::user("owner".into(), AuthMethod::ApiKey),
+        ] {
+            reads.store(0, Ordering::SeqCst);
+            let names = Box::pin(tool_names(&state, &auth)).await;
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            assert!(!names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        }
+        reads.store(0, Ordering::SeqCst);
+        let auth = chat_auth(AgentRole::Orchestrator, false);
+        let names = Box::pin(tool_names(&state, &auth)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert!(names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_authoring_flag_read_preserves_other_tools() {
+        let (state, reads) = observed_state("authoring_discovery_failure").await;
+        // A matching malformed record makes flag deserialization fail without
+        // disturbing catalog reads, demonstrating the isolated failure boundary.
+        state
+            .db
+            .collection::<mongodb::bson::Document>(feature_flag_override::COLLECTION_NAME)
+            .insert_one(mongodb::bson::doc! {
+                "_id": "malformed-flag", "flag_key": assistant_agent_learning::FLAG_KEY,
+                "enabled": true, "target_kind": "unknown"
+            })
+            .await
+            .unwrap();
+        assert!(
+            crate::services::assistant_skill_authoring::enabled(&state.db, "owner")
+                .await
+                .is_err()
+        );
+        reads.store(0, Ordering::SeqCst);
+        let auth = chat_auth(AgentRole::Orchestrator, false);
+        let names = Box::pin(tool_names(&state, &auth)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert!(!names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        for preserved in [
+            "nyxid__list_subagents",
+            "nyxid__remember",
+            "nyxid__settings_link",
+        ] {
+            assert!(names.iter().any(|name| name == preserved), "{preserved}");
+        }
+        // The same fallback applies to catalog loading for tool calls.
+        let services = Box::pin(load_all_services_for_meta_tools(&state, &auth))
+            .await
+            .unwrap();
+        let native = services
+            .iter()
+            .find(|service| service.service_slug == "nyxid")
+            .unwrap();
+        assert!(
+            native
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.name == "list_subagents")
+        );
+        assert!(
+            !native
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.name == "draft_agent_skill")
+        );
+        state.db.drop().await.unwrap();
     }
 }

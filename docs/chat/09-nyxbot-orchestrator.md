@@ -969,3 +969,29 @@ persisted-profile relaunches and package repair. Follow 12413 recovery guidance;
 ## Owner attachments
 
 The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them. Channel-media ingestion remains a follow-up.
+
+## Drafting agent skills
+
+When creating or improving an agent, use description for role/scope, persona for
+tone/style, and Ornn skills for repeatable procedures, checklists, domain
+reference, output templates and multi-step workflows. NyxBot searches existing
+skills, previews exact versions, then proposes attachment with `set_agent_skills`
+and its owner card. With `assistant:agent-learning` enabled for the person,
+`draft_agent_skill` covers procedures no existing skill fits. The name emphasizes
+that this is a draft, not model-authorized publication. Specialists request skills
+through NyxBot; guest and channel-guest turns cannot draft.
+
+The authoring tool accepts an immutable agent ID, a lowercase hyphenated skill
+name (1–64), description, SKILL.md body, up to eight small .md/.txt files, and an
+optional attached base GUID/version. It accepts no destination, owner override,
+permissions or scripts. The existing learning validator bounds the complete
+proposal to 8,000 bytes/7,500 characters and rejects unsafe paths and credential
+shapes. The full package is loaded on the owner card from encrypted storage;
+card records, audits and tool responses contain metadata only.
+
+One owner approval runs the existing publish-and-pin saga using the approving
+person's signed identity. A denial or expired card cannot publish. Repeat tool
+calls in the same turn reuse the proposal/card; uncertain publication reconciles
+without repeating the mutation. Never package or publish through Ornn Playground,
+sandboxes, machines or raw Ornn upload APIs. See `AGENT_LEARNING.md` for the shared
+review contract and org publication limitation.

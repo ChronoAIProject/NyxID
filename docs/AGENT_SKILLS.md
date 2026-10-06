@@ -89,3 +89,20 @@ uses fixed read-only paths, and has a 30-second timeout per request.
 Native reads carry the calling thread key as an API-key requester, including
 live scoped-operation context; they never receive the browser-session approval
 bypass. Human UI reads retain ordinary browser-session behavior.
+
+## Owner-requested authoring
+
+Reuse comes first: `search_agent_skills` → `preview_agent_skill` →
+`set_agent_skills` with an owner card. Personal NyxBot gains `draft_agent_skill`
+only under the existing default-off `assistant:agent-learning` flag. Authored
+drafts share L1's encrypted review store and publisher; they do not enroll the
+agent in automatic learning. Description is role/scope; persona is tone/style;
+skills contain repeatable procedures, references, checklists and templates.
+
+The card displays every text file and the generated publication frontmatter.
+One approval packages server-side, privately publishes with the approving
+person's signed identity and pins the verified exact version/hash. Revising an
+owned private attached base uses PUT with the next version. No Playground,
+sandbox, machine or model-selected raw upload is part of this path. Org
+publication keeps L1's `owner_binding_unavailable` refusal, without a personal
+fallback. See `AGENT_LEARNING.md` for bounds and fencing.

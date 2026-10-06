@@ -175,3 +175,11 @@ check: keep those routes on upgraded replicas while group data remains, or
 securely archive/remove the org-group hidden threads, messages and cards before
 rollback. Key revocation alone does not protect those reads. Existing
 organization groups otherwise require upgraded replicas.
+
+### Authored skills
+
+NyxBot skill authoring retains L1 PR-2's person-only Ornn publication boundary.
+An org maintainer can attach existing approved Ornn skills, but drafting for
+publication on an org agent refuses `owner_binding_unavailable` before any
+external mutation. It never publishes to the maintainer's personal account as a
+fallback. Existing org learning proposals, review and pinning rules are unchanged.
