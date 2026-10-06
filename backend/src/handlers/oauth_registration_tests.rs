@@ -62,7 +62,7 @@ async fn register_client_http_normalizes_advertised_auth_methods() {
     ]);
     for body in bodies {
         let (status, response) = registration(&state, &body, Some("application/json")).await;
-        assert_eq!(status, StatusCode::CREATED, "{response}");
+        assert_eq!(status, StatusCode::CREATED);
         assert_eq!(response["token_endpoint_auth_method"], "none");
         assert!(response.get("client_secret").is_none());
         assert_eq!(
@@ -116,7 +116,7 @@ async fn register_client_http_filters_unknown_scopes_without_widening_known_scop
             Some("application/json"),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED, "{response}");
+        assert_eq!(status, StatusCode::CREATED);
         assert_eq!(response["scope"], effective);
         let client = db
             .collection::<OauthClient>(CLIENTS)
@@ -186,7 +186,7 @@ async fn register_client_http_rejects_invalid_metadata_without_creating_rows() {
     for (body, code) in cases {
         let (status, response) =
             registration(&state, &body.to_string(), Some("application/json")).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response["error"], code);
         assert!(response["error_description"].is_string());
         assert_eq!(response.as_object().unwrap().len(), 2);
@@ -393,7 +393,7 @@ async fn restricted_round_trip(mixed: bool, request_mcp: bool, zero: bool) {
         params.push(("client_secret", "irrelevant-public-client-secret"));
     }
     let (status, mut tokens) = token_http(&state, &params, &requested).await;
-    assert_eq!(status, StatusCode::OK, "{tokens}");
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         tokens["scope"],
         oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES
@@ -422,7 +422,7 @@ async fn restricted_round_trip(mixed: bool, request_mcp: bool, zero: bool) {
             &requested,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(status, StatusCode::OK);
         let effective = if requested.is_empty() {
             resources.clone()
         } else {
@@ -483,7 +483,7 @@ async fn restricted_round_trip(mixed: bool, request_mcp: bool, zero: bool) {
                 &[],
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
             // No catalog fallback exists for this fixture's missing service.
             assert_eq!(error["error"], "invalid_target");
             let after = refresh_tokens
@@ -512,7 +512,7 @@ async fn restricted_round_trip(mixed: bool, request_mcp: bool, zero: bool) {
                 &[],
             )
             .await;
-            assert_eq!(status, StatusCode::OK, "{next}");
+            assert_eq!(status, StatusCode::OK);
             assert_token_grant(&state, &next, &granted, &resources, &granted, &resources).await;
             tokens = next;
         }
@@ -543,7 +543,7 @@ async fn restricted_round_trip(mixed: bool, request_mcp: bool, zero: bool) {
             &[],
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(status, StatusCode::OK);
         assert_token_grant(&state, &next, &[], &[mcp], &granted, &resources).await;
     }
 }
@@ -813,7 +813,10 @@ async fn register_client_logs_are_bounded_sanitized_outcomes() {
         "raw-secret",
         "\\u001b",
     ] {
-        assert!(!logs.contains(secret), "leaked {secret}");
+        assert!(
+            !logs.contains(secret),
+            "registration logs leaked sensitive data"
+        );
     }
     let events: Vec<Value> = logs
         .lines()
@@ -948,7 +951,7 @@ async fn pkce_code_exchange_rejects_resource_expansion_and_slug_rebinding_author
         )
         .await;
         if rebind {
-            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(status, StatusCode::OK);
             assert_token_grant(
                 &state,
                 &response,
