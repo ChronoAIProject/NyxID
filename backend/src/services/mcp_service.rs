@@ -4654,6 +4654,7 @@ pub async fn execute_tool_resolved(
         node_route,
         has_server_credential,
         billing_context_builder,
+        catalog_service_slug,
     );
     match lease {
         Some(lease) => {
@@ -4690,6 +4691,7 @@ fn execute_tool_resolved_boxed<'a>(
     node_route: Option<node_routing_service::NodeRoute>,
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<&'a str>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(execute_tool_resolved_inner(
         http_client,
@@ -4713,6 +4715,7 @@ fn execute_tool_resolved_boxed<'a>(
         node_route,
         has_server_credential,
         billing_context_builder,
+        catalog_service_slug,
     ))
 }
 
@@ -4739,6 +4742,7 @@ async fn execute_tool_resolved_inner(
     node_route: Option<node_routing_service::NodeRoute>,
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<&str>,
 ) -> AppResult<McpToolExecutionOutcome> {
     super::org_agent_service::authorize_service_with_access(
         db,
