@@ -699,6 +699,7 @@ async fn x_channel_onboarding_transfer_moves_one_live_credential_and_rotates_cal
             Some("stale-callback-refresh"),
             Some(&X_REQUIRED_SCOPES.join(" ")),
             None,
+            None,
         )
         .await
         .is_err()

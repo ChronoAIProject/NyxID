@@ -8,6 +8,218 @@ NyxID's AI Services system lets users manage external API credentials, SSH servi
 
 ---
 
+## Service cards and saved filter defaults
+
+The External Services grid groups catalog-backed connections by `catalog_service_id`.
+Custom connections remain separate by ID. Each group starts collapsed with a
+288px fixed collapsed height and two reserved description lines; expanding a group keeps its connection comparison
+table inside the parent. Connection details and history remain on their existing detail pages.
+
+The expanded table shows Classification (personal, named organization with role,
+or an actual platform connection), Status, Activity (latest configuration change
+with actor and date, or creation), and the exact Slug. Each row links by connection
+ID to its detail page, so identical slugs in different organizations remain
+distinguishable. Repeated descriptions, endpoints and configuration belong on
+the full service page. **Service details** opens
+`/keys/services/{groupId}` for the complete catalog group (or one custom service).
+This page has Connections, Service information and History tabs. History is
+selected by connection ID, and each connection links to its existing full
+configuration page. Last-caller attribution remains explicitly unreported when
+absent from the API; credential preparation and provisioning-app metadata are
+never presented as the last service use.
+
+Standalone **Organization** and **Service** multi-select menus precede search.
+Each supports searching and immediate checkbox selection. Active values appear
+as individual removable pills (`Org: ChronoAI`, `Service: Aevatar`,
+`Service: Codex`). Values within one field match with OR; the two fields combine
+with AND. Empty selections mean all. Options come
+from actual connection owners and grouped services, keyed by organization ID and
+group ID. Clearing either selector leaves other criteria intact. Missing saved
+selections remain visible as unavailable until cleared. These selections are
+included in account defaults. Organization ownership uses a small circular org
+avatar with the existing initials fallback on cards, table rows, filter choices
+and pills. Platform sources use the NyxID icon.
+
+The toolbar keeps Organization, Service, and search as its filtering controls;
+the additional Filters menu has been removed. Search applies on submit or blur.
+Older saved source, service-state, type, and auto-connected criteria remain visible
+as removable pills so they cannot silently hide connections. Active criteria can
+also be cleared together. In sticky mode Connect Service becomes **+ Connect** and
+Personal/All services becomes its active view icon, with accessible labels and
+hover tooltips. The preview refresh button is removed. Returning to the normal position restores their text. Explicit
+12px toolbar padding and a 10px gap separate controls from the selected pills;
+pills retain their own 6px gaps and fit within two rows before scrolling.
+These controls apply to both the grid and table. Personal is the default service scope: a group is included when it has
+a personal connection, and its accessible organization and platform counterparts
+remain visible. Groups with no personal connection are available in All services.
+All states/types and auto-connected services are included by default.
+Source options come from the current connection list. Enabled/disabled
+uses `UserService.is_active`; it does not assert credential health or readiness.
+Personal scope selects groups; the other criteria filter individual connections.
+Organization/platform source filters still match only those connection classes.
+Expanded tables show only matching
+rows and the parent displays the matching count against the group total. With no
+filters all siblings are visible. The full service page always contains every
+accessible connection in the group, independent of list filters.
+
+Source avatars sit at the bottom right of the card body without a visible label.
+Hovering or focusing a stationary circle brings it forward and shows its source
+name. Extra sources remain reachable through the overflow count.
+
+Billing checks the service configuration before credential supply. A service with
+no configured NyxID usage charge shows **—** for every connection, including
+supplied API keys, OAuth apps, disabled connections and nodes. Its tooltip is
+exactly **Not billable by NyxID**. For a service with billing configured, a
+connection shows **NyxID** when NyxID supplies the selected key or
+OAuth developer app, **BYOK** when the person or organization supplies it, and
+**Unverified** when the supplier or service configuration cannot be established.
+A connection requiring no provider credential is also NyxID when service billing
+is configured. Free grants, allowances, promotional credits, caller rollout and
+wallet debits never change this classification. A bill covered entirely by a
+grant remains NyxID; grant coverage of an additional fee on a supplied key does
+not turn BYOK into NyxID. The compact **NyxID** label means platform billing.
+
+The service-wide gate is true if any credential class has a configured charge.
+It is distinct from the selected connection's price lane: a service can have
+platform pricing while a BYOK connection has no NyxID fee. Grouped cards count all
+represented categories, including disabled connections; all-unpriced groups show
+one dash. Hover lists each connection and its actual/configured charge separately.
+Clicking opens the first NyxID connection's billing panel, or the first connection
+when none uses NyxID credentials. Expanded rows use the same classifier.
+
+The additive insight fields `service_billing_configured` and `credential_supplier`
+carry the service-wide gate and selected credential provenance. Existing
+`credit_billing_configured`, `rates` and `charge_status` describe the connection's
+charges. Restricted metadata stays null. Disabled connections preserve known
+configuration/provenance; unavailable agent overrides never borrow the default
+connection's supplier. None of these reads decrypts a credential or changes billing.
+
+`/keys` also exposes `oauth_app_source` (`platform` or `byo`), separately from
+personal/organization ownership. Successful OAuth authorization and refresh
+atomically record `oauth_app_observation` with the app source, credential epoch
+and timestamp. Source comes from the actual credential-resolution branch,
+including embedded BYO apps whose legacy owner-reference field is empty.
+The shared read-only resolver honors explicit selection and current observations;
+disagreement stays unknown. An epoch change or newer authorization invalidates
+an old observation. It batch-loads legacy provider-token records to match owner,
+provider, token association and identical copied ciphertext. Ciphertext is never
+decrypted or exposed. Missing or ambiguous evidence remains unknown; connection
+IDs, retained developer apps and token expiry are not provenance evidence.
+Observation writes never alter execution's credential source or pricing lane.
+Explicit platform binding wins over a retained user key. A legacy OAuth execution
+class of `user_owned` does not prove BYOK.
+Non-OAuth stored key records identify the supplied-key path; a user binding alone
+does not prove a credential exists. Agent provenance comes from the selected
+override rather than the connection default.
+
+Older servers use permitted catalog/connection metadata. Successfully loaded
+catalog entries without billing and custom services without catalog links show
+**—**. Missing or failed catalog reads remain unknown, including private catalog
+entries omitted from discovery. OAuth connections without published provenance
+remain unverified until the backend field is deployed. The dash tooltip stays
+beside its content; longer details align below, with viewport collision handling.
+
+The label is not evidence of a settled debit. Shared-app OAuth currently uses the
+BYOK price lane in execution. A service with only platform-key pricing therefore
+has no OAuth usage fee even when the credential supplier is NyxID. The UI must not
+attach the platform-key price to that OAuth connection. See the reviewed decision
+table and rollout limitations in [Billing labels](plans/service-billing-labels.md).
+
+Agent keys are counted once across the group's connections; partial inventories
+show a `+`. Agent key count and last-use time share one compact line. Hover or
+keyboard focus shows the key names, recorded caller/application and exact time.
+The lower-left **Last edit** summary uses the latest `authorship.last_change` event,
+including its actor, and opens that connection's history. Creation and credential
+preparation timestamps are not substituted for edits or usage.
+
+BYOK means a supplied API key or developer app. A user's OAuth token is not proof
+of their own app: the internal BYOK price lane also includes NyxID's shared OAuth
+app. Verified `nyxid_platform_oauth_app` shows **NyxID developer app**; a master key
+shows **NyxID key**. The older-server compatibility view recognizes a supplied
+OAuth app through its public `oauth_client_id`. Its absence does not establish
+platform ownership: an OAuth login or user binding alone cannot identify the app.
+It reads legacy catalog credit pricing as well as credential lanes, honors known
+platform-only exclusions, and never invents free usage or a numeric plan rate.
+
+Credential source, NyxID charges, and funding are separate. A platform credit grant
+can fund an eligible NyxID fee even when the caller supplies their own provider key;
+it does not change the provider credential's owner. Conversely, signing into an
+account through NyxID's app is not BYOK. This preview shows the configured funding
+order; identifying the actual allowance, grant, or wallet used requires per-request
+settlement data and is not claimed here.
+Personal credentials normally use the personal account, organization credentials
+use the owning organization's account, and a platform key uses the acting person's
+personal account. These details remain separate for every connection in the table.
+The pool summary shows the number of member connections and selection strategy;
+the next line shows the pool name and configured failover. Multiple pools show
+their count and how many have failover enabled. Hover/focus lists each pool's
+members, strategy, policy and slug. Expanded connection rows link to their pools.
+Grouping by catalog does not create a pool or change an individual connection slug.
+Click the pool summary to inspect the pool slug, strategy, priority/weight, credential supplier,
+billing account/rates, and operation-scoped eligibility/cooldown in a table inside
+the card. All members of the selected pool are shown, including members of other
+catalog services. Pool management inventory is currently personal or organization
+admin only; incomplete access is labeled instead of asserting there are no pools.
+AI service routing details are read-only. **Manage in Service Pools** opens the
+selected pool under its personal or organization owner and scrolls its expanded
+card into view. Pool configuration, member ordering and policy edits live in
+**Service Pools** only.
+
+Priority pools support bounded failover; round-robin and weighted pools select a
+single member per request. Omitted/null priority policies use server defaults, not
+"failover off". Disabled pools, disabled members and failed inspection remain
+explicit. Eligibility is metadata inspection, not proof of a successful upstream
+request. The Same API inspector applies the entered method/path on Inspect; AI
+chat inspection uses POST chat/completions. Reads refresh every 15 seconds while
+open. A failed read discards cached eligibility.
+
+The pool editor saves settings and membership in one revision-checked PUT. Dragging
+or using reorder arrows creates a strict priority sequence, preserving weights,
+models, enabled state and compatibility declarations. Equal numeric priorities
+configure rotation within a tier. The old local-storage-only priority preview is
+removed. The Service Pools routing view uses equal-height collapsed cards with
+one open route at a time and the same inline routing/billing table.
+
+Each pool attempt retains its own billing identity, credential class and payer.
+Known consumption can charge more than one attempt. Within a selected billing
+account, eligible allowances fund usage before credit grants and then wallet
+credits. This funding order does not select another connection or payer; local
+NyxID billing failures remain terminal. See [Service pools](SERVICE_POOLS.md).
+
+**Save as default** writes the current filters to the authenticated user's
+`users.profile_config.services_view` embedded blob. Search text is included.
+**Restore default** discards draft filters. **Clear filters** shows everything for
+this visit; saving afterward makes that the account default. Card expansion is
+session presentation state and is never persisted to the account. Draft filters
+survive detail-page navigation, but reset on sign-out/account change or reload.
+
+`GET /api/v1/users/me` includes `profile_config.services_view` (null until saved).
+`PUT /api/v1/users/me/preferences/services` replaces that one preference group:
+
+```json
+{
+  "search": "",
+  "organization_ids": [],
+  "service_group_ids": [],
+  "source": "org",
+  "state": "enabled",
+  "service_type": "all",
+  "show_auto_connected": true
+}
+```
+
+The PUT returns the saved filter object. It derives ownership from `AuthUser`,
+rejects unknown fields/enum values, limits search to 200 Unicode characters and
+each identifier to 128 characters and each selection list to 100 entries, and uses a dotted MongoDB update to preserve other settings. Existing users need no
+migration: legacy singular organization/service fields are read as one-item
+arrays (null as empty). Writes use the plural array fields and deduplicate IDs.
+Selection order does not change default-view equality. This endpoint changes display preferences only; it does not change
+routing, service access, or connection priority.
+
+Older backends omit `services_view`; filtering remains available, but account
+saving is disabled until the supporting backend is deployed. The UI never falls
+back to browser storage while claiming the preference was saved to the account.
+
 ## System Components
 
 ```mermaid
@@ -62,16 +274,17 @@ graph TB
 
 ## Service-Pool Routing Boundary
 
-NyxID#974 was narrowed to a routing proof before adding a user-facing pool
-surface. The proof is recorded in
-[SERVICE_POOL_ROUTING_PROOF.md](SERVICE_POOL_ROUTING_PROOF.md).
+A `ServicePool` owns a stable slug and a set of concrete `UserService` members.
+Priority ingress captures the pool revision, plans eligible candidates without
+materializing credentials, and uses the exact selected member for authorization,
+approval, dispatch and per-attempt billing. Round-robin and weighted strategies
+retain single-member selection. See [Service pools](SERVICE_POOLS.md) and the
+[architecture proof](SERVICE_POOL_ROUTING_PROOF.md).
 
-The important boundary is that `UserService` remains the concrete proxy target
-member, while any future `ServicePool` must be selected inside
-`proxy_service::resolve_proxy_target_from_user_service()`. The existing
-`node_routing_service::resolve_node_route()` / `fallback_node_ids` layer remains
-node failover below a selected `UserService`; it is not sufficient by itself to
-balance multiple endpoint/credential instances behind one stable slug.
+Node routing selects transport below that concrete member. Node failover does
+not replace pool selection, change connection ownership, or combine billing
+accounts. The card presents these saved pool policies without changing the normal
+resolution behavior of individual connection slugs.
 
 ## Data Model Relationships
 
@@ -587,4 +800,105 @@ membership, owner activity, provider eligibility and catalog configuration.
 
 ## Service authorship and history
 
-Service cards and tables include authorized creator/latest-editor summaries. Instance detail pages, including platform-managed instances, have a History tab. Deleted UUID histories remain discoverable from Services → Deleted service history under current personal-owner/org-admin/resource-scope checks. The transactional journal covers service, endpoint and credential writers; ordinary timestamps, usage and routine refresh do not count as configuration edits. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe values, writer inventory, audit publication and required MongoDB replica-set migration.
+Service cards and tables include authorized creator/latest-editor summaries. Instance detail pages, including platform-managed instances, have a History tab. Deleted UUID histories remain discoverable from Services → Deleted service history under current personal-owner/org-membership/resource-scope checks. The transactional journal covers service, endpoint and credential writers; ordinary timestamps, usage and routine refresh do not count as configuration edits. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe values, writer inventory, audit publication and required MongoDB replica-set migration.
+
+### Connection comparison and configuration visibility
+
+The grid starts with one collapsed card per catalog service. Expanding a card keeps
+its connection table inside the parent, replaces the fixed-height summary with a
+compact header, and animates the card and neighboring grid positions using native
+view transitions where supported. Reduced-motion users receive immediate updates.
+The standalone table and service overview use the same comparison component.
+
+Rows combine connection name/slug/type, ownership/avatar/role, service and credential
+state, configuration summary, and latest recorded change. Row disclosure exposes
+additional metadata without nested connection cards. History has a separate action
+for every visible connection; it is not conditional on a recorded creator.
+
+`GET /keys` and `GET /keys/{id}` include an additive `can_edit_configuration` flag:
+true for personal owners and scoped org admins, false for auto-connected rows and
+org members/viewers. It only gates editing affordances in the new comparison UI.
+Responses keep their existing fields for every reader, so API clients and the CLI
+(for example `nyxid ssh terminal` default principals and `nyxid service show`) are
+unchanged; `/user-services` and endpoint discovery keep their existing contracts.
+The full connection detail page keeps its existing read-only view for org members.
+
+History access is unchanged: personal owners and scoped org admins can read it under
+the checks in [SERVICE_HISTORY.md](SERVICE_HISTORY.md). Other readers who open a
+row's History see the existing "unavailable" message. Last editor and
+credential-preparation time are never labeled last caller or successful upstream
+execution.
+
+### Billing and caller information inside service cards
+
+Collapsed cards show credential sources, the latest recorded request, and a billing
+summary for their active connections. The expanded comparison table exposes
+**Owner / credential**, **Access & requests**, and **Billing** alongside identity,
+state, and configuration. Each connection can open one inline panel: permitted
+agent keys and credential overrides, its latest three recorded requests, or payer
+and rates. Users do not need to open an individual connection page to inspect
+these fields. Billing's **For** selector previews the viewer or a managed agent
+key, including an applicable credential override.
+
+`GET /api/v1/service-insights?ids=<comma-separated-UUIDs>` returns up to 100 exact
+connection projections; optional `api_key_id` selects a managed agent's billing
+context. It deliberately lives outside `/keys/{id_or_slug}` so no user slug is
+reserved. Sessions, access tokens, and delegated account reads use existing live
+owner/membership/resource checks. API keys, service accounts, and relay tokens
+cannot enumerate the management projection. Responses are private and not cached
+by HTTP intermediaries; a failed frontend refresh drops privileged summaries.
+
+Billing is a read-only explanation built from the execution owner resolver,
+credential class, rollout flags, and pricing configuration. A NyxID credential
+does not imply NyxID pays: the resolved account is displayed separately. Synced
+rates retain exact decimal values. Unknown legacy prices remain conditional;
+missing data is never represented as free. Provider charges may be separate, and
+the preview is not a settled debit or proof that a provider credential works.
+Inspecting the page does not decrypt credentials, reserve credits, or call providers.
+
+On servers without the insights route (404/405/501 only), the frontend reads the
+existing managed-key inventories, binding metadata and catalog credential prices.
+This compatibility projection is labelled **configured scope** and **expected
+payer**, with a credential → payer → charges flow inside the connection row.
+It does not assert live execution permission, credential health, a resolved payer,
+or an effective price; synchronization status accompanies configured prices.
+Restricted/network errors do not fall back. Incomplete inventories and unknown
+overrides remain explicit, and exact caller history remains unavailable rather
+than appearing as zero requests. Agent-specific billing remains on the new
+server resolver; the compatibility view only describes the connection default.
+
+Agent access describes current scope grants, not use. Members see their own key
+inventory and requests; scoped organization admins can also inspect organization
+keys and permitted connection activity. Other members' private keys are excluded.
+Request counts and the latest three events cover 30 days, with the privacy filter
+applied before aggregation. Requests use verified auth identities; an agent's
+platform label or the service's provisioning application cannot establish which
+application executed a request.
+
+Cards keep separate **Billing**, **Last used**, and **Agent keys** summaries in
+both collapsed and expanded states. Billing includes the NyxID payer, rate summary
+and separate provider-charge disclosure. Last used includes the exact connection
+slug, recorded personal/organization/platform layer, caller/application and time.
+Its source comes from the audit event's credential class and owner under current
+visibility checks, never today's credential binding or a shared credential's
+`last_used_at`. Denied admission and unknown dispatch do not count as recorded use;
+they remain in request history. Missing source evidence stays unrecorded. Historical
+coverage is bounded to 30 days. The latest dispatched request is aggregated
+separately from the three recent events, so newer denials cannot hide recorded use.
+The compatibility key parser accepts omitted non-expiring expiry and zero binding
+count fields, matching the deployed API contract; incomplete inventory never reads
+as a definitive zero keys.
+
+The `service_request` event is appended through the existing audit hash chain for
+resolved HTTP proxy, node, streaming, WebSocket, LLM, and MCP requests. It records
+the exact `user_service_id` and a server-generated execution ID shared with the
+billing request, plus verified caller and application identities when available.
+Response received and connection opened are distinct from completed streams;
+explicit admission denials are recorded as denied, and unclassified early exits
+remain unknown. Historical and uninstrumented events keep coverage partial.
+Catalog IDs and timestamps are never used to allocate old activity to duplicates.
+
+Raw usage meters also retain the exact connection ID. Charged hourly and daily
+rollups retain it in existing cost-partition metadata, preserving established
+bucket/replay identities during mixed-version deployment. These metadata additions
+do not change pricing, settlement, or the routing policy.

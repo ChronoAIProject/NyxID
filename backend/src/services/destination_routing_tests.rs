@@ -519,6 +519,7 @@ pub(crate) async fn mcp_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
+            attribution: None,
             org_agent_access: None,
             agent_owner: None,
             operation_scopes: None,

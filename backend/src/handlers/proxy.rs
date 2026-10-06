@@ -4111,6 +4111,19 @@ async fn execute_resolved_proxy_inner(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = pool_accounting
+        .as_ref()
+        .map(|ctx| ctx.request_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        auth_user,
+        resolved_user_service_id.as_deref(),
+        &target.service.id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -4119,11 +4132,8 @@ async fn execute_resolved_proxy_inner(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
-    let billing_request_id = pool_accounting
-        .as_ref()
-        .map(|ctx| ctx.request_id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let is_ws_candidate = is_ws_upgrade_request(&request);
     let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
     let node_intent = match &node_route {
@@ -4349,6 +4359,7 @@ async fn execute_resolved_proxy_inner(
     match approval_outcome {
         approval_service::ApprovalOutcome::Allowed { .. } => {}
         approval_service::ApprovalOutcome::Denied => {
+            request_audit.denied(403);
             if let Some(api_key_id) = scheduled_api_key_id {
                 audit_service::log_for_user(
                     state.db.clone(),
@@ -4756,7 +4767,9 @@ async fn execute_resolved_proxy_inner(
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
     // Billing and durable-grant admission carry their own database state.
     // Do not reserve it in every proxy poll, including early scope refusals.
-    let metered = Box::pin(state.billing.open(&billing_ctx)).await?;
+    let metered = Box::pin(state.billing.open(&billing_ctx))
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
         let grant_id = match durable_grant_id.as_deref() {
@@ -4918,7 +4931,9 @@ async fn execute_resolved_proxy_inner(
         let ws_upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
             Ok(ws) => ws,
             Err(rejection) => {
-                return Ok(rejection.into_response());
+                let response = rejection.into_response();
+                request_audit.denied(response.status().as_u16());
+                return Ok(response);
             }
         };
 
@@ -4943,7 +4958,8 @@ async fn execute_resolved_proxy_inner(
                 metered.clone(),
                 billing_egress_permit,
             ))
-            .await;
+            .await
+            .inspect(|response| request_audit.response(response.status().as_u16()));
         }
 
         // Direct WS passthrough: connect to downstream directly.
@@ -4963,7 +4979,8 @@ async fn execute_resolved_proxy_inner(
             metered.clone(),
             billing_egress_permit,
         ))
-        .await;
+        .await
+        .inspect(|response| request_audit.response(response.status().as_u16()));
     }
 
     // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
@@ -5511,6 +5528,7 @@ async fn execute_resolved_proxy_inner(
                     }
 
                     destination_audit.complete(response.status().as_u16());
+                    request_audit.response(response.status().as_u16());
                     return Ok(response);
                 }
                 Err(NodeProxyFailure {
@@ -5942,6 +5960,7 @@ async fn execute_resolved_proxy_inner(
         }
 
         destination_audit.complete(response.status().as_u16());
+        request_audit.response(response.status().as_u16());
         return Ok(response);
     }
 
@@ -6578,6 +6597,7 @@ async fn execute_resolved_proxy_inner(
     );
 
     destination_audit.complete(response.status().as_u16());
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 
@@ -11607,6 +11627,7 @@ mod proxy_resolution_integration_tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: api_key_id.clone(),
                 user_id: owner_user_id.to_string(),

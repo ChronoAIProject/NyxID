@@ -239,6 +239,9 @@ pub struct UsageMeterRow {
     pub api_key_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
+    /// Exact connection selected at execution; legacy catalog-only rows stay unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_service_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_slug: Option<String>,
     pub metric: BillingMetric,

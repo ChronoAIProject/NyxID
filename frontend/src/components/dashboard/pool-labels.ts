@@ -1,6 +1,10 @@
 import { ApiError } from "@/lib/api-client";
 import type { PoolCandidate } from "@/schemas/pools";
 
+/** The local production preview proxies reads only; keep pool writes disabled. */
+export const readOnlyPreview =
+  import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1";
+
 export const strategyLabels = {
   priority: "Automatic fallback",
   round_robin: "Round robin",

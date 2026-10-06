@@ -2583,6 +2583,15 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           onRetry={refetch}
         />
       )}
+      {import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-xs">
+          <p>Local preview · full details from production. Account changes and execution are disabled.</p>
+          <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary hover:underline">Back to services</Link>
+        </div>
+      )}
+      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-xs text-muted-foreground hover:text-foreground">
+        ← All {keyInfo.catalog_service_name ?? keyInfo.label} service details
+      </Link>
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">

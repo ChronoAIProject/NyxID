@@ -73,6 +73,7 @@ async fn fixture() -> (crate::AppState, String, String) {
         source: None,
         source_id: None,
         credential_epoch: 1,
+        oauth_app_observation: None,
         created_at: now,
         updated_at: now,
     };

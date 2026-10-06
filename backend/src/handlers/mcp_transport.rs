@@ -416,6 +416,8 @@ struct McpAuthContext {
     user_id: String,
     auth_method: AuthMethod,
     acting_client_id: Option<String>,
+    oauth_client_id: Option<String>,
+    api_key_credential_id: Option<String>,
     approval_owner_user_id: Option<String>,
     /// True when auth was via `x-api-key`. API-key requests are stateless: each
     /// request authenticates independently, no MCP session is created or required.
@@ -450,6 +452,8 @@ impl McpAuthContext {
             user_id,
             auth_method,
             acting_client_id: None,
+            oauth_client_id: None,
+            api_key_credential_id: None,
             approval_owner_user_id: None,
             is_api_key: false,
             api_key_id: None,
@@ -582,7 +586,7 @@ async fn authenticate_mcp(
             .map_err(|_| mcp_401(&state.config.base_url))?;
 
         match crate::services::key_service::validate_api_key(&state.db, raw_key).await {
-            Ok((user_id, api_key, _credential_id)) => {
+            Ok((user_id, api_key, credential_id)) => {
                 if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
@@ -639,6 +643,8 @@ async fn authenticate_mcp(
                     user_id,
                     auth_method: AuthMethod::ApiKey,
                     acting_client_id: None,
+                    oauth_client_id: None,
+                    api_key_credential_id: credential_id,
                     approval_owner_user_id: None,
                     is_api_key: true,
                     api_key_id: Some(api_key.id.clone()),
@@ -765,6 +771,7 @@ async fn authenticate_mcp(
                     ctx.api_key_id = api_key_id;
                     ctx.api_key_name = api_key_name;
                 }
+                ctx.oauth_client_id = claims.client_id.clone();
                 if let Some(key) = relay_key {
                     crate::services::org_agent_service::validate_key(
                         &state.db,
@@ -2259,6 +2266,29 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        attribution: Some(
+            crate::services::service_insights_activity::RequestAttribution {
+                actor: crate::services::audit_service::AuditActor {
+                    user_id: auth.user_id.clone(),
+                    api_key_id: auth.api_key_id.clone(),
+                    api_key_name: auth.api_key_name.clone(),
+                    ip_address: auth.ip_address.clone(),
+                    user_agent: auth.user_agent.clone(),
+                },
+                auth_kind: match auth.auth_method {
+                    AuthMethod::Session => "session",
+                    AuthMethod::AccessToken => "access_token",
+                    AuthMethod::ApiKey => "api_key",
+                    AuthMethod::ServiceAccount => "service_account",
+                    AuthMethod::Delegated => "delegated",
+                    AuthMethod::Relay => "relay",
+                }
+                .into(),
+                oauth_client_id: auth.oauth_client_id.clone(),
+                acting_client_id: auth.acting_client_id.clone(),
+                api_key_credential_id: auth.api_key_credential_id.clone(),
+            },
+        ),
         org_agent_access: auth.org_agent_access.as_deref(),
         agent_owner: auth.assistant_agent_owner_id.as_deref(),
         operation_scopes: Some(&auth.assistant_operation_scopes),
@@ -4628,6 +4658,8 @@ mod tests {
             user_id: "user-1".into(),
             auth_method: AuthMethod::ApiKey,
             acting_client_id: None,
+            oauth_client_id: None,
+            api_key_credential_id: None,
             approval_owner_user_id: None,
             is_api_key: true,
             api_key_id: Some("key-1".into()),
@@ -5816,11 +5848,19 @@ mod tests {
 
     #[test]
     fn mcp_exec_context_from_api_key_auth() {
-        let auth = api_key_auth(vec!["svc-1".into()]);
+        let mut auth = api_key_auth(vec!["svc-1".into()]);
+        auth.api_key_credential_id = Some("login-credential".into());
         let ctx = mcp_exec_context(&auth);
         assert_eq!(ctx.api_key_id, Some("key-1"));
         assert!(!ctx.allow_all_nodes);
         assert!(ctx.allowed_node_ids.is_empty());
+        let attribution = ctx.attribution.unwrap();
+        assert_eq!(attribution.actor.api_key_id.as_deref(), Some("key-1"));
+        assert_eq!(attribution.actor.api_key_name.as_deref(), Some("agent"));
+        assert_eq!(
+            attribution.api_key_credential_id.as_deref(),
+            Some("login-credential")
+        );
     }
 
     #[test]
@@ -5829,6 +5869,21 @@ mod tests {
         let ctx = mcp_exec_context(&auth);
         assert!(ctx.api_key_id.is_none());
         assert!(ctx.allow_all_nodes);
+        assert_eq!(ctx.attribution.unwrap().auth_kind, "session");
+    }
+
+    #[test]
+    fn mcp_exec_context_preserves_verified_application_identity() {
+        let mut auth = McpAuthContext::user("user-1".into(), AuthMethod::AccessToken);
+        auth.oauth_client_id = Some("registered-client".into());
+        let ctx = mcp_exec_context(&auth);
+        let attribution = ctx.attribution.unwrap();
+        assert_eq!(
+            attribution.oauth_client_id.as_deref(),
+            Some("registered-client")
+        );
+        assert_eq!(attribution.auth_kind, "access_token");
+        assert!(attribution.actor.api_key_id.is_none());
     }
 
     // -----------------------------------------------------------------------
