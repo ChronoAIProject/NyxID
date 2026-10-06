@@ -695,6 +695,17 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
   );
 }
 
+// Admin, Operator and User change through the Platform Role select; every
+// other role, including the seeded Credits Manager, is revoked here.
+const PLATFORM_ROLE_SLUGS = new Set(["admin", "operator", "user"]);
+
+function isPlatformRole(role: {
+  readonly is_system: boolean;
+  readonly slug: string;
+}) {
+  return role.is_system && PLATFORM_ROLE_SLUGS.has(role.slug);
+}
+
 function UserRolesSection({
   userId,
   canWrite,
@@ -774,7 +785,7 @@ function UserRolesSection({
               {directRoles.map((role) => (
                 <Badge key={role.id} variant="default" className="gap-1">
                   {role.name}
-                  {canWrite && !role.is_system && (
+                  {canWrite && !isPlatformRole(role) && (
                     <button
                       type="button"
                       className="ml-1 rounded-full hover:bg-primary-foreground/20 disabled:opacity-50"
