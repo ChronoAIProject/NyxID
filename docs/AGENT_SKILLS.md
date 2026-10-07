@@ -106,3 +106,8 @@ owned private attached base uses PUT with the next version. No Playground,
 sandbox, machine or model-selected raw upload is part of this path. Org
 publication keeps L1's `owner_binding_unavailable` refusal, without a personal
 fallback. See `AGENT_LEARNING.md` for bounds and fencing.
+
+Owner-authored drafts allow ordinary URLs, example IDs and paths. Only credential
+shapes are refused as private material, with safe rule/field/line diagnostics.
+The 7,500-character total cap supports CJK and four-byte scripts through a
+30,000-byte ceiling. Learned proposals retain their existing stricter checks.

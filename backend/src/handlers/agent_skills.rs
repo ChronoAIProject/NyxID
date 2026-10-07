@@ -336,8 +336,7 @@ pub(crate) async fn dispatch(
         ));
     }
     if name == "draft_agent_skill" {
-        let input = serde_json::from_value(args.clone())
-            .map_err(|_| AppError::ValidationError("Invalid skill draft".into()))?;
+        let input = crate::services::assistant_skill_authoring::parse_input(args)?;
         return Ok((
             Box::pin(crate::services::assistant_skill_authoring::create(
                 state, chat, input,
