@@ -136,6 +136,81 @@ async fn identities_without_display_names_use_email() {
 }
 
 #[tokio::test]
+async fn service_account_names_resolve_in_lists_and_analytics() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+
+    let db = connect_test_database("usage_service_account")
+        .await
+        .unwrap();
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let now = hour(Utc::now());
+    db.collection::<Document>(crate::models::service_account::COLLECTION_NAME)
+        .insert_many([
+            doc! { "_id": &actor, "name": "Heca production worker", "is_active": true },
+            doc! { "_id": &owner, "name": "Heca retired billing account", "is_active": false },
+        ])
+        .await
+        .unwrap();
+    let mut row = meter(&actor, &owner, "example", 42);
+    row.insert(
+        "created_at",
+        bson::DateTime::from_chrono(now - chrono::Duration::hours(2)),
+    );
+    insert(&db, row).await;
+
+    for folded in [false, true] {
+        if folded {
+            fold_once(&db, now).await.unwrap();
+        }
+        let list = read(
+            &db,
+            AdminUsageQuery {
+                user: Some(actor.clone()),
+                ..query()
+            },
+        )
+        .await;
+        assert_eq!(list.ranking[0].user.display_name, "Heca production worker");
+        assert_eq!(list.ranking[0].user.user_type, "service_account");
+        assert!(list.ranking[0].user.email.is_none());
+        assert_eq!(
+            list.selected_user.unwrap().display_name,
+            "Heca production worker"
+        );
+        assert_eq!(
+            list.ranking[0].billing_owner.as_ref().unwrap().display_name,
+            "Heca retired billing account"
+        );
+        for (breakdown, expected) in [
+            ("user", "Heca production worker"),
+            ("owner", "Heca retired billing account"),
+        ] {
+            let chart = get_analytics(
+                &db,
+                AnalyticsQuery {
+                    breakdown: Some(breakdown.into()),
+                    measure: Some("requests".into()),
+                    top: Some(5),
+                    actors: Some(actor.clone()),
+                    owners: Some(owner.clone()),
+                    ..Default::default()
+                }
+                .validate(Utc::now())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(chart.slices[0].label, expected);
+            assert_eq!(chart.series[0].label, expected);
+            assert_eq!(chart.total, Some(1));
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn deduplicates_components_and_resale_and_attributes_org_usage() {
     let db = connect_test_database("admin_usage_dedupe")
         .await

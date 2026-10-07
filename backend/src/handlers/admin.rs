@@ -112,8 +112,8 @@ pub struct AuditLogItem {
     /// `None` when the event has no service context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_slug: Option<String>,
-    /// Display name of the acting user resolved at query time. `None` when
-    /// the event has no user, the user was deleted, or no name is set.
+    /// Display name of the acting person, organization, or service account.
+    /// `None` when the subject no longer exists or no name is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_display_name: Option<String>,
     /// Email of the acting user resolved at query time. `None` when the
@@ -950,32 +950,23 @@ fn resolve_entry_service(
     (None, raw_slug)
 }
 
-/// Batch-resolves display name + email for the acting users referenced by a
-/// page of audit entries (one MongoDB round-trip). Deleted users simply drop
-/// out of the map and render as UUID-only downstream.
+/// Batch-resolves people, organizations, and service accounts for audit display.
 async fn resolve_user_lookup(
     db: &mongodb::Database,
     entries: &[AuditLog],
-) -> AppResult<HashMap<String, (Option<String>, String)>> {
+) -> AppResult<HashMap<String, crate::services::reporting_identity_service::ReportingIdentity>> {
     let ids: Vec<String> = entries
         .iter()
         .filter_map(|e| e.user_id.clone())
         .collect::<HashSet<String>>()
         .into_iter()
         .collect();
-    if ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let users: Vec<User> = db
-        .collection::<User>(USERS)
-        .find(doc! { "_id": { "$in": &ids } })
-        .await?
-        .try_collect()
-        .await?;
-    Ok(users
-        .into_iter()
-        .map(|u| (u.id, (u.display_name, u.email)))
-        .collect())
+    Ok(crate::services::reporting_identity_service::resolve(
+        db,
+        &ids,
+        std::time::Duration::from_secs(20),
+    )
+    .await?)
 }
 
 /// GET /api/v1/admin/audit-log
@@ -1045,7 +1036,7 @@ pub async fn list_audit_log(
                 .user_id
                 .as_deref()
                 .and_then(|uid| user_lookup.get(uid).cloned())
-                .map(|(display_name, email)| (display_name, Some(email)))
+                .map(|identity| (identity.display_name, identity.email))
                 .unwrap_or((None, None));
             AuditLogItem {
                 id: e.id,
@@ -2366,6 +2357,15 @@ mod tests {
             .await
             .expect("insert user");
 
+        let sa_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &sa_id, "name": "Heca production worker",
+                "is_active": false, "client_secret_hash": "must not be loaded",
+            })
+            .await
+            .expect("insert service account");
+
         let make_entry = |event_data: serde_json::Value, uid: Option<&str>| AuditLog {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uid.map(str::to_string),
@@ -2387,6 +2387,10 @@ mod tests {
             ),
             make_entry(serde_json::json!({ "service_id": "openai" }), None),
             make_entry(serde_json::json!({ "service_slug": "retired" }), None),
+            make_entry(
+                serde_json::json!({ "service_slug": "openai" }),
+                Some(&sa_id),
+            ),
         ];
 
         let service_lookup = resolve_service_lookup(&db, &entries)
@@ -2409,9 +2413,19 @@ mod tests {
         assert_eq!(name.as_deref(), Some("Retired Service"));
         assert_eq!(slug.as_deref(), Some("retired"));
 
-        let (display_name, email) = user_lookup.get(&user_id).cloned().expect("user resolved");
-        assert_eq!(display_name.as_deref(), Some("Test User"));
-        assert_eq!(email, format!("{user_id}@example.com"));
+        let user = user_lookup.get(&user_id).expect("user resolved");
+        assert_eq!(user.display_name.as_deref(), Some("Test User"));
+        assert_eq!(
+            user.email.as_deref(),
+            Some(format!("{user_id}@example.com").as_str())
+        );
+        let account = user_lookup.get(&sa_id).expect("service account resolved");
+        assert_eq!(
+            account.display_name.as_deref(),
+            Some("Heca production worker")
+        );
+        assert!(account.email.is_none());
+        assert_eq!(account.user_type, "service_account");
     }
 
     #[test]
