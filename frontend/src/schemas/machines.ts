@@ -23,6 +23,7 @@ export interface MachineProfile {
   computer: boolean;
   browser?: boolean | null;
   authority_versions?: number[];
+  separated?: { available: boolean; landlock_abi: number | null; reason: string | null } | null;
   os: string;
   arch: string;
   roots: string[];

@@ -628,7 +628,7 @@ separate stable session instructions from volatile turn facts:
 | Pinned skill metadata and agent memory notes | Stable instructions; omitted for guests |
 | Org private/shared-group memory and privacy rules | Stable instructions |
 | Guest policy and owner/guest audience | Stable instructions |
-| Machine use guidance (when granted), NyxBot machine setup guidance | Stable instructions; omitted for guests |
+| Machine use guidance (NyxBot: loaded usable assignment policy; specialists: machine membership), NyxBot machine setup guidance | Stable instructions; omitted for guests |
 | Context-envelope protocol | Stable instructions |
 | Drained events on non-event turns | Input context; omitted for guests |
 | Card decisions since the previous user message | Input context; omitted for guests |

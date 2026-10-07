@@ -129,8 +129,11 @@ browser generations per context. Exhaustion refuses provisioning, never reuses a
 UID. Preserve this journal with the machine identity/workspace volume.
 
 macOS, single-user Linux and Linux without a successful ABI 6 probe cannot enable
-`separated`. Return an explicit unavailable reason; never fall back to shared
-execution. Protocol v2 alone is insufficient: the node must separately advertise
+`separated`. For an assignment configured as `separated`, return an explicit
+unavailable reason; never fall back to shared execution. An assignment configured
+as `shared_legacy` runs its granted commands/file operations normally even when
+separated support is unavailable; retain its shared-mode risk warning. Protocol
+v2 alone is insufficient: the node must separately advertise
 verified separated support. The default-off `assistant:machine-contexts` flag gates
 new opt-ins, and an owner action card names the fresh workspace/browser and the
 interruption of existing work. Stored enforcement remains active with the flag off.
@@ -139,6 +142,49 @@ The original spike's failed stronger boundary remains documented in
 [MACHINE_CONTEXT_SPIKE.md](MACHINE_CONTEXT_SPIKE.md). Revised adversarial tests must
 retain the metadata, public pathname-socket and shared-memory residuals as explicit
 **allowed-by-design controls**, alongside cross-context denials and tooling tests.
+
+#### Browserless separated contexts: follow-up #1800
+
+The supported headless path today is an explicit `shared_legacy` assignment with
+shell/files grants. `separated_requires_managed_browser` describes why the
+optional separated mode cannot be enabled; it does not block that configured
+shared path. Switching an existing separated assignment to shared still requires
+an owner action card. For stronger separation now, dedicate a machine container
+or VM to the agent.
+
+Option A is feasible but is not just removal of the support check.
+`cli/src/node/machine/context_dispatch.rs::context_instance` unconditionally
+resolves browser policy identities, prepares native browser policy, opens two
+displays/D-Bus resources and constructs a managed-browser child runtime.
+`context_runtime::Store::provision` also journals command, secure and developer
+UIDs/profile generations together. Bypassing those steps without a lifecycle
+design risks reopening a shared browser or weakening generation quarantine.
+
+Follow-up design and effort (a dedicated runtime/protocol PR plus native Linux
+validation, rather than a discovery-only patch):
+
+1. Advertise independently live-probed workspace and browser support, with absent
+   new fields never widening support on old nodes/servers. Admit shell/files-only
+   separated assignments only when workspace support is proven; browser,
+   computer, developer-browser and saved-login grants keep their own checks.
+   Settings and the owner card must describe a command-only workspace accurately;
+   adding browser access requires both browser support and a new owner approval.
+2. Provision a command-only child with never-reused UID, 0700 workspace/home/tmp,
+   protected legacy ancestors, ABI 6+ Landlock, NNP/seccomp, descriptor closure
+   and signal/socket scoping unchanged. Make browser resources optional; every
+   browser/desktop/fill entry point must refuse missing resources, never use the
+   shared runtime. Journal later browser activation and quarantine across grant
+   changes and daemon restarts without reusing identities or profile generations.
+3. Extend the native Linux matrix: headless without Chromium/Xvfb/D-Bus, the
+   existing traversal/descriptor/signal adversarial suite and tooling, browser
+   denial, adding/removing browser grants, restart/revocation/quarantine, and
+   mixed-version fail-closed behavior. Retain the documented metadata/shared-memory
+   residuals; neither mode is described as full isolation.
+
+Estimated effort is several implementation/test days across capability negotiation,
+provisioning/lifecycle and the Linux matrix, plus availability of the native
+separate-users VM release gate. No browser capability is expanded by the current
+#1800 fix.
 
 ### 3.2 Capability grants, saved logins, and NyxBot policy
 

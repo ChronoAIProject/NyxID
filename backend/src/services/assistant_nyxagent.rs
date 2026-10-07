@@ -197,7 +197,25 @@ pub fn base_prompt(
                 }
             }
             prompt.push_str(&super::assistant_team_service::memory_note(agent));
-            if !agent.machine_node_ids.is_empty() {
+            // NyxBot's implicit reachability is snapshotted in machine_access,
+            // not the specialist machine picker. Reuse the loaded policy; this
+            // is guidance only, and machine_list/execution recheck live access.
+            let use_machines = if agent.is_nyxbot() {
+                agent.machine_access.as_ref().is_some_and(|policy| {
+                    policy.version == 2
+                        && policy.assignments.values().any(|assignment| {
+                            matches!(assignment.mode.as_str(), "shared_legacy" | "separated")
+                                && assignment.capabilities.valid()
+                                && (assignment.capabilities.shell
+                                    || assignment.capabilities.files
+                                    || assignment.capabilities.browser
+                                    || assignment.capabilities.computer)
+                        })
+                })
+            } else {
+                !agent.machine_node_ids.is_empty()
+            };
+            if use_machines {
                 prompt.push_str("\n\n");
                 prompt.push_str(super::machine_tools::USE_INSTRUCTIONS);
             }

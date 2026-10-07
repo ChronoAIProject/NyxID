@@ -9,6 +9,29 @@ const off = { shell: false, files: false, browser: false, computer: false, devel
 const machine: MachineAccess = { node_id: "node", name: "Work Mac", revision: 3, protocol_v2: true, can_edit: true, capabilities: off, ceiling: { shell: true, files: true, browser: true, computer: true, developer_browser: true }, legacy: false, saved_login_ids: null, separated: { available: true, landlock_abi: 6, reason: null } };
 beforeEach(() => { vi.clearAllMocks(); feature.mockReturnValue(true); query.mockReturnValue({ data: [machine] }); save.mockResolvedValue([]); contextSave.mockResolvedValue({ status: "pending" }); });
 describe("machine capability editor", () => {
+  it("keeps configured headless shared work usable and separates setup diagnostics", () => {
+    render(<MachineCapabilityForm machine={{ ...machine, mode: "shared_legacy", legacy: true,
+      capabilities: { ...off, shell: true, files: true }, ceiling: { ...off, shell: true, files: true },
+      separated: { available: false, landlock_abi: 8, reason: "separated_requires_managed_browser" },
+    }} agentId="agent" contextEnabled />);
+    expect(screen.getByText(/run in shared mode, as configured, even when separation is unavailable/)).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Shell commands" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: /Secure browser/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Separate workspace and browser for this agent" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Browser permissions are not required/)).toBeInTheDocument();
+    expect(screen.getByText("separated_requires_managed_browser").closest("details")).not.toHaveAttribute("open");
+  });
+  it("refuses unavailable separated work and shows the owner recovery path with the flag off", () => {
+    render(<MachineCapabilityForm machine={{ ...machine, mode: "separated", separated: { available: false, landlock_abi: 8, reason: "separated_requires_managed_browser" } }} agentId="agent" />);
+    expect(screen.getByText(/Execution is refused.*owner action card/)).toBeInTheDocument();
+    expect(screen.queryByText(/run in shared mode, as configured/)).not.toBeInTheDocument();
+    expect(screen.getByText(/To enable separate workspaces and browsers/)).toBeInTheDocument();
+  });
+  it("renders server mode diagnostics from the additive API fields", () => {
+    render(<MachineCapabilityForm machine={{ ...machine, execution_note: "Granted commands and file tools run in shared mode, as configured.", separated: null, separated_setup_note: "Restore the managed installation before requesting separated mode." }} agentId="agent" />);
+    expect(screen.getByText("Granted commands and file tools run in shared mode, as configured.")).toBeInTheDocument();
+    expect(screen.getByText("Restore the managed installation before requesting separated mode.")).toBeInTheDocument();
+  });
   it("labels separated contexts without promising full isolation", () => {
     render(<MachineCapabilityForm machine={{ ...machine, mode: "separated", saved_login_ids: [] }} agentId="agent" />);
     expect(screen.getByText("Separate workspace and browser")).toBeInTheDocument();
