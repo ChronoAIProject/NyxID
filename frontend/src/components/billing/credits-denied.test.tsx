@@ -1,3 +1,4 @@
+import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import {
   act,
   render,
@@ -52,6 +53,7 @@ function renderAt(url: string) {
     createRoute({
       getParentRoute: () => root,
       path,
+      validateSearch: withAccountPanelSearch((search) => search),
       component: () => <p>{path}</p>,
     });
   const history = createMemoryHistory({ initialEntries: [url] });
@@ -59,6 +61,10 @@ function renderAt(url: string) {
     routeTree: root.addChildren([
       page("/assistant"),
       page("/billing"),
+      page("/assistant/plugins"),
+      page("/assistant/machines/$nodeId/desktop"),
+      page("/assistantish"),
+      page("/dashboard"),
       page("/login"),
     ]),
     history,
@@ -82,6 +88,7 @@ function deny(payer: CreditsPayer, key = "op:test:1") {
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   useAuthStore.getState().setUser(person);
+  useAuthStore.setState({ isLoading: false });
   useCreditsDenialStore.getState().reset();
   vi.stubGlobal(
     "fetch",
@@ -109,11 +116,11 @@ describe("CreditsDeniedHost", () => {
     ).toBeInTheDocument();
   });
 
-  it.each(["/billing", "/login"])(
+  it.each(["/billing", "/assistant?panel=billing", "/login"])(
     "suppresses %s and drops the prompt",
     async (path) => {
       renderAt(path);
-      await screen.findByText(path);
+      await screen.findByText(path.split("?")[0]!);
       deny("self");
       await waitFor(() =>
         expect(useCreditsDenialStore.getState().current).toBeNull(),
@@ -121,6 +128,15 @@ describe("CreditsDeniedHost", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     },
   );
+
+  it("dismisses a stored prompt when navigating to assistant billing", async () => {
+    const { router } = renderAt("/assistant");
+    deny("self");
+    await screen.findByRole("dialog");
+    await act(() => router.navigate({ to: "/assistant", search: { panel: "billing" } }));
+    await waitFor(() => expect(useCreditsDenialStore.getState().current).toBeNull());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
 
   it("renders nothing without a signed-in person", async () => {
     renderAt("/assistant");
@@ -137,8 +153,14 @@ describe("CreditsDeniedHost", () => {
 });
 
 describe("CreditsDeniedDialog variants", () => {
-  it("offers both options and the purchase CTA to the person paying", async () => {
-    const { history } = renderAt("/assistant");
+  it.each([
+    ["/assistant", "/assistant"],
+    ["/assistant/plugins", "/assistant/plugins"],
+    ["/assistant/machines/node/desktop", "/assistant"],
+    ["/dashboard", "/billing"],
+    ["/assistantish", "/billing"],
+  ])("offers a personal purchase from %s to %s", async (path, destination) => {
+    const { history } = renderAt(path);
     deny("self");
     await screen.findByRole("dialog");
     expect(screen.getByText("Ask an admin")).toBeVisible();
@@ -149,10 +171,11 @@ describe("CreditsDeniedDialog variants", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Purchase credits" }),
     );
-    await waitFor(() => expect(history.location.pathname).toBe("/billing"));
+    await waitFor(() => expect(history.location.pathname).toBe(destination));
     const search = new URLSearchParams(history.location.search);
-    expect(search.get("tab")).toBe("billing");
-    expect(search.get("action")).toBe("topup");
+    expect(search.get(destination.startsWith("/assistant") ? "panelTab" : "tab")).toBe("billing");
+    expect(search.get(destination.startsWith("/assistant") ? "panelAction" : "action")).toBe("topup");
+    if (destination.startsWith("/assistant")) expect(search.get("panel")).toBe("billing");
     expect(useCreditsDenialStore.getState().current).toBeNull();
   });
 

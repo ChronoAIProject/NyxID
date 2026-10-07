@@ -1,6 +1,8 @@
+import { ACCOUNT_PANEL_KEYS, parseAccountPanelSearch, type AccountPanel, type AccountPanelParams } from "./account-panel-search";
 import { isHostedConnectLink } from "@/lib/assistant/hosted-connect-link";
 
 export type AssistantModalLinkTarget =
+  | { readonly kind: "account-panel"; readonly href: string; readonly panel: AccountPanel; readonly params: AccountPanelParams }
   | {
       readonly kind: "connect";
       readonly href: string;
@@ -53,6 +55,16 @@ export function assistantModalLinkTarget(
       href: url.href,
       token: url.pathname.slice("/connect/".length),
     };
+  }
+
+  if (url.pathname === "/assistant") {
+    if (Array.from(url.searchParams.keys()).some((key) => !ACCOUNT_PANEL_KEYS.some((allowed) => allowed === key))) return null;
+    const raw: Record<string, unknown> = Object.fromEntries(url.searchParams);
+    if (url.searchParams.has("panelServices")) {
+      try { raw.panelServices = JSON.parse(url.searchParams.get("panelServices") ?? ""); } catch { return null; }
+    }
+    const { panel, ...params } = parseAccountPanelSearch(raw);
+    return panel ? { kind: "account-panel", href: url.href, panel, params } : null;
   }
 
   const match = CHANNEL_BOT_SETUP_PATH.exec(url.pathname);

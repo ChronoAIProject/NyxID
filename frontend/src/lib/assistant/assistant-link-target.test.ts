@@ -56,3 +56,11 @@ describe("assistantModalLinkTarget", () => {
     });
   });
 });
+
+it("classifies only same-origin account links with panel-owned query keys", () => {
+  expect(assistantModalLinkTarget("/assistant?panel=settings&panelTab=security", ORIGIN)).toEqual({ kind: "account-panel", href: `${ORIGIN}/assistant?panel=settings&panelTab=security`, panel: "settings", params: { panelTab: "security" } });
+  expect(assistantModalLinkTarget(`${ORIGIN}/assistant?panel=billing&panelTab=usage&panelServices=%5B%22a%22%5D`, ORIGIN)).toMatchObject({ kind: "account-panel", panel: "billing", params: { panelTab: "usage", panelServices: ["a"] } });
+  for (const href of ["/assistant?panel=nyxbot", "https://evil.example/assistant?panel=settings", "https://user:secret@nyxid.example/assistant?panel=settings", "/assistant?panel=settings#x", "/assistant?panel=settings&c=chat", "/assistant?panel=settings&tab=security", "/assistant?panel=invalid", "/assistant?panel=billing&panelServices=invalid", "/assistant/settings?panel=settings"]) {
+    expect(assistantModalLinkTarget(href, ORIGIN)).toBeNull();
+  }
+});

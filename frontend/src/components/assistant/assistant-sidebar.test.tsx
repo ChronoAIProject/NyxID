@@ -26,16 +26,23 @@ vi.mock("@/hooks/use-assistant-workspace", () => ({
   }),
 }));
 
+const accountMocks = vi.hoisted(() => ({ navigate: vi.fn(), logout: vi.fn(), nyxagent: false, panel: undefined as string | undefined, open: vi.fn() }));
+vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
+vi.mock("@/hooks/use-auth", () => ({ useLogout: () => ({ mutateAsync: accountMocks.logout }) }));
+vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => accountMocks.nyxagent }));
 vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => accountMocks.navigate,
   Link: ({
     to,
+    search,
     children,
     ...rest
   }: AnchorHTMLAttributes<HTMLAnchorElement> & {
     readonly to?: string;
+    readonly search?: Record<string, unknown>;
     readonly children?: ReactNode;
   }) => (
-    <a data-to={to} {...rest}>
+    <a data-to={to} data-search={search ? JSON.stringify(search) : undefined} href={`${to ?? ""}${search ? `?${new URLSearchParams(Object.entries(search).map(([key, value]) => [key, String(value)]))}` : ""}`} {...rest}>
       {children}
     </a>
   ),
@@ -65,6 +72,7 @@ const USER: User = {
   is_admin: false,
   is_active: true,
   created_at: "2026-07-20T00:00:00.000Z",
+  capabilities: { billing_available: true },
 };
 
 function renderSidebar(
@@ -99,6 +107,11 @@ function seedDraft(ownerUserId: string, text: string) {
 }
 
 beforeEach(() => {
+  accountMocks.navigate.mockReset();
+  accountMocks.logout.mockReset();
+  accountMocks.nyxagent = false;
+  accountMocks.panel = undefined;
+  accountMocks.open.mockReset();
   localStorage.clear();
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAuthStore.setState({
@@ -732,4 +745,99 @@ describe("NyxBot agents in the sidebar", () => {
     // Destroyed agents are hidden until shown, so nothing is expanded.
     expect(screen.queryByRole("button", { name: /New chat with/ })).not.toBeInTheDocument();
   });
+});
+
+
+describe("AssistantSidebar account menu", () => {
+  it("opens from the user row and exposes the shared account destinations", async () => {
+    renderSidebar();
+    const trigger = screen.getByRole("button", { name: "Account menu" });
+    expect(trigger).toHaveAttribute("data-keep-drawer-open", "");
+    await userEvent.click(trigger);
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByText("Reader")).toBeVisible();
+    expect(within(menu).getByText("reader@example.com")).toBeVisible();
+    expect(
+      within(menu).getByRole("menuitem", { name: "Settings" }),
+    ).not.toHaveAttribute("href");
+    for (const tab of ["billing", "usage"]) {
+      const item = within(menu).getByRole("menuitem", {
+        name: tab === "billing" ? "Billing" : "Usage",
+      });
+      expect(item).not.toHaveAttribute("href");
+      expect(item).not.toHaveAttribute("search");
+    }
+    expect(
+      within(menu).getByRole("menuitem", {
+        name: "Notification settings (opens in Studio)",
+      }),
+    ).toHaveAttribute("data-to", "/approvals/settings");
+    expect(
+      within(menu).getByRole("menuitem", { name: "Open Studio" }),
+    ).toHaveAttribute("data-to", "/dashboard");
+    expect(
+      within(menu).queryByRole("menuitem", { name: "NyxBot settings" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([false, undefined])(
+    "hides billing and usage when capability is %s",
+    async (billing_available) => {
+      useAuthStore.setState({
+        user: { ...USER, capabilities: { billing_available } },
+      });
+      renderSidebar();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Account menu" }),
+      );
+      expect(
+        screen.queryByRole("menuitem", { name: "Billing" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("menuitem", { name: "Usage" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("waits for logout before navigating to login", async () => {
+    let finish: (() => void) | undefined;
+    accountMocks.logout.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderSidebar();
+    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
+    expect(accountMocks.logout).toHaveBeenCalledOnce();
+    expect(accountMocks.navigate).not.toHaveBeenCalled();
+    finish?.();
+    await waitFor(() =>
+      expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" }),
+    );
+  });
+
+  it.each(["settings", "billing"] as const)(
+    "marks the user row active in %s",
+    (activeView) => {
+      accountMocks.panel = activeView;
+      render(
+        <TooltipProvider>
+          <AssistantSidebar
+            conversations={[]}
+            activeConversationId={undefined}
+            activeView="chat"
+            onNewChat={vi.fn()}
+            onSelect={vi.fn()}
+            onDelete={vi.fn()}
+          />
+        </TooltipProvider>,
+      );
+      expect(screen.getByRole("button", { name: "Account menu" })).toHaveClass(
+        "bg-overlay-strong",
+        "font-medium",
+        "text-foreground",
+      );
+    },
+  );
 });

@@ -1,3 +1,5 @@
+import type { User } from "@/types/api";
+
 /**
  * Feature flag catalog — the single client-side source of truth for flag keys.
  *
@@ -50,6 +52,13 @@ type FeatureFlagKey = (typeof FEATURE_FLAG)[keyof typeof FEATURE_FLAG];
 export type FeatureFlag = [FeatureFlagKey] extends [never]
   ? string
   : FeatureFlagKey;
+
+export function userHasFeature(
+  user: Pick<User, "capabilities"> | null | undefined,
+  flag: FeatureFlag,
+): boolean {
+  return user?.capabilities?.enabled_features?.includes(flag) ?? false;
+}
 
 /** All flag keys as an array (iteration, validation, tests). */
 export const FEATURE_FLAG_KEYS = Object.values(FEATURE_FLAG) as FeatureFlag[];

@@ -37,6 +37,7 @@ import { canAdminWrite, hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
+import { validateSettingsSearch, withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
@@ -405,6 +406,7 @@ const assistantRoute = createRoute({
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
+  validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="plugins" />,
 });
@@ -412,6 +414,7 @@ const assistantPluginsRoute = createRoute({
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
+  validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="approvals" />,
 });
@@ -583,9 +586,7 @@ const settingsRoute = createRoute({
   path: "/settings",
   getParentRoute: () => dashboardLayout,
   component: SettingsPage,
-  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
-    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
-  }),
+  validateSearch: validateSettingsSearch,
 });
 
 const devicesBindRoute = createRoute({
@@ -678,7 +679,7 @@ const assistantAutomationsRoute = createRoute({
   path: "/assistant/automations",
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
-  validateSearch: parseAutomationSearch,
+  validateSearch: withAccountPanelSearch(parseAutomationSearch),
   component: () => <AssistantPage view="automations" />,
 });
 
@@ -686,7 +687,7 @@ const assistantMachinesRoute = createRoute({
   path: "/assistant/machines",
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
-  validateSearch: parseMachinesSearch,
+  validateSearch: withAccountPanelSearch(parseMachinesSearch),
   component: () => <AssistantPage view="machines" />,
 });
 
@@ -760,14 +761,14 @@ const machineSetupRoute = createRoute({
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-setup" />,
-  validateSearch: parseMachineSetupSearch,
+  validateSearch: withAccountPanelSearch(parseMachineSetupSearch),
 });
 const machinePairRoute = createRoute({
   path: "/assistant/machines/pair",
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-pair" />,
-  validateSearch: parseMachinePairSearch,
+  validateSearch: withAccountPanelSearch(parseMachinePairSearch),
 });
 
 const nodeDetailRoute = createRoute({

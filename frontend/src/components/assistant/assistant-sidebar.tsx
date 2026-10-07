@@ -1,3 +1,5 @@
+import { useAccountPanel } from "@/hooks/use-account-panel";
+import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -20,6 +22,7 @@ import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagen
 import {
   Activity,
   ChevronRight,
+  ChevronsUpDown,
   FileText,
   House,
   LayoutGrid,
@@ -582,7 +585,11 @@ export function AssistantSidebar({
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
   readonly activeView?:
-    | "chat" | "plugins" | "approvals" | "automations" | "machines";
+    | "chat"
+    | "plugins"
+    | "approvals"
+    | "automations"
+    | "machines";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -594,6 +601,7 @@ export function AssistantSidebar({
   /** NyxBot group chats (NyxAgent engine). */
   readonly groups?: SidebarGroups;
 }) {
+  const { current: accountPanel } = useAccountPanel();
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
   const pluginsActive = activeView === "plugins";
@@ -857,19 +865,30 @@ export function AssistantSidebar({
           <span className="flex-1">Studio</span>
           <ChevronRight className="h-3.5 w-3.5" />
         </Link>
-        <div className="mt-1 flex items-center gap-3 rounded-lg px-3 py-2">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
-            <User className="h-3.5 w-3.5 text-text-tertiary" />
-          </div>
-          <div className="min-w-0">
-            <p className="truncate text-12 font-medium text-foreground">
-              {user?.display_name ?? "User"}
-            </p>
-            <p className="truncate text-10 text-text-tertiary">
-              {user?.email ?? ""}
-            </p>
-          </div>
-        </div>
+        <AssistantAccountMenu align="start" side="top">
+          <button
+            type="button"
+            aria-label="Account menu"
+            data-keep-drawer-open=""
+            className={cn(
+              "mt-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-overlay",
+              Boolean(accountPanel.panel) && "bg-overlay-strong font-medium text-foreground",
+            )}
+          >
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
+              <User className="h-3.5 w-3.5 text-text-tertiary" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-12 font-medium text-foreground">
+                {user?.display_name ?? "User"}
+              </p>
+              <p className="truncate text-10 text-text-tertiary">
+                {user?.email ?? ""}
+              </p>
+            </div>
+            <ChevronsUpDown aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+          </button>
+        </AssistantAccountMenu>
       </div>
 
       <Dialog

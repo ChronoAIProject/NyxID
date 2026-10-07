@@ -1,3 +1,4 @@
+import { useAccountPanel } from "@/hooks/use-account-panel";
 import { useOverlayLayer } from "@/lib/overlay-layer";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
 import {
@@ -114,6 +115,7 @@ export function AssistantLinkModal({
   if (target.kind === "connect") {
     return <ConnectLinkModal target={target} onClose={onClose} />;
   }
+  if (target.kind === "account-panel") return null;
   return <ChannelBotSetupModal target={target} onClose={onClose} />;
 }
 
@@ -126,6 +128,7 @@ export function AssistantLinkModalHost({
 }: {
   readonly children: ReactNode;
 }) {
+  const account = useAccountPanel();
   const [href, setHref] = useState<string | null>(null);
   const triggerRef = useRef<HTMLAnchorElement | null>(null);
 
@@ -157,6 +160,10 @@ export function AssistantLinkModalHost({
     );
     if (!targetLink) return;
     event.preventDefault();
+    if (targetLink.kind === "account-panel") {
+      void account.open(targetLink.panel, targetLink.params, link);
+      return;
+    }
     triggerRef.current = link;
     setHref(targetLink.href);
   }

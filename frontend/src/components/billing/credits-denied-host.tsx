@@ -1,3 +1,6 @@
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { ASSISTANT_CREDITS_OVERLAY_BASE } from "@/lib/overlay-layer";
+import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
 import { lazy, Suspense, useEffect } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import {
@@ -24,7 +27,9 @@ export function CreditsDeniedHost() {
   const current = useCreditsDenialStore((state) => state.current);
   const dismiss = useCreditsDenialStore((state) => state.dismiss);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const suppressed = isCreditsDialogSuppressed(pathname);
+  const search = useRouterState({ select: (s) => s.location.search });
+  const ready = useAuthStore((s) => !s.isLoading && s.isAuthenticated && s.user !== null);
+  const suppressed = isCreditsDialogSuppressed(pathname, search, ready && isBillingAvailable(user));
   const searchStr = useRouterState({ select: (s) => s.location.searchStr });
   const previewUnavailable =
     import.meta.env.DEV &&
@@ -52,7 +57,7 @@ export function CreditsDeniedHost() {
   }, [userId]);
 
   if (!user || !current || suppressed) return null;
-  return (
+  const dialog = (
     <Suspense fallback={null}>
       <CreditsDeniedDialog
         payer={current.payer}
@@ -61,4 +66,6 @@ export function CreditsDeniedHost() {
       />
     </Suspense>
   );
+  return isAssistantShellRoute(pathname) ?
+    <OverlayLayer layer={ASSISTANT_CREDITS_OVERLAY_BASE}>{dialog}</OverlayLayer> : dialog;
 }

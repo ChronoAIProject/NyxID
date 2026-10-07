@@ -1,3 +1,4 @@
+import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useSyncExternalStore } from "react";
@@ -58,14 +59,23 @@ const query = (data: unknown, error: unknown = null) => ({
   isError: Boolean(error),
   refetch: vi.fn(),
 });
+const PAGE_ROUTES = ["/billing", "/assistant"] as const;
+let pageRoute: (typeof PAGE_ROUTES)[number] = "/billing";
 async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
+  if (pageRoute === "/assistant") {
+    const old = new URL(url, "https://nyxid.test");
+    const params = new URLSearchParams({ panel: "billing", c: "chat", mock: "1" });
+    for (const [key, value] of old.searchParams) params.set(`panel${key.charAt(0).toUpperCase()}${key.slice(1)}`, value);
+    url = `/assistant?${params}`;
+  }
   const root = createRootRoute();
   const route = createRoute({
     getParentRoute: () => root,
-    path: "/billing",
-    validateSearch: (search: Record<string, unknown>) =>
-      billingSearchSchema.parse(search),
-    component: BillingPage,
+    path: pageRoute,
+    validateSearch: pageRoute === "/billing" ? billingSearchSchema.parse : withAccountPanelSearch((search) => ({ c: search.c, mock: search.mock })),
+    component: () => pageRoute === "/billing"
+      ? <BillingPage />
+      : <BillingPage presentation="panel" />,
   });
   const history = createMemoryHistory({ initialEntries: [url] });
   const router = createRouter({
@@ -78,10 +88,9 @@ async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
     </TooltipProvider>,
   );
   await act(() => router.load());
-  await screen.findByRole("heading", {
-    name: "Billing & Usage",
-    hidden: true,
-  });
+  await screen.findByRole("tab", { name: "Billing", hidden: true });
+  if (pageRoute === "/assistant") expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
+  expect(history.location.pathname).toBe(pageRoute);
   if (exploreGroups) {
     const disclosure = screen.queryByText("Explore by service, model or agent");
     if (disclosure) await userEvent.click(disclosure);
@@ -108,7 +117,7 @@ async function selectServices(names: string[]) {
   await userEvent.click(picker().getByRole("button", { name: "Done" }));
 }
 function servicesParam(history: { location: { search: string } }) {
-  const raw = new URLSearchParams(history.location.search).get("services");
+  const raw = new URLSearchParams(history.location.search).get(pageRoute === "/assistant" ? "panelServices" : "services");
   return raw === null ? undefined : (JSON.parse(raw) as string[]);
 }
 function twoServiceRows() {
@@ -134,7 +143,8 @@ beforeEach(() => {
   mocks.catalog.mockReturnValue(query(billingCatalog));
   mocks.activity.mockReturnValue(query([]));
 });
-describe("BillingPage", () => {
+describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
+  beforeEach(() => { pageRoute = route; });
   it("opens on visual quantities and funding with the grouped list collapsed", async () => {
     await renderPage("/billing?tab=usage", false);
     expect(screen.getByText("Usage overview", { exact: true })).toBeVisible();
@@ -234,6 +244,7 @@ describe("BillingPage", () => {
       screen.getByText("Free", { exact: true, selector: ".usage-status" }),
     ).toBeVisible();
     expect(servicesChip()).toHaveTextContent("Service: Free service");
+    expect(history.location.pathname).toBe(pageRoute);
     expect(servicesParam(history)).toEqual(["free-service"]);
     await act(() => history.back());
     await waitFor(() =>
@@ -285,6 +296,7 @@ describe("BillingPage", () => {
       picker().queryByRole("button", { name: "Cancel" }),
     ).not.toBeInTheDocument();
     await userEvent.click(picker().getByRole("button", { name: "Done" }));
+    expect(history.location.pathname).toBe(pageRoute);
     await userEvent.click(serviceFilter());
     expect(option("Example LLM")).toBeChecked();
     await userEvent.click(picker().getByRole("button", { name: "Clear" }));
@@ -349,7 +361,7 @@ describe("BillingPage", () => {
     mocks.usage.mockReturnValue(query(usage(twoServiceRows())));
     const { history } = await renderPage(url);
     await waitFor(() =>
-      expect(history.location.search).not.toContain("service="),
+      expect(history.location.search).not.toMatch(/(?:service|panelService)=/),
     );
     expect(servicesParam(history)).toEqual(expected);
   });
@@ -395,7 +407,7 @@ describe("BillingPage", () => {
     const { history } = await renderPage("/billing?tab=billing&action=topup");
     expect(await screen.findByRole("dialog")).toBeVisible();
     await waitFor(() =>
-      expect(history.location.search).not.toContain("action"),
+      expect(history.location.search).not.toMatch(/(?:action|panelAction)=/),
     );
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() =>
@@ -428,9 +440,9 @@ describe("BillingPage", () => {
       const { history } = await renderPage(url);
       // Usage has settled, so legacy/stale filters are cleaned up first...
       await waitFor(() =>
-        expect(history.location.search).not.toMatch(/service=|services=/),
+        expect(history.location.search).not.toMatch(/(?:service|services|panelService|panelServices)=/),
       );
-      expect(history.location.search).toContain("action=topup");
+      expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelAction=topup" : "action=topup");
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       // ...and the wallet arrives later: Add credits opens exactly once.
       act(() => {
@@ -441,7 +453,7 @@ describe("BillingPage", () => {
         await screen.findByRole("dialog", { name: "Add credits" }),
       ).toBeVisible();
       await waitFor(() =>
-        expect(history.location.search).not.toContain("action"),
+        expect(history.location.search).not.toMatch(/(?:action|panelAction)=/),
       );
       await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
       await waitFor(() =>
@@ -470,8 +482,9 @@ describe("BillingPage", () => {
     const { history } = await renderPage("/billing?tab=billing&action=topup");
     // The user picks Usage while the wallet is still loading.
     await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
-    await waitFor(() => expect(history.location.search).toContain("tab=usage"));
-    expect(history.location.search).not.toContain("action");
+    await waitFor(() => expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage"));
+    expect(history.location.pathname).toBe(pageRoute);
+    expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
     act(() => {
       wallet = query(billingWallet());
       listeners.forEach((listener) => listener());
@@ -486,7 +499,8 @@ describe("BillingPage", () => {
         "active",
       ),
     );
-    expect(history.location.search).not.toContain("action");
+    expect(history.location.pathname).toBe(pageRoute);
+    expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await act(() => history.forward());
@@ -503,7 +517,7 @@ describe("BillingPage", () => {
     );
     const { history } = await renderPage("/billing?tab=usage&action=topup");
     await waitFor(() =>
-      expect(history.location.search).not.toContain("action"),
+      expect(history.location.search).not.toMatch(/(?:action|panelAction)=/),
     );
     expect(screen.getByRole("tab", { name: "Billing" })).toHaveAttribute(
       "data-state",

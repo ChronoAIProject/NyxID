@@ -1,6 +1,68 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { openAssistant, sendMessage, composerInput, stopButton } from "./helpers";
 import { mockDashboard } from "./managed-onboarding-fixtures";
+
+const unexpectedRequests = new WeakMap<Page, string[]>();
+
+test.beforeEach(async ({ page }) => {
+  const unexpected: string[] = [];
+  unexpectedRequests.set(page, unexpected);
+  await page.route("**/api/v1/**", (route) => {
+    unexpected.push(
+      `${route.request().method()} ${new URL(route.request().url()).pathname}`,
+    );
+    return route.fulfill({
+      status: 500,
+      json: { message: "Unexpected request outside fixtures" },
+    });
+  });
+  await page.route("**/api/v1/approvals/requests?**", (route) =>
+    route.fulfill({ json: { requests: [], total: 0 } }),
+  );
+  await page.route("**/api/v1/users/me", (route) =>
+    route.fulfill({
+      json: {
+        id: "d4f5a6b7-c8d9-4e0f-a1b2-c3d4e5f60718",
+        email: "reader@example.com",
+        display_name: "Reader",
+        email_verified: true,
+        mfa_enabled: false,
+        is_admin: false,
+        is_active: true,
+        created_at: "2026-01-01T00:00:00Z",
+        capabilities: {
+          billing_available: true,
+          enabled_features: ["assistant:nyxagent-engine"],
+        },
+      },
+    }),
+  );
+  await page.route("**/api/v1/public/config", (route) =>
+    route.fulfill({ json: { mcp_url: "https://nyxid.test/mcp" } }),
+  );
+  await page.route("**/api/v1/sessions", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/api/v1/saved-logins**", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/api/v1/triggers", (route) =>
+    route.fulfill({ json: { triggers: [] } }),
+  );
+  await page.route("**/api/v1/orgs", (route) =>
+    route.fulfill({ json: { orgs: [] } }),
+  );
+  await page.route("**/api/v1/channel-bots?**", (route) =>
+    route.fulfill({ json: { bots: [], total: 0 } }),
+  );
+});
+
+test.afterEach(({ page }) => {
+  expect(unexpectedRequests.get(page)).toEqual([]);
+});
 
 async function settled(page: import("@playwright/test").Page) {
   await expect(stopButton(page)).not.toBeVisible({ timeout: 6000 });

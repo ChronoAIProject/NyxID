@@ -1,3 +1,5 @@
+import { useAccountPanel } from "@/hooks/use-account-panel";
+import { PageHeader } from "@/components/shared/page-header";
 import { useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -94,28 +96,30 @@ interface DeleteAccountResponse {
   readonly deleted_at: string;
 }
 
-export function SettingsPage() {
+export function SettingsPage({
+  presentation = "page",
+}: {
+  readonly presentation?: "page" | "panel";
+} = {}) {
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
   const navigate = useNavigate();
-  const currentTab = parseTab(searchParams.tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT);
+  const account = useAccountPanel();
+  const currentTab = parseTab(presentation === "panel" ? account.current.panelTab : searchParams.tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT);
 
   function handleTabChange(value: string) {
-    void navigate({ to: "/settings", search: { tab: value }, replace: true });
+    if (presentation === "panel") void account.update({ panelTab: value });
+    else void navigate({ to: "/settings", search: { tab: value }, replace: true });
   }
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-          Account Settings
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Manage your account settings and preferences.
-        </p>
-      </div>
+      {presentation === "page" && <PageHeader
+        title="Account Settings"
+        description="Manage your account settings and preferences."
+      />}
 
       <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
-        <TabsList>
+        <TabsList className="max-w-full" aria-label="Account settings">
           <TabsTrigger value="profile">Profile</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>
           <TabsTrigger value="sessions">Sessions</TabsTrigger>

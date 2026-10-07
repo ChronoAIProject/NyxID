@@ -1,3 +1,4 @@
+import { isAssistantShellRoute, parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { isPublicPath } from "@/lib/public-paths";
 import { useCreditsDenialStore } from "@/stores/credits-denial-store";
@@ -103,8 +104,9 @@ export function creditsAttemptNonce(): string {
  * itself (the person is already where the dialog would send them). The
  * Nyxbot onboarding page is public but runs a foreground registration.
  */
-export function isCreditsDialogSuppressed(path: string): boolean {
+export function isCreditsDialogSuppressed(path: string, search: Record<string, unknown> = {}, billingRenderable = false): boolean {
   if (path === "/billing") return true;
+  if (billingRenderable && isAssistantShellRoute(path) && parseAccountPanelSearch(search).panel === "billing") return true;
   if (path === "/nyxbot/onboarding") return false;
   return (
     isPublicPath(path) || path === "/login/code" || path.startsWith("/connect/")
