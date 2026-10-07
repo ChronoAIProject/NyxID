@@ -1663,6 +1663,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             )),
         )
         .route(
+            "/thread-reply",
+            post(handlers::channel_relay::async_thread_reply).layer(DefaultBodyLimit::max(
+                crate::services::channel_media_service::request_body_limit(
+                    router_state
+                        .as_ref()
+                        .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
+                            state.config.channel_media_max_bytes
+                        }),
+                ),
+            )),
+        )
+        .route(
             "/messages/{message_id}/attachments/{index}",
             get(handlers::channel_relay::fetch_attachment),
         )

@@ -13,7 +13,9 @@ pub async fn validate_in_session(
 ) -> AppResult<NyxbotThread> {
     let b = origin.thread.as_deref().ok_or_else(not_found)?;
     let channel = fence(db, &origin.nyxbot_channel_id, owner, session).await?;
-    if channel.status != "active" || channel.transport != "direct" {
+    if channel.status != "active"
+        || !super::super::channel_thread_service::gateway::supports(&channel)
+    {
         return Err(not_found());
     }
     if let Some(org) = &channel.bot_owner_id
