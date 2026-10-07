@@ -326,7 +326,7 @@ pub async fn delegable_specialist(
     for agent in candidates {
         match super::org_agent_service::require_use(db, actor, &agent).await {
             Ok(()) => usable.push(agent),
-            Err(AppError::Forbidden(_)) => {}
+            Err(error) if error.is_forbidden() => {}
             Err(error) => return Err(error),
         }
     }

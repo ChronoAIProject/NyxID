@@ -369,7 +369,7 @@ impl PermissionHook for LiveBinding {
     async fn check(&self, _: HookContext<'_>, _: &Value) -> Result<HookDecision, HookFailure> {
         match check_live(&self.db, &self.binding).await {
             Ok(()) => Ok(HookDecision::Allow),
-            Err(AppError::Forbidden(_)) => Ok(HookDecision::Deny),
+            Err(error) if error.is_forbidden() => Ok(HookDecision::Deny),
             Err(_) => Err(HookFailure),
         }
     }

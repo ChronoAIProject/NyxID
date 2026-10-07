@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::crypto::jwt;
 use crate::crypto::token::hash_token;
-use crate::errors::{AppError, AppResult};
+use crate::errors::{AppError, AppResult, access_denial::CredentialType};
 use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
@@ -291,7 +291,7 @@ impl AuthUser {
             return Ok(());
         }
 
-        Err(AppError::Forbidden(format!(
+        Err(AppError::insufficient_scope(format!(
             "Missing required scope for proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}"
         )))
     }
@@ -301,7 +301,7 @@ impl AuthUser {
             return Ok(());
         }
 
-        Err(AppError::Forbidden(format!(
+        Err(AppError::insufficient_scope(format!(
             "Missing required scope for LLM proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}, {LLM_PROXY_SCOPE}"
         )))
     }
@@ -316,8 +316,8 @@ impl AuthUser {
         if self.can_write() {
             return Ok(());
         }
-        Err(AppError::Forbidden(
-            "write or admin scope required for this operation".to_string(),
+        Err(AppError::insufficient_scope(
+            "write or admin scope required for this operation",
         ))
     }
 
@@ -712,6 +712,16 @@ fn delegated_request_allowed(
         && !is_websocket_upgrade(headers)
 }
 
+// Distinguish a missing account:read scope from an excluded route/method.
+// Reuse the authorization predicate; this changes metadata, never admission.
+fn delegated_denial(method: &Method, path: &str, headers: &HeaderMap) -> AppError {
+    if delegated_request_allowed(method, path, headers, ACCOUNT_READ_SCOPE) {
+        AppError::insufficient_scope(DELEGATED_ENDPOINT_FORBIDDEN)
+    } else {
+        AppError::unsupported_credential(DELEGATED_ENDPOINT_FORBIDDEN, CredentialType::Delegated)
+    }
+}
+
 fn delegated_path_class(path: &str) -> String {
     api_v1_path_segments(path)
         .and_then(|segments| segments.first().map(|segment| (*segment).to_string()))
@@ -1104,9 +1114,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             &parts.headers,
                             &claims.scope,
                         ) {
-                            return Err(AppError::Forbidden(
-                                DELEGATED_ENDPOINT_FORBIDDEN.to_string(),
-                            ));
+                            return Err(delegated_denial(&parts.method, request_path, &parts.headers));
                         }
 
                         if !is_delegated_native_path(request_path) {
@@ -1460,8 +1468,9 @@ pub async fn reject_relay_tokens(
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_relay_request(&request) {
-        return Err(AppError::Forbidden(
-            "Relay tokens cannot access this endpoint".to_string(),
+        return Err(AppError::unsupported_credential(
+            "Relay tokens cannot access this endpoint",
+            CredentialType::Relay,
         ));
     }
     Ok(next.run(request).await)
@@ -1522,8 +1531,10 @@ pub async fn reject_delegated_tokens(
             .get::<OriginalUri>()
             .map_or_else(|| request.uri().path(), |uri| uri.path());
         if !delegated_request_allowed(request.method(), request_path, request.headers(), &scope) {
-            return Err(AppError::Forbidden(
-                DELEGATED_ENDPOINT_FORBIDDEN.to_string(),
+            return Err(delegated_denial(
+                request.method(),
+                request_path,
+                request.headers(),
             ));
         }
     }
@@ -1584,8 +1595,9 @@ pub async fn reject_service_account_tokens(
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_service_account_request(&request) {
-        return Err(AppError::Forbidden(
-            "Service accounts cannot access this endpoint".to_string(),
+        return Err(AppError::unsupported_credential(
+            "Service accounts cannot access this endpoint",
+            CredentialType::ServiceAccount,
         ));
     }
     Ok(next.run(request).await)
@@ -1617,8 +1629,9 @@ pub async fn reject_oauth_client_tokens(
             .get("client_id")
             .is_some_and(|value| !value.is_null())
     {
-        return Err(AppError::Forbidden(
-            "A first-party human account session is required".into(),
+        return Err(AppError::unsupported_credential(
+            "A first-party human account session is required",
+            CredentialType::OauthClient,
         ));
     }
     Ok(next.run(request).await)
@@ -1630,8 +1643,9 @@ pub async fn reject_api_key_tokens(
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_api_key_request(&request) {
-        return Err(AppError::Forbidden(
-            "API keys cannot access this endpoint".to_string(),
+        return Err(AppError::unsupported_credential(
+            "API keys cannot access this endpoint",
+            CredentialType::ApiKey,
         ));
     }
     Ok(next.run(request).await)
@@ -1714,7 +1728,8 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
                 Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
                     Ok(OptionalAuthUser(None))
                 }
-                Err(AppError::Forbidden(error)) => {
+                Err(AppError::Forbidden(error))
+                | Err(AppError::ForbiddenWithGuidance { message: error, .. }) => {
                     tracing::debug!(%error, "OptionalAuthUser rejected credentials");
                     Ok(OptionalAuthUser(None))
                 }
@@ -2487,7 +2502,7 @@ mod tests {
         db.drop().await.unwrap();
     }
 
-    fn delegated_fixture_api_key(
+    pub(super) fn delegated_fixture_api_key(
         id: &str,
         user_id: &str,
         key_hash: &str,
@@ -4329,3 +4344,7 @@ mod curation_purpose_regressions {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "auth_denial_tests.rs"]
+mod denial_tests;

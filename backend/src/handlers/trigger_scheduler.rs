@@ -270,7 +270,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     };
     match engine::require_enabled(&state.db, &run.user_id).await {
         Ok(()) => {}
-        Err(AppError::Forbidden(_) | AppError::NotFound(_)) => {
+        Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => {
             schedules::pause_target(&state.db, &trigger, "assistant_disabled").await?;
             return schedules::finish_claimed(
                 &state.db,

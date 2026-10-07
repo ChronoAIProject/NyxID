@@ -2651,10 +2651,11 @@ mod tests {
         ] {
             let mut denied = auth.clone();
             denied.auth_method = method;
-            assert!(matches!(
-                resolve_initiated_context(&fixture.state, &denied, "missing").await,
-                Err(AppError::Forbidden(_))
-            ));
+            assert!(
+                resolve_initiated_context(&fixture.state, &denied, "missing")
+                    .await
+                    .is_err_and(|error| error.is_forbidden())
+            );
         }
         let mut wrong = auth.clone();
         wrong.api_key_id = Some(Uuid::new_v4().to_string());
@@ -2794,10 +2795,11 @@ mod tests {
                 .unwrap();
         }
         auth.oauth_client_id = Some("external-app".into());
-        assert!(matches!(
-            resolve_initiated_context(&fixture.state, &auth, &fixture.conversation.id).await,
-            Err(AppError::Forbidden(_))
-        ));
+        assert!(
+            resolve_initiated_context(&fixture.state, &auth, &fixture.conversation.id)
+                .await
+                .is_err_and(|error| error.is_forbidden())
+        );
         let mut mismatch = fixture.bot.clone();
         mismatch.user_id = Uuid::new_v4().to_string();
         assert!(matches!(
