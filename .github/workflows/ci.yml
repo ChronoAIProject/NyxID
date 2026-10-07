@@ -72,6 +72,8 @@ jobs:
       sdk: ${{ steps.filter.outputs.sdk }}
       wizard: ${{ steps.filter.outputs.wizard }}
       cursor_plugin: ${{ steps.filter.outputs.cursor_plugin }}
+      codex_plugin: ${{ steps.filter.outputs.codex_plugin }}
+      claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       oracle_worker: ${{ steps.filter.outputs.oracle_worker }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
@@ -197,6 +199,18 @@ jobs:
               - 'integrations/cursor-plugin/**'
               - '.cursor-plugin/**'
               - 'scripts/validate-cursor-plugin.py'
+            codex_plugin:
+              - 'integrations/codex-plugin/**'
+              - 'integrations/plugin-source/**'
+              - '.agents/plugins/**'
+              - 'scripts/build-codex-plugin.sh'
+              - 'scripts/sync-plugins.py'
+            claude_plugin:
+              - 'integrations/claude-plugin/**'
+              - 'integrations/plugin-source/**'
+              - '.claude-plugin/**'
+              - 'scripts/validate-claude-plugin.py'
+              - 'scripts/sync-plugins.py'
             oracle_worker:
               - 'integrations/oracle/cdp-worker/**'
               - '.node-version'
@@ -258,6 +272,56 @@ jobs:
       - uses: actions/checkout@v6
       - name: Validate Cursor plugin
         run: python3 scripts/validate-cursor-plugin.py
+
+  # Codex / OpenAI plugin: generated files, manifest, MCP, skills, and
+  # package allowlist.
+  codex-plugin-validate:
+    name: Codex Plugin Validate
+    permissions:
+      contents: read
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.codex_plugin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check generated plugin files match integrations/plugin-source
+        run: python3 scripts/sync-plugins.py --check
+      - name: Validate Codex plugin
+        run: scripts/build-codex-plugin.sh --check
+
+  # Claude plugin: manifest, remote MCP, skills, and directory bundle limits.
+  # The repository-limit step runs on every PR because the Claude directory
+  # also reads repository-wide size and entry counts; the package steps run
+  # only when the plugin or its validator changes.
+  claude-plugin-validate:
+    name: Claude Plugin Validate
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: ubuntu-latest
+    env:
+      CLAUDE_CODE_VERSION: 2.1.284
+      PACKAGE_CHANGED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check repository limits for the Claude directory
+        run: python3 scripts/validate-claude-plugin.py --repo-only
+      - uses: actions/setup-node@v6
+        if: env.PACKAGE_CHANGED == 'true'
+        with:
+          node-version-file: .node-version
+      - name: Install pinned Claude Code
+        if: env.PACKAGE_CHANGED == 'true'
+        run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+      - name: Check generated plugin files match integrations/plugin-source
+        if: env.PACKAGE_CHANGED == 'true'
+        run: python3 scripts/sync-plugins.py --check
+      - name: Validate Claude plugin
+        if: env.PACKAGE_CHANGED == 'true'
+        run: python3 scripts/validate-claude-plugin.py --require-claude
+      - name: Validate Claude marketplace
+        if: env.PACKAGE_CHANGED == 'true'
+        run: claude plugin validate --strict .
 
   oracle-worker-test:
     name: Oracle Worker Test
@@ -1174,6 +1238,8 @@ jobs:
       - changes
       - workflow-permissions
       - cursor-plugin-validate
+      - codex-plugin-validate
+      - claude-plugin-validate
       - oracle-worker-test
       - rust-fmt
       - rust-clippy
@@ -1203,6 +1269,8 @@ jobs:
             changes=${{ needs.changes.result }}
             workflow-permissions=${{ needs.workflow-permissions.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
+            codex-plugin-validate=${{ needs.codex-plugin-validate.result }}
+            claude-plugin-validate=${{ needs.claude-plugin-validate.result }}
             oracle-worker-test=${{ needs.oracle-worker-test.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}

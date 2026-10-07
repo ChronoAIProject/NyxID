@@ -19,6 +19,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 pub struct Resolved {
+    pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     pub key: Zeroizing<String>,
     pub identity: String,
     pub voice: String,
@@ -233,6 +234,7 @@ pub async fn resolve(
         .as_bytes(),
     );
     Ok(Resolved {
+        concurrency_policy: service.concurrency_policy.clone(),
         voice,
         key,
         identity,

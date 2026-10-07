@@ -52,6 +52,398 @@ const TWITTER_DEFAULT_SCOPES: &[&str] = &[
     "media.write",
 ];
 
+/// OAuth providers with fixed authorization and token endpoints. These
+/// definitions intentionally stop at the OAuth contract; provider-specific API
+/// operation overlays can be added without changing the connection flow. Providers that need a tenant, data-center,
+/// merchant, bot, or user-entered host are kept out of this registry until
+/// NyxID can collect and bind those values safely.
+struct ManagedOAuthProviderSeed {
+    slug: &'static str,
+    name: &'static str,
+    description: &'static str,
+    authorization_url: &'static str,
+    token_url: &'static str,
+    documentation_url: &'static str,
+    supports_pkce: bool,
+    token_endpoint_auth_method: &'static str,
+    token_request_encoding: Option<&'static str>,
+    default_scopes: Option<&'static [&'static str]>,
+    extra_auth_params: Option<&'static [(&'static str, &'static str)]>,
+    client_id_param_name: Option<&'static str>,
+}
+
+const MANAGED_OAUTH_PROVIDER_SEEDS: &[ManagedOAuthProviderSeed] = &[
+    ManagedOAuthProviderSeed {
+        slug: "airtable",
+        name: "Airtable",
+        description: "Airtable account access via OAuth 2.0",
+        authorization_url: "https://airtable.com/oauth2/v1/authorize",
+        token_url: "https://airtable.com/oauth2/v1/token",
+        documentation_url: "https://airtable.com/developers/web/api/oauth-reference",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["schema.bases:read", "data.records:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "asana",
+        name: "Asana",
+        description: "Asana account access via OAuth 2.0",
+        authorization_url: "https://app.asana.com/-/oauth_authorize",
+        token_url: "https://app.asana.com/-/oauth_token",
+        documentation_url: "https://developers.asana.com/docs/oauth",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["workspaces:read", "projects:read", "tasks:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "attio",
+        name: "Attio",
+        description: "Attio account access via OAuth 2.0",
+        authorization_url: "https://app.attio.com/authorize",
+        token_url: "https://app.attio.com/oauth/token",
+        documentation_url: "https://docs.attio.com/docs/authentication",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "bitbucket",
+        name: "Bitbucket",
+        description: "Bitbucket account access via OAuth 2.0",
+        authorization_url: "https://bitbucket.org/site/oauth2/authorize",
+        token_url: "https://bitbucket.org/site/oauth2/access_token",
+        documentation_url: "https://developer.atlassian.com/cloud/bitbucket/oauth-2/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["account"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "box",
+        name: "Box",
+        description: "Box account access via OAuth 2.0",
+        authorization_url: "https://account.box.com/api/oauth2/authorize",
+        token_url: "https://api.box.com/oauth2/token",
+        documentation_url: "https://developer.box.com/guides/authentication/oauth2/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "calendly",
+        name: "Calendly",
+        description: "Calendly account access via OAuth 2.0",
+        authorization_url: "https://auth.calendly.com/oauth/authorize",
+        token_url: "https://auth.calendly.com/oauth/token",
+        documentation_url: "https://developer.calendly.com/creating-an-oauth-app",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "capsule-crm",
+        name: "Capsule CRM",
+        description: "Capsule CRM account access via OAuth 2.0",
+        authorization_url: "https://api.capsulecrm.com/oauth/authorise",
+        token_url: "https://api.capsulecrm.com/oauth/token",
+        documentation_url: "https://developer.capsulecrm.com/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "clickup",
+        name: "ClickUp",
+        description: "ClickUp account access via OAuth 2.0",
+        authorization_url: "https://app.clickup.com/api/v2/oauth/authorize",
+        token_url: "https://api.clickup.com/api/v2/oauth/token",
+        documentation_url: "https://developer.clickup.com/docs/authentication",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("json"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "crowdin",
+        name: "Crowdin",
+        description: "Crowdin account access via OAuth 2.0",
+        authorization_url: "https://accounts.crowdin.com/oauth/authorize",
+        token_url: "https://accounts.crowdin.com/oauth/token",
+        documentation_url: "https://support.crowdin.com/developer/authorizing-oauth-apps/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("json"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "dialpad",
+        name: "Dialpad",
+        description: "Dialpad account access via OAuth 2.0",
+        authorization_url: "https://dialpad.com/oauth2/authorize",
+        token_url: "https://dialpad.com/oauth2/token",
+        documentation_url: "https://developers.dialpad.com/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "dropbox",
+        name: "Dropbox",
+        description: "Dropbox account access via OAuth 2.0",
+        authorization_url: "https://www.dropbox.com/oauth2/authorize",
+        token_url: "https://api.dropboxapi.com/oauth2/token",
+        documentation_url: "https://developers.dropbox.com/oauth-guide",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: Some(&[("token_access_type", "offline")]),
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "eventbrite",
+        name: "Eventbrite",
+        description: "Eventbrite account access via OAuth 2.0",
+        authorization_url: "https://www.eventbrite.com/oauth/authorize",
+        token_url: "https://www.eventbrite.com/oauth/token",
+        documentation_url: "https://www.eventbrite.com/platform/api",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "figma",
+        name: "Figma",
+        description: "Figma account access via OAuth 2.0",
+        authorization_url: "https://www.figma.com/oauth",
+        token_url: "https://api.figma.com/v1/oauth/token",
+        documentation_url: "https://www.figma.com/developers/api#oauth2",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["file_content:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "gitlab",
+        name: "GitLab",
+        description: "GitLab account access via OAuth 2.0",
+        authorization_url: "https://gitlab.com/oauth/authorize",
+        token_url: "https://gitlab.com/oauth/token",
+        documentation_url: "https://docs.gitlab.com/api/oauth2/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["read_user"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "hubspot",
+        name: "HubSpot",
+        description: "HubSpot account access via OAuth 2.0",
+        authorization_url: "https://app.hubspot.com/oauth/authorize",
+        token_url: "https://api.hubapi.com/oauth/v1/token",
+        documentation_url: "https://developers.hubspot.com/docs/api/oauth-quickstart",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["oauth"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "intercom",
+        name: "Intercom",
+        description: "Intercom account access via OAuth 2.0",
+        authorization_url: "https://app.intercom.com/oauth",
+        token_url: "https://api.intercom.io/auth/eagle/token",
+        documentation_url: "https://developers.intercom.com/docs/build-an-integration/learn-more/authentication",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "jira",
+        name: "Jira Cloud",
+        description: "Jira Cloud account access via OAuth 2.0",
+        authorization_url: "https://auth.atlassian.com/authorize",
+        token_url: "https://auth.atlassian.com/oauth/token",
+        documentation_url: "https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("json"),
+        default_scopes: Some(&[
+            "read:me",
+            "read:jira-user",
+            "read:jira-work",
+            "offline_access",
+        ]),
+        extra_auth_params: Some(&[("audience", "api.atlassian.com"), ("prompt", "consent")]),
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "linear",
+        name: "Linear",
+        description: "Linear account access via OAuth 2.0",
+        authorization_url: "https://linear.app/oauth/authorize",
+        token_url: "https://api.linear.app/oauth/token",
+        documentation_url: "https://linear.app/developers/oauth-2-0-authentication",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "miro",
+        name: "Miro",
+        description: "Miro account access via OAuth 2.0",
+        authorization_url: "https://miro.com/oauth/authorize",
+        token_url: "https://api.miro.com/v1/oauth/token",
+        documentation_url: "https://developers.miro.com/docs/oauth",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["boards:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "pagerduty",
+        name: "PagerDuty",
+        description: "PagerDuty account access via OAuth 2.0",
+        authorization_url: "https://identity.pagerduty.com/oauth/authorize",
+        token_url: "https://identity.pagerduty.com/oauth/token",
+        documentation_url: "https://developer.pagerduty.com/docs/ZG9jOjExMDI5NTU5-oauth-2",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "productboard",
+        name: "Productboard",
+        description: "Productboard account access via OAuth 2.0",
+        authorization_url: "https://app.productboard.com/oauth2/authorize",
+        token_url: "https://app.productboard.com/oauth2/token",
+        documentation_url: "https://developer.productboard.com/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "sentry",
+        name: "Sentry",
+        description: "Sentry account access via OAuth 2.0",
+        authorization_url: "https://sentry.io/oauth/authorize/",
+        token_url: "https://sentry.io/oauth/token/",
+        documentation_url: "https://docs.sentry.io/api/auth/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["org:read", "project:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "shippo",
+        name: "Shippo",
+        description: "Shippo account access via OAuth 2.0",
+        authorization_url: "https://goshippo.com/oauth/authorize",
+        token_url: "https://goshippo.com/oauth/access_token",
+        documentation_url: "https://docs.goshippo.com/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "square",
+        name: "Square",
+        description: "Square account access via OAuth 2.0",
+        authorization_url: "https://connect.squareup.com/oauth2/authorize",
+        token_url: "https://connect.squareup.com/oauth2/token",
+        documentation_url: "https://developer.squareup.com/docs/oauth-api/how-oauth-works",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("json"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "todoist",
+        name: "Todoist",
+        description: "Todoist account access via OAuth 2.0",
+        authorization_url: "https://app.todoist.com/oauth/authorize",
+        token_url: "https://api.todoist.com/oauth/access_token",
+        documentation_url: "https://developer.todoist.com/api/v1/#tag/Authorization/OAuth",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["data:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "zoom",
+        name: "Zoom",
+        description: "Zoom account access via OAuth 2.0",
+        authorization_url: "https://zoom.us/oauth/authorize",
+        token_url: "https://zoom.us/oauth/token",
+        documentation_url: "https://developers.zoom.us/docs/integrations/oauth/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["user:read:user"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+];
+
 /// Seed default AI provider configurations at startup (idempotent).
 ///
 /// Checks for each provider by slug; if it does not exist, inserts it.
@@ -717,6 +1109,103 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    for (slug, name, description, authorization_url, token_url, documentation_url) in [
+        (
+            "cloudflare",
+            "Cloudflare",
+            "Manage Cloudflare accounts, zones, DNS, and Workers through OAuth. API permissions and account access are selected in Cloudflare.",
+            "https://dash.cloudflare.com/oauth2/auth",
+            "https://dash.cloudflare.com/oauth2/token",
+            "https://developers.cloudflare.com/fundamentals/oauth/",
+        ),
+        (
+            "supabase-management",
+            "Supabase Management",
+            "Manage Supabase organizations and projects through OAuth. Project database access uses the separate Supabase Data API connector.",
+            "https://api.supabase.com/v1/oauth/authorize",
+            "https://api.supabase.com/v1/oauth/token",
+            "https://supabase.com/docs/guides/integrations/build-a-supabase-integration",
+        ),
+        (
+            "railway",
+            "Railway",
+            "Manage selected Railway workspaces and projects through OAuth and the GraphQL API. Viewer permissions are requested by default.",
+            "https://backboard.railway.com/oauth/auth",
+            "https://backboard.railway.com/oauth/token",
+            "https://docs.railway.com/integrations/oauth",
+        ),
+    ] {
+        if slug_exists!(slug) {
+            continue;
+        }
+        let revocation_url =
+            (slug == "cloudflare").then(|| "https://dash.cloudflare.com/oauth2/revoke".to_string());
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(authorization_url.to_string()),
+            token_url: Some(token_url.to_string()),
+            revocation: revocation_url.as_ref().map(|url| RevocationConfig {
+                request_encoding: "form".to_string(),
+                style: "rfc7009".to_string(),
+                url: url.clone(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
+            revocation_url,
+            default_scopes: match slug {
+                "cloudflare" => Some(vec!["openid".to_string(), "offline_access".to_string()]),
+                "railway" => Some(
+                    [
+                        "openid",
+                        "email",
+                        "profile",
+                        "offline_access",
+                        "project:viewer",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+                // Supabase configures permissions on the registered app; its
+                // authorize `scope` parameter is deprecated.
+                _ => None,
+            },
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(documentation_url.to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: Some("form".to_string()),
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: slug != "supabase-management",
+            extra_auth_params: (slug == "railway")
+                .then(|| HashMap::from([("prompt".to_string(), "consent".to_string())])),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: i32::from(slug == "cloudflare"),
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug, "Seeded cloud OAuth provider");
+        seeded_count += 1;
+    }
+
     // Telnyx (API Key)
     if !slug_exists!("telnyx") {
         let provider = ProviderConfig {
@@ -1068,6 +1557,24 @@ pub async fn seed_default_providers(
         tracing::info!(
             count = social_user_mode_migration.modified_count,
             "Migrated existing seeded social providers to credential_mode=user"
+        );
+    }
+
+    // LinkedIn was seeded with PKCE on, which makes every token exchange
+    // fail with `invalid_client` (see the LinkedIn seed below).
+    let linkedin_pkce_migration = collection
+        .update_one(
+            doc! { "slug": "linkedin", "supports_pkce": true },
+            doc! { "$set": {
+                "supports_pkce": false,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if linkedin_pkce_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "linkedin",
+            "Migrated LinkedIn provider to supports_pkce=false"
         );
     }
 
@@ -1429,7 +1936,10 @@ pub async fn seed_default_providers(
             ]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
-            supports_pkce: true,
+            // LinkedIn's confidential web flow rejects a token request that
+            // carries `code_verifier` with `invalid_client`; PKCE exists only
+            // on its separate native flow.
+            supports_pkce: false,
             device_code_url: None,
             device_token_url: None,
             device_verification_url: None,
@@ -2648,6 +3158,65 @@ pub async fn seed_default_providers(
         );
     }
 
+    // Managed OAuth connectors with fixed provider endpoints. Keep
+    // these in a data-driven registry so adding a connector cannot silently
+    // diverge from the standard provider defaults. Client credentials remain
+    // operator-configured; `both` permits a BYO app when a deployment has not
+    // provisioned a NyxID platform app yet.
+    for seed in MANAGED_OAUTH_PROVIDER_SEEDS {
+        if slug_exists!(seed.slug) {
+            continue;
+        }
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: seed.slug.to_string(),
+            name: seed.name.to_string(),
+            description: Some(seed.description.to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(seed.authorization_url.to_string()),
+            token_url: Some(seed.token_url.to_string()),
+            revocation_url: None,
+            revocation: None,
+            default_scopes: seed
+                .default_scopes
+                .map(|scopes| scopes.iter().map(|scope| (*scope).to_string()).collect()),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: seed.supports_pkce,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(seed.documentation_url.to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: seed.token_endpoint_auth_method.to_string(),
+            token_request_encoding: seed.token_request_encoding.map(str::to_string),
+            oauth_request_headers: HashMap::new(),
+            supports_oauth_scopes: true,
+            extra_auth_params: seed.extra_auth_params.map(|params| {
+                params
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect()
+            }),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: seed.client_id_param_name.map(str::to_string),
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = seed.slug, "Seeded managed OAuth provider");
+        seeded_count += 1;
+    }
+
     backfill_provider_revocation(&collection).await?;
 
     for adapter in super::channel_adapters::registered_adapters(&std::sync::Arc::new(
@@ -3245,6 +3814,42 @@ const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
     },
 ];
 
+macro_rules! managed_oauth_service_seed {
+    ($provider:literal, $slug:literal, $name:literal, $base_url:literal, $homepage:literal) => {
+        DefaultServiceSeed {
+            provider_slug: $provider,
+            service_slug: concat!("api-", $slug),
+            service_name: $name,
+            base_url: $base_url,
+            injection_method: "bearer",
+            injection_key: "Authorization",
+            service_auth_method: None,
+            service_auth_key_name: None,
+            description: Some(concat!($name, " account access through NyxID OAuth 2.0.")),
+            default_request_headers: None,
+            service_category: "connection",
+            requires_user_credential: true,
+            homepage_url: Some($homepage),
+            auth_notes: Some(
+                "Connect with the provider's OAuth consent screen. Configure a NyxID-owned OAuth app (or use a BYO app) with the callback URL shown by NyxID.",
+            ),
+            known_limitations: Some(
+                "This initial connector seeds the OAuth connection and generic proxy base URL. Provider-specific operation overlays and least-privilege scope menus are added separately after endpoint verification.",
+            ),
+        }
+    };
+}
+
+/// LinkedIn's Rest.li endpoints (including `/v2/ugcPosts`, used by the
+/// hosted `create_post` tool) require `X-Restli-Protocol-Version: 2.0.0`.
+/// Overridable so a caller pinning its own protocol version still wins.
+const LINKEDIN_DEFAULT_HEADERS: &[SeededHeader] = &[SeededHeader {
+    name: "X-Restli-Protocol-Version",
+    value: "2.0.0",
+    overridable: true,
+    sensitive: false,
+}];
+
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "ifttt-mcp",
@@ -3578,6 +4183,75 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
     },
     DefaultServiceSeed {
+        provider_slug: "cloudflare",
+        service_slug: "api-cloudflare",
+        service_name: "Cloudflare",
+        base_url: "https://api.cloudflare.com/client/v4",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Cloudflare account, zone, DNS, and Workers management through an OAuth connection.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.cloudflare.com"),
+        auth_notes: Some(
+            "Register a confidential Cloudflare OAuth client using client_secret_basic. Configure API permissions on that client; users select accounts and optional permissions during consent. NyxID uses PKCE and requests offline_access for refresh tokens.",
+        ),
+        known_limitations: Some(
+            "Private OAuth clients are restricted to members of the client's Cloudflare account. A managed client serving other accounts must be public and verify its publisher domain. Account administrators may block new public OAuth authorizations. The hosted overlay covers account, zone, and DNS reads; other APIs remain available through the generic proxy.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "supabase-management",
+        service_slug: "api-supabase-management",
+        service_name: "Supabase Management",
+        base_url: "https://api.supabase.com/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Supabase organization and project management through OAuth, including infrastructure configuration and provisioning.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://supabase.com"),
+        auth_notes: Some(
+            "Create an OAuth app in Supabase organization settings. Permissions are configured on the app, so NyxID omits the deprecated scope parameter. Token exchange and refresh use form encoding, HTTP Basic authentication, and PKCE.",
+        ),
+        known_limitations: Some(
+            "Management OAuth tokens are not project Data API keys or end-user Supabase Auth JWTs. Use api-supabase with a project URL and API key for table access. Changing app permissions requires users to reauthorize. Revoke the app in Supabase when remote access must be removed; no revocation endpoint is seeded.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "railway",
+        service_slug: "api-railway",
+        service_name: "Railway",
+        base_url: "https://backboard.railway.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Railway GraphQL API access to selected projects and workspaces through OAuth. Viewer access is the default; request member scopes to manage resources.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://railway.com"),
+        auth_notes: Some(
+            "Register a Web OAuth app in Railway workspace settings > Developer. NyxID uses HTTP Basic authentication and PKCE. openid is required; offline_access plus prompt=consent obtains rotating refresh tokens. API requests are JSON POSTs to /graphql/v2.",
+        ),
+        known_limitations: Some(
+            "Users choose which projects or workspaces to share; token access is capped by their actual role. Access tokens expire after one hour. Arbitrary GraphQL requests may contain mutations and are marked as requiring approval in the hosted overlay. Revoke remote access in Railway Account Settings > Apps; no revocation endpoint is seeded.",
+        ),
+    },
+    DefaultServiceSeed {
         provider_slug: "twitter",
         service_slug: "api-twitter",
         service_name: "Twitter / X API",
@@ -3868,7 +4542,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         description: Some(
             "LinkedIn profile and publishing tools for AI agents. Read the connected member profile and create posts with explicit approval.",
         ),
-        default_request_headers: None,
+        default_request_headers: Some(LINKEDIN_DEFAULT_HEADERS),
         service_category: "connection",
         requires_user_credential: true,
         homepage_url: Some("https://www.linkedin.com"),
@@ -4291,6 +4965,188 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         auth_notes: None,
         known_limitations: None,
     },
+    managed_oauth_service_seed!(
+        "airtable",
+        "airtable",
+        "Airtable",
+        "https://api.airtable.com/v0",
+        "https://airtable.com"
+    ),
+    managed_oauth_service_seed!(
+        "asana",
+        "asana",
+        "Asana",
+        "https://app.asana.com/api/1.0",
+        "https://asana.com"
+    ),
+    managed_oauth_service_seed!(
+        "attio",
+        "attio",
+        "Attio",
+        "https://api.attio.com/v2",
+        "https://attio.com"
+    ),
+    managed_oauth_service_seed!(
+        "bitbucket",
+        "bitbucket",
+        "Bitbucket",
+        "https://api.bitbucket.org/2.0",
+        "https://bitbucket.org"
+    ),
+    managed_oauth_service_seed!(
+        "box",
+        "box",
+        "Box",
+        "https://api.box.com/2.0",
+        "https://www.box.com"
+    ),
+    managed_oauth_service_seed!(
+        "calendly",
+        "calendly",
+        "Calendly",
+        "https://api.calendly.com",
+        "https://calendly.com"
+    ),
+    managed_oauth_service_seed!(
+        "capsule-crm",
+        "capsule-crm",
+        "Capsule CRM",
+        "https://api.capsulecrm.com/api/v2",
+        "https://capsulecrm.com"
+    ),
+    managed_oauth_service_seed!(
+        "clickup",
+        "clickup",
+        "ClickUp",
+        "https://api.clickup.com/api/v2",
+        "https://clickup.com"
+    ),
+    managed_oauth_service_seed!(
+        "crowdin",
+        "crowdin",
+        "Crowdin",
+        "https://api.crowdin.com/api/v2",
+        "https://crowdin.com"
+    ),
+    managed_oauth_service_seed!(
+        "dialpad",
+        "dialpad",
+        "Dialpad",
+        "https://dialpad.com/api/v2",
+        "https://dialpad.com"
+    ),
+    managed_oauth_service_seed!(
+        "dropbox",
+        "dropbox",
+        "Dropbox",
+        "https://api.dropboxapi.com/2",
+        "https://www.dropbox.com"
+    ),
+    managed_oauth_service_seed!(
+        "eventbrite",
+        "eventbrite",
+        "Eventbrite",
+        "https://www.eventbriteapi.com/v3",
+        "https://www.eventbrite.com"
+    ),
+    managed_oauth_service_seed!(
+        "figma",
+        "figma",
+        "Figma",
+        "https://api.figma.com/v1",
+        "https://www.figma.com"
+    ),
+    managed_oauth_service_seed!(
+        "gitlab",
+        "gitlab",
+        "GitLab",
+        "https://gitlab.com/api/v4",
+        "https://gitlab.com"
+    ),
+    managed_oauth_service_seed!(
+        "hubspot",
+        "hubspot",
+        "HubSpot",
+        "https://api.hubapi.com",
+        "https://www.hubspot.com"
+    ),
+    managed_oauth_service_seed!(
+        "intercom",
+        "intercom",
+        "Intercom",
+        "https://api.intercom.io",
+        "https://www.intercom.com"
+    ),
+    managed_oauth_service_seed!(
+        "jira",
+        "jira",
+        "Jira Cloud",
+        "https://api.atlassian.com",
+        "https://www.atlassian.com/software/jira"
+    ),
+    managed_oauth_service_seed!(
+        "linear",
+        "linear",
+        "Linear",
+        "https://api.linear.app",
+        "https://linear.app"
+    ),
+    managed_oauth_service_seed!(
+        "miro",
+        "miro",
+        "Miro",
+        "https://api.miro.com/v2",
+        "https://miro.com"
+    ),
+    managed_oauth_service_seed!(
+        "pagerduty",
+        "pagerduty",
+        "PagerDuty",
+        "https://api.pagerduty.com",
+        "https://www.pagerduty.com"
+    ),
+    managed_oauth_service_seed!(
+        "productboard",
+        "productboard",
+        "Productboard",
+        "https://api.productboard.com",
+        "https://www.productboard.com"
+    ),
+    managed_oauth_service_seed!(
+        "sentry",
+        "sentry",
+        "Sentry",
+        "https://sentry.io/api/0",
+        "https://sentry.io"
+    ),
+    managed_oauth_service_seed!(
+        "shippo",
+        "shippo",
+        "Shippo",
+        "https://api.goshippo.com",
+        "https://goshippo.com"
+    ),
+    managed_oauth_service_seed!(
+        "square",
+        "square",
+        "Square",
+        "https://connect.squareup.com/v2",
+        "https://squareup.com"
+    ),
+    managed_oauth_service_seed!(
+        "todoist",
+        "todoist",
+        "Todoist",
+        "https://api.todoist.com/api/v1",
+        "https://todoist.com"
+    ),
+    managed_oauth_service_seed!(
+        "zoom",
+        "zoom",
+        "Zoom",
+        "https://api.zoom.us/v2",
+        "https://zoom.us"
+    ),
 ];
 
 /// Apply per-slug capability / streaming overrides to pre-existing seeded
@@ -5382,6 +6238,7 @@ pub async fn seed_default_services(
                     username: "x-access-token".into(),
                 }
             }),
+            concurrency_policy: None,
             inference_admin_modified: false,
             auth_notes: seed.auth_notes.map(String::from),
             known_limitations: seed.known_limitations.map(String::from),
@@ -6747,9 +7604,10 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, NOTION_DEFAULT_HEADERS,
-        OPENROUTER_DEFAULT_HEADERS, SeededHeader, normalize_telegram_bot_token,
-        normalize_telegram_bot_username, reconcile_seeded_headers, seed_capability_override,
+        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, MANAGED_OAUTH_PROVIDER_SEEDS,
+        NOTION_DEFAULT_HEADERS, OPENROUTER_DEFAULT_HEADERS, SeededHeader,
+        normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
+        seed_capability_override,
     };
     use crate::errors::AppError;
     use crate::models::default_request_header::DefaultRequestHeader;
@@ -8439,6 +9297,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn managed_oauth_registry_is_static_and_excludes_google_super() {
+        let mut slugs = std::collections::HashSet::new();
+        for seed in MANAGED_OAUTH_PROVIDER_SEEDS {
+            assert!(seed.authorization_url.starts_with("https://"));
+            assert!(seed.token_url.starts_with("https://"));
+            assert!(
+                slugs.insert(seed.slug),
+                "duplicate managed OAuth provider slug: {}",
+                seed.slug
+            );
+            assert_ne!(seed.slug, "googlesuper");
+        }
+        assert!(slugs.len() >= 20);
+    }
+
+    #[test]
+    fn managed_oauth_services_have_matching_provider_seeds() {
+        for seed in DEFAULT_SERVICE_SEEDS {
+            if !seed.service_slug.starts_with("api-") {
+                continue;
+            }
+            let Some(provider) = MANAGED_OAUTH_PROVIDER_SEEDS
+                .iter()
+                .find(|provider| provider.slug == seed.provider_slug)
+            else {
+                continue;
+            };
+            assert_eq!(
+                seed.service_slug,
+                format!("api-{}", provider.slug),
+                "managed OAuth service slug must be derived from its provider"
+            );
+            assert!(seed.requires_user_credential);
+        }
+    }
+
     // ── update_provider integration tests ──────────────────────────
 
     #[tokio::test]
@@ -9735,6 +10630,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_oauth_seeding_preserves_operator_settings_and_data_api() {
+        let db = seed_default_catalog("cloud_oauth_seeding")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+        let client_id = enc.encrypt(b"configured-cloud-client").await.unwrap();
+        let client_secret = enc.encrypt(b"configured-cloud-secret").await.unwrap();
+        let mut identities = Vec::new();
+        for (slug, service_slug) in [
+            ("cloudflare", "api-cloudflare"),
+            ("supabase-management", "api-supabase-management"),
+            ("railway", "api-railway"),
+        ] {
+            let mut provider = super::get_provider_by_slug(&db, slug).await.unwrap();
+            let service = services
+                .find_one(doc! { "slug": service_slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(provider.credential_mode, "both");
+            assert!(provider.supports_pkce);
+            assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+            assert_eq!(
+                service.provider_config_id.as_deref(),
+                Some(provider.id.as_str())
+            );
+            assert_eq!(service.service_category, "connection");
+            assert!(service.requires_user_credential);
+            let requirement = requirements
+                .find_one(doc! { "service_id": &service.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(requirement.provider_config_id, provider.id);
+            assert_eq!(requirement.injection_method, "bearer");
+            assert_eq!(requirement.injection_key.as_deref(), Some("Authorization"));
+            assert!(crate::services::catalog_spec_registry::spec_for_slug(service_slug).is_some());
+            identities.push((slug, provider.id.clone(), service_slug, service.id));
+            provider.credential_mode = "admin".into();
+            provider.client_id_encrypted = Some(client_id.clone());
+            provider.client_secret_encrypted = Some(client_secret.clone());
+            providers
+                .replace_one(doc! { "_id": &provider.id }, provider)
+                .await
+                .unwrap();
+        }
+        let provider_count = providers.count_documents(doc! {}).await.unwrap();
+        let service_count = services.count_documents(doc! {}).await.unwrap();
+        for _ in 0..2 {
+            super::seed_default_providers(&db, &enc).await.unwrap();
+            super::seed_default_services(&db, &enc).await.unwrap();
+            for (slug, provider_id, service_slug, service_id) in &identities {
+                let provider = super::get_provider_by_slug(&db, slug).await.unwrap();
+                assert_eq!(&provider.id, provider_id);
+                assert_eq!(provider.credential_mode, "admin");
+                assert_eq!(provider.client_id_encrypted.as_ref(), Some(&client_id));
+                assert_eq!(
+                    provider.client_secret_encrypted.as_ref(),
+                    Some(&client_secret)
+                );
+                let service = services
+                    .find_one(doc! { "slug": *service_slug })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(&service.id, service_id);
+                assert_eq!(
+                    requirements
+                        .count_documents(doc! { "service_id": service_id })
+                        .await
+                        .unwrap(),
+                    1
+                );
+            }
+        }
+        assert_eq!(
+            providers.count_documents(doc! {}).await.unwrap(),
+            provider_count
+        );
+        assert_eq!(
+            services.count_documents(doc! {}).await.unwrap(),
+            service_count
+        );
+        let data_provider = super::get_provider_by_slug(&db, "supabase").await.unwrap();
+        assert_eq!(data_provider.provider_type, "api_key");
+        assert!(data_provider.requires_gateway_url);
+        let data_service = services
+            .find_one(doc! { "slug": "api-supabase" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(data_service.auth_method, "header");
+        assert_eq!(data_service.auth_key_name, "apikey");
+    }
+
+    #[tokio::test]
     async fn seed_default_providers_creates_known_slugs() {
         let Some(db) = connect_test_database("prov_svc_seed_slugs").await else {
             eprintln!("skipping: no MongoDB");
@@ -9752,6 +10746,9 @@ mod tests {
             "cohere",
             "deepseek",
             "supabase",
+            "supabase-management",
+            "cloudflare",
+            "railway",
             "elevenlabs",
             "twilio",
             "twitter",
@@ -10013,6 +11010,43 @@ mod tests {
                 "{slug} must stay credential_mode=both across startup seed runs"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn seed_turns_off_linkedin_pkce_and_adds_restli_header() {
+        let Some(db) = seed_default_catalog("prov_svc_linkedin_pkce").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+
+        // Existing installs carry the old PKCE-on seed value.
+        providers
+            .update_one(
+                doc! { "slug": "linkedin" },
+                doc! { "$set": { "supports_pkce": true } },
+            )
+            .await
+            .unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+
+        let linkedin = providers
+            .find_one(doc! { "slug": "linkedin" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!linkedin.supports_pkce);
+
+        let service = services
+            .find_one(doc! { "slug": "api-linkedin" })
+            .await
+            .unwrap()
+            .unwrap();
+        let headers = service.default_request_headers.unwrap_or_default();
+        assert!(headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("x-restli-protocol-version") && h.value == "2.0.0"
+        }));
     }
 
     #[tokio::test]

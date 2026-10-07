@@ -52,6 +52,7 @@
         // AI Services (unified key management)
         crate::handlers::keys::create_key,
         crate::handlers::keys::list_keys,
+        crate::handlers::service_insights::get_insights,
         crate::handlers::keys::get_key,
         crate::handlers::keys::get_key_authorization,
         crate::handlers::keys::update_key,

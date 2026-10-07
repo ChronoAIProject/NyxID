@@ -7,6 +7,8 @@ import {
 } from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { ADMIN_CREDITS_TABS, ADMIN_CREDITS_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -103,6 +105,9 @@ const SCHEDULE_DEFAULTS: ScheduleForm = {
 const GRANTS_PER_PAGE = 50;
 
 export function AdminCreditsPage() {
+  const search = useSearch({ strict: false });
+  const navigate = useNavigate();
+  const tab = parseTab(search.tab, ADMIN_CREDITS_TABS, ADMIN_CREDITS_TAB_DEFAULT);
   const currentUser = useAuthStore((state) => state.user);
   const canWrite = canAdminWrite(currentUser);
   const canManageGrants = canManageCreditGrants(currentUser);
@@ -420,7 +425,9 @@ export function AdminCreditsPage() {
         description="Manage promotional credit grants, recurring credit schedules, and free usage allowances."
       />
 
-      <Tabs defaultValue="grants">
+      <Tabs value={tab} onValueChange={(value) => {
+        void navigate({ to: "/admin/credits", search: { tab: value }, replace: true });
+      }}>
         <TabsList>
           <TabsTrigger value="grants">Credit grants</TabsTrigger>
           <TabsTrigger value="allowances">Free allowances</TabsTrigger>

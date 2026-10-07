@@ -418,11 +418,62 @@ pub(crate) fn build_effective_outbound_headers(
         });
     }
     outbound_headers.extend(delegated_headers.iter().cloned());
-    for (name, value) in extra_outbound_headers {
-        outbound_headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-        outbound_headers.push((name.clone(), value.clone()));
+    apply_server_owned_headers(outbound_headers, extra_outbound_headers)
+}
+
+pub(crate) fn apply_server_owned_headers(
+    mut headers: Vec<(String, String)>,
+    server_owned_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    for (name, value) in server_owned_headers {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
     }
-    outbound_headers
+    headers
+}
+
+/// Request-local bearer material. Never persisted in MCP sessions or exposed by Debug.
+#[derive(Clone)]
+pub(crate) struct CallerToken(zeroize::Zeroizing<String>);
+
+impl std::ops::Deref for CallerToken {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for CallerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallerToken([REDACTED])")
+    }
+}
+
+/// The REST passthrough contract: only a supplied Bearer header, never a
+/// synthesized token or an x-api-key. Scheduled invocation credentials stay
+/// inside NyxID. Authentication must succeed before using this value.
+pub(crate) fn caller_bearer_token_for_downstream(
+    headers: &axum::http::HeaderMap,
+    scheduled_invocation: bool,
+) -> Option<CallerToken> {
+    if scheduled_invocation {
+        return None;
+    }
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|value| CallerToken(zeroize::Zeroizing::new(value.to_owned())))
+}
+
+/// Credential ownership follows the resolved service, falling back to the
+/// authenticated proxy principal (the effective owner for a service account).
+/// This is independent of the caller subject and the eventual billing payer.
+pub(crate) fn delegated_credential_owner<'a>(
+    proxy_resolution_user_id: &'a str,
+    effective_service_owner: Option<&'a str>,
+) -> &'a str {
+    effective_service_owner.unwrap_or(proxy_resolution_user_id)
 }
 
 /// A server-owned Authorization header must survive caller bearer forwarding.
@@ -492,6 +543,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     // when they are absent.
     "http-referer",
     "x-title",
+    // LinkedIn API version selection; its `/rest/*` endpoints reject
+    // requests without `LinkedIn-Version`.
+    "linkedin-version",
+    "x-restli-protocol-version",
 ];
 
 /// Namespaced header prefixes that should be forwarded transparently.
@@ -1016,6 +1071,49 @@ pub(crate) fn prepare_delegated_request(
         path: build_forward_path(path, delegated_credentials)?,
         query: forwarded_query,
         delegated_headers,
+    })
+}
+
+pub(crate) struct PreparedNodeRequest {
+    pub path: String,
+    pub query: Option<String>,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Prepare the same URL substitutions and header precedence for REST and MCP
+/// node frames. The node still owns its local service credential injection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_node_request(
+    target: &ProxyTarget,
+    path: &str,
+    query: Option<&str>,
+    mut base_headers: Vec<(String, String)>,
+    identity_headers: &[(String, String)],
+    delegated: &[DelegatedCredential],
+    caller_token: Option<&str>,
+    extra_outbound_headers: &[(String, String)],
+) -> AppResult<PreparedNodeRequest> {
+    let mut node_delegated = delegated.to_vec();
+    extend_with_path_credential(&mut node_delegated, target);
+    let prepared = prepare_delegated_request(path, query, &node_delegated)?;
+    let path = if prepared.path.starts_with('/') {
+        prepared.path.clone()
+    } else {
+        format!("/{}", prepared.path)
+    };
+    if let Some(token) = forwarded_caller_token(target, caller_token, extra_outbound_headers) {
+        base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
+    }
+    Ok(PreparedNodeRequest {
+        path,
+        query: prepared.query,
+        headers: build_effective_outbound_headers(
+            target,
+            base_headers,
+            identity_headers,
+            &prepared.delegated_headers,
+            extra_outbound_headers,
+        ),
     })
 }
 
@@ -3132,6 +3230,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     inference: Option<crate::models::downstream_service::ServiceInference>,
     workspace_destinations_pending: bool,
     destination_targets: std::collections::BTreeMap<String, String>,
@@ -3160,6 +3259,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        concurrency_policy: service.concurrency_policy.clone(),
         inference: service.inference.clone(),
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -3175,6 +3275,7 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    service.concurrency_policy = authorization.concurrency_policy.clone();
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
     service.destination_targets = authorization.destination_targets.clone();
@@ -3762,6 +3863,7 @@ fn build_minimal_downstream_service(
         capabilities: None,
         inference: None,
         git_http: None,
+        concurrency_policy: None,
         inference_admin_modified: false,
         billing,
         auth_notes: None,
@@ -4996,6 +5098,23 @@ mod tests {
     }
 
     #[test]
+    fn linkedin_version_headers_are_forwarded() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("LinkedIn-Version", "202609".parse().unwrap());
+        headers.insert("X-Restli-Protocol-Version", "2.0.0".parse().unwrap());
+
+        let forwarded = collect_forward_headers(&headers);
+        for (name, value) in [
+            ("linkedin-version", "202609"),
+            ("x-restli-protocol-version", "2.0.0"),
+        ] {
+            assert!(forwarded.iter().any(|(actual_name, actual_value)| {
+                actual_name.eq_ignore_ascii_case(name) && actual_value == value
+            }));
+        }
+    }
+
+    #[test]
     fn valid_w3c_trace_context_and_async_metadata_are_forwarded_unchanged() {
         let mut headers = http::HeaderMap::new();
         headers.insert(
@@ -5727,6 +5846,7 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: override_credential_id.clone(),
                 user_id: user_id.clone(),
@@ -5964,6 +6084,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7292,6 +7413,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7637,6 +7759,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7868,6 +7991,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -8116,6 +8240,7 @@ mod tests {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -8419,6 +8544,7 @@ mod tests {
 
     fn authority_test_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -8497,6 +8623,7 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
@@ -8531,6 +8658,7 @@ mod tests {
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),

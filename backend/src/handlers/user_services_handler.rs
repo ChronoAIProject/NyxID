@@ -176,6 +176,21 @@ pub enum CredentialSourceResponse {
     },
 }
 
+impl CredentialSourceResponse {
+    /// Listing and detail resolvers have already applied the service scope.
+    pub fn can_edit_configuration(&self) -> bool {
+        matches!(
+            self,
+            Self::Personal
+                | Self::Org {
+                    role: OrgRoleResponse::Admin,
+                    allowed: true,
+                    ..
+                }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrgRoleResponse {

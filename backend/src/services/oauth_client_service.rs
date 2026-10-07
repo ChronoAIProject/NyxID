@@ -125,6 +125,38 @@ const ADMIN_SEARCH_FILTER_MAX_TOTAL_VALUES: usize = 32;
 const ADMIN_CREATED_DATES_MAX_VALUES: usize = 32;
 const ADMIN_BROKER_SORT_FIELD: &str = "__nyxid_admin_broker_sort";
 
+/// Filter provider-specific scope hints on DCR registration and authorization.
+/// Bounds apply before filtering so unknown tokens cannot evade the limits.
+pub fn known_dcr_scopes(requested: &str) -> AppResult<String> {
+    let mut known = Vec::new();
+    for (index, scope) in requested.split_whitespace().enumerate() {
+        if index >= 64 || scope.len() > 256 {
+            return Err(AppError::InvalidScope(
+                "Too many or oversized scope tokens".to_string(),
+            ));
+        }
+        if KNOWN_OIDC_SCOPES.contains(&scope) && !known.contains(&scope) {
+            known.push(scope);
+        }
+    }
+    Ok(known.join(" "))
+}
+
+pub fn resolve_dcr_allowed_scopes(
+    requested: Option<&str>,
+) -> AppResult<(String, crate::models::oauth_client::ScopeProvenance)> {
+    use crate::models::oauth_client::ScopeProvenance;
+    let known = known_dcr_scopes(requested.unwrap_or_default())?;
+    if known.is_empty() {
+        Ok((
+            DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
+            ScopeProvenance::Defaulted,
+        ))
+    } else {
+        Ok((validate_allowed_scopes(&known)?, ScopeProvenance::Explicit))
+    }
+}
+
 /// Validate and canonicalize `allowed_scopes`.
 ///
 /// - Every scope must be in [`KNOWN_OIDC_SCOPES`].
@@ -296,8 +328,8 @@ fn merge_missing_default_mcp_scopes(existing: &str) -> AppResult<Option<String>>
     Ok(Some(validate_allowed_scopes(&merged)?))
 }
 
-/// Backfill default MCP scopes onto OAuth clients created via Dynamic Client
-/// Registration before the current scope set landed.
+/// Reconcile server defaults only for DCR clients with durable defaulted provenance.
+/// Explicit choices and unknown legacy origins must never be widened.
 ///
 /// DCR is used by MCP clients (Cursor, Claude Code, Codex, etc.). Whenever
 /// [`DEFAULT_MCP_ALLOWED_SCOPES`] grows, older DCR records would otherwise
@@ -312,7 +344,7 @@ pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
     let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
 
     let candidates: Vec<OauthClient> = collection
-        .find(doc! { "created_by": "dynamic_registration" })
+        .find(doc! { "created_by": "dynamic_registration", "scope_provenance": "defaulted" })
         .await?
         .try_collect()
         .await?;
@@ -329,9 +361,17 @@ pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
             continue;
         };
 
-        collection
+        // Compare the policy snapshot as well as provenance: an administrator
+        // may have edited it since the cursor read, including on an older replica.
+        let result = collection
             .update_one(
-                doc! { "_id": &client.id },
+                doc! {
+                    "_id": &client.id,
+                    "created_by": "dynamic_registration",
+                    "scope_provenance": "defaulted",
+                    "allowed_scopes": &client.allowed_scopes,
+                    "updated_at": bson::DateTime::from_chrono(client.updated_at),
+                },
                 doc! { "$set": {
                     "allowed_scopes": &updated_scopes,
                     "updated_at": now,
@@ -339,7 +379,7 @@ pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
             )
             .await?;
 
-        upgraded += 1;
+        upgraded += result.modified_count as usize;
     }
 
     if upgraded > 0 {
@@ -1247,6 +1287,7 @@ pub async fn update_client_for_creator(
 
     if let Some(scopes) = allowed_scopes {
         set_doc.insert("allowed_scopes", scopes);
+        set_doc.insert("scope_provenance", "explicit");
     }
 
     if let Some(enabled) = broker_capability_enabled {
@@ -1332,6 +1373,7 @@ pub async fn admin_update_client(
 
     if let Some(scopes) = update.allowed_scopes {
         set_doc.insert("allowed_scopes", scopes);
+        set_doc.insert("scope_provenance", "explicit");
     }
 
     if let Some(enabled) = update.broker_capability_enabled {
@@ -3290,7 +3332,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn migration_backfills_roles_and_groups_on_legacy_dcr_clients() {
+        async fn migration_preserves_legacy_dcr_clients() {
             let Some(db) = connect_test_database("oauth_dcr_migration").await else {
                 eprintln!("skipping oauth_dcr_migration test: no local MongoDB available");
                 return;
@@ -3305,16 +3347,12 @@ mod tests {
                 .await
                 .expect("migration runs cleanly");
 
-            let upgraded = get_client(&db, "legacy-dcr").await.unwrap();
-            for scope in DEFAULT_MCP_ALLOWED_SCOPES.split_whitespace() {
-                assert!(
-                    upgraded
-                        .allowed_scopes
-                        .split_whitespace()
-                        .any(|s| s == scope),
-                    "legacy DCR client should have {scope} after migration"
-                );
-            }
+            let legacy = get_client(&db, "legacy-dcr").await.unwrap();
+            assert_eq!(legacy.allowed_scopes, "openid profile email proxy");
+            assert_eq!(
+                get_client(&db, "current-dcr").await.unwrap().allowed_scopes,
+                DEFAULT_MCP_ALLOWED_SCOPES
+            );
 
             // Idempotent: a second pass is a no-op.
             migrate_dynamic_clients_grant_default_mcp_scopes(&db)
@@ -3372,3 +3410,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_client_dcr_tests.rs"]
+mod dcr_tests;

@@ -531,6 +531,16 @@ pub async fn llm_proxy_request(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -539,14 +549,15 @@ pub async fn llm_proxy_request(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmProvider,
-        uuid::Uuid::new_v4().to_string(),
+        billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
         auth_user.api_key_id.clone(),
-        None,
+        operation_user_service_id.clone(),
         Some(service_id.clone()),
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
@@ -557,7 +568,11 @@ pub async fn llm_proxy_request(
         state.billing.resale_enabled(),
     );
     let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
-    let metered = state.billing.open(&billing_ctx).await?;
+    let metered = state
+        .billing
+        .open(&billing_ctx)
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     // Resolve credentials for injection. The new UserService path bakes the
     // credential into `target` (via auth_method / credential), so we only need
@@ -596,130 +611,147 @@ pub async fn llm_proxy_request(
 
     // OpenAI Codex: use the specialized HTTP SSE transport with Responses API
     // translation and Codex-specific headers.
-    let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
-        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes)
-            .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
-        let usage_context = llm_usage_service::UsageAuditContext {
-            db: state.db.clone(),
-            user_id: user_id_str.clone(),
-            provider_slug: Some(provider_slug.clone()),
-            service_id: Some(service_id.clone()),
-            model: body_json
-                .get("model")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            path: path.clone(),
-            api_key_id: auth_user.api_key_id.clone(),
-            api_key_name: auth_user.api_key_name.clone(),
-        };
+    let concurrency = crate::services::service_concurrency_service::acquire(
+        &state.db,
+        &target.service,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    let execution = Box::pin(async {
+        let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
+            let body_json: serde_json::Value = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+            let usage_context = llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: Some(provider_slug.clone()),
+                service_id: Some(service_id.clone()),
+                model: body_json
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                path: path.clone(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            };
 
-        // Path determines response format: chat/completions → Chat Completions,
-        // responses → Responses API passthrough
-        let is_chat_completions_path = path.contains("chat/completions");
+            // Path determines response format: chat/completions → Chat Completions,
+            // responses → Responses API passthrough
+            let is_chat_completions_path = path.contains("chat/completions");
 
-        let translator = llm_gateway_service::get_translator(&provider_slug);
-        let translated = translator.translate_request(&path, &body_json)?;
-        Box::pin(enforce_agent_llm_operations(
-            &state.db,
-            &auth_user,
-            operation_user_service_id.as_deref(),
-            &service_id,
-            method.as_str(),
-            &translated.path,
-            &headers,
-            query.as_deref(),
-            &body_bytes,
-        ))
-        .await?;
-
-        let request_len = serde_json::to_vec(&translated.body)
-            .map(|bytes| bytes.len() as i64)
-            .unwrap_or(body_bytes.len() as i64);
-
-        let bearer_token = extract_bearer_token(&delegated)?;
-        let is_streaming = body_json
-            .get("stream")
-            .and_then(|s| s.as_bool())
-            .unwrap_or(false);
-        let usage_complete = chatgpt_usage_callback(
-            state.billing.clone(),
-            metered.clone(),
-            request_len,
-            metered
-                .route
-                .as_ref()
-                .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
-            body_json
-                .get("model")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-        );
-
-        state.billing.mark_forwarded(&metered).await?;
-        chatgpt_translator::send_to_chatgpt(
-            &translated.body,
-            &bearer_token,
-            is_streaming,
-            is_chat_completions_path,
-            query.as_deref(),
-            Some(usage_context),
-            Some(usage_complete),
-            billing_egress_permit,
-        )
-        .await?
-    } else {
-        let body = if body_bytes.is_empty() {
-            None
-        } else {
-            Some(force_stream_usage_bytes_for_provider(
-                &provider_slug,
-                &path,
-                body_bytes,
+            let translator = llm_gateway_service::get_translator(&provider_slug);
+            let translated = translator.translate_request(&path, &body_json)?;
+            Box::pin(enforce_agent_llm_operations(
+                &state.db,
+                &auth_user,
+                operation_user_service_id.as_deref(),
+                &service_id,
+                method.as_str(),
+                &translated.path,
+                &headers,
+                query.as_deref(),
+                &body_bytes,
             ))
+            .await?;
+
+            let request_len = serde_json::to_vec(&translated.body)
+                .map(|bytes| bytes.len() as i64)
+                .unwrap_or(body_bytes.len() as i64);
+
+            let bearer_token = extract_bearer_token(&delegated)?;
+            let is_streaming = body_json
+                .get("stream")
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
+            let usage_complete = chatgpt_usage_callback(
+                state.billing.clone(),
+                metered.clone(),
+                request_len,
+                metered
+                    .route
+                    .as_ref()
+                    .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
+                body_json
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+            );
+
+            state.billing.mark_forwarded(&metered).await?;
+            chatgpt_translator::send_to_chatgpt(
+                &translated.body,
+                &bearer_token,
+                is_streaming,
+                is_chat_completions_path,
+                query.as_deref(),
+                Some(usage_context),
+                Some(usage_complete),
+                billing_egress_permit,
+            )
+            .await?
+        } else {
+            let body = if body_bytes.is_empty() {
+                None
+            } else {
+                Some(force_stream_usage_bytes_for_provider(
+                    &provider_slug,
+                    &path,
+                    body_bytes,
+                ))
+            };
+            let request_len = body.as_ref().map(|bytes| bytes.len() as i64).unwrap_or(0);
+
+            let reqwest_method = convert_method(&method)?;
+            let reqwest_headers = convert_headers(&headers);
+
+            state.billing.mark_forwarded(&metered).await?;
+            let downstream_response = proxy_service::forward_request(
+                &state.http_client,
+                &target,
+                reqwest_method,
+                &path,
+                query.as_deref(),
+                reqwest_headers,
+                proxy_service::ProxyBody::Buffered(body),
+                vec![], // no identity headers for LLM proxy
+                delegated,
+                None,
+                &state.token_exchange_cache,
+                &state.cloud_response_cache,
+                billing_egress_permit,
+            )
+            .await?;
+
+            let usage_context = llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: Some(provider_slug.clone()),
+                service_id: Some(service_id.clone()),
+                model: None,
+                path: path.clone(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            };
+
+            build_filtered_response(
+                downstream_response,
+                Some(usage_context),
+                state.config.proxy_stream_idle_timeout_secs,
+                metered.clone(),
+                state.billing.clone(),
+                request_len,
+            )
+            .await?
         };
-        let request_len = body.as_ref().map(|bytes| bytes.len() as i64).unwrap_or(0);
 
-        let reqwest_method = convert_method(&method)?;
-        let reqwest_headers = convert_headers(&headers);
-
-        state.billing.mark_forwarded(&metered).await?;
-        let downstream_response = proxy_service::forward_request(
-            &state.http_client,
-            &target,
-            reqwest_method,
-            &path,
-            query.as_deref(),
-            reqwest_headers,
-            proxy_service::ProxyBody::Buffered(body),
-            vec![], // no identity headers for LLM proxy
-            delegated,
-            None,
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            billing_egress_permit,
-        )
-        .await?;
-
-        let usage_context = llm_usage_service::UsageAuditContext {
-            db: state.db.clone(),
-            user_id: user_id_str.clone(),
-            provider_slug: Some(provider_slug.clone()),
-            service_id: Some(service_id.clone()),
-            model: None,
-            path: path.clone(),
-            api_key_id: auth_user.api_key_id.clone(),
-            api_key_name: auth_user.api_key_name.clone(),
-        };
-
-        build_filtered_response(
-            downstream_response,
-            Some(usage_context),
-            state.config.proxy_stream_idle_timeout_secs,
-            metered.clone(),
-            state.billing.clone(),
-            request_len,
-        )
-        .await?
+        Ok(response)
+    });
+    let response = match concurrency {
+        Some(lease) => {
+            let response = lease.run(execution).await?;
+            lease.hold_response(response)
+        }
+        None => execution.await?,
     };
 
     audit_service::log_for_user(
@@ -736,6 +768,7 @@ pub async fn llm_proxy_request(
         })),
     );
 
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 
@@ -1101,6 +1134,16 @@ async fn gateway_provider_request(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -1109,14 +1152,15 @@ async fn gateway_provider_request(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmGateway,
-        uuid::Uuid::new_v4().to_string(),
+        billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
         auth_user.api_key_id.clone(),
-        None,
+        operation_user_service_id,
         Some(service_id.clone()),
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
@@ -1127,7 +1171,11 @@ async fn gateway_provider_request(
         state.billing.resale_enabled(),
     );
     let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
-    let metered = state.billing.open(&billing_ctx).await?;
+    let metered = state
+        .billing
+        .open(&billing_ctx)
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     // Resolve delegated credentials. When the target came from the new
     // UserService path, the credential is already baked into `target`; we only
@@ -1226,65 +1274,95 @@ async fn gateway_provider_request(
 
     // OpenAI Codex: use the specialized HTTP SSE transport and preserve query
     // parameters on the translated request.
-    let response = if provider_slug == "openai-codex" {
-        let bearer_token = extract_bearer_token(&delegated)?;
-        // final_body_bytes is already the translated Responses API body
-        let translated_body: serde_json::Value =
-            serde_json::from_slice(final_body_bytes.as_deref().unwrap_or(&[]))
-                .map_err(|e| AppError::Internal(format!("Failed to parse translated body: {e}")))?;
+    let concurrency = crate::services::service_concurrency_service::acquire(
+        &state.db,
+        &target.service,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    let execution = Box::pin(async {
+        let response = if provider_slug == "openai-codex" {
+            let bearer_token = extract_bearer_token(&delegated)?;
+            // final_body_bytes is already the translated Responses API body
+            let translated_body: serde_json::Value = serde_json::from_slice(
+                final_body_bytes.as_deref().unwrap_or(&[]),
+            )
+            .map_err(|e| AppError::Internal(format!("Failed to parse translated body: {e}")))?;
 
-        // Path determines response format: chat/completions → translate back
-        // to Chat Completions, responses → return Responses API as-is
-        let is_chat_completions_path = path.contains("chat/completions");
-        let usage_complete = chatgpt_usage_callback(
-            state.billing.clone(),
-            metered.clone(),
-            request_len,
-            metered
-                .route
-                .as_ref()
-                .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
-            Some(model.to_string()),
-        );
+            // Path determines response format: chat/completions → translate back
+            // to Chat Completions, responses → return Responses API as-is
+            let is_chat_completions_path = path.contains("chat/completions");
+            let usage_complete = chatgpt_usage_callback(
+                state.billing.clone(),
+                metered.clone(),
+                request_len,
+                metered
+                    .route
+                    .as_ref()
+                    .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
+                Some(model.to_string()),
+            );
 
-        state.billing.mark_forwarded(&metered).await?;
-        chatgpt_translator::send_to_chatgpt(
-            &translated_body,
-            &bearer_token,
-            is_streaming,
-            is_chat_completions_path,
-            query.as_deref(),
-            Some(usage_context),
-            Some(usage_complete),
-            billing_egress_permit,
-        )
-        .await?
-    } else {
-        state.billing.mark_forwarded(&metered).await?;
-        let downstream_response = proxy_service::forward_request(
-            &state.http_client,
-            &target,
-            reqwest_method,
-            &final_path,
-            query.as_deref(),
-            reqwest_headers,
-            proxy_service::ProxyBody::Buffered(final_body_bytes),
-            vec![],
-            delegated,
-            None,
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            billing_egress_permit,
-        )
-        .await?;
+            state.billing.mark_forwarded(&metered).await?;
+            chatgpt_translator::send_to_chatgpt(
+                &translated_body,
+                &bearer_token,
+                is_streaming,
+                is_chat_completions_path,
+                query.as_deref(),
+                Some(usage_context),
+                Some(usage_complete),
+                billing_egress_permit,
+            )
+            .await?
+        } else {
+            state.billing.mark_forwarded(&metered).await?;
+            let downstream_response = proxy_service::forward_request(
+                &state.http_client,
+                &target,
+                reqwest_method,
+                &final_path,
+                query.as_deref(),
+                reqwest_headers,
+                proxy_service::ProxyBody::Buffered(final_body_bytes),
+                vec![],
+                delegated,
+                None,
+                &state.token_exchange_cache,
+                &state.cloud_response_cache,
+                billing_egress_permit,
+            )
+            .await?;
 
-        // If translator needs translation, parse and translate the response
-        if translator.needs_translation() {
-            if is_streaming {
-                // Streaming: translate SSE events on the fly
-                build_translated_sse_response(
+            // If translator needs translation, parse and translate the response
+            if translator.needs_translation() {
+                if is_streaming {
+                    // Streaming: translate SSE events on the fly
+                    build_translated_sse_response(
+                        downstream_response,
+                        translator,
+                        Some(usage_context),
+                        idle_timeout_secs,
+                        metered.clone(),
+                        state.billing.clone(),
+                        request_len,
+                    )
+                    .await?
+                } else {
+                    // Non-streaming: buffer and translate the full response
+                    build_translated_json_response(
+                        downstream_response,
+                        translator.as_ref(),
+                        Some(usage_context),
+                        metered.clone(),
+                        state.billing.clone(),
+                        request_len,
+                    )
+                    .await?
+                }
+            } else {
+                build_filtered_response(
                     downstream_response,
-                    translator,
                     Some(usage_context),
                     idle_timeout_secs,
                     metered.clone(),
@@ -1292,29 +1370,17 @@ async fn gateway_provider_request(
                     request_len,
                 )
                 .await?
-            } else {
-                // Non-streaming: buffer and translate the full response
-                build_translated_json_response(
-                    downstream_response,
-                    translator.as_ref(),
-                    Some(usage_context),
-                    metered.clone(),
-                    state.billing.clone(),
-                    request_len,
-                )
-                .await?
             }
-        } else {
-            build_filtered_response(
-                downstream_response,
-                Some(usage_context),
-                idle_timeout_secs,
-                metered.clone(),
-                state.billing.clone(),
-                request_len,
-            )
-            .await?
+        };
+
+        Ok(response)
+    });
+    let response = match concurrency {
+        Some(lease) => {
+            let response = lease.run(execution).await?;
+            lease.hold_response(response)
         }
+        None => execution.await?,
     };
 
     audit_service::log_for_user(
@@ -1332,6 +1398,7 @@ async fn gateway_provider_request(
         })),
     );
 
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 

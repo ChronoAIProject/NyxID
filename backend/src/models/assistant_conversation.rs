@@ -140,6 +140,9 @@ pub struct ActiveTurn {
     pub tool_progress: ToolProgress,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Worker liveness marker. Absent on turns written before heartbeat support.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub heartbeat_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
     pub turn_id: String,
@@ -203,6 +206,10 @@ pub struct AssistantConversation {
     #[serde(default)]
     pub access_mode: AccessMode,
     pub nyxagent_session_id: Option<String>,
+    /// Server-only instruction state, committed with the upstream session.
+    /// Older rows/replicas may omit it. Never expose its marker in a DTO or Debug.
+    #[serde(default)]
+    pub nyxagent_instruction_binding: Option<InstructionBinding>,
     pub nyxagent_last_response_id: Option<String>,
     pub credential_api_key_id: String,
     pub message_count: i64,
@@ -275,6 +282,21 @@ pub struct AssistantConversation {
     /// restricted.
     #[serde(default)]
     pub guest_turn: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct InstructionBinding {
+    pub session_id: String,
+    pub fingerprint: String,
+    /// None when adopting a legacy session whose initial context had no marker.
+    pub marker: Option<String>,
+    pub guest: bool,
+}
+
+impl std::fmt::Debug for InstructionBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstructionBinding").finish_non_exhaustive()
+    }
 }
 
 impl AssistantConversation {

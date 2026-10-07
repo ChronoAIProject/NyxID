@@ -760,6 +760,7 @@ mod tests {
             wallet_id: Some(wallet_id.to_string()),
             actor_user_id: owner_id.to_string(),
             api_key_id: None,
+            user_service_id: None,
             service_id: Some("svc-1".to_string()),
             service_slug: Some("svc".to_string()),
             metric: BillingMetric::Requests,

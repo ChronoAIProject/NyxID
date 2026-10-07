@@ -542,3 +542,38 @@ are preserved and rechecked rather than replayed blindly.
 Each PR is independently deployable with the flag off and has a rollback that
 disables the flag before binaries are reverted. Neither PR changes grants,
 operation scopes, approvals, memory visibility or existing B2 pins.
+
+## Owner-requested skill authoring
+
+`draft_agent_skill` is NyxBot-only: it drafts for review, never publishes on a
+model's authority. It reuses the default-off `assistant:agent-learning` flag,
+encrypted proposal store, and the one-card fenced publication saga. The additive
+proposal source defaults to `learned`; `authored` proposals do not require
+automatic learning enrollment or conversation evidence. Flag discovery skips
+membership resolution when no relevant rollout is enabled. Only owner NyxBot
+chats read the authoring flag during tool discovery; a failed lookup hides only
+the drafting tool. Guests and specialists cannot draft; specialists can ask
+NyxBot with `request_agent_skills`.
+
+Build agents from description (role/scope), persona (tone/style), and Ornn skills
+(repeatable procedures, checklists, references, templates and workflows). Search,
+preview and propose attaching existing skills before drafting uncovered procedures.
+Never package or publish through Ornn Playground, sandboxes, machines or raw
+Ornn upload APIs. NyxID validates bounded text, rejects credential shapes, encrypts
+the draft and shows all proposed files on one owner approval card. The card stores
+only IDs/revisions; its human review view reads the encrypted proposal.
+
+Approval uses the existing server ZIP builder and signed approving-person Ornn
+identity, verifies the returned exact version/hash and pins transactionally.
+Improvements require an existing exact attached, private, person-owned base and
+use PUT/new-version publication. Denial or expiry cannot publish. As in L1 PR-2,
+org publication refuses `owner_binding_unavailable`: maintainers should attach an
+existing approved skill until Ornn supports org ownership. No personal fallback.
+
+Authored cards require a first-party human content review. Chat-code replies,
+voice decisions and NyxBot permission decisions cannot approve publication.
+The package's generated frontmatter and every text file are displayed verbatim,
+as inert text. Retry uses the same card and publication operation; it never
+replays an uncertain POST/PUT. The initiating model turn may already have ended
+when the human approves. The current chat key, owner, proposal/skill revisions
+and publication lease still fence the action.

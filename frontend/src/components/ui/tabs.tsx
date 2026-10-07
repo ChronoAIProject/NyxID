@@ -33,9 +33,13 @@ const TabsList = React.forwardRef<
     if (!list) return;
     const observer = new MutationObserver(updateIndicator);
     observer.observe(list, { attributes: true, subtree: true, attributeFilter: ["data-state"] });
+    const resizeObserver = new ResizeObserver(updateIndicator);
+    resizeObserver.observe(list);
+    list.querySelectorAll<HTMLElement>("[role=tab]").forEach((tab) => resizeObserver.observe(tab));
     list.addEventListener("scroll", updateIndicator);
     return () => {
       observer.disconnect();
+      resizeObserver.disconnect();
       list.removeEventListener("scroll", updateIndicator);
     };
   }, [updateIndicator]);
@@ -48,7 +52,7 @@ const TabsList = React.forwardRef<
         else if (ref) ref.current = node;
       }}
       className={cn(
-        "relative flex h-8 w-fit items-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground overflow-x-auto overflow-y-hidden scrollbar-none",
+        "min-h-control relative flex h-8 w-fit max-w-full items-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground overflow-x-auto overflow-y-hidden scrollbar-none",
         className,
       )}
       {...props}

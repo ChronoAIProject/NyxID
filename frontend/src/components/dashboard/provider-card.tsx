@@ -115,7 +115,7 @@ export function ProviderCard({
               <KeyRound
                 className={`h-5 w-5 ${
                   isConnected && !needsAttention
-                    ? "text-primary"
+                    ? "text-primary-text"
                     : needsAttention
                       ? "text-warning"
                       : "text-muted-foreground"
@@ -230,7 +230,7 @@ export function ProviderCard({
                     href={provider.documentation_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-0.5 text-xs text-primary hover:underline"
+                    className="inline-flex items-center gap-0.5 text-xs text-primary-text hover:underline"
                   >
                     Docs
                     <ExternalLink className="h-2.5 w-2.5" />

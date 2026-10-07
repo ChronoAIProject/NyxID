@@ -124,7 +124,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
       <DialogContent className="md:max-w-[520px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5 text-primary" aria-hidden="true" />
+            <ShieldCheck className="h-5 w-5 text-primary-text" aria-hidden="true" />
             {step === "setup" && "Enable Two-Factor Authentication"}
             {step === "verify" && "Scan QR Code"}
             {step === "recovery" && "Recovery Codes"}

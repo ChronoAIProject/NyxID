@@ -137,7 +137,7 @@ export function UserCredentialsDialog({
                 href={provider.documentation_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-12 text-primary hover:underline"
+                className="inline-flex items-center gap-1.5 text-12 text-primary-text hover:underline"
               >
                 How to create an OAuth app
                 <ExternalLink className="h-3 w-3" />

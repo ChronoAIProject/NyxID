@@ -35,6 +35,8 @@ const LAGO_HMAC_SHA256_ALGORITHM: &str = "hmac";
 #[derive(Debug, Deserialize)]
 pub struct UsageQuery {
     pub period: Option<String>,
+    /// `day` additionally splits rows by UTC calendar day for usage charts.
+    pub bucket: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -81,6 +83,9 @@ pub struct BillingUsageRow {
     /// only). None when no row in the group carried a breakdown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<crate::models::service_billing::TokenBreakdown>,
+    /// UTC day start; present only when requested with `bucket=day`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub day: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -215,7 +220,8 @@ pub struct InvoiceDownloadResponse {
     path = "/api/v1/billing/usage",
     tag = "Billing",
     params(
-        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all")
+        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all"),
+        ("bucket" = Option<String>, Query, description = "`day` splits rows by UTC day")
     ),
     responses(
         (status = 200, description = "Billing usage summary", body = BillingUsageResponse)
@@ -230,6 +236,15 @@ pub async fn get_usage(
     let owner_id = auth_user.user_id.to_string();
     let period = query.period.unwrap_or_else(|| "30d".to_string());
     let since = period_start(&period);
+    let by_day = match query.bucket.as_deref() {
+        None => false,
+        Some("day") => true,
+        Some(_) => {
+            return Err(AppError::ValidationError(
+                "bucket must be `day` when supplied".to_string(),
+            ));
+        }
+    };
     let mut match_doc = doc! {
         "billing_owner_id": &owner_id,
         "quantity": { "$ne": null },
@@ -296,6 +311,13 @@ pub async fn get_usage(
                     // only (service not platform_billable); they carry no
                     // cost and are never pushed to Lago.
                     "billable": { "$ne": [{ "$ifNull": ["$wallet_id", null] }, null] },
+                    "day": if by_day {
+                        bson::Bson::Document(doc! { "$dateTrunc": {
+                            "date": "$created_at", "unit": "day", "timezone": "UTC",
+                        } })
+                    } else {
+                        bson::Bson::Null
+                    },
                 },
                 "quantity": { "$sum": "$quantity" },
                 // Keep exact settlements separate from historical estimates.
@@ -338,7 +360,7 @@ pub async fn get_usage(
                 "cache_creation_tokens": { "$sum": { "$ifNull": ["$token_breakdown.cache_creation_tokens", 0] } },
             }
         },
-        doc! { "$sort": { "_id.service_slug": 1, "_id.layer": 1, "_id.metric": 1 } },
+        doc! { "$sort": { "_id.service_slug": 1, "_id.layer": 1, "_id.metric": 1, "_id.day": 1 } },
     ];
 
     let mut cursor = state
@@ -404,6 +426,7 @@ pub async fn get_usage(
                 0
             },
             token_breakdown: usage_row_breakdown(&doc),
+            day: id_doc.get_datetime("day").ok().map(|day| day.to_chrono()),
         });
     }
 

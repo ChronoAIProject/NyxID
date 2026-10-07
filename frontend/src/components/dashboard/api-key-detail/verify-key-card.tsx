@@ -196,7 +196,7 @@ export function VerifyKeyCard({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <ShieldCheck className="h-4 w-4 text-primary" />
+          <ShieldCheck className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Verify key</CardTitle>
         </div>
         <CardDescription>

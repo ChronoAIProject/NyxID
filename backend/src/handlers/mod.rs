@@ -135,6 +135,9 @@ pub mod options;
 pub(crate) mod org_group;
 
 pub mod service_history;
+pub mod service_insights;
+#[cfg(test)]
+mod service_insights_tests;
 
 pub mod channel_activities;
 pub mod machine_activity;
@@ -164,3 +167,5 @@ pub mod assistant_voice;
 pub mod machine_access;
 
 pub mod admin_utility_inference;
+
+pub mod service_concurrency;

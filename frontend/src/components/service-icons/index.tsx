@@ -59,12 +59,42 @@ import ApiFeishuBotIcon from "./api-feishu-bot";
 import ApiTelegramBotIcon from "./api-telegram-bot";
 import ApiWhatsappBusinessIcon from "./api-whatsapp-business";
 import ApiSupabaseIcon from "./api-supabase";
+import ApiSupabaseManagementIcon from "./api-supabase-management";
+import ApiCloudflareIcon from "./api-cloudflare";
+import ApiRailwayIcon from "./api-railway";
 import ApiElevenLabsIcon from "./api-elevenlabs";
 import ApiTelnyxIcon from "./api-telnyx";
 import ApiTwilioIcon from "./api-twilio";
 import ApiAurinkoIcon from "./api-aurinko";
 import ApiIftttIcon from "./api-ifttt";
 import ApiIftttMcpIcon from "./api-ifttt-mcp";
+
+import ApiAirtableIcon from "./api-airtable";
+import ApiAsanaIcon from "./api-asana";
+import ApiAttioIcon from "./api-attio";
+import ApiBitbucketIcon from "./api-bitbucket";
+import ApiBoxIcon from "./api-box";
+import ApiCalendlyIcon from "./api-calendly";
+import ApiCapsuleCrmIcon from "./api-capsule-crm";
+import ApiClickupIcon from "./api-clickup";
+import ApiCrowdinIcon from "./api-crowdin";
+import ApiDialpadIcon from "./api-dialpad";
+import ApiDropboxIcon from "./api-dropbox";
+import ApiEventbriteIcon from "./api-eventbrite";
+import ApiFigmaIcon from "./api-figma";
+import ApiGitlabIcon from "./api-gitlab";
+import ApiHubspotIcon from "./api-hubspot";
+import ApiIntercomIcon from "./api-intercom";
+import ApiJiraIcon from "./api-jira";
+import ApiLinearIcon from "./api-linear";
+import ApiMiroIcon from "./api-miro";
+import ApiPagerdutyIcon from "./api-pagerduty";
+import ApiProductboardIcon from "./api-productboard";
+import ApiSentryIcon from "./api-sentry";
+import ApiShippoIcon from "./api-shippo";
+import ApiSquareIcon from "./api-square";
+import ApiTodoistIcon from "./api-todoist";
+import ApiZoomIcon from "./api-zoom";
 
 import AwsCostExplorerIcon from "./aws-cost-explorer";
 import AevatarIcon from "./aevatar";
@@ -84,7 +114,7 @@ export type ServiceIconProps = { className?: string };
 export type IconComponent = ComponentType<ServiceIconProps>;
 
 // The slugs seeded in `backend/src/services/provider_service.rs`
-// (`DEFAULT_SERVICE_SEEDS`) — authoritative the test setup asserts against.
+// (`DEFAULT_SERVICE_SEEDS` and `MANAGED_OAUTH_PROVIDER_SEEDS`) — authoritative the test setup asserts against.
 export const SPEC_CATALOG_SLUGS = [
   "llm-xai",
   "llm-openai",
@@ -129,12 +159,43 @@ export const SPEC_CATALOG_SLUGS = [
   "api-telegram-bot",
   "api-whatsapp-business",
   "api-supabase",
+  "api-supabase-management",
+  "api-cloudflare",
+  "api-railway",
   "api-elevenlabs",
   "api-telnyx",
   "api-twilio",
   "api-aurinko",
   "api-ifttt",
   "api-ifttt-mcp",
+
+  // `MANAGED_OAUTH_PROVIDER_SEEDS`
+  "api-airtable",
+  "api-asana",
+  "api-attio",
+  "api-bitbucket",
+  "api-box",
+  "api-calendly",
+  "api-capsule-crm",
+  "api-clickup",
+  "api-crowdin",
+  "api-dialpad",
+  "api-dropbox",
+  "api-eventbrite",
+  "api-figma",
+  "api-gitlab",
+  "api-hubspot",
+  "api-intercom",
+  "api-jira",
+  "api-linear",
+  "api-miro",
+  "api-pagerduty",
+  "api-productboard",
+  "api-sentry",
+  "api-shippo",
+  "api-square",
+  "api-todoist",
+  "api-zoom",
 
   "aws-cost-explorer",
 ] as const;
@@ -199,6 +260,12 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-telegram-bot": ApiTelegramBotIcon,
   "api-whatsapp-business": ApiWhatsappBusinessIcon,
   "api-supabase": ApiSupabaseIcon,
+  "api-supabase-management": ApiSupabaseManagementIcon,
+  "supabase-management": ApiSupabaseManagementIcon,
+  "api-cloudflare": ApiCloudflareIcon,
+  cloudflare: ApiCloudflareIcon,
+  "api-railway": ApiRailwayIcon,
+  railway: ApiRailwayIcon,
   "api-elevenlabs": ApiElevenLabsIcon,
   "api-telnyx": ApiTelnyxIcon,
   telnyx: ApiTelnyxIcon,
@@ -208,6 +275,33 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   aurinko: ApiAurinkoIcon,
   "api-ifttt": ApiIftttIcon,
   "api-ifttt-mcp": ApiIftttMcpIcon,
+
+  "api-airtable": ApiAirtableIcon,
+  "api-asana": ApiAsanaIcon,
+  "api-attio": ApiAttioIcon,
+  "api-bitbucket": ApiBitbucketIcon,
+  "api-box": ApiBoxIcon,
+  "api-calendly": ApiCalendlyIcon,
+  "api-capsule-crm": ApiCapsuleCrmIcon,
+  "api-clickup": ApiClickupIcon,
+  "api-crowdin": ApiCrowdinIcon,
+  "api-dialpad": ApiDialpadIcon,
+  "api-dropbox": ApiDropboxIcon,
+  "api-eventbrite": ApiEventbriteIcon,
+  "api-figma": ApiFigmaIcon,
+  "api-gitlab": ApiGitlabIcon,
+  "api-hubspot": ApiHubspotIcon,
+  "api-intercom": ApiIntercomIcon,
+  "api-jira": ApiJiraIcon,
+  "api-linear": ApiLinearIcon,
+  "api-miro": ApiMiroIcon,
+  "api-pagerduty": ApiPagerdutyIcon,
+  "api-productboard": ApiProductboardIcon,
+  "api-sentry": ApiSentryIcon,
+  "api-shippo": ApiShippoIcon,
+  "api-square": ApiSquareIcon,
+  "api-todoist": ApiTodoistIcon,
+  "api-zoom": ApiZoomIcon,
 
   "aws-cost-explorer": AwsCostExplorerIcon,
   aevatar: AevatarIcon,
@@ -223,7 +317,14 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   talos: TalosIcon,
 } satisfies Readonly<
   Record<
-    Slug | CustomSlug | "telnyx" | "platform-telnyx" | "aurinko",
+    | Slug
+    | CustomSlug
+    | "telnyx"
+    | "platform-telnyx"
+    | "aurinko"
+    | "supabase-management"
+    | "cloudflare"
+    | "railway",
     IconComponent
   >
 >;

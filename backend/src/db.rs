@@ -169,6 +169,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         tracing::warn!(%error, "NyxBot reply channel reset deferred");
     }
     crate::services::coordination_service::ensure_indexes(db).await?;
+    crate::services::service_concurrency_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
@@ -513,6 +514,14 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "event_type": 1, "event_data.user_service_id": 1, "created_at": -1, "_id": -1 })
+                .options(IndexOptions::builder().name("audit_service_requests".to_string()).build())
+                .build(),
+        )
+        .await?;
     audit
         .create_index(
             IndexModel::builder()
@@ -2835,6 +2844,13 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     usage_meter
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "billing_request_id": 1 })
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "released": 1, "pool_attempt.lease_until": 1, "_id": 1 })
                 .options(
                     IndexOptions::builder()
@@ -4400,6 +4416,12 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
 
         // Create UserApiKey -- clean up endpoint on failure
         let api_key = UserApiKey {
+            oauth_app_observation: (token.token_type == "oauth2").then(|| {
+                crate::services::oauth_app_source::OAuthAppSource::from_credential_owner(
+                    token.credential_user_id.as_deref(),
+                )
+                .observation(1)
+            }),
             credential_source: None,
             id: api_key_id.clone(),
             user_id: token.user_id.clone(),
@@ -4650,6 +4672,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             .or_else(|| service.auth_type.clone())
             .unwrap_or_else(|| "api_key".to_string());
         let api_key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: conn.user_id.clone(),
@@ -4917,6 +4940,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: binding.user_id.clone(),
@@ -5035,6 +5059,115 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn usage_meter_pool_accounting_queries_examine_only_the_current_request() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("pool_accounting_index").await;
+        let meters = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+        let lease_until = bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(5));
+        let mut rows: Vec<_> = (0..4096)
+            .map(|index| {
+                doc! {
+                    "_id": uuid::Uuid::new_v4().to_string(),
+                    "transaction_id": format!("historical:{index}"),
+                    "billing_request_id": format!("historical-{index}"),
+                    "layer": "platform", "released": false,
+                    "status": if index % 2 == 0 { "finalized" } else { "forwarded" },
+                    "pool_attempt": { "lease_until": lease_until, "completion_cause": bson::Bson::Null },
+                }
+            })
+            .collect();
+        for (index, layer) in ["platform", "platform", "resale"].iter().enumerate() {
+            rows.push(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "transaction_id": format!("current:{index}"),
+                "billing_request_id": "current-request",
+                "layer": layer, "released": false,
+                "status": if *layer == "resale" { "finalized" } else { "forwarded" },
+                "quantity": 7_i64, "model": "test-model",
+                "pool_attempt": { "lease_until": lease_until, "completion_cause": bson::Bson::Null },
+            });
+        }
+        meters.insert_many(rows).await.unwrap();
+        ensure_indexes(&db).await.unwrap();
+        let now = bson::DateTime::now();
+        for request_id in ["current-request", "missing-request"] {
+            let queries = [
+                doc! {
+                    "find": meters.name(),
+                    "filter": { "billing_request_id": request_id, "pool_attempt": { "$type": "object" } },
+                },
+                doc! {
+                    "update": meters.name(), "updates": [{
+                        "q": { "billing_request_id": request_id, "pool_attempt": { "$type": "object" }, "pool_attempt.completion_cause": bson::Bson::Null },
+                        "u": { "$set": { "pool_attempt.completion_cause": "complete" } }, "multi": true,
+                    }],
+                },
+                doc! {
+                    "update": meters.name(), "updates": [{
+                        "q": { "billing_request_id": request_id, "released": false, "pool_attempt.lease_until": { "$gt": now } },
+                        "u": { "$max": { "pool_attempt.lease_until": lease_until } }, "multi": true,
+                    }],
+                },
+                doc! {
+                    "find": meters.name(),
+                    "filter": { "billing_request_id": request_id, "layer": "platform" },
+                },
+                doc! {
+                    "find": meters.name(), "limit": 1, "singleBatch": true,
+                    "filter": { "billing_request_id": request_id, "status": "finalized" },
+                },
+                doc! {
+                    "aggregate": meters.name(), "cursor": {},
+                    "pipeline": [
+                        { "$match": {
+                            "billing_request_id": request_id, "layer": "resale",
+                            "status": { "$in": ["finalized", "failed", "dead_letter"] },
+                            "quantity": 7_i64, "model": "test-model",
+                        } },
+                        { "$group": { "_id": 1, "n": { "$sum": 1 } } },
+                    ],
+                },
+            ];
+            for query in queries {
+                let evidence = db
+                    .run_command(doc! { "explain": &query, "verbosity": "executionStats" })
+                    .await
+                    .unwrap();
+                let stats = evidence.get_document("executionStats").unwrap_or_else(|_| {
+                    evidence.get_array("stages").unwrap()[0]
+                        .as_document()
+                        .unwrap()
+                        .get_document("$cursor")
+                        .unwrap()
+                        .get_document("executionStats")
+                        .unwrap()
+                });
+                let number = |field| match stats.get(field).unwrap() {
+                    bson::Bson::Int32(value) => i64::from(*value),
+                    bson::Bson::Int64(value) => *value,
+                    value => panic!("unexpected execution statistic {field}: {value:?}"),
+                };
+                let documents = number("totalDocsExamined");
+                let keys = number("totalKeysExamined");
+                let (max_documents, max_keys) = if request_id == "current-request" {
+                    (3, 4)
+                } else {
+                    (0, 1)
+                };
+                assert!(
+                    documents <= max_documents,
+                    "accounting must not scan unrelated requests: {query:?}"
+                );
+                assert!(
+                    keys <= max_keys,
+                    "accounting must seek the current request: {query:?}"
+                );
+            }
+        }
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn google_token_migration_never_infers_a_product_from_provider_id() {
@@ -5256,6 +5389,7 @@ mod tests {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

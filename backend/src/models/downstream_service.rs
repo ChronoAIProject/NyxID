@@ -259,6 +259,9 @@ pub struct SshServiceConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DownstreamService {
+    /// Absent policies add no concurrency work to execution paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     #[serde(rename = "_id")]
     pub id: String,
     pub name: String,
@@ -575,6 +578,7 @@ pub mod test_helpers {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -686,6 +690,7 @@ mod tests {
             billing: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
@@ -770,6 +775,7 @@ mod tests {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

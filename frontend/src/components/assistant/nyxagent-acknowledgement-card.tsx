@@ -1,3 +1,4 @@
+import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
@@ -49,6 +50,7 @@ export function NyxAgentAcknowledgementCard({
   readonly onDecision: (choice: "allow" | "deny") => Promise<unknown>;
 }) {
   const [error, setError] = useState<string>();
+  if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} deciding={deciding} onDecision={onDecision} />;
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
   if (acknowledgement.status !== "pending") {

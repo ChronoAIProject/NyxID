@@ -22,7 +22,7 @@ export function MachineSummary({ node }: { readonly node: NodeInfo }) {
         <MachineIsolationBadge machine={machine} />
         <MachineIsolationDetails machine={machine} />
         <p>Owner confirmation: {node.machine_confirm ?? "none"}</p>
-        <Link to="/assistant/machines" className="text-primary underline">
+        <Link to="/assistant/machines" className="text-primary-text underline">
           Manage in Assistant → Machines
         </Link>
       </div>

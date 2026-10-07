@@ -364,7 +364,7 @@ async fn pool_proxy_billing_preserves_reported_consumption_from_both_attempts() 
     to_bytes(response.into_body(), 8192).await.unwrap();
     let rows = settled_rows(&fixture, 2).await;
     assert_ne!(rows[0].billing_request_id, rows[1].billing_request_id);
-    for row in rows {
+    for row in &rows {
         assert_eq!(
             row.pool_attempt.as_ref().and_then(|a| a.outcome),
             Some(crate::models::usage_meter::PoolAttemptOutcome::Reported)
@@ -426,6 +426,46 @@ async fn pool_proxy_billing_preserves_reported_consumption_from_both_attempts() 
         assert_eq!(data.get_i64("total_tokens").unwrap(), 1);
         assert!(!format!("{event:?}").contains("review-platform-secret"));
         assert!(!format!("{event:?}").contains("review-byok-secret"));
+    }
+    let request_events: Vec<Document> =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let events: Vec<Document> = fixture
+                    .proxy
+                    .state
+                    .db
+                    .collection::<Document>("audit_log")
+                    .find(doc! { "event_type": "service_request" })
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                if events.len() >= 2 {
+                    break events;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both pool attempts retain service attribution");
+    assert_eq!(request_events.len(), 2);
+    for row in &rows {
+        let event = request_events
+            .iter()
+            .filter_map(|event| event.get_document("event_data").ok())
+            .find(|data| {
+                data.get_str("billing_request_id").ok() == Some(row.billing_request_id.as_str())
+            })
+            .expect("service history must use the actual attempt billing identity");
+        assert_eq!(
+            event.get_str("execution_id").unwrap(),
+            row.billing_request_id
+        );
+        assert_eq!(
+            event.get_str("user_service_id").ok(),
+            row.user_service_id.as_deref()
+        );
     }
     fixture.proxy.state.db.drop().await.unwrap();
 }

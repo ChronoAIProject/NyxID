@@ -490,7 +490,7 @@ async fn ensure_catalog_editor_route(
     ))
 }
 
-fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
+pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
     if api_key.purpose == ApiKeyPurpose::PermissionBound {
         return if path == "/api/v1/permission-execution/mcp"
             || path.starts_with("/api/v1/permission-execution/rest/")
@@ -2750,6 +2750,7 @@ mod tests {
             .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 id: actor_external_key_id.clone(),
                 user_id: actor_id.to_string(),
                 label: "Secret-bearing fixture".to_string(),

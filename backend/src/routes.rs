@@ -540,6 +540,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
+        .route(
+            "/me/preferences/services",
+            put(handlers::users::save_services_view),
+        )
         // Assistant postcondition evidence. These MUST be mounted on the
         // production router: a browser journey that proves success by a 404
         // cannot distinguish "resource absent" from "route absent", so an
@@ -632,6 +636,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let service_routes = Router::new()
+        .route(
+            "/{service_id}/concurrency",
+            get(handlers::service_concurrency::get).put(handlers::service_concurrency::put),
+        )
         .route("/", get(handlers::services::list_services))
         .route("/", post(handlers::services::create_service))
         .route("/{service_id}", get(handlers::services::get_service))
@@ -1927,6 +1935,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
         .route(
+            "/service-insights",
+            get(handlers::service_insights::get_insights),
+        )
+        .route(
             "/assistant-attachments/{id}/content",
             get(handlers::assistant_uploads::thread_image),
         )
@@ -2082,7 +2094,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
-            axum::routing::put(handlers::assistant_agent_learning::edit),
+            get(handlers::assistant_agent_learning::authored_preview)
+                .put(handlers::assistant_agent_learning::edit),
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",
