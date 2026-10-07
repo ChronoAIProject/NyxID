@@ -419,7 +419,12 @@ fn endpoint_inputs_from_spec_url(
     // only from the compiled overlay for this URL.
     let mut inputs =
         endpoint_inputs_from_parsed(openapi_parser::parse_openapi_spec_for_url(spec, spec_url)?)?;
-    annotate_hosted_async_inputs(spec_url, &mut inputs)?;
+    // Only the exact compiled overlay may carry async contracts.
+    if super::api_docs_service::hosted_catalog_spec_for_url(spec_url)?
+        .is_some_and(|hosted| hosted.as_ref() == spec)
+    {
+        annotate_hosted_async_inputs(spec_url, &mut inputs)?;
+    }
     Ok(inputs)
 }
 

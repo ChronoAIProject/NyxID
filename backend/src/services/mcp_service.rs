@@ -1636,16 +1636,20 @@ async fn fetch_and_parse_user_spec(
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_for_url(&spec, spec_url)?;
     let mut endpoints = parsed_endpoints_to_mcp(parsed);
-    // The URL recognizer serves compiled bytes; never trust a remote extension.
-    if hosted_catalog_spec_url(spec_url) {
+    // Async contracts come only from the exact compiled overlay; a different
+    // document at a lookalike hosted URL never supplies NyxID extensions.
+    if let Some(hosted) = super::api_docs_service::hosted_catalog_spec_for_url(spec_url)?
+        .filter(|hosted| hosted.as_ref() == spec.as_ref())
+    {
         for endpoint in &mut endpoints.endpoints {
-            if let Some(value) = spec["paths"][&endpoint.path][endpoint.method.to_ascii_lowercase()]
-                .get("x-nyxid-async-operation")
+            if let Some(value) = hosted["paths"][&endpoint.path]
+                [endpoint.method.to_ascii_lowercase()]
+            .get("x-nyxid-async-operation")
             {
                 let contract = serde_json::from_value(value.clone()).map_err(|_| {
                     AppError::ValidationError("Invalid async operation contract".into())
                 })?;
-                super::async_service_operation::validate_contract(&contract, &spec)?;
+                super::async_service_operation::validate_contract(&contract, &hosted)?;
                 endpoint.async_operation = Some(contract);
             }
         }

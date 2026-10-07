@@ -85,16 +85,18 @@ pub(crate) fn parse_hosted_openapi_spec_value(
     parse_endpoints_from_spec(spec, is_openapi3)
 }
 
-/// Follow the existing hosted-overlay URL resolution: known paths use only the
-/// compiled document, never the supplied remote body (regardless of URL host).
+/// NyxID-owned extensions are honoured only when the supplied document is
+/// exactly the compiled overlay registered for this hosted path. Any other
+/// document at a lookalike URL (for example an instance-mounted spec) is parsed
+/// as a remote document: its own operations govern and NyxID extensions are
+/// stripped.
 pub(crate) fn parse_openapi_spec_for_url(
     spec: &serde_json::Value,
     url: &str,
 ) -> AppResult<Vec<ParsedEndpoint>> {
-    if let Some(hosted) = super::api_docs_service::hosted_catalog_spec_for_url(url)? {
-        parse_hosted_openapi_spec_value(&hosted)
-    } else {
-        parse_openapi_spec_value(spec)
+    match super::api_docs_service::hosted_catalog_spec_for_url(url)? {
+        Some(hosted) if hosted.as_ref() == spec => parse_hosted_openapi_spec_value(&hosted),
+        _ => parse_openapi_spec_value(spec),
     }
 }
 
@@ -2588,13 +2590,44 @@ mod tests {
             super::super::operation_path::encode_parameter(&remote, "a/b").unwrap(),
             "a/b"
         );
-        let hosted = parse_openapi_spec_for_url(
+        // A different document at a hosted-looking URL (for example an
+        // instance-mounted spec) keeps its own operations, and its NyxID
+        // extensions are never honoured.
+        let lookalike = parse_openapi_spec_for_url(
             &spec,
             "https://untrusted.example/api/v1/catalog-specs/github/openapi.json",
         )
         .unwrap();
-        assert!(hosted.iter().any(|op| op.name == "get_file_contents"));
-        assert!(!hosted.iter().any(|op| op.name == "read"));
+        assert!(lookalike.iter().any(|op| op.name == "read"));
+        assert!(!lookalike.iter().any(|op| op.name == "get_file_contents"));
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&parameter(lookalike), "a/b").unwrap(),
+            "a%2Fb"
+        );
+        // Only the exact compiled overlay at its hosted path carries them.
+        let compiled = super::super::catalog_spec_registry::spec_for_key("github").unwrap();
+        let exact = parse_openapi_spec_for_url(
+            &compiled,
+            "https://untrusted.example/api/v1/catalog-specs/github/openapi.json",
+        )
+        .unwrap();
+        let contents = exact
+            .into_iter()
+            .find(|op| op.name == "get_file_contents")
+            .unwrap();
+        let path = contents
+            .parameters
+            .as_ref()
+            .and_then(|parameters| parameters.as_array())
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "path")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&path, "backend/src").unwrap(),
+            "backend/src"
+        );
     }
 
     #[test]
