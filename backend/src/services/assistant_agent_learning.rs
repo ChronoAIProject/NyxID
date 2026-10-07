@@ -446,7 +446,7 @@ async fn candidate_threads(
     let mut out = Vec::new();
     for conversation in conversations {
         let rows: Vec<AssistantMessage> = messages
-            .find(doc! {"conversation_id": &conversation.id, "status": "completed"})
+            .find(doc! {"conversation_id": &conversation.id, "status": "completed", "steering": bson::Bson::Null})
             .sort(doc! {"seq": 1})
             .limit(200)
             .await?
@@ -940,6 +940,7 @@ async fn evidence_is_current(
             "turn_id": &evidence.turn_id,
             "status": "completed",
             "role": {"$in": ["user", "assistant"]},
+            "steering": bson::Bson::Null,
         })
         .sort(doc! {"seq": 1})
         .limit(4)

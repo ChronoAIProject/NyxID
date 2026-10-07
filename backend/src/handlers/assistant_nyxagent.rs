@@ -163,6 +163,9 @@ pub(crate) async fn mark_expired_attachments(
 
 #[derive(Serialize)]
 pub struct ActiveTurnResponse {
+    response_id: Option<String>,
+    steering_allowed: bool,
+    stop_requested: bool,
     continuations: u32,
     turn_id: String,
     started_at: DateTime<Utc>,
@@ -255,6 +258,15 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
+            response_id: turn
+                .running_response
+                .as_ref()
+                .map(|r| r.response_id.clone()),
+            steering_allowed: matches!(
+                crate::services::assistant_steering::unavailable(&row, &turn.turn_id),
+                None | Some("starting")
+            ),
+            stop_requested: turn.stop_requested,
             continuations: turn.continuations,
             turn_id: turn.turn_id.clone(),
             started_at: turn.started_at,
@@ -329,6 +341,7 @@ impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscript
 }
 #[derive(Serialize)]
 pub struct MessageResponse {
+    steering: Option<steering::SteeringResponse>,
     voice: Option<VoiceTranscriptResponse>,
     execution_pending: bool,
     id: String,
@@ -347,6 +360,10 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            steering: row
+                .steering
+                .as_deref()
+                .map(steering::SteeringResponse::from),
             voice: row.voice.map(VoiceTranscriptResponse::from),
             execution_pending: row.execution_pending,
             id: row.id,
@@ -995,7 +1012,7 @@ async fn proxy(
         .header("content-type", "application/json")
         .header(
             "accept",
-            if turn_id.is_some() {
+            if path == "v1/responses" {
                 "text/event-stream"
             } else {
                 "application/json"
@@ -1596,11 +1613,18 @@ async fn execute_turn(
     // model: NyxAgent ends a turn on a card and answers repeats locally. Report
     // decisions made since the previous user message; a lookup failure only
     // omits the note.
-    let previous = history
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .map(|message| message.created_at);
+    let previous = engine::previous_user_message(
+        &state.db,
+        &row.user_id,
+        &row.id,
+        row.active_turn
+            .as_ref()
+            .and_then(|turn| turn.initiating_message_seq)
+            .or(Some(row.message_count)),
+    )
+    .await
+    .unwrap_or_default()
+    .map(|message| message.created_at);
     let mut decisions = match previous.filter(|_| !row.guest_turn) {
         Some(previous) => {
             acknowledgements::decided_since(&state.db, &row.user_id, &row.id, previous)
@@ -1690,32 +1714,7 @@ async fn execute_turn(
         .iter()
         .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))
     {
-        let lookup = async {
-            let response = proxy(
-                state,
-                auth,
-                credential,
-                "GET",
-                "v1/capabilities",
-                None,
-                None,
-                policy,
-            )
-            .await
-            .ok()?;
-            if !response.status().is_success() {
-                return None;
-            }
-            let bytes = axum::body::to_bytes(response.into_body(), 16384)
-                .await
-                .ok()?;
-            serde_json::from_slice::<Value>(&bytes).ok()
-        };
-        tokio::time::timeout(Duration::from_secs(5), lookup)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(Value::Null)
+        steering::upstream_capabilities(state, auth, credential, policy).await
     } else {
         Value::Null
     };
@@ -1839,6 +1838,12 @@ async fn execute_turn(
             )
             .await
             .map_err(|_| TurnError::new("assistant_unavailable"))?;
+        }
+        if !crate::services::assistant_steering::set_running_response(&state.db, row, None)
+            .await
+            .map_err(|_| TurnError::new("assistant_unavailable"))?
+        {
+            return Err(TurnError::new("cancelled"));
         }
         let request_key = if continuations.count == 0 {
             turn_id.clone()
@@ -2023,6 +2028,19 @@ async fn execute_turn(
                 return Err(TurnError::new("output_too_large"));
             }
             decoded?;
+            if let Some(mut created) = decoder.created.take() {
+                created.credential_api_key_id = credential.api_key_id.clone();
+                if !crate::services::assistant_steering::set_running_response(
+                    &state.db,
+                    row,
+                    Some(&created),
+                )
+                .await
+                .map_err(|_| TurnError::new("assistant_unavailable"))?
+                {
+                    return Err(TurnError::new("cancelled"));
+                }
+            }
             if decoder.terminal.is_some() {
                 break;
             }
@@ -2044,6 +2062,9 @@ async fn execute_turn(
                 }
             }
         }
+        crate::services::assistant_steering::set_running_response(&state.db, row, None)
+            .await
+            .map_err(|_| TurnError::new("assistant_unavailable"))?;
         let mut result = decoder
             .terminal
             .ok_or_else(|| TurnError::new("invalid_stream"))?;
@@ -2139,3 +2160,7 @@ async fn continue_turn(
 #[cfg(test)]
 #[path = "assistant_nyxagent_tests.rs"]
 mod tests;
+
+#[path = "assistant_nyxagent_steering.rs"]
+mod steering;
+pub use steering::{capabilities, steer};

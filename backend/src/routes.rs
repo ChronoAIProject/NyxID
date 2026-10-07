@@ -156,6 +156,20 @@ macro_rules! assistant_direct_billing_routes {
                 )
             ),
             (
+                "/nyxagent/conversations/{id}/steer",
+                "/api/v1/assistant/nyxagent/conversations/{id}/steer",
+                "handlers::assistant_nyxagent::steer",
+                post(handlers::assistant_nyxagent::steer),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
+                "/nyxagent/conversations/{id}/capabilities",
+                "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
+                "handlers::assistant_nyxagent::capabilities",
+                get(handlers::assistant_nyxagent::capabilities),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
                 "/nyxagent/models",
                 "/api/v1/assistant/nyxagent/models",
                 "handlers::assistant_nyxagent::models",

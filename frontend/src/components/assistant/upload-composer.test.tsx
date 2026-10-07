@@ -45,6 +45,35 @@ beforeEach(() => {
   vi.mocked(uploadFile).mockResolvedValue(item);
 });
 describe("Assistant uploads composer", () => {
+  it("detaches submitted files while the reply streams so text guidance stays available", async () => {
+    let finish!: () => void;
+    const onSend = vi.fn().mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }))
+      .mockResolvedValue(undefined);
+    const { rerender } = render(<UploadComposer {...base} onSend={onSend} scope={{ kind: "conversations", id: "one" }} />);
+    choose();
+    await screen.findByText("Ready");
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onSend).toHaveBeenCalledWith("", { attachmentIds: [item.id], conversationId: "one" });
+    rerender(<UploadComposer {...base} onSend={onSend} active allowActiveInput sendLabel="Send guidance" scope={{ kind: "conversations", id: "one" }} />);
+    expect(screen.queryByRole("list", { name: "Attachments" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Focus on the summary" } });
+    const send = screen.getByRole("button", { name: "Send guidance" });
+    expect(send).toBeEnabled();
+    await act(async () => fireEvent.click(send));
+    expect(onSend).toHaveBeenLastCalledWith("Focus on the summary", undefined);
+    expect(removeUpload).not.toHaveBeenCalled();
+    await act(async () => finish());
+  });
+  it("restores submitted files when admission fails", async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error("Turn not admitted"));
+    render(<UploadComposer {...base} onSend={onSend} scope={{ kind: "conversations", id: "one" }} />);
+    choose();
+    await screen.findByText("Ready");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })));
+    expect(screen.getByRole("list", { name: "Attachments" })).toHaveTextContent("notes.txt");
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
+    expect(removeUpload).not.toHaveBeenCalled();
+  });
   it("creates a draft once, shows progress and sends attachment-only messages", async () => {
     let resolve!: (value: typeof item) => void;
     vi.mocked(uploadFile).mockImplementation(

@@ -2299,7 +2299,7 @@ pub async fn direct_chats_note(
     let messages: Vec<AssistantMessage> = db
         .collection::<AssistantMessage>(MESSAGES)
         .find(
-            doc! {"user_id": owner, "conversation_id": {"$in": thread_ids}, "role": "user",
+            doc! {"user_id": owner, "conversation_id": {"$in": thread_ids}, "role": "user", "steering": bson::Bson::Null,
             "created_at": {"$gt": bson::DateTime::from_chrono(since)}},
         )
         .sort(doc! {"created_at": 1})

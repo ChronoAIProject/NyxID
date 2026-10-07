@@ -123,6 +123,9 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// The running response, not the previous committed response head.
+    #[serde(default)]
+    pub running_response: Option<Box<RunningResponse>>,
     /// Server-only event binding for durable channel answer delivery.
     #[serde(default)]
     pub channel_event_id: Option<String>,
@@ -310,6 +313,24 @@ impl std::fmt::Debug for AssistantConversation {
         f.debug_struct("AssistantConversation")
             .field("id", &self.id)
             .field("message_count", &self.message_count)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningResponse {
+    /// Key generation that owns this response; server-only.
+    #[serde(default)]
+    pub credential_api_key_id: String,
+    pub response_id: String,
+    pub session_id: String,
+}
+
+impl std::fmt::Debug for RunningResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningResponse")
+            .field("response_id", &self.response_id)
+            .field("session_id", &self.session_id)
             .finish_non_exhaustive()
     }
 }
