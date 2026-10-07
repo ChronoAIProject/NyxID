@@ -69,6 +69,8 @@ frontend/src/components/service-icons/api-microsoft.tsx
 frontend/src/components/service-icons/api-miro.tsx
 frontend/src/components/service-icons/api-notion.tsx
 frontend/src/components/service-icons/api-pagerduty.tsx
+frontend/src/components/service-icons/api-posthog-eu.tsx
+frontend/src/components/service-icons/api-posthog.tsx
 frontend/src/components/service-icons/api-productboard.tsx
 frontend/src/components/service-icons/api-railway.tsx
 frontend/src/components/service-icons/api-reddit.tsx
