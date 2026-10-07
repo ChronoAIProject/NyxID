@@ -124,6 +124,12 @@ pub(crate) async fn stop(
         // Stopping a channel follow also stops its NyxAgent turn. The durable
         // conversation fence makes this safe across replicas.
         engine::request_stop(&state.db, owner, conversation_id).await?;
+        crate::handlers::mcp_transport::async_operations::cancel_conversation(
+            state,
+            owner,
+            conversation_id,
+        )
+        .await?;
         crate::handlers::machine_cancel::conversation(state, owner, conversation_id).await?;
     }
     hide_reservations(state, owner, std::slice::from_mut(&mut child)).await?;

@@ -1,6 +1,9 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+#[path = "async_service_operations.rs"]
+pub(crate) mod async_operations;
+
 use axum::body::Body;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -2238,8 +2241,24 @@ async fn dispatch_service_tool(
         return resp;
     }
 
+    let async_watch = if endpoint.async_operation.is_some() {
+        if let Some(chat) = auth.chat.as_ref() {
+            match crate::services::async_service_operation::reserve(
+                &state.db, chat, service, endpoint,
+            )
+            .await
+            {
+                Ok(watch) => Some(watch),
+                Err(error) => return tool_result(request.id.clone(), &error.to_string(), true),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let exec_ctx = mcp_exec_context(auth);
-    let mut response = match mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -2258,8 +2277,18 @@ async fn dispatch_service_tool(
         &exec_ctx,
         billing_egress_permit,
     )
-    .await
+    .await;
+    if let Some(watch) = &async_watch
+        && let Err(error) = crate::services::async_service_operation::submitted(
+            &state.db,
+            watch,
+            execution.as_ref().ok(),
+        )
+        .await
     {
+        tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
+    }
+    let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request.id.clone(), &msg, true);
@@ -2280,6 +2309,9 @@ async fn dispatch_service_tool(
         }
     };
 
+    if async_watch.is_some() && (200..300).contains(&response.status) {
+        response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
+    }
     // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
@@ -2310,6 +2342,7 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
         caller_token: auth.caller_token.as_deref(),
         delegation_restrictions: Box::new(jwt::TokenRestrictionClaims::from_authenticated_scope(
@@ -3129,8 +3162,24 @@ async fn handle_meta_call_tool(
         None => false,
     };
 
+    let async_watch = if endpoint.async_operation.is_some() {
+        if let Some(chat) = auth.chat.as_ref() {
+            match crate::services::async_service_operation::reserve(
+                &state.db, chat, service, endpoint,
+            )
+            .await
+            {
+                Ok(watch) => Some(watch),
+                Err(error) => return tool_result(request_id.clone(), &error.to_string(), true),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let exec_ctx = mcp_exec_context(auth);
-    let mut response = match mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -3149,8 +3198,18 @@ async fn handle_meta_call_tool(
         &exec_ctx,
         billing_egress_permit,
     )
-    .await
+    .await;
+    if let Some(watch) = &async_watch
+        && let Err(error) = crate::services::async_service_operation::submitted(
+            &state.db,
+            watch,
+            execution.as_ref().ok(),
+        )
+        .await
     {
+        tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
+    }
+    let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);
@@ -3167,6 +3226,9 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if async_watch.is_some() && (200..300).contains(&response.status) {
+        response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
+    }
     // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
@@ -5326,6 +5388,7 @@ mod tests {
         let now = chrono::Utc::now();
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),
@@ -5355,6 +5418,7 @@ mod tests {
             .expect("insert blocked MCP endpoint");
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),

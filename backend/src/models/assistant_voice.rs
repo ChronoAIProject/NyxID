@@ -57,6 +57,9 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    /// The initial reply only submitted background work; it is not a result.
+    #[serde(default)]
+    pub async_operation_pending: bool,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

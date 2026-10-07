@@ -648,6 +648,7 @@ async fn delete_threads_in_session(
         )
         .await?;
         for collection in [
+            crate::models::async_service_operation::COLLECTION_NAME,
             assistant_agent_credential::COLLECTION_NAME,
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             crate::models::assistant_message::COLLECTION_NAME,

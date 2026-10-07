@@ -36,10 +36,23 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
 
     for slug in catalog_spec_registry::hydrated_slugs() {
-        let Some(service) = service_col
-            .find_one(doc! { "slug": slug, "created_by": "system" })
-            .await?
-        else {
+        // A hosted async overlay is also explicitly registered for administrator-
+        // created catalog rows. Remote specs never supply these contracts.
+        let owns_async_contract = catalog_spec_registry::spec_for_slug(slug).is_some_and(|spec| {
+            spec["paths"].as_object().is_some_and(|paths| {
+                paths.values().any(|item| {
+                    item.as_object().is_some_and(|ops| {
+                        ops.values()
+                            .any(|op| op.get("x-nyxid-async-operation").is_some())
+                    })
+                })
+            })
+        });
+        let mut filter = doc! {"slug": slug};
+        if !owns_async_contract {
+            filter.insert("created_by", "system");
+        }
+        let Some(service) = service_col.find_one(filter).await? else {
             continue; // Service not seeded on this deployment
         };
         if crate::services::retired_service_service::is_retired(&service) {
@@ -171,7 +184,7 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
         }
     };
 
-    let inputs = match endpoint_inputs_from_spec(&spec) {
+    let inputs = match endpoint_inputs_from_spec_url(&spec, spec_url) {
         Ok(inputs) if !inputs.is_empty() => inputs,
         Ok(_) => {
             tracing::warn!(slug = %service.slug, "Spec endpoint sync: spec contained no operations");
@@ -306,6 +319,19 @@ fn destination_endpoint_inputs(
                 ));
             }
         }
+        input.async_operation = spec["paths"][&input.path][input.method.to_ascii_lowercase()]
+            .get("x-nyxid-async-operation")
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    crate::errors::AppError::ValidationError(
+                        "Invalid async operation contract".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        if let Some(contract) = &input.async_operation {
+            super::async_service_operation::validate_contract(contract, spec)?;
+        }
         inputs.push(input);
     }
     if skipped_operation_count > 0 {
@@ -338,6 +364,7 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
         validate_response_contract(&endpoint.response)?;
 
         inputs.push(EndpointInput {
+            async_operation: None,
             target_id: None,
             name: endpoint.name,
             description: endpoint.description,
@@ -353,6 +380,37 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
             supports_idempotency_key: endpoint.supports_idempotency_key,
         });
     }
+    Ok(inputs)
+}
+
+/// Remote discovery discards async annotations. Only the compiled URL resolver
+/// may restore them, matching the operation's exact method and path.
+pub(crate) fn annotate_hosted_async_inputs(
+    spec_url: &str,
+    inputs: &mut [EndpointInput],
+) -> AppResult<()> {
+    let Some(spec) = super::api_docs_service::hosted_catalog_spec_for_url(spec_url)? else {
+        return Ok(());
+    };
+    for input in inputs {
+        if let Some(value) = spec["paths"][&input.path][input.method.to_ascii_lowercase()]
+            .get("x-nyxid-async-operation")
+        {
+            let contract = serde_json::from_value(value.clone()).map_err(|_| {
+                crate::errors::AppError::ValidationError("Invalid async operation contract".into())
+            })?;
+            super::async_service_operation::validate_contract(&contract, &spec)?;
+            input.async_operation = Some(contract);
+        }
+    }
+    Ok(())
+}
+fn endpoint_inputs_from_spec_url(
+    spec: &serde_json::Value,
+    spec_url: &str,
+) -> AppResult<Vec<EndpointInput>> {
+    let mut inputs = endpoint_inputs_from_spec(spec)?;
+    annotate_hosted_async_inputs(spec_url, &mut inputs)?;
     Ok(inputs)
 }
 
@@ -446,6 +504,30 @@ mod tests {
                 "api-google must publish '{required}' to complete the authoring round trip"
             );
         }
+    }
+
+    #[test]
+    fn async_contract_survives_hosted_discovery_but_never_remote_discovery() {
+        let spec = catalog_spec_registry::spec_for_key("chrono-sandbox").unwrap();
+        let remote =
+            endpoint_inputs_from_spec_url(&spec, "https://sandbox.chrono-ai.fun/openapi.json")
+                .unwrap();
+        assert!(remote.iter().all(|e| e.async_operation.is_none()));
+        let hosted = endpoint_inputs_from_spec_url(
+            &spec,
+            "https://nyx.example/api/v1/catalog-specs/chrono-sandbox/openapi.json",
+        )
+        .unwrap();
+        let contract = hosted
+            .iter()
+            .find_map(|e| e.async_operation.as_ref())
+            .unwrap();
+        let mut bad = contract.clone();
+        bad.result_operation = "execute_handler".into();
+        assert!(super::super::async_service_operation::validate_contract(&bad, &spec).is_err());
+        bad = contract.clone();
+        bad.success_states = bad.failure_states.clone();
+        assert!(super::super::async_service_operation::validate_contract(&bad, &spec).is_err());
     }
 
     #[test]

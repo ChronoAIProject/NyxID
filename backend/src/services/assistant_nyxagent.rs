@@ -709,6 +709,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::async_service_operation::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
     // Retire legacy per-person keys before lifting the unique owner index.
@@ -1457,13 +1458,14 @@ pub async fn begin_turn_with_voice(
                     Vec::new()
                 } else {
                     super::channel_thread_follow_service::filter_events(db,user_id,&id,
-                        std::mem::take(&mut row.pending_events),session).await?
+                        super::async_service_operation::select_events(&mut row, start.origin),session).await?
                 };
                 if start.origin == TurnOrigin::Event && events.is_empty() {
                     return Err(AppError::Conflict("No eligible pending events".into()));
                 }
                 if start.origin == TurnOrigin::Event
                     && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
+                    && !events.iter().any(|e| e.kind == super::async_service_operation::EVENT_KIND)
                 {
                     // A queued owner request retains its own authority even
                     // when the preceding turn's guest is no longer eligible.
@@ -1641,6 +1643,7 @@ pub async fn begin_turn_with_voice(
                         db, session, event_id, &row.user_id, &row.id, turn_id,
                     ).await?;
                 }
+                Box::pin(super::async_service_operation::bind_in_session(db, &mut row, session)).await?;
                 // Chats whose queued messages this turn answers get its reply
                 // too, unless it already goes there.
                 let answered_here = match start.origin {
@@ -1849,12 +1852,12 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let existing = get(db, user_id, id).await?;
     let Some(existing_turn) = existing.active_turn.as_ref() else {
-        return Ok(());
+        return super::async_service_operation::cancel(db, user_id, id).await;
     };
     // Rows written before heartbeat support retain the old lease boundary: an
     // already-expired legacy fence is reclaimed by the next send instead.
     if existing_turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
-        return Ok(());
+        return super::async_service_operation::cancel(db, user_id, id).await;
     }
     let expected_turn_id = existing_turn.turn_id.clone();
     let row = db
@@ -1869,6 +1872,9 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
         )
         .return_document(ReturnDocument::After)
         .await?;
+    // Fence new submissions before cancelling existing watches. A reserve
+    // racing this update writes the same conversation inside its transaction.
+    super::async_service_operation::cancel(db, user_id, id).await?;
     let Some(row) = row else {
         // A concurrent settlement, delete, or new turn won the exact fence.
         return Ok(());
@@ -2097,7 +2103,9 @@ async fn finish_turn_inner(
                     .as_ref()
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
+                super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
+                    let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
                     let update = if error.is_some() {
                         vec![doc! {"$set": {
                             "state": "cancelled",
@@ -2108,8 +2116,9 @@ async fn finish_turn_inner(
                             "state": {"$cond":[
                                 {"$gt":[{"$size":{"$ifNull":["$pending_acknowledgement_ids",[]]}},0]},
                                 "awaiting_confirmation",
-                                "completed",
+                                if async_pending { "claimed" } else { "completed" },
                             ]},
+                            "async_operation_pending": async_pending,
                         }}]
                     };
                     db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
@@ -2681,6 +2690,7 @@ pub async fn delete(
                         Err(error) => return Err(error),
                     }
                     for collection in [
+                        crate::models::async_service_operation::COLLECTION_NAME,
                         crate::models::assistant_voice::REQUESTS,
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,

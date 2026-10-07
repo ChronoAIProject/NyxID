@@ -638,6 +638,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
         .db
         .collection(crate::models::service_endpoint::COLLECTION_NAME)
         .insert_one(ServiceEndpoint {
+            async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: service.id.clone(),
@@ -3204,3 +3205,6 @@ async fn assistant_skills_specialist_permission_is_advisory_and_agent_scoped() {
     assert!(denied.get("error").is_some());
     f.state.db.drop().await.unwrap();
 }
+
+#[path = "async_service_operation_tests.rs"]
+mod async_service_operation_tests;

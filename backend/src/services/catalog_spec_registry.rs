@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "chrono-sandbox",
+        include_str!("../../specs/catalog/chrono-sandbox.openapi.json"),
+    ),
+    (
         "cloudflare",
         include_str!("../../specs/catalog/cloudflare.openapi.json"),
     ),
@@ -183,6 +187,7 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("chrono-sandbox", "chrono-sandbox"),
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
     ("api-notion", "notion"),
