@@ -487,10 +487,14 @@ remain usable during editing and move together with measured group geometry.
   `ServiceConnectionTable` receives `ordering` and renders **all** of the
   group's connections with the note "Showing all N connections while
   ordering; filters still apply to other services." Other cards, the toolbar,
-  saved views and the `useServiceCardView` store are untouched.
-- Rows become `useSortable` `<tr>`s in a `SortableContext`
+  saved views and account defaults are untouched. Ordering may sync the
+  ephemeral `useServiceCardView` expansion to the editing group; it never
+  calls `PUT /users/me/preferences/services`.
+- Each connection becomes one `useSortable` `<tbody>` containing its main,
+  pool and animated panel rows in a `SortableContext`
   (`verticalListSortingStrategy`); `PointerSensor` (`distance: 6`),
-  `KeyboardSensor` with `sortableKeyboardCoordinates`; dnd-kit
+  `KeyboardSensor` with `serviceOrderKeyboardCoordinates`, which centers
+  complete groups of different heights; dnd-kit
   `accessibility.announcements` only. Each row gains, before the details
   chevron: a `GripVertical` handle (`aria-label="Drag <label>"`,
   `touch-none cursor-grab`) and `Move up` / `Move down` buttons
@@ -973,8 +977,10 @@ authorized implicit-routing behavior; docs.
   capacity/network recovery including the release confirmation and retry
   save, draft survival across a `/keys` refetch, the
   kept-mounted and revealed card under filter/Personal-All/saved-view changes
-  including reduced motion, guards before collapse/other-card/view/tab/navigation, disabled other-group entry, focus return, and that saved view, filters, store
-  and other cards are unchanged (no `PUT /users/me/preferences/services`).
+  including reduced motion, guards before collapse/other-card/view/tab/navigation,
+  disabled other-group entry, focus return, and that saved view, filters and
+  other cards are unchanged. The ephemeral expansion store may sync to the
+  editing group (no `PUT /users/me/preferences/services`).
 - **AC-28** (*revised*): read failure cannot enable saving; a two-connection
   group (one enabled, one disabled) can be ordered; the 30/26/duplicate-label
   group renders, drags complete connection row groups and saves; main service-card
