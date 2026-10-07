@@ -284,8 +284,12 @@ export function ServiceConnectionTable({
                   data-service-connection-row={key.id}
                   className={cn(
                     "[&>td]:align-top [&>td]:py-3",
-                    // The opened panel continues this entry, so no rule between them.
-                    expanded && "border-b-0 bg-muted/20 hover:bg-muted/20",
+                    // The pool row and opened panel continue this entry, so no rule between them.
+                    memberships.length > 0 && "border-b-0",
+                    // The pool row is part of this entry, so they highlight together.
+                    expanded
+                      ? "border-b-0 bg-muted/20 hover:bg-muted/20"
+                      : "[&:has(+tr[data-service-connection-pools]:hover)]:bg-overlay",
                   )}
                 >
                   <TableCell>
@@ -363,31 +367,6 @@ export function ServiceConnectionTable({
                       </span>
                       {editable && renderActions?.(key)}
                     </p>
-                    {memberships.map((pool) => {
-                      const member = pool.members.find(
-                        (member) => member.user_service_id === key.id,
-                      )!;
-                      return (
-                        <button
-                          key={pool.id}
-                          type="button"
-                          onClick={() => onViewPool?.(pool.id)}
-                          className="mt-1 flex w-full min-w-0 items-start gap-1.5 text-left text-11 text-primary-text hover:underline"
-                          title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
-                        >
-                          <PoolStrategyIcon
-                            strategy={pool.strategy}
-                            className="mt-0.5 size-3 shrink-0"
-                          />
-                          <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">
-                            {pool.name} ·{" "}
-                            {pool.strategy === "priority"
-                              ? `Priority ${member.priority ?? 0}`
-                              : poolStrategyLabel(pool)}
-                          </span>
-                        </button>
-                      );
-                    })}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1.5">
@@ -646,6 +625,57 @@ export function ServiceConnectionTable({
                     </p>
                   </TableCell>
                 </TableRow>
+                {memberships.length > 0 && (
+                  <TableRow
+                    data-service-connection-pools={key.id}
+                    className={
+                      expanded
+                        ? "border-b-0 bg-muted/20 hover:bg-muted/20"
+                        : "[tr:hover+&]:bg-overlay"
+                    }
+                  >
+                    {/* Full width so pool names never stretch the connection column. */}
+                    <TableCell
+                      colSpan={5}
+                      className="whitespace-normal pb-3 pt-0"
+                    >
+                      <p className="mb-1.5 text-11 font-medium text-muted-foreground">
+                        Member of service pools
+                      </p>
+                      <ul
+                        aria-label={`Pools using ${key.label}`}
+                        className="flex flex-col items-start gap-1.5"
+                      >
+                        {memberships.map((pool) => {
+                          const member = pool.members.find(
+                            (member) => member.user_service_id === key.id,
+                          )!;
+                          return (
+                            <li key={pool.id} className="min-w-0">
+                              <button
+                                type="button"
+                                onClick={() => onViewPool?.(pool.id)}
+                                className="flex min-w-0 items-start gap-1.5 rounded-sm text-left text-11 text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                                title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
+                              >
+                                <PoolStrategyIcon
+                                  strategy={pool.strategy}
+                                  className="mt-0.5 size-3 shrink-0"
+                                />
+                                <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                                  {pool.name} ·{" "}
+                                  {pool.strategy === "priority"
+                                    ? `Priority ${member.priority ?? 0}`
+                                    : poolStrategyLabel(pool)}
+                                </span>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </TableCell>
+                  </TableRow>
+                )}
                 <AnimatePresence initial={false}>
                   {expanded && (
                     <TableRow

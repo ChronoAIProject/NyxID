@@ -920,16 +920,15 @@ html.theme-dark .assistant-halo--visible {
   position: absolute;
   pointer-events: none;
   top: -100vh;
-  height: calc(100vh + var(--service-filters-height, 0px) + 28px);
+  height: calc(100vh + var(--service-filters-height, 0px) + var(--spacing) * 2);
   left: calc(-1 * var(--service-filter-gutter-left, 0px));
   right: calc(-1 * var(--service-filter-gutter-right, 0px));
   background: var(--color-background);
   backdrop-filter: blur(8px);
   mask-image: linear-gradient(
     to bottom,
-    #000 calc(100% - 28px),
-    rgb(0 0 0 / 0.95) calc(100% - 20px),
-    rgb(0 0 0 / 0.6) calc(100% - 10px),
+    #000 calc(100% - var(--spacing) * 2),
+    rgb(0 0 0 / 0.6) calc(100% - var(--spacing)),
     transparent
   );
 }
@@ -940,7 +939,7 @@ html.theme-dark .assistant-halo--visible {
   pointer-events: none;
   top: -100vh;
   bottom: 0;
-  left: calc(-1 * var(--service-filter-gutter-left, 0px) - 1px);
-  right: calc(-1 * var(--service-filter-gutter-right, 0px) - 1px);
+  left: calc(-1 * var(--service-filter-gutter-left, 0px));
+  right: calc(-1 * var(--service-filter-gutter-right, 0px));
   background: var(--color-background);
 }

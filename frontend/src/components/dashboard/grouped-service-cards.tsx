@@ -300,7 +300,7 @@ function GroupCard({
       layoutKey={layoutKey}
       aria-labelledby={headingId}
       className={cn(
-        "min-w-0 scroll-mt-[calc(var(--service-filters-height,0px)+24px)] sm:scroll-mt-[calc(var(--service-filters-height,0px)+20px)] border border-border bg-card shadow-sm",
+        "min-w-0 scroll-mt-[calc(var(--service-filters-height,0px)+var(--service-filters-top,0px)+var(--spacing)*2)] border border-border bg-card shadow-sm",
         expanded
           ? "sm:col-span-2 xl:col-span-3"
           : "relative focus-within:z-10 hover:z-10",
@@ -312,7 +312,7 @@ function GroupCard({
         className={cn(
           "service-card-header",
           expanded
-            ? "sticky top-[calc(var(--service-filters-height,0px)+24px)] z-10 sm:top-[calc(var(--service-filters-height,0px)+20px)]"
+            ? "sticky -mx-px -mt-px top-[calc(var(--service-filters-height,0px)+var(--service-filters-top,0px)+var(--spacing)*2)] z-10"
             : undefined,
         )}
       >
@@ -325,7 +325,7 @@ function GroupCard({
           }}
           className={cn(
             "relative flex flex-col bg-card",
-            expanded ? "shadow-sm" : "h-72",
+            expanded ? "border border-border" : "h-72",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
@@ -527,7 +527,7 @@ function GroupCard({
         className="overflow-hidden rounded-b-xl"
       >
         <CardReveal open={open} onClosed={onClosed}>
-          <div className="border-t border-border bg-background/30">
+          <div className="bg-background/30">
             {routingOpen ? (
               <FadeIn key="routing">
                 <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
@@ -653,6 +653,10 @@ export function GroupedServiceCards({
       container.style.setProperty(
         "--service-filters-height",
         `${bounds.height}px`,
+      );
+      container.style.setProperty(
+        "--service-filters-top",
+        getComputedStyle(toolbar).top,
       );
       if (scroller) {
         const viewportLeft =

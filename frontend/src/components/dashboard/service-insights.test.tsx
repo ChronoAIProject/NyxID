@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import type { KeyInfo } from "@/types/keys";
 import type { ServiceInsight } from "@/schemas/service-insights";
+import type { ServicePool } from "@/schemas/pools";
 import type { ServiceInsightsState } from "@/hooks/use-service-insights";
 import {
   billingAccountLabel,
@@ -642,5 +643,59 @@ describe("service card billing and caller details", () => {
         },
       ]),
     ).toBe("Charges vary by connection");
+  });
+});
+
+describe("service connection pool memberships", () => {
+  it("lists pools in a full-width row under the connection instead of its first column", async () => {
+    const user = userEvent.setup();
+    const onViewPool = vi.fn();
+    const member = { user_service_id: connection.id, weight: 1, enabled: true };
+    const pool = (
+      id: string,
+      strategy: ServicePool["strategy"],
+      extra: Partial<ServicePool["members"][number]> = {},
+    ): ServicePool => ({
+      id,
+      name: `${id} pool`,
+      slug: id,
+      user_id: "user-a",
+      strategy,
+      members: [{ ...member, ...extra }],
+      rr_counter: 0,
+      is_active: true,
+      created_at: "2026-01-01",
+      updated_at: "2026-01-01",
+    });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ServiceConnectionTable
+          connections={[connection]}
+          serviceName="OpenAI"
+          insights={{
+            connections: new Map(),
+            status: "ready",
+            refresh: vi.fn(),
+          }}
+          pools={[
+            pool("reliable", "priority", { priority: 20 }),
+            pool("rotate", "round_robin"),
+            pool("unrelated", "weighted", { user_service_id: "other" }),
+          ]}
+          onViewPool={onViewPool}
+        />
+      </QueryClientProvider>,
+    );
+    const list = screen.getByRole("list", { name: "Pools using Team OpenAI" });
+    const cell = list.closest("td")!;
+    expect(cell).toHaveAttribute("colspan", "5");
+    expect(cell.closest("tr")).not.toHaveAttribute(
+      "data-service-connection-row",
+    );
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(list).getByText("reliable pool · Priority 20")).toBeVisible();
+    expect(screen.getAllByRole("row")).toHaveLength(3);
+    await user.click(within(list).getByRole("button", { name: /rotate pool/ }));
+    expect(onViewPool).toHaveBeenCalledWith("rotate");
   });
 });
