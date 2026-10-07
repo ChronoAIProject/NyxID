@@ -9,6 +9,7 @@ import {
 import { beforeEach, expect, it, vi } from "vitest";
 import { useLayoutEffect } from "react";
 import { useServiceGroupOrder } from "./use-service-group-order";
+import { ServiceOrderActions } from "@/components/dashboard/service-order-actions";
 import { ServiceConnectionTable } from "@/components/dashboard/service-connection-table";
 import { ServiceAgentOrderPanel } from "@/components/dashboard/service-agent-order-panel";
 import { groupServiceConnections } from "@/lib/service-groups";
@@ -72,6 +73,14 @@ vi.mock("@/hooks/use-service-insights", () => ({
     refresh: vi.fn(),
   }),
 }));
+// Billing tooltips are unrelated to ordering validation; keep their trigger
+// buttons without mounting a Radix tooltip/portal tree for every connection.
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: React.ReactNode }) => children,
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: React.ReactNode }) => children,
+  TooltipContent: () => null,
+}));
 function key(i: number): KeyInfo {
   return {
     id: `${String(i + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
@@ -94,7 +103,13 @@ function key(i: number): KeyInfo {
   } as unknown as KeyInfo;
 }
 let latest: ReturnType<typeof useServiceGroupOrder>;
-function Harness({ table = false }: { table?: boolean }) {
+function Harness({
+  table = false,
+  sticky = false,
+}: {
+  table?: boolean;
+  sticky?: boolean;
+}) {
   const order = useServiceGroupOrder(state.error ? [] : state.inventory);
   useLayoutEffect(() => {
     latest = order;
@@ -117,11 +132,16 @@ function Harness({ table = false }: { table?: boolean }) {
         {order.groupId ?? "closed"}|{order.busy ? "busy" : "idle"}|
         {order.ordered.join(",")}
       </output>
+      {sticky && order.groupId && (
+        <ServiceOrderActions order={order} formId="test-order" />
+      )}
       {table && order.groupId ? (
         <ServiceConnectionTable
           connections={order.connections}
           ordering={order}
           serviceName="Anthropic"
+          orderFormId={sticky ? "test-order" : undefined}
+          externalOrderActions={sticky}
         />
       ) : (
         <ServiceAgentOrderPanel group={entry} order={order} />
@@ -224,8 +244,16 @@ it("discard is idempotent so tab plus router blocker asks once, cancellation kee
 });
 it("201-row local validation is visible, sends no PUT and permits confirmed reset", async () => {
   state.inventory = Array.from({ length: 201 }, (_, i) => key(i));
-  render(<Harness table />);
+  const originalIds = state.inventory.map((connection) => connection.id);
+  render(<Harness table sticky />);
   fireEvent.click(screen.getByText("Start"));
+  expect(latest.connections.map((connection) => connection.id)).toEqual(
+    originalIds,
+  );
+  expect(document.querySelectorAll("[data-ordering-row]")).toHaveLength(201);
+  const form = document.querySelector("form")!;
+  const tableRoot = form.parentElement!;
+  const controls = within(tableRoot.firstElementChild! as HTMLElement);
   const row = within(
     document.querySelector(
       `[data-ordering-row="${key(1).id}"]`,
@@ -234,22 +262,39 @@ it("201-row local validation is visible, sends no PUT and permits confirmed rese
   fireEvent.click(
     row.getByRole("button", { name: "Move Anthropic (connection-1) up" }),
   );
-  fireEvent.submit(document.querySelector("form")!);
-  await waitFor(() =>
-    expect(
-      Array.from(document.querySelectorAll("[role=alert]")).some((node) =>
-        node.textContent?.includes("At most 200"),
-      ),
-    ).toBe(true),
+  expect(latest.ordered).toEqual([
+    originalIds[1],
+    originalIds[0],
+    ...originalIds.slice(2),
+  ]);
+  const stickySave = document.querySelector<HTMLButtonElement>(
+    'button[form="test-order"]',
+  )!;
+  expect((stickySave as HTMLButtonElement).form).toBe(form);
+  expect(form.querySelector("table")).toBeNull();
+  fireEvent.click(stickySave);
+  await waitFor(
+    () => {
+      const alert = tableRoot.querySelector("[role=alert]");
+      expect(alert).toBeVisible();
+      expect(alert).toHaveTextContent("At most 200 connections");
+      expect(tableRoot.querySelectorAll('[role="alert"]')).toHaveLength(1);
+      expect(
+        tableRoot.textContent!.match(/At most 200 connections/g),
+      ).toHaveLength(1);
+    },
+    { container: tableRoot },
   );
   expect(save).not.toHaveBeenCalled();
-  fireEvent.click(
-    Array.from(
-      document.querySelector("form")!.parentElement!.querySelectorAll("button"),
-    ).find((button) => button.textContent === "Reset to default")!,
+  fireEvent.click(controls.getByRole("button", { name: "Reset to default" }));
+  expect(window.confirm).toHaveBeenCalledExactlyOnceWith(
+    "Reset this service's agent order to default server discovery order?",
+  );
+  expect(latest.connections.map((connection) => connection.id)).toEqual(
+    originalIds,
   );
   await act(() => latest.retrySave());
-  expect(save).toHaveBeenCalledWith(group, {
+  expect(save).toHaveBeenCalledExactlyOnceWith(group, {
     ordered: [],
     expected_version: 1,
   });
@@ -261,9 +306,7 @@ it("unknown read states preserve known keys pills and never claim absent order",
   expect(screen.queryByText(/No agent order/)).toBeNull();
   state.inventory[0] = { ...key(0), preference_rank: 1 };
   rerender(<Harness />);
-  expect(
-    screen.getByText(/Preferred in discovery: Anthropic/),
-  ).toBeVisible();
+  expect(screen.getByText(/Preferred in discovery: Anthropic/)).toBeVisible();
   state.unavailable = false;
   state.pending = true;
   state.inventory[0] = key(0);
@@ -360,31 +403,46 @@ it("validates retry and overwrite after a successful inventory refresh grows bey
 it("capacity release confirms, keeps draft, handles CAS and uses released version", async () => {
   save.mockRejectedValueOnce(
     new ApiError(400, {
-      message: "Agent order storage is full",
+      message:
+        "Validation error: Agent order storage is full (200 connections across all services). Reset the agent order of another service, or release unavailable preferences for services you can no longer access, then try again.",
       error: "validation",
       error_code: 1000,
     }),
   );
   release.mockResolvedValue({ groups: [], version: 3, updated_at: null });
-  render(<Harness />);
+  const { rerender } = render(<Harness table />);
   fireEvent.click(screen.getByText("Start"));
   fireEvent.click(screen.getByText("Reverse"));
   await act(() => latest.retrySave());
   expect(latest.failure).toBe("capacity");
+  expect(
+    screen.getAllByText(/^Validation error: Agent order storage is full/),
+  ).toHaveLength(1);
+  expect(
+    screen.getByText(/^Validation error: Agent order storage is full/),
+  ).toBeVisible();
   vi.mocked(window.confirm).mockReturnValueOnce(false);
   await act(() => latest.releaseHidden());
   expect(release).not.toHaveBeenCalled();
   await act(() => latest.releaseHidden());
   expect(latest.groupId).toBe(group);
-  expect(latest.message).toContain("Retry save");
-  await act(() => latest.retrySave());
+  expect(latest.readyToRetry).toBe(true);
+  state.inventory = [...state.inventory, key(3)];
+  state.stamp++;
+  rerender(<Harness table />);
+  expect(latest.message).toContain("New connections were appended");
+  expect(screen.getByRole("button", { name: "Retry save" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
   expect(save.mock.calls[1]?.[1].expected_version).toBe(3);
 });
 
 it("explains real provider groups with null inference without guessing a provider slug", () => {
   state.inventory = state.inventory.map((key) => ({ ...key, inference: null }));
   const { rerender } = render(<Harness />);
-  const explanation = screen.getByText("How selection works").closest("details")!;
+  const explanation = screen
+    .getByText("How selection works")
+    .closest("details")!;
   expect(explanation).not.toHaveAttribute("open");
   explanation.open = true;
   expect(screen.getByText("/api/v1/llm/{provider}")).toBeVisible();

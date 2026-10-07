@@ -1,7 +1,8 @@
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useServiceGroupOrder } from "@/hooks/use-service-group-order";
 import { ServiceAgentOrderPanel } from "@/components/dashboard/service-agent-order-panel";
+import { ServiceOrderActions } from "@/components/dashboard/service-order-actions";
 import { Button } from "@/components/ui/button";
 import { Link, useParams, useBlocker } from "@tanstack/react-router";
 import { ArrowLeft, ListOrdered } from "lucide-react";
@@ -40,6 +41,7 @@ export function ServiceOverviewPage() {
         ?.credential_source,
   }));
   const agentOrder = useServiceGroupOrder(connections);
+  const orderFormId = useId();
   const routing = useServiceRoutingPools(agentOrder.inventory);
   useBlocker({
     shouldBlockFn: () => !agentOrder.guard(),
@@ -164,16 +166,49 @@ export function ServiceOverviewPage() {
         />
       )}
       <Tabs
+        className="sm:pt-1"
         value={tab}
         activationMode={agentOrder.dirty ? "manual" : "automatic"}
         onValueChange={(value) => {
           if (agentOrder.guard()) setTab(value);
         }}
       >
-        <TabsList>
-          <TabsTrigger value="connections">Connections</TabsTrigger>
-          <TabsTrigger value="history">History</TabsTrigger>
-        </TabsList>
+        <div
+          data-service-order-actions
+          className="sticky top-0 z-10 flex min-h-12 flex-wrap items-center gap-4 border-b border-border bg-background py-2 before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-background sm:before:-top-6 sm:before:h-6"
+        >
+          <TabsList>
+            <TabsTrigger value="connections">Connections</TabsTrigger>
+            <TabsTrigger value="history">History</TabsTrigger>
+          </TabsList>
+          {tab === "connections" &&
+            (agentOrder.groupId === group.id ? (
+              <div
+                role="group"
+                aria-label={`Agent order actions for ${group.name}`}
+                className="flex items-center gap-2"
+              >
+                <ServiceOrderActions order={agentOrder} formId={orderFormId} />
+              </div>
+            ) : group.id.startsWith("catalog:") &&
+              group.connections.length >= 2 ? (
+              <Button
+                ref={orderButton}
+                type="button"
+                variant="primary"
+                size="sm"
+                disabled={Boolean(agentOrder.reason)}
+                title={
+                  agentOrder.reason ??
+                  "Set agent discovery order within this service"
+                }
+                onClick={() => agentOrder.start(group)}
+              >
+                <ListOrdered className="size-4" aria-hidden="true" />
+                Agent order
+              </Button>
+            ) : null)}
+        </div>
         <TabsContent
           value="connections"
           className="mt-4 overflow-hidden rounded-xl border border-border/50 bg-card"
@@ -188,20 +223,6 @@ export function ServiceOverviewPage() {
             group={group}
             order={agentOrder}
             hasPool={pools.length > 0}
-            action={
-              <Button
-                ref={orderButton}
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={Boolean(agentOrder.reason)}
-                title={agentOrder.reason}
-                onClick={() => agentOrder.start(group)}
-              >
-                <ListOrdered className="size-4" />
-                Agent order
-              </Button>
-            }
           />
           <ServiceConnectionTable
             catalog={entry}
@@ -212,6 +233,8 @@ export function ServiceOverviewPage() {
                 : group.connections
             }
             ordering={agentOrder.groupId === group.id ? agentOrder : undefined}
+            orderFormId={orderFormId}
+            externalOrderActions
             savedOrder={agentOrder.savedOrder(group.id)}
             serviceName={group.name}
             onViewHistory={(connection) => {

@@ -346,7 +346,7 @@ disabled rows are not loaded. Native machine/upload search extras carry
 and cap semantics. Ranks do not verify downstream providers or grant execution.
 
 Ranks derive after all existing membership, allowlist, node, operation and guest
-filters. For example, a disabled saved position 1 appears as `Saved #1` in the
+filters. For example, a disabled saved position 1 appears as `Saved #1 · disabled` in the
 owner's UI; a restricted key seeing only the owner's Discovery #2 and #4 sees MCP
 ranks 1 and 2, in the same relative order. Guest connected search/list includes
 only granted UserManaged/Platform connections and drops Internal catalog entries;

@@ -938,7 +938,14 @@ card or service overview provides inline drag handles, Move up/down, disabled-ro
 positions and confirmed Reset to default. All group rows remain visible during
 editing even if filters change. No global editor replaces the page and editing
 does not write saved-view settings. A compact summary shows enabled/disabled
-counts and saved/default/unknown order beside the single Agent order action.
+counts and saved/default/unknown order. The single primary Agent order CTA sits
+in the card's sticky header bottom action bar, or the overview's sticky tab bar.
+Editing replaces it with a readable Agent order label and one primary Save /
+Cancel set in the same section. Explicit gaps keep controls together; narrow
+bars wrap and remain operable while scrolled. Save targets a dedicated native
+order form outside the connection table, so unrelated panel buttons cannot
+submit the order. Invalid/failed submissions focus and reveal one error below
+the sticky cover, including repeated same-error attempts.
 The longer **How selection works** disclosure is collapsed by default on cards
 and overview; it contains scope, protocol, pool and gateway distinctions without
 repeating every connection prefix. Disclosure toggles preserve drafts, filters
@@ -958,11 +965,11 @@ draft and offer scoped Reload/Overwrite, bound to the original identity.
 | Route/fail over across alternatives | Explicit service pool, addressed by its pool slug; its strategy is unchanged |
 | Resolve an implicit LLM provider/model without `pool:` | Existing active-row database choice within owner tiers; unchanged by Part A |
 
-Agent-key counts count access grants, while HTTP connection rows are alternatives
+The card's agent-key count is keys with access, not connections. HTTP rows are alternatives
 with different tool-name prefixes. Non-HTTP rows keep saved positions but have
 no connected MCP discovery rank or tool prefix. Enabled does not mean verified or executable;
 discovery can include an unavailable credential with `executable: false`.
-Disabled stored rows show `Saved #p` and no discovery rank. Restricted callers
+Disabled stored rows show `Saved #p · disabled` and no discovery rank. Restricted callers
 see dense ranks over their permitted discovered connections: the owner's REST
 Discovery #2 and #4 can become MCP #1 and #2. A disabled Saved #1 is excluded
 from those MCP ranks. The selection disclosure explains this, advisory choice, relevance,

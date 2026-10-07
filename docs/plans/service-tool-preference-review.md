@@ -38,11 +38,17 @@ each actual service group, such as the expanded Anthropic connection table.
 The global editor does not satisfy that requirement. The revised inline
 implementation is complete and PR #1796 remains draft through final validation
 and review. Fable completed the revised plan; ROOT authorized Part A with
-31 acceptance criteria and personally reviewed the revised source and behavior.
-All 31 Part A acceptance criteria have passing local evidence, and ROOT has
-closed every substantiated finding below. The final all-target Clippy recheck
-also passed. Fresh CI and Opus 5.5 review of the published revision are tracked
-on PR #1796; old checks and approval for `e72036b7` do not satisfy these gates.
+31 original acceptance criteria and personally reviewed the revised source and behavior.
+The revised plan adds AC-32 for sticky controls and AC-33 for CLI transport security.
+All 33 Part A acceptance criteria now have local implementation and validation
+evidence. ROOT personally reviewed the coverage/Opus corrections, sticky
+controls and spacing, protected CLI release transport, final documentation,
+browser screenshots and completed validation logs. The additional findings
+from published `0ea6cfa3e41eea4cbc03d65e9c4e8d24da5d3fbb` are corrected locally,
+including the 201-row coverage timeout and credential transport boundary.
+Fresh exact-head CI, aggregate CodeQL and Opus sign-off remain publication
+gates; local evidence alone does not close them. PR #1796 remains draft;
+old checks and approval for `e72036b7` do not satisfy these gates.
 
 ## Revised scope: PM plan review
 
@@ -558,7 +564,7 @@ Only the existing Sol and Opus heca sessions are reused for this follow-up.
 The PM owns publication; final required CI and Opus sign-off bind the revised
 published head in the PR body.
 
-## Within-service revision requested by the user
+## Within-service revision requested by the user: current delivery status
 
 The user's Anthropic card has 30 connections, 26 disabled connections and
 34 agent keys with access. Agent key count is not a connection count. The
@@ -572,19 +578,105 @@ bridge, whose production backend does not yet implement preference writes.
 No emulated order is delivered to production. The actual branch implementation
 must remain honest about unavailable saves on an older backend.
 
-Open revision gates:
+Revision gates:
 
 | Finding | Required correction | Status |
 | --- | --- | --- |
-| Reorder replaces all service cards with one global list. | Put handles, local order pills and Save/Cancel inside the existing service card's connection table; keep its metadata and surrounding groups visible. | Plan in progress |
-| Full replacement cannot safely preserve preferences omitted from a scoped read. | Server-authoritative group writes must retain unrelated and currently inaccessible stored entries, with CAS and no-op behavior. | Plan in progress |
-| Discovery ranks and sorting currently cross service groups. | Derive dense ranks within each immutable service group and preserve relevance and unrelated group ordering with a transitive deterministic algorithm. | Plan in progress |
-| The group does not explain how discovery, named execution and pools select connections. | Display a concise explanation in the actual group, including agent-key scope, disabled/unavailable state, explicit connection slugs and pool routing. | Plan in progress |
-| The implicit provider gateway chooses an active connection without saved priority. | Document the current selector and separately decide whether the user's order must govern that route. The PM asked the user for this runtime-scope choice. | User clarification pending |
-| Production 404 makes all preference controls disappear in the local frontend. | Preserve visible explanatory group UI and an honest unavailable-save state on older backends; do not simulate successful production persistence. | Plan in progress |
-| Earlier source sign-off covers the rejected global editor. | Repeat PM review, relevant validation and Opus sign-off on the final revised SHA and plan. | Pending implementation |
+| Reorder replaces all service cards with one global list. | Put handles, local order pills and Save/Cancel inside the existing service card's connection table; keep its metadata and surrounding groups visible. | Implemented and personally verified in the card and overview browser scenarios |
+| Full replacement cannot safely preserve preferences omitted from a scoped read. | Server-authoritative group writes must retain unrelated and currently inaccessible stored entries, with CAS and no-op behavior. | Implemented; real database merge/CAS/no-op/privacy tests pass |
+| Discovery ranks and sorting currently cross service groups. | Derive dense ranks within each immutable service group and preserve relevance and unrelated group ordering with a transitive deterministic algorithm. | Implemented; same-group slot, relevance and truncation regressions pass |
+| The group does not explain how discovery, named execution and pools select connections. | Display a concise explanation in the actual group, including agent-key scope, disabled/unavailable state, explicit connection slugs and pool routing. | Implemented and verified; final copy nit tracked in the fresh review below |
+| The implicit provider gateway chooses an active connection without saved priority. | Document the current selector and separately decide whether the user's order must govern that route. The PM asked the user for this runtime-scope choice. | Conditional Part B; outside this delivery until the user chooses that runtime scope |
+| Production 404 makes all preference controls disappear in the local frontend. | Preserve visible explanatory group UI and an honest unavailable-save state on older backends; do not simulate successful production persistence. | Implemented and verified against older-backend 404; separate local sample preview authorized and running |
+| Earlier source sign-off covers the rejected global editor. | Repeat PM review, relevant validation and Opus sign-off on the final revised SHA and plan. | PM reviewed revised implementation; fresh CI and exact-head Opus approval remain required |
 
-Only the original Fable, Sol and Opus heca sessions are reused. Sol completed
-a read-only architecture review and awaits the PM-reviewed plan. The PM
-prepared a dedicated MongoDB 8.0.17 replica set on loopback port 27029 for
-revision tests; it contains no production data or credentials.
+Only the original Fable, Sol and Opus heca sessions are reused. Fable completed
+the revised plan and Sol implemented Part A after PM plan review. The PM
+prepared a dedicated MongoDB 8.0.17 replica set on loopback port 27029 and
+personally reviewed the implementation and execution evidence; the fixture
+contains no production data or credentials.
+
+## Fresh published-head review and coverage correction
+
+Opus 5.5 returned REQUEST_CHANGES on
+`0ea6cfa3e41eea4cbc03d65e9c4e8d24da5d3fbb`. It confirmed scoped storage,
+CAS/privacy, caller filtering, discovery slot permutation, execution invariance,
+transport authority fences and inline UI placement. The following additional
+findings required correction and fresh validation. ROOT reviews each
+correction directly; Sol handles source and plan changes without new agents.
+
+| Finding | Required correction | Status |
+|---|---|---|
+| Backend capacity failure appears twice, and the browser fixture uses different server text. | Render one capacity message and exercise the actual backend text with an exact single-occurrence browser assertion. | Closed locally: ROOT inspected the separated capacity message state, exact backend fixture and single-occurrence browser proof |
+| An unrelated sticky-header outline was edited after the recorded local gates. | Remove the unrelated edit and run final frontend/browser gates on frozen source. | Closed: outline/comment removed; ROOT inspected fresh browser, unit, build and lint evidence |
+| Agent-key count explanation is unclear. | Explain that the card counts agent keys with access rather than service connections. | Closed: ROOT reviewed the specific card-count wording |
+| Retry save visibility depends on message prose. | Drive the action from explicit recovery state and verify successful release/retry behavior. | Closed locally: draft-token-bound readyToRetry state controls the action; release/confirmation/retry browser proof passes |
+| CLI help still describes cross-service preferences. | Describe discovery order within one service's connections. | Closed: ROOT inspected the corrected help and completed fresh compilation, unit/subprocess and all-target Clippy evidence |
+| Plan disagrees with actual action location, guards, disabled pills, summary states and changed-file map. | Align every relevant section and acceptance criterion with the final behavior and complete the file map. | Closed: ROOT reviewed the final plan, API/discovery/architecture docs, complete CLI/frontend file map and per-criterion evidence |
+| This review record's closing revision section still describes unimplemented work. | Update implemented Part A gates and distinguish conditional Part B from delivery. | Closed: ROOT updated the section and current status; final CI/Opus remain explicit gates |
+| Frontend coverage times out in the 201-row validation/reset test. | Remove unnecessary test work while retaining all 201 IDs, visible local validation, no PUT, and confirmed reset; reproduce with coverage. | Closed locally: full V8 coverage passes 466 files / 4,773 tests with the existing 15% threshold; no timeout or coverage relaxations |
+| Local 201-row invalid submission also duplicates the limit paragraph. | Render the validation message once while retaining the real form error and actionable reset. | Closed: one form error; native sticky-submit hook and real 201-row browser checks retain every ID, reject PUT and confirm reset |
+| The user finds Agent order hard to recognize and wants Save/Cancel in the sticky section. | Use a clear idle CTA, then one Save/Cancel action set in the sticky action bar while editing; preserve validation, recovery and focus, and prove scrolled desktop/mobile usability. | Closed locally under AC-32: ROOT inspected source, six card/overview width scenarios and mobile/desktop screenshots; deliberate gap spacing replaces justify-between |
+| The first sticky-action candidate wraps unrelated row panels in the order form, making their existing untyped buttons submit the draft. | Keep the table and its panels outside the dedicated order form; native sticky Save targets that form explicitly. Verify panel interaction leaves the draft unsaved. | Closed: dedicated form excludes the table; actual Show all/fewer keys browser interactions retain the dirty order with zero PUTs |
+| The first error-scroll calculation looks for an explicit region role that neither surface provides and can miss sticky-header occlusion or a repeated identical failure. | Measure the actual action bar's bottom bound and reveal each failed attempt; verify first and repeated scrolled failures remain below the sticky cover and inside the scrollport. | Closed locally: associated native submit control measures the action bar; submit count repeats error reveal; browser geometry/hit-testing verifies first and repeated failures |
+| CodeQL reports two new high-severity cleartext-transmission alerts on the added CLI JSON DELETE helper, including its refresh retry. | Establish an actual secure transport boundary for credential-bearing requests, retain safe local fixtures, and prove remote cleartext and downgrade redirects cannot transmit credentials. No alert dismissal or scanner suppression. | Corrected locally: ROOT reviewed URL validation, verified HTTPS/no-redirect client binding, protected preliminary reads/refresh/retry, retained profile fences and four passing real subprocess security cases; fresh exact-head aggregate CodeQL remains required |
+| Scrolled overview screenshots show passing row text in the main top gutter above the new sticky bar. | Extend the sticky surface background over the existing mobile/desktop gutter without obscuring normal metadata; inspect fresh screenshots and recheck geometry/error visibility. | Closed: ROOT inspected corrected 390/1440 screenshots; all three width browser checks, seven overview unit tests and final build/lint pass |
+
+CI run: `https://github.com/ChronoAIProject/NyxID/actions/runs/37571777616`.
+The frontend coverage job ran 4,772 passing tests and one timeout, with 465 files
+passing and one failing. Its failure is at
+`src/hooks/use-service-group-order.test.tsx:225` (5,000 ms), rather than the
+coverage threshold. The normal Frontend, Rust Clippy, CLI Test, wizard freshness,
+billing smoke and feature-combination jobs passed on this head. Full new-head
+CI and a fresh Opus review are required after correction; these partial passes
+do not close either gate.
+
+The CodeQL workflow completed successfully, but its separate aggregate security
+check `112631937301` failed on new alerts
+`https://github.com/ChronoAIProject/NyxID/security/code-scanning/465` and
+`https://github.com/ChronoAIProject/NyxID/security/code-scanning/466` at
+`cli/src/api.rs:566` and `:576`. A successful scanner execution does not establish
+a clean security verdict. Both findings require implementation and fresh exact-head
+CodeQL evidence before sign-off.
+
+### Final local correction review
+
+ROOT inspected the corrected sticky controls on cards and the service overview,
+including the mobile/desktop screenshots and all six width scenarios. Agent
+order is a primary CTA; editing shows a readable label, outline Cancel and
+primary Save in one group with explicit gaps. The existing chevron remains.
+The dedicated native form excludes unrelated row panels; its associated submit
+button supplies the actual sticky action-bar bound used to reveal errors.
+Repeated identical failed submissions reveal the error again. ROOT also found
+and returned the overview gutter issue, then inspected its corrected screenshots
+and three passing browser rechecks.
+
+The CLI release command constructs one existing read-only authenticated client,
+then validates and binds transport to that client's actual destination before
+any request. Remote transport requires verified HTTPS. Local HTTP is restricted
+to exact loopback hosts, bypasses proxies and pins localhost to loopback. All
+release reads, refreshes and DELETE attempts refuse redirects. Explicit keys
+never refresh; saved-profile destination and login-generation fences remain.
+ROOT found and returned a first candidate's duplicate destination resolution;
+the final constructor resolves once. The DELETE helper independently applies
+the same transport policy to its initial and refresh-retry request.
+
+ROOT reviewed the final source, documentation and completed logs below. Plan
+§17 contains the commands and artifact paths. Existing backend/database and
+execution-boundary evidence remains applicable because these corrections do
+not change backend source or discovery/execution semantics.
+
+| Local validation reviewed by ROOT | Result | Evidence |
+|---|---|---|
+| Full frontend and full V8 coverage | 466 files / 4,773 tests passed in each; 73.16% lines with the existing 15% coverage threshold | `/tmp/nyxid-service-preference-sticky-full-frontend.log`, `/tmp/nyxid-service-preference-sticky-full-coverage.log` |
+| Complete feature and regenerated wizard browser execution | 29 passed, no retries; final gutter-only change adds three passing overview browser and seven passing unit rechecks | `/tmp/nyxid-service-preference-sticky-frozen-browser.log`, `/tmp/nyxid-service-preference-sticky-gutter-browser.log`, `/tmp/nyxid-service-preference-sticky-gutter-unit.log` |
+| Final production build and lint | Build passes including mock-footprint assertion; lint has zero errors or feature warnings, with 29 unrelated existing warnings | `/tmp/nyxid-service-preference-sticky-gutter-build.log`, `/tmp/nyxid-service-preference-sticky-gutter-lint.log` |
+| Fresh CLI compilation, formatting and all-target Clippy | All pass; compiler-artifact paths identify the freshly rebuilt executables | `/tmp/nyxid-service-preference-sticky-cli-compile-recheck.log`, `/tmp/nyxid-service-preference-sticky-cli-artifacts.json`, `/tmp/nyxid-service-preference-sticky-final-fmt.log`, `/tmp/nyxid-service-preference-sticky-final-cli-clippy.log` |
+| CLI preference/API/TLS unit tests | 3 preference, 5 API and 17 TLS tests passed; zero ignored | `/tmp/nyxid-service-preference-sticky-cli-unit.log`, `/tmp/nyxid-service-preference-sticky-cli-api.log`, `/tmp/nyxid-service-preference-sticky-cli-tls.log` |
+| Real CLI transport, preference and network/profile subprocess tests | 4 transport, 4 preference and 5 network tests passed; verified CA/refresh and zero requests at downgrade targets | `/tmp/nyxid-service-preference-sticky-cli-transport.log`, `/tmp/nyxid-service-preference-sticky-cli-integration.log`, `/tmp/nyxid-service-preference-sticky-cli-network.log` |
+| Regenerated wizard freshness | Fresh rebuilt-source check passes; all 171 manifest inputs and recorded hash match | `/tmp/nyxid-service-preference-sticky-cli-freshness.log`, `/tmp/nyxid-service-preference-sticky-gutter-closure.json` |
+
+All substantiated local implementation findings are corrected. Fresh published
+head CI, its separate aggregate CodeQL verdict and Opus's plan/PR sign-off remain
+required. Their final results belong in the PR evidence so that adding evidence
+does not change an approved source head. No merge or deployment is performed.

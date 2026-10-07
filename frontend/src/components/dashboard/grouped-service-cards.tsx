@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import type { ServiceGroupOrder } from "@/hooks/use-service-group-order";
 import { ServiceAgentOrderPanel } from "./service-agent-order-panel";
+import { ServiceOrderActions } from "./service-order-actions";
 import {
   useId,
   useLayoutEffect,
@@ -87,6 +88,7 @@ function GroupCard({
   const preferred = preferredConnection(group.connections);
   const ordering = agentOrder?.groupId === group.id ? agentOrder : undefined;
   const isOrdering = Boolean(ordering);
+  const orderFormId = useId();
   const orderButton = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
     if (!agentOrder || agentOrder.focusGroup !== group.id || agentOrder.reason)
@@ -330,9 +332,6 @@ function GroupCard({
           className={cn(
             "relative flex flex-col bg-card",
             expanded ? "rounded-t-xl shadow-sm" : "h-72 rounded-xl",
-            // The stuck cover hides the card's side borders; redraw them on
-            // the header so its edges line up with the body's borders below.
-            expanded && headerStuck && "outline outline-border",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
@@ -492,7 +491,10 @@ function GroupCard({
               </div>
             </div>
           </div>
-          <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-4">
+          <div
+            data-service-order-actions
+            className="flex min-h-12 shrink-0 flex-wrap items-center gap-3 border-t border-border/70 px-4 py-2"
+          >
             <Button
               variant="ghost"
               size="sm"
@@ -517,7 +519,16 @@ function GroupCard({
                 ? "Hide connections"
                 : `View ${matchingCount} ${matchingCount === 1 ? "connection" : "connections"}`}
             </Button>
-            {expanded &&
+            {ordering ? (
+              <div
+                role="group"
+                aria-label={`Agent order actions for ${group.name}`}
+                className="flex items-center gap-2"
+              >
+                <ServiceOrderActions order={ordering} formId={orderFormId} />
+              </div>
+            ) : (
+              expanded &&
               agentOrder &&
               group.id.startsWith("catalog:") &&
               group.connections.length >= 2 && (
@@ -525,7 +536,7 @@ function GroupCard({
                   ref={orderButton}
                   type="button"
                   size="sm"
-                  variant="ghost"
+                  variant="primary"
                   disabled={Boolean(agentOrder.reason)}
                   title={
                     agentOrder.reason ??
@@ -536,8 +547,9 @@ function GroupCard({
                   <ListOrdered className="size-3.5" aria-hidden="true" />
                   Agent order
                 </Button>
-              )}
-            <div className="flex items-center gap-2 pr-2">
+              )
+            )}
+            <div className="ml-auto flex flex-wrap items-center gap-2 pr-2">
               {matchingCount < count && (
                 <span className="text-11 text-muted-foreground">
                   {matchingCount} of {count} match
@@ -643,6 +655,8 @@ function GroupCard({
                     : connections
                 }
                 ordering={ordering}
+                orderFormId={orderFormId}
+                externalOrderActions
                 savedOrder={agentOrder?.savedOrder(group.id)}
                 insights={insights}
                 serviceName={group.name}

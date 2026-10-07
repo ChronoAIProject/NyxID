@@ -98,6 +98,13 @@ fn build_cli_http_client_with_redirect(
     profile: Option<&str>,
     redirect: reqwest::redirect::Policy,
 ) -> Result<Client> {
+    cli_http_client_builder(profile)?
+        .redirect(redirect)
+        .build()
+        .context("Failed to build HTTP client")
+}
+
+fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuilder> {
     // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
     // BOTH conditions are true:
     //   (a) the operator has configured a telemetry DSN (or opted into
@@ -143,7 +150,6 @@ fn build_cli_http_client_with_redirect(
         crate::telemetry::consent::resolve_consent_preferring_profile(profile).enabled;
 
     let mut builder = crate::tls::client_builder()?
-        .redirect(redirect)
         .user_agent(CLI_USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(10));
 
@@ -160,7 +166,48 @@ fn build_cli_http_client_with_redirect(
         builder = builder.default_headers(default_headers);
     }
 
-    builder.build().context("Failed to build HTTP client")
+    Ok(builder)
+}
+
+fn credential_delete_url(address: &str) -> Result<url::Url> {
+    let address =
+        url::Url::parse(address).map_err(|_| anyhow::anyhow!("Invalid credential DELETE URL"))?;
+    if address.host().is_none()
+        || !address.username().is_empty()
+        || address.password().is_some()
+        || address.fragment().is_some()
+    {
+        bail!("Credential DELETE URL must have a host without userinfo or a fragment");
+    }
+    if address.scheme() != "https"
+        && !(address.scheme() == "http"
+            && matches!(
+                address.host_str(),
+                Some("localhost" | "127.0.0.1" | "[::1]")
+            ))
+    {
+        bail!(
+            "Credential DELETE requires HTTPS; HTTP is allowed only for localhost, 127.0.0.1, or [::1]"
+        );
+    }
+    Ok(address)
+}
+
+fn credential_delete_client(profile: Option<&str>, address: &url::Url) -> Result<Client> {
+    let local_http = address.scheme() == "http";
+    let mut builder = cli_http_client_builder(profile)?
+        .https_only(!local_http)
+        .redirect(reqwest::redirect::Policy::none());
+    if local_http {
+        // Match the existing provider OAuth policy: local credentials bypass
+        // proxies, localhost is pinned, and no redirect can leave this origin.
+        builder = builder
+            .no_proxy()
+            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+    }
+    builder
+        .build()
+        .context("Failed to build credential DELETE client")
 }
 
 pub struct ApiClient {
@@ -229,6 +276,16 @@ impl ApiClient {
         Ok(client)
     }
 
+    /// Bind the hidden-release command's reads, token refresh and writes to
+    /// the same HTTPS/loopback transport before making any request. A saved
+    /// session renews on 401 through this client; caller-selected keys never do.
+    pub fn from_auth_with_credential_transport(auth: &crate::cli::AuthArgs) -> Result<Self> {
+        let mut api = Self::from_auth(auth)?;
+        let address = credential_delete_url(api.base_url_root())?;
+        api.client = credential_delete_client(api.profile.as_deref(), &address)?;
+        Ok(api)
+    }
+
     /// Build a client after validating the saved session up front.
     ///
     /// Runs [`crate::auth::ensure_session`] first: a no-op when the access
@@ -291,6 +348,11 @@ impl ApiClient {
     /// source of truth) and owns only the token I/O: read the saved refresh
     /// token, persist the rotated pair, and update this client's in-memory copy.
     async fn try_refresh_token(&mut self) -> bool {
+        let client = self.client.clone();
+        self.try_refresh_token_with_client(&client).await
+    }
+
+    async fn try_refresh_token_with_client(&mut self, client: &Client) -> bool {
         if self.refresh_disabled {
             return false;
         }
@@ -319,12 +381,8 @@ impl ApiClient {
             None => return false,
         };
 
-        match crate::auth::exchange_refresh_token(
-            &self.client,
-            self.base_url_root(),
-            &refresh_token,
-        )
-        .await
+        match crate::auth::exchange_refresh_token(client, self.base_url_root(), &refresh_token)
+            .await
         {
             crate::auth::RefreshExchange::Renewed {
                 access_token,
@@ -560,20 +618,21 @@ impl ApiClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let url = format!("{}{path}", self.base_url);
-        let resp = self
-            .client
-            .delete(&url)
+        let url = credential_delete_url(&format!("{}{path}", self.base_url))?;
+        let client = credential_delete_client(self.profile.as_deref(), &url)?;
+        let resp = client
+            .delete(url.clone())
             .bearer_auth(&self.access_token)
             .json(body)
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
-            let resp = self
-                .client
-                .delete(&url)
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.try_refresh_token_with_client(&client).await
+        {
+            let resp = client
+                .delete(url)
                 .bearer_auth(&self.access_token)
                 .json(body)
                 .send()
@@ -900,6 +959,33 @@ mod tests {
             access_token_env: "NYXID_ACCESS_TOKEN".to_string(),
             profile: None,
             output: OutputFormat::Json,
+        }
+    }
+
+    #[test]
+    fn credential_delete_urls_allow_https_and_only_exact_loopback_http() {
+        for address in [
+            "https://service.example/api/v1/service-preferences/hidden",
+            "http://localhost:3001/api/v1/service-preferences/hidden",
+            "http://127.0.0.1:3001/api/v1/service-preferences/hidden",
+            "http://[::1]:3001/api/v1/service-preferences/hidden",
+        ] {
+            assert!(super::credential_delete_url(address).is_ok(), "{address}");
+        }
+        for address in [
+            "http://service.example/hidden",
+            "http://192.168.1.1/hidden",
+            "http://127.0.0.2/hidden",
+            "http://localhost.service.example/hidden",
+            "http://127.0.0.1.service.example/hidden",
+            "http://[::ffff:127.0.0.1]/hidden",
+            "https://user:dummy@service.example/hidden",
+            "http://localhost@service.example/hidden",
+            "https://service.example/hidden#fragment",
+            "file:///hidden",
+            "ftp://localhost/hidden",
+        ] {
+            assert!(super::credential_delete_url(address).is_err(), "{address}");
         }
     }
 

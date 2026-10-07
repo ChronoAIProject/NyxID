@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import type { ServiceGroupOrder } from "@/hooks/use-service-group-order";
 import { ServiceOrderRow, ServiceOrderHandle } from "./service-order-rows";
+import { ServiceOrderActions } from "./service-order-actions";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowUpRight,
@@ -190,6 +191,8 @@ export function ServiceConnectionTable({
   pools = [],
   onViewPool,
   ordering,
+  orderFormId,
+  externalOrderActions = false,
   savedOrder = [],
 }: {
   readonly connections: readonly KeyInfo[];
@@ -202,6 +205,8 @@ export function ServiceConnectionTable({
   readonly pools?: readonly ServicePool[];
   readonly onViewPool?: (poolId: string) => void;
   readonly ordering?: ServiceGroupOrder;
+  readonly orderFormId?: string;
+  readonly externalOrderActions?: boolean;
   readonly savedOrder?: readonly string[];
 }) {
   const [open, setOpen] = useState<{
@@ -237,6 +242,47 @@ export function ServiceConnectionTable({
     });
     return () => cancelAnimationFrame(frame);
   }, [ordering]);
+  useEffect(() => {
+    if (
+      !ordering?.failure &&
+      !(ordering?.validationError && ordering.submitCount > 0)
+    )
+      return;
+    let frame = requestAnimationFrame(() => {
+      const alert = root.current?.querySelector<HTMLElement>('[role="alert"]');
+      if (!alert) return;
+      alert.tabIndex = -1;
+      alert.focus({ preventScroll: true });
+      const reveal = () => {
+        const main = alert.closest("main");
+        if (!main) {
+          alert.scrollIntoView?.({ block: "center" });
+          return;
+        }
+        const form = root.current?.querySelector("form");
+        const submit =
+          form &&
+          Array.from(form.elements).find(
+            (element) =>
+              element instanceof HTMLButtonElement && element.type === "submit",
+          );
+        const actionBar = submit?.closest("[data-service-order-actions]");
+        const scrollport = main.getBoundingClientRect();
+        const top =
+          Math.max(
+            scrollport.top,
+            actionBar?.getBoundingClientRect().bottom ?? scrollport.top,
+          ) + 12;
+        const bounds = alert.getBoundingClientRect();
+        if (bounds.top < top || bounds.bottom > scrollport.bottom)
+          main.scrollTop += bounds.top - top;
+      };
+      reveal();
+      // Sticky geometry may change when scrolling back from the middle rows.
+      frame = requestAnimationFrame(reveal);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [ordering?.failure, ordering?.validationError, ordering?.submitCount]);
   const rankedIds = ordering?.ordered ?? savedOrder;
   const activeRanks = new Map<string, number>();
   for (const id of rankedIds) {
@@ -876,7 +922,7 @@ export function ServiceConnectionTable({
           {ordering.message}
         </p>
       )}
-      {ordering.message.includes("Retry save when ready") && (
+      {ordering.readyToRetry && (
         <Button
           type="button"
           variant="outline"
@@ -911,29 +957,34 @@ export function ServiceConnectionTable({
         </div>
       )}
       {ordering.failure === "stale" && (
-        <ErrorBanner
-          message="Some connections are no longer available. Refresh connections before saving again."
-          onRetry={() => void ordering.refreshStale()}
-        />
+        <div role="alert">
+          <ErrorBanner
+            message="Some connections are no longer available. Refresh connections before saving again."
+            onRetry={() => void ordering.refreshStale()}
+          />
+        </div>
       )}
       {ordering.readError && (
-        <ErrorBanner
-          message="Could not refresh connections or agent order. Your edits are kept."
-          onRetry={() => void ordering.retryRead()}
-        />
+        <div role="alert">
+          <ErrorBanner
+            message="Could not refresh connections or agent order. Your edits are kept."
+            onRetry={() => void ordering.retryRead()}
+          />
+        </div>
       )}
       {ordering.failure === "network" && (
-        <ErrorBanner
-          message="Could not save agent order. Your edits are kept."
-          onRetry={() => void ordering.retrySave()}
-        />
+        <div role="alert">
+          <ErrorBanner
+            message="Could not save agent order. Your edits are kept."
+            onRetry={() => void ordering.retrySave()}
+          />
+        </div>
       )}
       {ordering.failure === "capacity" && (
         <div role="alert" className="space-y-2 p-3 text-12">
           <p>
-            Agent order storage is full (200 connections across all services).
-            Reset the agent order of another service, or release unavailable
-            preferences for services you can no longer access, then try again.
+            {ordering.capacityMessage ||
+              "Agent order storage is full (200 connections across all services). Reset the agent order of another service, or release unavailable preferences for services you can no longer access, then try again."}
           </p>
           <Button
             type="button"
@@ -987,31 +1038,15 @@ export function ServiceConnectionTable({
         </SortableContext>
       </DndContext>
       <form
+        id={orderFormId}
         aria-label={`Agent order for ${serviceName}`}
         onSubmit={(event) => void ordering.save(event)}
-        className="flex justify-end gap-2 border-t border-border/50 p-3"
       >
-        <Button
-          type="button"
-          variant="outline"
-          disabled={ordering.busy}
-          onClick={ordering.cancel}
-        >
-          Cancel
-        </Button>
-        <Button
-          type="submit"
-          variant="primary"
-          isLoading={ordering.busy}
-          disabled={
-            blocked ||
-            !ordering.dirty ||
-            ordering.failure === "stale" ||
-            ordering.failure === "capacity"
-          }
-        >
-          Save
-        </Button>
+        {!externalOrderActions && (
+          <div className="flex justify-end gap-2 border-t border-border/50 p-3">
+            <ServiceOrderActions order={ordering} />
+          </div>
+        )}
       </form>
     </div>
   );

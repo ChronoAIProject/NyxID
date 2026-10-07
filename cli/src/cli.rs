@@ -970,7 +970,7 @@ pub enum ServicePreferenceCommands {
 // not load-bearing — accept the lint here.
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
-    /// Set discovery preference among connected services (breaks relevance ties)
+    /// Set agent discovery order within a service's connections
     Preference {
         #[command(subcommand)]
         command: ServicePreferenceCommands,

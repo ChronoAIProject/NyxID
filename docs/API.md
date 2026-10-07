@@ -3229,6 +3229,12 @@ No-op writes retain metadata and produce no audit.
 within the authorized active HTTP catalog group, and `preference_position`, the
 saved position among authorized stored group IDs including disabled rows. Both
 are null for custom singleton groups; disabled rows have a null discovery rank.
+The CLI hidden-release command requires verified HTTPS remotely, refuses
+redirects on reads, refresh and DELETE (including retry), and preserves its
+existing profile/identity and caller-selected-credential fences. Local HTTP is
+limited to exact localhost/127.0.0.1/[::1] destinations, bypasses proxies and pins
+localhost to loopback. Other transport helpers retain their existing behavior.
+
 The UI shows `Discovery #n` and `Saved #p · disabled` separately. Restricted MCP
 callers see dense ranks over their own fully scoped discovery inventory, which
 can differ from the owner's REST pills. Preference never changes named execution,

@@ -83,10 +83,10 @@ export function ServiceAgentOrderPanel({
         </summary>
         <div className="mt-2 space-y-2">
           <p>
-            Agent keys count access grants. Enabled HTTP connections are
-            alternatives for the same service. Each has its own tool-name
-            prefix, based on the connection slug shown in its row:{" "}
-            <code>slug__…</code>.
+            The card's agent-key count is keys with access, not connections.
+            Enabled HTTP connections are alternatives for the same service. Each
+            has its own tool-name prefix, based on the connection slug shown in
+            its row: <code>slug__…</code>.
           </p>
           {otherProtocols.length > 0 && (
             <p>

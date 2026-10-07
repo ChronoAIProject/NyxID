@@ -4721,7 +4721,11 @@ async fn run_service_preference(command: ServicePreferenceCommands) -> Result<()
             (auth, None, true)
         }
     };
-    let mut api = ApiClient::from_auth_checked(&auth).await?;
+    let mut api = if release {
+        ApiClient::from_auth_with_credential_transport(&auth)?
+    } else {
+        ApiClient::from_auth_checked(&auth).await?
+    };
     let current: Value = api.get("/service-preferences").await?;
     let inventory: Value = api.get("/keys").await?;
     let items = inventory["keys"]

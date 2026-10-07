@@ -68,6 +68,8 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     "conflict" | "stale" | "capacity" | "network" | null
   >(null);
   const [message, setMessage] = useState("");
+  const [capacityMessage, setCapacityMessage] = useState("");
+  const [retryToken, setRetryToken] = useState<number | null>(null);
   const [operation, setOperation] = useState<number | null>(null);
   const [focusGroup, setFocusGroup] = useState<string | null>(null);
   const [previousIdentity, setPreviousIdentity] = useState(identity);
@@ -89,6 +91,8 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     setFailure(null);
     setFocusGroup(null);
     setMessage("");
+    setCapacityMessage("");
+    setRetryToken(null);
     setOperation(null);
   }
   useEffect(() => {
@@ -204,6 +208,8 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     replaceDraft(null);
     setFailure(null);
     setMessage("");
+    setCapacityMessage("");
+    setRetryToken(null);
   };
   const update = (ids: string[]) => {
     if (!current || busy) return;
@@ -226,6 +232,8 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     }
     const parsed = result.data;
     // The mutation also checks live authentication immediately before PUT.
+    setMessage("");
+    setRetryToken(null);
     setOperation(captured.token);
     try {
       if (!valid(captured)) return;
@@ -249,7 +257,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
         error.status === 400 &&
         /capacity|storage is full/i.test(error.message)
       )
-        setMessage(error.message);
+        setCapacityMessage(error.message);
     } finally {
       if (valid(captured)) setOperation(null);
     }
@@ -305,6 +313,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
         form.reset({ ordered: next.saved, expected_version: latest.version });
         setFailure(null);
         setMessage("");
+        setRetryToken(null);
       }
     } catch {
       if (valid(captured))
@@ -360,6 +369,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
       )
     )
       return;
+    setRetryToken(null);
     setOperation(captured.token);
     try {
       const latest = await reloadPreference();
@@ -371,6 +381,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
         shouldTouch: false,
       });
       setFailure(null);
+      setRetryToken(captured.token);
       setMessage(
         "Unavailable preferences released. Your draft is kept. Retry save when ready.",
       );
@@ -412,12 +423,15 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     inventory: current && keys.isError ? retainedInventory.current : inventory,
     connections,
     validationError: form.formState.errors.ordered?.message,
+    submitCount: form.formState.submitCount,
     ordered: requestIds,
     savedOrder,
     dirty,
     busy,
     failure,
     message,
+    capacityMessage,
+    readyToRetry: current != null && retryToken === current.token,
     reason,
     unavailable,
     readError,
@@ -455,6 +469,8 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
       });
       setFailure(null);
       setMessage("");
+      setCapacityMessage("");
+      setRetryToken(null);
     },
     update,
     reset: () => {
@@ -469,6 +485,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
         form.setValue("ordered", []);
         setFailure(null);
         setMessage("");
+        setRetryToken(null);
       }
     },
     moveDisabled: () =>
@@ -478,17 +495,11 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
           ...connections.filter((key) => !key.is_active),
         ].map((key) => key.id),
       ),
-    save: form.handleSubmit(
-      async (body) => {
-        const captured = live.current;
-        if (captured && !busy && !readPending && !readError && !unavailable)
-          await persist(captured, body);
-      },
-      () =>
-        setMessage(
-          "At most 200 connections can have a saved agent order across all services. Reset this group to default, or reduce the group before saving.",
-        ),
-    ),
+    save: form.handleSubmit(async (body) => {
+      const captured = live.current;
+      if (captured && !busy && !readPending && !readError && !unavailable)
+        await persist(captured, body);
+    }),
     cancel: () => {
       if (current && !busy) close(current);
     },

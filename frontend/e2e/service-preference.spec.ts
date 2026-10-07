@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+const capacityMessage =
+  "Validation error: Agent order storage is full (200 connections across all services). Reset the agent order of another service, or release unavailable preferences for services you can no longer access, then try again.";
 const catalog = "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa";
 const slackCatalog = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const group = `catalog:${catalog}`;
@@ -72,6 +74,7 @@ async function fixture(page: Page, count = 30) {
     removed: [] as string[],
     disabled: [] as number[],
     delayInventory: 0,
+    delaySave: 0,
     legacy: false,
     includeSlack: true,
     writes: [] as {
@@ -157,6 +160,8 @@ async function fixture(page: Page, count = 30) {
         ordered: string[];
         expected_version: number;
       };
+      if (state.delaySave)
+        await new Promise((resolve) => setTimeout(resolve, state.delaySave));
       state.writes.push({
         group: decodeURIComponent(path.split("/").at(-1)!),
         ...write,
@@ -196,7 +201,38 @@ async function fixture(page: Page, count = 30) {
           ? [{ id: ids[2], credential_source: service(2).credential_source }]
           : [],
       };
-    else if (path === "/api/v1/service-insights") body = { connections: [] };
+    else if (path === "/api/v1/service-insights")
+      body = {
+        connections: [
+          {
+            service_id: ids[0],
+            billing: null,
+            usage: {
+              access: {
+                visibility: "own_keys",
+                basis: "resolved",
+                truncated: false,
+                keys: Array.from({ length: 5 }, (_, i) => ({
+                  id: `agent-${i}`,
+                  name: `Agent ${i}`,
+                  platform: null,
+                  owner_id: "human",
+                  permission: "explicit",
+                  credential_override: false,
+                })),
+              },
+              activity: {
+                visibility: "own_keys",
+                period_days: 30,
+                tracking: "enabled",
+                request_count: 0,
+                requests: [],
+                truncated: false,
+              },
+            },
+          },
+        ],
+      };
     else if (path.endsWith("/service-pools"))
       body = {
         pools: new URL(req.url()).searchParams.has("org_id")
@@ -245,7 +281,7 @@ async function fixture(page: Page, count = 30) {
         error: "fixture",
         error_code: status === 409 ? 1004 : 1000,
         message: state.capacity
-          ? "Agent order storage is full (200 connections across all services). Reset another service or release unavailable preferences."
+          ? capacityMessage
           : state.stale
             ? "unknown service id"
             : "Fixture read or save failure",
@@ -277,7 +313,7 @@ async function enter(page: Page) {
     .click();
   await expect(
     card(page).getByRole("form", { name: "Agent order for Anthropic" }),
-  ).toBeVisible();
+  ).toBeAttached();
   await expect(
     row(page, 0).getByRole("button", { name: /^Drag / }),
   ).toBeEnabled();
@@ -594,14 +630,14 @@ test("guards collapse, another group, view and tab before mutation with one conf
   await card(page)
     .getByRole("button", { name: "Collapse Anthropic connections" })
     .click();
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   await page
     .getByRole("region", { name: "Slack", exact: true })
     .getByRole("button", { name: "Expand Slack connections" })
     .click();
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   await page.getByRole("button", { name: "Table view", exact: true }).click();
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   const before = prompts;
   await page.getByRole("tab", { name: "Service Pools" }).click();
   expect(prompts - before).toBe(1);
@@ -610,7 +646,7 @@ test("guards collapse, another group, view and tab before mutation with one conf
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   expect(prompts - navigation).toBe(1);
   expect(new URL(page.url()).pathname).toBe("/keys");
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
 });
 test("409 Overwrite persists and Reload resets only current group", async ({
   page,
@@ -650,6 +686,12 @@ test("capacity release confirmation cancellation and retry-save keep draft", asy
   await card(page).getByRole("button", { name: "Save", exact: true }).click();
   await expect(
     card(page).getByRole("button", { name: "Release unavailable preferences" }),
+  ).toBeVisible();
+  await expect(
+    card(page).getByText(capacityMessage, { exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    card(page).getByText(capacityMessage, { exact: true }),
   ).toBeVisible();
   page.once("dialog", (dialog) => dialog.dismiss());
   await card(page)
@@ -708,7 +750,7 @@ test("actual stale-ID 400 only prunes after successful inventory Retry", async (
     .locator("..")
     .getByRole("button", { name: "Retry", exact: true })
     .click();
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   await expect(row(page, 1)).toBeVisible();
   await expect(
     card(page).getByText(
@@ -740,7 +782,7 @@ test("failed inventory refetch retains card and has visible Retry recovery", asy
   await expect(
     page.getByText("Failed to refresh services. Your edits are kept."),
   ).toBeVisible({ timeout: 15000 });
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   await expect(
     card(page).getByRole("button", { name: "Save", exact: true }),
   ).toBeDisabled();
@@ -812,7 +854,9 @@ for (const surface of ["card", "overview"] as const) {
       }),
     ).toBeVisible();
     await expect(
-      section.getByText(/Agent keys count access grants/),
+      section.getByText(
+        /The card.s agent-key count is keys with access, not connections/,
+      ),
     ).toBeHidden();
     const action = (surface === "card" ? card(page) : page).getByRole(
       "button",
@@ -845,7 +889,9 @@ for (const surface of ["card", "overview"] as const) {
     await expect(details).toHaveAttribute("open", "");
     await expect(icon).toHaveCSS("rotate", "90deg");
     await expect(
-      section.getByText(/Agent keys count access grants/),
+      section.getByText(
+        /The card.s agent-key count is keys with access, not connections/,
+      ),
     ).toBeVisible();
     await expect(
       section.getByText(/database order within the current owner tiers/),
@@ -1008,7 +1054,7 @@ test("overview reuses inline rows, pills, explanation and pool link", async ({
   await move(page, 2);
   await expect(
     page.getByRole("form", { name: "Agent order for Anthropic" }),
-  ).toBeVisible();
+  ).toBeAttached();
 });
 test("overview row History guards before changing connection or tab", async ({
   page,
@@ -1030,7 +1076,7 @@ test("overview row History guards before changing connection or tab", async ({
   ).toHaveAttribute("aria-selected", "true");
   await expect(
     page.getByRole("form", { name: "Agent order for Anthropic" }),
-  ).toBeVisible();
+  ).toBeAttached();
   await expect(
     page.getByRole("button", { name: "Save", exact: true }),
   ).toBeEnabled();
@@ -1068,7 +1114,7 @@ test("table view Saved positions, two-member disabled eligibility, and single/cu
   state.disabled = [1];
   await page.reload();
   await enter(page);
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   await expect(card(page).getByText(/1 enabled · 1 disabled/)).toBeVisible();
   await expect(row(page, 1).getByLabel(/Saved order position 2/)).toBeVisible();
   await card(page).getByRole("button", { name: "Cancel", exact: true }).click();
@@ -1137,7 +1183,7 @@ test("overview legacy provenance arrives during ordering and survives inventory-
   ).toBeVisible({ timeout: 15000 });
   await expect(
     page.getByRole("form", { name: "Agent order for Anthropic" }),
-  ).toBeVisible();
+  ).toBeAttached();
   await expect(
     page.getByRole("button", { name: "Save", exact: true }),
   ).toBeDisabled();
@@ -1167,7 +1213,7 @@ test("all group rows disappearing preserves an in-card Cancel action", async ({
   await move(page, 2);
   state.removed = ids.slice(0, 30);
   await focusRefetch(page);
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   await expect(card(page).locator("[data-ordering-row]")).toHaveCount(0);
   await card(page).getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(card(page)).toHaveCount(0);
@@ -1183,7 +1229,7 @@ test("entire authorized inventory disappearing retains the draft until Cancel sh
   state.removed = ids.slice(0, 30);
   state.includeSlack = false;
   await focusRefetch(page);
-  await expect(card(page).getByRole("form")).toBeVisible();
+  await expect(card(page).getByRole("form")).toBeAttached();
   await expect(card(page).locator("[data-ordering-row]")).toHaveCount(0);
   await expect(
     page.getByText("No AI services yet", { exact: true }),
@@ -1195,4 +1241,339 @@ test("entire authorized inventory disappearing retains the draft until Cancel sh
   ).toBeVisible();
   expect(state.writes).toEqual([]);
   expect(state.viewWrites).toEqual([]);
+});
+
+for (const surface of ["card", "overview"] as const) {
+  for (const width of [390, 1024, 1440]) {
+    test(`${surface} sticky Agent order, Save and Cancel stay operable at ${width}px`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize({ width, height: 844 });
+      const state = await fixture(page);
+      if (surface === "overview")
+        await page.goto(`/keys/services/${encodeURIComponent(group)}`);
+      else await expand(page);
+      const scope = surface === "card" ? card(page) : page;
+      const bar = scope.locator("[data-service-order-actions]");
+      const entry = bar.getByRole("button", {
+        name: "Agent order",
+        exact: true,
+      });
+      await expect(entry).toHaveCount(1);
+      await expect(entry).toBeEnabled();
+      await expect(entry).toHaveClass(/nyx-gradient-vivid/);
+      if (surface === "overview") {
+        const cover = await bar.evaluate((element) => ({
+          top:
+            element.getBoundingClientRect().top +
+            parseFloat(getComputedStyle(element, "::before").top),
+          metadataBottom: element.parentElement!.previousElementSibling!
+            .getBoundingClientRect().bottom,
+        }));
+        expect(cover.top).toBeGreaterThanOrEqual(cover.metadataBottom);
+      }
+      if (surface === "card") {
+        const chevron = bar
+          .getByRole("button", { name: "Collapse Anthropic connections" })
+          .locator("svg");
+        await expect(chevron).toHaveCount(1);
+        await expect(chevron).toHaveClass(/lucide-chevron-right/);
+      }
+      await entry.click();
+      await expect(entry).toHaveCount(0);
+      await expect(bar.getByText("Agent order", { exact: true })).toBeVisible();
+      const save = bar.getByRole("button", { name: "Save", exact: true });
+      const cancel = bar.getByRole("button", { name: "Cancel", exact: true });
+      await expect(
+        scope.getByRole("button", { name: "Save", exact: true }),
+      ).toHaveCount(1);
+      await expect(
+        scope.getByRole("button", { name: "Cancel", exact: true }),
+      ).toHaveCount(1);
+      await expect(save).toBeDisabled();
+      await expect(cancel).toBeEnabled();
+      await expect(save).toHaveClass(/nyx-gradient-vivid/);
+      const form = scope.getByRole("form", {
+        name: "Agent order for Anthropic",
+      });
+      expect(
+        await save.evaluate((button) => (button as HTMLButtonElement).form?.id),
+      ).toBe(await form.getAttribute("id"));
+      await expect(form.locator("table")).toHaveCount(0);
+      await move(page, 2);
+      await expect(save).toBeEnabled();
+      const main = page.locator("main");
+      const scrollToMiddle = async () => {
+        await row(page, 14).evaluate((element) => {
+          const main = element.closest("main")!;
+          main.scrollTop +=
+            element.getBoundingClientRect().top -
+            main.getBoundingClientRect().top -
+            450;
+        });
+        await expect
+          .poll(() => main.evaluate((element) => element.scrollTop))
+          .toBeGreaterThan(400);
+      };
+      const assertVisibleActions = async () => {
+        const mainBox = (await main.boundingBox())!;
+        const boxes = await Promise.all([
+          bar.boundingBox(),
+          save.boundingBox(),
+          cancel.boundingBox(),
+          bar.getByText("Agent order", { exact: true }).boundingBox(),
+        ]);
+        for (const box of boxes) {
+          expect(box).not.toBeNull();
+          expect(box!.y).toBeGreaterThanOrEqual(mainBox.y - 1);
+          expect(box!.y + box!.height).toBeLessThanOrEqual(
+            mainBox.y + mainBox.height,
+          );
+          expect(box!.x).toBeGreaterThanOrEqual(0);
+          expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+        }
+        const [, saveBox, cancelBox, labelBox] = boxes;
+        for (const [a, b] of [
+          [saveBox!, cancelBox!],
+          [saveBox!, labelBox!],
+          [cancelBox!, labelBox!],
+        ]) {
+          expect(
+            a.x < b.x + b.width &&
+              a.x + a.width > b.x &&
+              a.y < b.y + b.height &&
+              a.y + a.height > b.y,
+          ).toBe(false);
+        }
+        expect(
+          await page.evaluate(
+            () => document.documentElement.scrollWidth <= innerWidth,
+          ),
+        ).toBe(true);
+      };
+      await scrollToMiddle();
+      await assertVisibleActions();
+      if (surface === "overview") {
+        const gutter = await bar.evaluate((element) => {
+          const main = element.closest("main")!;
+          const mainBox = main.getBoundingClientRect();
+          const barBox = element.getBoundingClientRect();
+          const cover = getComputedStyle(element, "::before");
+          const inset = parseFloat(getComputedStyle(main).paddingTop);
+          return {
+            height: parseFloat(cover.height),
+            top: barBox.top + parseFloat(cover.top),
+            mainTop: mainBox.top,
+            inset,
+            covered: document.elementFromPoint(
+              barBox.x + barBox.width / 2,
+              mainBox.top + inset / 2,
+            ) === element,
+          };
+        });
+        expect(gutter.height).toBe(gutter.inset);
+        expect(gutter.top).toBeCloseTo(gutter.mainTop, 0);
+        expect(gutter.covered).toBe(true);
+      }
+      const beforeScroll = await main.evaluate((element) => element.scrollTop);
+      await page.screenshot({
+        path: testInfo.outputPath(`sticky-${surface}-${width}.png`),
+      });
+      const box = (await save.boundingBox())!;
+      state.delayInventory = 250;
+      state.delaySave = 400;
+      // Click the measured visible control without Playwright scrolling it into view.
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await expect(save).toBeDisabled();
+      await expect(cancel).toBeDisabled();
+      await expect(form).toHaveCount(0);
+      await expect(entry).toBeFocused();
+      expect(state.writes).toHaveLength(1);
+      expect(state.writes[0]?.group).toBe(group);
+      expect(state.writes[0]?.ordered).toHaveLength(30);
+      expect(
+        Math.abs(
+          (await main.evaluate((element) => element.scrollTop)) - beforeScroll,
+        ),
+      ).toBeLessThan(100);
+      await entry.press("Enter");
+      await move(page, 2);
+      await scrollToMiddle();
+      await assertVisibleActions();
+      await cancel.focus();
+      await cancel.press("Enter");
+      await expect(form).toHaveCount(0);
+      await expect(entry).toBeFocused();
+      expect(state.writes).toHaveLength(1);
+      expect(state.viewWrites).toEqual([]);
+      await entry.press("Enter");
+      await move(page, 2);
+      await scrollToMiddle();
+      await assertVisibleActions();
+      state.failSave = true;
+      const failedSave = (await save.boundingBox())!;
+      await page.mouse.click(
+        failedSave.x + failedSave.width / 2,
+        failedSave.y + failedSave.height / 2,
+      );
+      const error = scope.getByRole("alert").filter({
+        hasText: "Could not save agent order. Your edits are kept.",
+      });
+      await expect(error).toBeFocused();
+      const errorBox = (await error.boundingBox())!;
+      const barBox = (await bar.boundingBox())!;
+      const mainBox = (await main.boundingBox())!;
+      expect(errorBox.y).toBeGreaterThanOrEqual(barBox.y + barBox.height);
+      expect(errorBox.y + errorBox.height).toBeLessThanOrEqual(
+        mainBox.y + mainBox.height,
+      );
+      expect(
+        await error.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return element.contains(
+            document.elementFromPoint(
+              box.x + box.width / 2,
+              box.y + box.height / 2,
+            ),
+          );
+        }),
+      ).toBe(true);
+      await expect(scope.locator("[data-ordering-row]")).toHaveCount(30);
+      expect(state.writes).toHaveLength(2);
+      await scrollToMiddle();
+      await assertVisibleActions();
+      await save.focus();
+      const repeatedSave = (await save.boundingBox())!;
+      await page.mouse.click(
+        repeatedSave.x + repeatedSave.width / 2,
+        repeatedSave.y + repeatedSave.height / 2,
+      );
+      await expect.poll(() => state.writes.length).toBe(3);
+      await expect(error).toBeFocused();
+      await expect(error).toHaveCount(1);
+      const repeatedErrorBox = (await error.boundingBox())!;
+      const repeatedBarBox = (await bar.boundingBox())!;
+      expect(repeatedErrorBox.y).toBeGreaterThanOrEqual(
+        repeatedBarBox.y + repeatedBarBox.height,
+      );
+      expect(
+        await error.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return element.contains(
+            document.elementFromPoint(
+              bounds.x + bounds.width / 2,
+              bounds.y + bounds.height / 2,
+            ),
+          );
+        }),
+      ).toBe(true);
+      expect(state.viewWrites).toEqual([]);
+    });
+  }
+}
+
+test("unrelated access-panel Show all keys cannot submit a dirty order", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await enter(page);
+  await move(page, 2);
+  const draft = await card(page)
+    .locator("[data-ordering-row]")
+    .evaluateAll((rows) =>
+      rows.map((row) => row.getAttribute("data-ordering-row")),
+    );
+  await row(page, 0)
+    .getByRole("button", { name: "Agent key access for Anthropic" })
+    .click();
+  const panel = card(page).getByRole("region", {
+    name: "Agent key access for Anthropic",
+  });
+  await expect(panel.getByRole("table").locator("tbody tr")).toHaveCount(3);
+  await panel.getByRole("button", { name: "Show all 5 keys" }).click();
+  await expect(panel.getByRole("table").locator("tbody tr")).toHaveCount(5);
+  await panel.getByRole("button", { name: "Show fewer keys" }).click();
+  await expect(panel.getByRole("table").locator("tbody tr")).toHaveCount(3);
+  expect(state.writes).toEqual([]);
+  await expect(
+    card(page).getByRole("button", { name: "Save", exact: true }),
+  ).toBeEnabled();
+  expect(
+    await card(page)
+      .locator("[data-ordering-row]")
+      .evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-ordering-row")),
+      ),
+  ).toEqual(draft);
+});
+
+test("sticky Save brings one local 201-row validation error into view without a write", async ({
+  page,
+}) => {
+  const state = await fixture(page, 201);
+  await enter(page);
+  await move(page, 2);
+  await row(page, 14).evaluate((element) =>
+    element.scrollIntoView({ block: "center" }),
+  );
+  const save = card(page)
+    .locator("[data-service-order-actions]")
+    .getByRole("button", { name: "Save", exact: true });
+  const box = (await save.boundingBox())!;
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(844);
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  const error = card(page)
+    .getByRole("alert")
+    .filter({ hasText: "At most 200 connections" });
+  await expect(error).toHaveCount(1);
+  await expect(error).toBeFocused();
+  await expect(error).toBeInViewport();
+  const errorBox = (await error.boundingBox())!;
+  const actionBox = (await card(page)
+    .locator("[data-service-order-actions]")
+    .boundingBox())!;
+  const mainBox = (await page.locator("main").boundingBox())!;
+  expect(errorBox.y).toBeGreaterThanOrEqual(actionBox.y + actionBox.height);
+  expect(errorBox.y + errorBox.height).toBeLessThanOrEqual(
+    mainBox.y + mainBox.height,
+  );
+  expect(
+    await error.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return element.contains(
+        document.elementFromPoint(
+          box.x + box.width / 2,
+          box.y + box.height / 2,
+        ),
+      );
+    }),
+  ).toBe(true);
+  expect(state.writes).toEqual([]);
+  await row(page, 14).evaluate((element) =>
+    element.scrollIntoView({ block: "center" }),
+  );
+  await save.focus();
+  const repeatedSave = (await save.boundingBox())!;
+  await page.mouse.click(
+    repeatedSave.x + repeatedSave.width / 2,
+    repeatedSave.y + repeatedSave.height / 2,
+  );
+  await expect(error).toBeFocused();
+  const repeatedErrorBox = (await error.boundingBox())!;
+  const repeatedActionBox = (await card(page)
+    .locator("[data-service-order-actions]")
+    .boundingBox())!;
+  expect(repeatedErrorBox.y).toBeGreaterThanOrEqual(
+    repeatedActionBox.y + repeatedActionBox.height,
+  );
+  expect(state.writes).toEqual([]);
+  await expect(card(page).locator("[data-ordering-row]")).toHaveCount(201);
+  page.once("dialog", (dialog) => dialog.accept());
+  await card(page)
+    .getByRole("button", { name: "Reset to default", exact: true })
+    .click();
+  await save.click();
+  await expect(card(page).getByRole("form")).toHaveCount(0);
+  expect(state.writes).toEqual([{ group, ordered: [], expected_version: 1 }]);
 });
