@@ -538,9 +538,8 @@ fn admission_denial_status(error: &AppError) -> Option<u16> {
         AppError::InsufficientCredits
         | AppError::WalletSuspended
         | AppError::PlanEntitlementRequired(_) => Some(402),
-        AppError::Forbidden(_)
-        | AppError::ApiKeyScopeForbidden(_)
-        | AppError::OrgRoleInsufficient(_) => Some(403),
+        error if error.is_forbidden() => Some(403),
+        AppError::ApiKeyScopeForbidden(_) | AppError::OrgRoleInsufficient(_) => Some(403),
         _ => None,
     }
 }
@@ -805,6 +804,10 @@ mod tests {
         );
         assert_eq!(
             admission_denial_status(&AppError::Forbidden("policy".into())),
+            Some(403)
+        );
+        assert_eq!(
+            admission_denial_status(&AppError::insufficient_scope("policy")),
             Some(403)
         );
         assert_eq!(

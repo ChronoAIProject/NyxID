@@ -9,7 +9,7 @@ use utoipa::{PartialSchema, ToSchema};
 
 use crate::{
     AppState,
-    errors::{AppError, AppResult},
+    errors::{AppError, AppResult, access_denial::CredentialType},
     models::{catalog_skill_revision::SkillReference, service_account::ServiceAccountPurpose},
     mw::auth::{AuthMethod, AuthUser},
     services::{
@@ -81,8 +81,9 @@ pub async fn update_key(
     let sa =
         service_account_service::get_service_account(&state.db, &auth.user_id.to_string()).await?;
     if sa.purpose != ServiceAccountPurpose::CatalogEditor {
-        return Err(AppError::Forbidden(
-            "Service accounts cannot access this endpoint".into(),
+        return Err(AppError::unsupported_credential(
+            "Service accounts cannot access this endpoint",
+            CredentialType::ServiceAccount,
         ));
     }
     catalog_editor_service::authorize(

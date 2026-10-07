@@ -85,7 +85,7 @@ pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
             let access = match groups::get(&state.db, &request.actor_user_id, &group.id, None).await
             {
                 Ok(a) => a,
-                Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+                Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => {
                     groups::drop_request(&state.db, group, &request.id, &request.actor_user_id)
                         .await?;
                     continue;
@@ -112,9 +112,9 @@ pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
                 }
                 // begin_turn consumes this queue entry in the same transaction
                 // that admits the turn. A crash cannot lose claimed work.
-                if let Err(
-                    AppError::Forbidden(_) | AppError::ValidationError(_) | AppError::NotFound(_),
-                ) = Box::pin(run_member(state, &access, &request, agent_id)).await
+                if let Err(error) = Box::pin(run_member(state, &access, &request, agent_id)).await
+                    && (error.is_forbidden()
+                        || matches!(error, AppError::ValidationError(_) | AppError::NotFound(_)))
                 {
                     groups::drop_request(&state.db, group, &request.id, &request.actor_user_id)
                         .await?;

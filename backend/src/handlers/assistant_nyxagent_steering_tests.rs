@@ -350,28 +350,28 @@ async fn assistant_steer_requires_first_party_owner_and_web_turn() {
     let row = running(&f).await;
     let mut auth = test_auth_user(OWNER);
     auth.api_key_id = Some("key".into());
-    assert!(matches!(
+    assert!(
         steer(
             State(f.state.clone()),
             auth,
             Path(row.id.clone()),
             request(&row, "key", "Guidance")
         )
-        .await,
-        Err(AppError::Forbidden(_))
-    ));
+        .await
+        .is_err_and(|error| error.is_forbidden())
+    );
     let mut auth = test_auth_user(OWNER);
     auth.oauth_client_id = Some("oauth".into());
-    assert!(matches!(
+    assert!(
         steer(
             State(f.state.clone()),
             auth,
             Path(row.id.clone()),
             request(&row, "oauth", "Guidance")
         )
-        .await,
-        Err(AppError::Forbidden(_))
-    ));
+        .await
+        .is_err_and(|error| error.is_forbidden())
+    );
     assert!(matches!(
         steer(
             State(f.state.clone()),
