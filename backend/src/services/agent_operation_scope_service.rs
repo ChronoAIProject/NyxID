@@ -346,11 +346,11 @@ async fn compile(
                     "Selected endpoint is unavailable for this service".into(),
                 )
             })?;
-        let rule = ProxyOperationRule {
-            method: endpoint.method.clone(),
-            path_template: endpoint.path.clone(),
-            ..Default::default()
-        };
+        let rule = proxy_authorization::rule_from_endpoint(
+            &endpoint.method,
+            &endpoint.path,
+            endpoint.parameters.as_ref(),
+        )?;
         let policy =
             proxy_authorization::normalize_policy(ProxyOperationPolicy { rules: vec![rule] })?;
         let marks = catalog_slug
