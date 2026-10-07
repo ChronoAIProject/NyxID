@@ -38,6 +38,12 @@ request snapshot; the next request is refused with `assistant_turn_required`.
 Voice delegation must enter through `begin_turn` on the same thread and must
 not call tools with the bare key after the voice session or turn ends.
 
+Trusted async service watches have a separate, narrowly bound background reader:
+it may call only the declared status/result/cancel operations with the saved ID,
+using the original key and live authority. It never fabricates a live turn. Results
+resume the thread through event admission; see
+[asynchronous service results](09-nyxbot-orchestrator.md#asynchronous-service-results).
+
 The flag is default-off for rollout safety: deploy every auth, MCP, proxy, LLM
 and worker replica with fence support, then enable `assistant:live-turn-gate`.
 Rollback disables the flag before rolling back binaries. Existing fences are

@@ -783,6 +783,7 @@ pub async fn stop(
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     engine::request_stop(&state.db, &user_id, &id).await?;
+    super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
     super::machine_cancel::conversation(&state, &user_id, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -825,6 +826,8 @@ pub async fn delete(
     }
     for row in &related {
         engine::request_stop(&state.db, &user_id, &row.id).await?;
+        super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &row.id)
+            .await?;
         super::machine_cancel::conversation(&state, &user_id, &row.id).await?;
     }
     let mut credentials_by_id = HashMap::new();
@@ -1118,7 +1121,7 @@ pub(crate) async fn start_turn_with_voice(
     voice_request_id: Option<&str>,
 ) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
     let user_id = auth.user_id.to_string();
-    let row = if voice_request_id.is_some() {
+    let mut row = if voice_request_id.is_some() {
         Box::pin(engine::begin_turn_with_voice(
             &state.db,
             &user_id,
@@ -1136,6 +1139,9 @@ pub(crate) async fn start_turn_with_voice(
         ))
         .await?
     };
+    if let Some(watch) = crate::services::async_service_operation::bound(&state.db, &row).await? {
+        crate::services::async_service_operation::apply_delivery(&mut row, &watch);
+    }
     let mut text = engine::turn_input(&row, start);
     if start.origin == crate::models::assistant_conversation::TurnOrigin::Channel
         && let Some(prelude) = Box::pin(super::nyxbot::thread_follow::prelude(state, &row)).await
@@ -1623,6 +1629,15 @@ async fn execute_turn(
         };
     decisions
         .push_str(&super::assistant_team::turn_notes(state, row, agent.as_ref(), previous).await);
+    decisions.push_str(
+        &crate::services::async_service_operation::input_context(
+            &state.db,
+            &state.encryption_keys,
+            row,
+        )
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?,
+    );
     // Rollout-gated authoring rules are instructions, so they belong in the
     // stable (fingerprinted) part rather than the per-turn quoted context.
     let guidance = if !row.is_subagent()

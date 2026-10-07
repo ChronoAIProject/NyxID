@@ -165,6 +165,8 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    /// Background result readers may stop buffering after this many bytes.
+    pub response_body_limit: Option<usize>,
     /// Acting person/SA when credential resolution runs as another owner.
     pub actor_user_id: Option<&'a str>,
     /// Supplied caller bearer; absent for API-key-only or session-fallback calls.
@@ -314,6 +316,7 @@ fn mcp_credential_class(
 /// A single endpoint within a service.
 #[derive(Default)]
 pub struct McpToolEndpoint {
+    pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     pub target_id: Option<String>,
     pub endpoint_id: String,
     pub name: String,
@@ -371,6 +374,10 @@ pub fn endpoint_contract_digest(endpoint: &McpToolEndpoint) -> String {
     });
     if let Some(target_id) = &endpoint.target_id {
         contract["target_id"] = target_id.clone().into();
+    }
+    if let Some(async_operation) = &endpoint.async_operation {
+        contract["async_operation"] =
+            serde_json::to_value(async_operation).expect("async contract");
     }
     canonical_sha256(contract)
 }
@@ -1523,6 +1530,7 @@ async fn load_user_tools_with_grants(
 fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
     eps.iter()
         .map(|ep| McpToolEndpoint {
+            async_operation: ep.async_operation.clone(),
             target_id: ep.target_id.clone(),
             endpoint_id: ep.id.clone(),
             name: ep.name.clone(),
@@ -1627,7 +1635,22 @@ async fn fetch_and_parse_user_spec(
 ) -> AppResult<ParsedMcpEndpoints> {
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
-    Ok(parsed_endpoints_to_mcp(parsed))
+    let mut endpoints = parsed_endpoints_to_mcp(parsed);
+    // The URL recognizer serves compiled bytes; never trust a remote extension.
+    if hosted_catalog_spec_url(spec_url) {
+        for endpoint in &mut endpoints.endpoints {
+            if let Some(value) = spec["paths"][&endpoint.path][endpoint.method.to_ascii_lowercase()]
+                .get("x-nyxid-async-operation")
+            {
+                let contract = serde_json::from_value(value.clone()).map_err(|_| {
+                    AppError::ValidationError("Invalid async operation contract".into())
+                })?;
+                super::async_service_operation::validate_contract(&contract, &spec)?;
+                endpoint.async_operation = Some(contract);
+            }
+        }
+    }
+    Ok(endpoints)
 }
 
 /// Convert parsed operations into MCP endpoints with unique identities.
@@ -1689,6 +1712,7 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
             },
         );
         endpoints.push(McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             // Dynamic operations have no persisted row. Hash the producer's
             // OpenAPI operationId, falling back to canonical method/path, so
@@ -2173,6 +2197,7 @@ fn classify_credential(
 /// predefined API endpoints. Lets the AI make arbitrary HTTP requests.
 fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
     McpToolEndpoint {
+        async_operation: None,
         target_id: None,
         endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
         name: "request".to_string(),
@@ -2587,11 +2612,14 @@ pub fn generate_tool_definitions(
         }
         for endpoint in &service.endpoints {
             let name = format!("{}__{}", service.service_slug, endpoint.name);
-            let description = format!(
+            let mut description = format!(
                 "[{}] {}",
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name)
             );
+            if endpoint.async_operation.is_some() {
+                description.push_str(" Prefer this asynchronous submit for work beyond a quick run. For assistant chat keys, NyxID watches completion and resumes the original thread; end the turn or do other work. Do not busy-poll.");
+            }
             let input_schema = if service.is_generic_proxy {
                 build_generic_proxy_input_schema()
             } else {
@@ -2673,6 +2701,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             .iter()
             .filter(|rule| rule.enabled)
             .map(|rule| McpToolEndpoint {
+                async_operation: None,
                 target_id: None,
                 endpoint_id: rule.id.clone(),
                 name: public_endpoint_tool_name(&rule.method, &rule.path_pattern),
@@ -4568,6 +4597,7 @@ fn node_dispatch_failure_disposition(dispatched: bool) -> NodeDispatchFailureDis
 
 async fn collect_node_stream_response(
     stream: impl Into<crate::services::node_ws_manager::NodeProxyStream>,
+    limit: Option<usize>,
 ) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>)> {
     let mut stream = stream.into();
     use crate::services::node_ws_manager::StreamChunk;
@@ -4584,7 +4614,15 @@ async fn collect_node_stream_response(
                 status = stream_status;
                 headers = stream_headers;
             }
-            StreamChunk::Data(data) => body.extend_from_slice(&data),
+            StreamChunk::Data(data) => {
+                let take = limit.map_or(data.len(), |n| {
+                    data.len().min((n + 1).saturating_sub(body.len()))
+                });
+                body.extend_from_slice(&data[..take]);
+                if limit.is_some_and(|n| body.len() > n) {
+                    return Ok((status, headers, body));
+                }
+            }
             StreamChunk::End => return Ok((status, headers, body)),
             StreamChunk::Error(error) => {
                 tracing::error!(%error, "Node stream failed after provider dispatch");
@@ -5125,11 +5163,18 @@ async fn execute_tool_resolved_inner(
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
                         resp.status,
                         header_value(&resp.headers, "content-type"),
-                        &resp.body,
+                        &resp.body[..exec_ctx
+                            .response_body_limit
+                            .map_or(resp.body.len(), |n| resp.body.len().min(n + 1))],
                     )));
                 }
                 Ok(ProxyResponseType::Streaming(rx)) => {
-                    let (status, headers, body_buf) = match collect_node_stream_response(rx).await {
+                    let (status, headers, body_buf) = match collect_node_stream_response(
+                        rx,
+                        exec_ctx.response_body_limit,
+                    )
+                    .await
+                    {
                         Ok(response) => response,
                         Err(error) => {
                             return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
@@ -5252,12 +5297,29 @@ async fn execute_tool_resolved_inner(
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
     );
-    let read = match image_type {
-        Some(content_type) => response.bytes().await.map(|bytes| {
-            let media = tool_media(status, Some(content_type), &bytes);
-            (String::from_utf8_lossy(&bytes).to_string(), media)
-        }),
-        None => response.text().await.map(|text| (text, None)),
+    let read = if let Some(limit) = exec_ctx.response_body_limit {
+        let mut response = response;
+        let mut bytes = Vec::new();
+        let result: Result<_, reqwest::Error> = async {
+            while let Some(chunk) = response.chunk().await? {
+                let take = chunk.len().min((limit + 1).saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&chunk[..take]);
+                if bytes.len() > limit {
+                    break;
+                }
+            }
+            Ok((String::from_utf8_lossy(&bytes).into_owned(), None))
+        }
+        .await;
+        result
+    } else {
+        match image_type {
+            Some(content_type) => response.bytes().await.map(|bytes| {
+                let media = tool_media(status, Some(content_type), &bytes);
+                (String::from_utf8_lossy(&bytes).to_string(), media)
+            }),
+            None => response.text().await.map(|text| (text, None)),
+        }
     };
     let (body_text, media) = match read {
         Ok(read) => read,
@@ -5470,11 +5532,14 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
     for service in services {
         for endpoint in &service.endpoints {
             let name = format!("{}__{}", service.service_slug, endpoint.name);
-            let description = format!(
+            let mut description = format!(
                 "[{}] {}",
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name),
             );
+            if endpoint.async_operation.is_some() {
+                description.push_str(" Asynchronous submit: NyxID resumes assistant threads with the result. Prefer for long work; end the turn instead of polling.");
+            }
             if let Some((matched, in_name)) = matcher.rank(&name, &description) {
                 let order = candidates.len();
                 candidates.push((
@@ -6172,6 +6237,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        response_body_limit: None,
                         actor_user_id: None,
                         caller_token: None,
                         delegation_restrictions: Default::default(),
@@ -6282,6 +6348,7 @@ mod tests {
             .find(|endpoint| endpoint.name == name)
             .unwrap();
         McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: name.to_string(),
             name: endpoint.name,
@@ -6432,6 +6499,7 @@ mod tests {
     fn selected_typed_operation_cannot_shift_to_another_allowlisted_custom_method() {
         use crate::models::downstream_service::ProxyOperationRule;
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             method: "POST".into(),
             path: "/v1/items/{id}".into(),
@@ -6475,6 +6543,7 @@ mod tests {
             .is_err()
         );
         let other = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             path: "/v1/items/{id}:other".into(),
             ..endpoint
@@ -6556,6 +6625,7 @@ mod tests {
     #[test]
     fn google_ai_no_policy_keeps_generate_content_path_bytes() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             method: "POST".into(),
             path: "/models/{model}:generateContent".into(),
@@ -6587,6 +6657,7 @@ mod tests {
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: format!("endpoint-{name}"),
             name: name.to_string(),
@@ -7055,6 +7126,7 @@ mod tests {
     #[test]
     fn mcp_preparation_denies_before_approval_descriptor_for_blocked_order_read() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             method: "GET".to_string(),
             path: "/air/orders/{id}".to_string(),
@@ -7078,6 +7150,7 @@ mod tests {
     #[test]
     fn mcp_cancellation_prepares_a_write_for_the_existing_approval_path() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             method: "POST".to_string(),
             path: "/air/order_cancellations/{id}/actions/confirm".to_string(),
@@ -7108,6 +7181,7 @@ mod tests {
     #[test]
     fn mcp_no_policy_keeps_existing_passthrough_preparation() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             method: "GET".to_string(),
             path: "/existing/{id}".to_string(),
@@ -7501,6 +7575,7 @@ mod tests {
             assert!(!overrides(args.clone()), "{args}");
         }
         let header = McpToolEndpoint {
+            async_operation: None,
             method: "POST".to_string(),
             path: "/posts/{id}".to_string(),
             parameters: Some(serde_json::json!([
@@ -7522,6 +7597,7 @@ mod tests {
         // A form endpoint's body is read as a form even when it looks like
         // JSON.
         let form = McpToolEndpoint {
+            async_operation: None,
             method: "POST".to_string(),
             path: "/Messages.json".to_string(),
             request_content_type: Some("application/x-www-form-urlencoded".to_string()),
@@ -7558,6 +7634,22 @@ mod tests {
         assert_eq!(metadata.risk, Some(EndpointRisk::Read));
     }
 
+    #[tokio::test]
+    async fn async_contract_is_trusted_only_from_compiled_overlay() {
+        let hosted = try_user_spec_endpoints(
+            "https://nyx.example/api/v1/catalog-specs/chrono-sandbox/openapi.json",
+            "owner",
+            "service",
+        )
+        .await
+        .unwrap();
+        assert!(hosted.endpoints.iter().any(|e| e.async_operation.is_some()));
+        let spec = super::super::catalog_spec_registry::spec_for_key("chrono-sandbox").unwrap();
+        let remote =
+            parsed_endpoints_to_mcp(openapi_parser::parse_openapi_spec_value(&spec).unwrap());
+        assert!(remote.endpoints.iter().all(|e| e.async_operation.is_none()));
+    }
+
     #[test]
     fn hosted_catalog_overlays_are_recognised_by_url() {
         assert!(hosted_catalog_spec_url(
@@ -7574,6 +7666,7 @@ mod tests {
     #[test]
     fn mounted_specs_of_catalog_services_keep_overlay_markers() {
         let endpoint = |name: &str, path: &str| McpToolEndpoint {
+            async_operation: None,
             method: "POST".to_string(),
             path: path.to_string(),
             ..make_endpoint(name, name)
@@ -7628,6 +7721,7 @@ mod tests {
     #[test]
     fn catalog_rows_carry_their_overlay_destructive_markers() {
         let row = |name: &str, method: &str, path: &str| ServiceEndpoint {
+            async_operation: None,
             target_id: None,
             id: format!("ep-{name}"),
             service_id: "svc".to_string(),
@@ -8002,6 +8096,7 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: connected_id.clone(),
@@ -8212,6 +8307,7 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: platform_id.clone(),
@@ -8407,6 +8503,7 @@ mod tests {
         // Template row that would publish `template_op` without an override.
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: catalog_id.clone(),
@@ -8523,6 +8620,7 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: catalog_id.clone(),
@@ -9809,6 +9907,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_base64_string_for_binary_bodies() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -9845,6 +9944,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_non_json_object_bodies() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_xml".to_string(),
@@ -9878,6 +9978,7 @@ mod tests {
     #[test]
     fn build_input_schema_exposes_body_when_content_type_has_no_schema() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -9905,6 +10006,7 @@ mod tests {
     #[test]
     fn build_input_schema_treats_unknown_application_uploads_as_binary() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_tarball".to_string(),
@@ -9932,6 +10034,7 @@ mod tests {
     #[test]
     fn build_input_schema_includes_supported_header_and_cookie_params() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -9978,6 +10081,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_alternate_body_field_when_body_param_exists() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_archive".to_string(),
@@ -10015,6 +10119,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10071,6 +10176,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10109,6 +10215,7 @@ mod tests {
     fn build_input_schema_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10153,6 +10260,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_optional_json_body_without_requiring_it() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_profile".to_string(),
@@ -10186,6 +10294,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_binary_media_type_when_missing() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -10214,6 +10323,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_wildcard_binary_media_type_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -10243,6 +10353,7 @@ mod tests {
     fn build_input_schema_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
@@ -10296,6 +10407,7 @@ mod tests {
             Some(serde_json::json!([parameter.clone()])),
         ] {
             let mut endpoint = McpToolEndpoint {
+                async_operation: None,
                 method: "GET".into(),
                 path: "/search".into(),
                 parameters,
@@ -10325,6 +10437,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -10358,6 +10471,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -10391,6 +10505,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_tarball".to_string(),
@@ -10419,6 +10534,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_flattened_json_body_named_body_property() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_payload".to_string(),
@@ -10456,6 +10572,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_flattened_json_body() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_profile".to_string(),
@@ -10486,6 +10603,7 @@ mod tests {
     #[test]
     fn build_proxy_args_routes_header_and_cookie_params_out_of_body() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10556,6 +10674,7 @@ mod tests {
     #[test]
     fn build_proxy_args_accepts_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10607,6 +10726,7 @@ mod tests {
     #[test]
     fn build_proxy_args_allows_missing_optional_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_profile".to_string(),
@@ -10638,6 +10758,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_archive".to_string(),
@@ -10675,6 +10796,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10750,6 +10872,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10803,6 +10926,7 @@ mod tests {
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -10860,6 +10984,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_binary_body() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -10885,6 +11010,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
@@ -10923,6 +11049,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
@@ -10962,6 +11089,7 @@ mod tests {
     fn build_proxy_args_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
     {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
@@ -11006,6 +11134,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_extra_fields_for_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
@@ -11039,6 +11168,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_urlencoded_body_as_raw_text() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_form".to_string(),
@@ -11070,6 +11200,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unknown_args_when_endpoint_has_no_request_body() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "list_users".to_string(),
@@ -11111,6 +11242,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_body_for_bodyless_post_endpoint() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "create_session".to_string(),
@@ -11144,6 +11276,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_path_parameter() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "get_user".to_string(),
@@ -11179,6 +11312,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unresolved_path_templates_without_required_metadata() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "get_user".to_string(),
@@ -11214,6 +11348,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_non_body_parameters() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
@@ -11289,6 +11424,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_multipart_body() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_form".to_string(),
@@ -11322,6 +11458,7 @@ mod tests {
     #[test]
     fn build_proxy_args_error_mentions_alternate_body_field_name() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "submit_text".to_string(),
@@ -11360,6 +11497,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -11386,6 +11524,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_wildcard_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -11412,6 +11551,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_uses_endpoint_content_type() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -11438,6 +11578,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_optional_body_without_payload() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -11458,6 +11599,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_default_json_without_payload() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "create_session".to_string(),
@@ -11485,6 +11627,7 @@ mod tests {
     #[test]
     fn build_downstream_request_headers_sets_content_type_without_forcing_accept() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
@@ -11620,6 +11763,7 @@ mod tests {
     #[test]
     fn request_body_field_name_avoids_collision() {
         let endpoint = McpToolEndpoint {
+            async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
             name: "test".into(),
@@ -12116,7 +12260,7 @@ mod tests {
         tx.send(StreamChunk::End).await.unwrap();
         drop(tx);
 
-        let response = collect_node_stream_response(rx)
+        let response = collect_node_stream_response(rx, None)
             .await
             .expect("explicitly terminated stream");
         assert_eq!(response.0, 201);
@@ -12128,7 +12272,7 @@ mod tests {
             .unwrap();
         drop(tx);
         assert!(matches!(
-            collect_node_stream_response(rx).await,
+            collect_node_stream_response(rx, None).await,
             Err(AppError::Internal(message))
                 if message == "Node stream failed after provider dispatch"
         ));
@@ -12139,7 +12283,7 @@ mod tests {
             .unwrap();
         drop(tx);
         assert!(matches!(
-            collect_node_stream_response(rx).await,
+            collect_node_stream_response(rx, None).await,
             Err(AppError::Internal(message))
                 if message == "Node stream closed before its terminal frame"
         ));

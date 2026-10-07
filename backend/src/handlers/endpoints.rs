@@ -261,6 +261,7 @@ pub async fn create_endpoint(
     }
 
     let input = EndpointInput {
+        async_operation: None,
         target_id: body.target_id,
         request_body_required: body
             .request_body_required
@@ -401,9 +402,10 @@ pub async fn discover_endpoints(
         validate_response_contract(&endpoint.response)?;
     }
 
-    let inputs: Vec<EndpointInput> = parsed
+    let mut inputs: Vec<EndpointInput> = parsed
         .into_iter()
         .map(|p| EndpointInput {
+            async_operation: None,
             target_id: None,
             name: p.name,
             description: p.description,
@@ -419,6 +421,7 @@ pub async fn discover_endpoints(
             supports_idempotency_key: p.supports_idempotency_key,
         })
         .collect();
+    crate::services::catalog_spec_sync::annotate_hosted_async_inputs(&api_spec_url, &mut inputs)?;
 
     let count = inputs.len();
     let endpoints =
@@ -505,6 +508,7 @@ mod tests {
     #[test]
     fn endpoint_to_response_uses_effective_request_body_required() {
         let endpoint = ServiceEndpoint {
+            async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -549,6 +553,7 @@ mod tests {
             &db,
             &other_service_id,
             EndpointInput {
+                async_operation: None,
                 target_id: None,
                 name: "other_endpoint".to_string(),
                 description: None,

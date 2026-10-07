@@ -352,7 +352,11 @@ pub(crate) async fn after_turn(
         super::nyxbot::late_delivery::settled(state, event_id).await;
     }
     let owner = row.user_id.as_str();
-    if let Some(run_id) = turn.trigger_run_id.as_deref() {
+    if let Some(run_id) = turn.trigger_run_id.as_deref()
+        && !crate::services::async_service_operation::pending_run(&state.db, run_id)
+            .await
+            .unwrap_or(true)
+    {
         super::trigger_scheduler::settled(state, row, run_id, text, error.map(|e| e.code)).await;
     }
     // Every reply of a hidden group member thread belongs to the group,
@@ -2676,6 +2680,7 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());

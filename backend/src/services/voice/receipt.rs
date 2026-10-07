@@ -229,6 +229,7 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            async_operation_pending: false,
             id: id.into(),
             user_id: "owner".into(),
             conversation_id: "thread".into(),

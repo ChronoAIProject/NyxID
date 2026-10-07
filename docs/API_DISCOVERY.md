@@ -351,3 +351,50 @@ candidates are paged at `/service-pools/candidates` or `/{pool_id}/candidates`;
 health/reset use `/{pool_id}/health` and `/{pool_id}/health/reset`. See
 [Service pools](SERVICE_POOLS.md) for draft peer compatibility, native operation
 selection, atomic edits and authorization.
+
+
+## Assistant async operation contracts
+
+`x-nyxid-async-operation` is NyxID-owned catalog metadata on an asynchronous
+submit operation. Only stored catalog endpoint rows and compiled, NyxID-hosted
+overlays can supply it. Remote OpenAPI documents cannot opt into background
+execution; their extension is ignored. Ordinary tool calls retain their existing
+execution path and perform no async-watch database reads.
+
+```json
+"x-nyxid-async-operation": {
+  "status_operation": "get_execution_handler",
+  "result_operation": "get_execution_result_handler",
+  "cancel_operation": "cancel_execution_handler",
+  "id_field": "/operation_id",
+  "id_parameter": "operation_id",
+  "status_field": "/status",
+  "success_states": ["succeeded"],
+  "failure_states": ["failed", "cancelled", "outcome_uncertain"],
+  "error_field": "/failure"
+}
+```
+
+Operation references are exact operation names on the same service and destination.
+Submit and optional cancel use POST; status and result use GET. `id_field`,
+`status_field` and optional `error_field` are JSON pointers. The ID parameter is
+the sole path parameter of each referenced operation. The model never supplies
+a polling URL, credentials, or a delivery destination. Changed contracts fail
+closed for existing watches. No new environment variable is required.
+
+The `chrono-sandbox` overlay follows
+<https://sandbox.chrono-ai.fun/openapi.json>. It exposes async `/executions`
+submission/status/result/cancel plus the existing synchronous and streaming
+execution operations, including session execution. Submission requires the
+upstream `Idempotency-Key` header. Startup additively synchronizes registered
+async overlays for administrator-created catalog rows as well as system rows;
+endpoints with other names are preserved. A mounted hosted overlay also receives
+the contract, using compiled bytes rather than a network-fetched extension.
+
+Both concrete MCP tools and `nyx__call_tool` automatically reserve a watch when
+an owner assistant chat key submits a marked operation. Other API-key classes
+retain the ordinary response. Guests cannot register watches. The tool response
+explains that NyxID will resume the originating thread and that the model should
+end its turn or do other work, without polling. See
+[async event delivery](chat/09-nyxbot-orchestrator.md#asynchronous-service-results)
+for limits and lifecycle semantics.

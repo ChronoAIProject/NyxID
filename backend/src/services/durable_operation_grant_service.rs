@@ -192,6 +192,7 @@ async fn load_active_published_endpoint(
     };
     let now = Utc::now();
     Ok(Some(ServiceEndpoint {
+        async_operation: None,
         target_id: endpoint.target_id,
         id: endpoint.endpoint_id,
         service_id: user_service_id.to_string(),
@@ -1535,6 +1536,7 @@ mod tests {
     fn endpoint() -> ServiceEndpoint {
         let now = Utc::now();
         ServiceEndpoint {
+            async_operation: None,
             target_id: None,
             id: Uuid::new_v4().to_string(),
             service_id: Uuid::new_v4().to_string(),
@@ -1887,6 +1889,7 @@ mod tests {
         let user_service_id = Uuid::new_v4().to_string();
         let user_endpoint_id = Uuid::new_v4().to_string();
         let template = ServiceEndpoint {
+            async_operation: None,
             path: "/items/{item_id}:publish".to_string(),
             ..endpoint()
         };
