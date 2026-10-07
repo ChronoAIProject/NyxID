@@ -135,8 +135,8 @@ pub fn chat_attempt_nonce_from_state(state: &str) -> Option<&str> {
     }
 }
 
-/// Maximum number of user-supplied additional scopes per OAuth initiate request.
-const MAX_ADDITIONAL_SCOPES: usize = 32;
+/// Maximum size of a caller-supplied scope list before parsing and allocation.
+const MAX_SCOPE_INPUT_BYTES: usize = 16 * 1024;
 /// Maximum length of a single scope string.
 const MAX_SCOPE_LENGTH: usize = 256;
 
@@ -148,7 +148,7 @@ const MAX_SCOPE_LENGTH: usize = 256;
 /// to `provider.default_scopes`.
 ///
 /// Validation:
-/// - At most [`MAX_ADDITIONAL_SCOPES`] entries.
+/// - The raw scope list is at most [`MAX_SCOPE_INPUT_BYTES`] bytes.
 /// - Each scope is at most [`MAX_SCOPE_LENGTH`] characters.
 /// - Each scope must match `[A-Za-z0-9._:/~+*=-]+` (RFC 6749 §3.3 permits
 ///   a broader set, but this covers every known OAuth scope format including
@@ -158,6 +158,11 @@ pub fn parse_additional_scopes(raw: Option<&str>) -> AppResult<Vec<String>> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
+    if raw.len() > MAX_SCOPE_INPUT_BYTES {
+        return Err(AppError::ValidationError(format!(
+            "OAuth scope list exceeds {MAX_SCOPE_INPUT_BYTES} bytes"
+        )));
+    }
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(Vec::new());
@@ -169,12 +174,6 @@ pub fn parse_additional_scopes(raw: Option<&str>) -> AppResult<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-
-    if scopes.len() > MAX_ADDITIONAL_SCOPES {
-        return Err(AppError::ValidationError(format!(
-            "Too many additional scopes (max {MAX_ADDITIONAL_SCOPES})"
-        )));
-    }
 
     for scope in &scopes {
         if scope.len() > MAX_SCOPE_LENGTH {
@@ -3685,12 +3684,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_additional_scopes_rejects_too_many() {
+    fn parse_additional_scopes_accepts_large_scope_sets() {
         let many = (0..100)
             .map(|i| format!("scope{i}"))
             .collect::<Vec<_>>()
             .join(",");
-        assert!(parse_additional_scopes(Some(&many)).is_err());
+        let scopes = parse_additional_scopes(Some(&many)).unwrap();
+        assert_eq!(scopes.len(), 100);
+        assert_eq!(scopes.first().unwrap(), "scope0");
+        assert_eq!(scopes.last().unwrap(), "scope99");
+        assert_eq!(
+            resolve_scope_param(None, &[], Some(&scopes)),
+            Some(scopes.join(" "))
+        );
+        assert_eq!(
+            resolve_scope_param(None, &scopes, None),
+            Some(scopes.join(" "))
+        );
+        assert!(parse_additional_scopes(Some(&format!("{many},bad<scope>"))).is_err());
+        assert!(parse_additional_scopes(Some(&format!("{many},{}", "a".repeat(257)))).is_err());
+    }
+
+    #[test]
+    fn parse_additional_scopes_bounds_raw_input_size() {
+        let at_limit = "a ".repeat(super::MAX_SCOPE_INPUT_BYTES / 2);
+        assert!(parse_additional_scopes(Some(&at_limit)).is_ok());
+        let oversized = format!("{at_limit}a");
+        let err = parse_additional_scopes(Some(&oversized)).unwrap_err();
+        assert!(
+            matches!(err, AppError::ValidationError(message) if message.contains("scope list exceeds"))
+        );
+        let padding = " ".repeat(super::MAX_SCOPE_INPUT_BYTES + 1);
+        assert!(parse_additional_scopes(Some(&padding)).is_err());
     }
 
     #[test]
