@@ -65,7 +65,11 @@ pub(crate) fn capabilities(
     on: bool,
     group: bool,
 ) -> ThreadCapabilities {
-    if !on || !group || row.transport != "direct" || row.status != "active" {
+    if !on
+        || !group
+        || !crate::services::channel_thread_service::gateway::supports(row)
+        || row.status != "active"
+    {
         return ThreadCapabilities::default();
     }
     crate::services::channel_adapters::resolve_adapter(&row.platform, &state.token_exchange_cache)

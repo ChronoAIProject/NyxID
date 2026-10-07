@@ -51,12 +51,16 @@ pub(super) async fn eligible_source_live(
         .collection::<NyxbotChannel>(CHANNELS)
         .find_one(doc! {
             "channel_bot_id": &bot.id, "route_api_key_id": key,
-            "transport": "direct", "status": "active",
+            "status": "active",
+            "$or": [{"transport":"direct"}, {"transport":"gateway", "gateway_threads.version":1}],
         })
         .await?
     else {
         return Ok(false);
     };
+    if !super::gateway::supports(&link) {
+        return Ok(false);
+    }
     if link.bot_owner_id.as_deref().unwrap_or(&link.user_id) != bot.user_id {
         return Ok(false);
     }
@@ -80,7 +84,8 @@ pub(super) async fn eligible_source(
         .collection::<NyxbotChannel>(CHANNELS)
         .find_one(doc! {
             "channel_bot_id": &bot.id, "route_api_key_id": &source.agent_api_key_id,
-            "transport": "direct", "status": "active",
+            "status": "active",
+            "$or": [{"transport":"direct"}, {"transport":"gateway", "gateway_threads.version":1}],
         })
         .await?
     else {

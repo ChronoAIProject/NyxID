@@ -1014,3 +1014,16 @@ calls in the same turn reuse the proposal/card; uncertain publication reconciles
 without repeating the mutation. Never package or publish through Ornn Playground,
 sandboxes, machines or raw Ornn upload APIs. See `AGENT_LEARNING.md` for the shared
 review contract and org publication limitation.
+
+### Gateway group-thread follow
+
+Lark/Feishu gateway channels can use the same followed child conversations as
+the relay only after [thread contract 1](../CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md)
+is advertised and accepted. The existing follow flag remains authoritative.
+The management sweep projects follow-enabled chats into bounded per-chat gateway
+admission; NyxID filters admitted events with the same sender, mention, live org
+and follow policies as relay events. An other-person-only mention is context,
+not a new turn; broadcasts never activate follow. Native replies explicitly bind
+to the original event and root, including delayed replies. Legacy gateways keep
+follow unavailable. Lark/Feishu on the gateway remain text-only, including org
+bots; media and edit parity are separate work.

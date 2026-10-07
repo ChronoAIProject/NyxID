@@ -222,7 +222,7 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     fence.insert("pending_route_api_key_id", &next.id);
     let update = doc! {"$set": {"transport": "direct", "route_api_key_id": &next.id, "updated_at": bson::DateTime::now()},
     "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",
-        "gateway_record_id": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
+        "gateway_record_id": "", "gateway_threads": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
         "gateway_groups": "", "gateway_groups_retry_at": "", "gateway_attempted_at": "", "gateway_fallback_at": "",
         "pending_agent_api_key_id": "", "pending_route_api_key_id": ""}};
     match swap_route(state, row, &next.id, fence, update).await {

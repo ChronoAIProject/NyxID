@@ -805,6 +805,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             crate::models::nyxbot_channel::COLLECTION_NAME,
+            doc! {"channel_bot_id": 1, "route_api_key_id": 1, "status": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::COLLECTION_NAME,
             doc! {"agent_api_key_id": 1},
             false,
         ),

@@ -142,6 +142,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        gateway_threads: Default::default(),
         follow_capacity_revision: 0,
         follow_binding_generation: 0,
         id: Uuid::new_v4().to_string(),
@@ -2748,6 +2749,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            gateway_threads: Default::default(),
             follow_capacity_revision: 0,
             follow_binding_generation: 0,
             id: "c".into(),
@@ -4099,9 +4101,11 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
     assert_eq!(carried.reply_mode.as_deref(), Some("all"));
     let made = calls.lock().await.clone();
     assert_eq!(
-        made.len(),
-        3,
-        "create, attach, then admit every group message"
+        made.iter()
+            .map(|(method, _, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        ["POST", "PUT", "GET", "PUT"],
+        "create, attach, discover thread capabilities, then admit every group message"
     );
     assert_eq!(
         made[0].2["sources"][0]["key_id"],
@@ -4109,7 +4113,9 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
     );
     assert_eq!(made[0].2["sources"][0]["bot_id"], json!("ou_office_bot"));
     assert_eq!(made[1].2["sources"][0]["route_ids"], json!([route_id]));
-    assert_eq!(made[2].2["sources"][0]["admission"]["groups"], json!("all"));
+    assert_eq!(made[3].2["sources"][0]["admission"]["groups"], json!("all"));
+    assert!(made[3].2["reply"].get("thread_contract").is_none());
+    assert!(!after.gateway_threads.supported);
     assert_eq!(after.gateway_groups.as_deref(), Some("all"));
     // A bot connected while the gateway refuses its platform uses NyxID's
     // relay, with a route key the gateway never saw.
@@ -4816,3 +4822,6 @@ mod thread_follow_tests;
 
 #[path = "nyxbot_late_delivery_tests.rs"]
 mod late_delivery_tests;
+
+#[path = "nyxbot_gateway_thread_tests.rs"]
+mod gateway_thread_tests;

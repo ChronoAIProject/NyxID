@@ -224,7 +224,7 @@ pub async fn select(
 
         let work: AppResult<Selection> = Box::pin(async {
             let channel = fence(db, channel_id, owner, session).await?;
-            if channel.status != "active" || channel.transport != "direct" { return Ok(Selection::Legacy); }
+            if channel.status != "active" || !super::channel_thread_service::gateway::supports(&channel) { return Ok(Selection::Legacy); }
             let settings = db.collection::<NyxbotThread>(THREADS)
                 .find_one(doc! {"_id":settings_id,"channel_id":channel_id,"user_id":owner,"record_scope":{"$ne":SCOPE}})
                 .session(&mut *session).await?.ok_or_else(not_found)?;
