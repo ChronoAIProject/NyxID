@@ -521,3 +521,6 @@ async fn mcp_delegation_service_account_keeps_its_subject_not_its_owner() {
 
 #[path = "mcp_proxy_parity_tests.rs"]
 mod proxy_parity;
+
+#[path = "mcp_path_parameter_tests.rs"]
+mod path_parameters;

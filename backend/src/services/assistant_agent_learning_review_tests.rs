@@ -677,6 +677,7 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                steering: None,
                 voice: None,
                 execution_pending: false,
                 id: Uuid::new_v4().to_string(),

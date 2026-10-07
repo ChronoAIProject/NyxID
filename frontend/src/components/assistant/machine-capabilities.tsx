@@ -11,7 +11,7 @@ import {
   useRequestMachineContext,
   useSetMachineAccess,
 } from "@/hooks/use-machine-access";
-import { machineSelectionSchema, type MachineAccess, type MachineSelection } from "@/schemas/machine-access";
+import { machineSelectionSchema, SEPARATED_SETUP_NOTE, type MachineAccess, type MachineSelection } from "@/schemas/machine-access";
 const labels = { shell: "Shell commands", files: "File tools", browser: "Secure browser", computer: "Full computer control", developer_browser: "Developer browser" } as const;
 
 export function MachineCapabilities({ agentId, disabled = false }: { readonly agentId: string; readonly disabled?: boolean }) {
@@ -59,6 +59,15 @@ export function MachineCapabilityForm({ machine, agentId, disabled = false, cont
   })}>
     <div className="flex flex-wrap items-center gap-2"><span className="text-13 font-medium">{machine.name}</span><Badge variant="secondary">{machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy"}</Badge></div>
     <p className="text-12 text-muted-foreground">{machine.mode === "separated" ? "This agent has its own workspace and browser profiles. Full isolation requires a separate machine container or VM per agent." : "Workspace and browser sessions are shared with other agents on this machine."}</p>
+    <p role="status" className="text-12 text-muted-foreground">{machine.execution_note ?? (machine.mode === "separated"
+      ? machine.separated?.available
+        ? "Granted commands and file tools use this agent’s separated workspace. No shared fallback."
+        : "This assignment requires separated mode, but separation is unavailable. Execution is refused. Restore support or ask the owner to change mode through an owner action card; no automatic shared fallback."
+      : "Granted commands and file tools run in shared mode, as configured, even when separation is unavailable. Shell uses the command user’s full OS permissions.")}</p>
+    {!machine.separated?.available ? <div className="space-y-1 text-12 text-muted-foreground">
+      <p>{machine.separated_setup_note ?? SEPARATED_SETUP_NOTE}</p>
+      {machine.separated?.reason ? <details><summary className="cursor-pointer">Separate workspace diagnostics</summary><p>{machine.separated.reason}</p></details> : null}
+    </div> : null}
     {machine.revocation_pending ? <p role="status" className="text-12 text-muted-foreground">Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.</p> : null}
     {!machine.can_edit ? <p role="status" className="text-12">Only the machine owner or an organization admin can edit this access.</p> : null}
     {!machine.protocol_v2 ? <p role="status" className="text-12">Update this machine before changing capabilities. Its existing access continues.</p> : null}
@@ -71,9 +80,7 @@ export function MachineCapabilityForm({ machine, agentId, disabled = false, cont
           </Button>
           {contextRequested || contextMutation.isSuccess ? <p role="status">Owner approval requested in the NyxBot Assistant thread.</p> : null}
         </div>
-      ) : (
-        <p role="status" className="text-12">Separate workspace and browser is unavailable on this machine{machine.separated?.reason ? `: ${machine.separated.reason}` : "."}</p>
-      )
+      ) : null
     ) : null}
     <fieldset disabled={disabled || !machine.can_edit || !machine.protocol_v2 || mutation.isPending} className="grid gap-2 sm:grid-cols-2">
       <legend className="sr-only">Allowed capabilities</legend>

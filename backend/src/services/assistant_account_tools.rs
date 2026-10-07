@@ -314,6 +314,7 @@ fn account_service() -> McpToolService {
         endpoints: TOOL_NAMES
             .iter()
             .map(|name| McpToolEndpoint {
+                async_operation: None,
                 endpoint_id: format!("nyxid__{name}"),
                 name: (*name).into(),
                 description: Some(description(name)),
@@ -422,6 +423,14 @@ impl std::fmt::Debug for ToolResult {
 pub fn error_result(error: AppError) -> ToolResult {
     let body = error.response_body();
     let message = match error {
+        AppError::SkillDraftValidation(_) => {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": body.message, "details": body.details}),
+            };
+        }
         AppError::NotFound(_) | AppError::NodeNotFound(_) | AppError::ChannelBotNotFound(_) => {
             "Resource not found."
         }
@@ -1294,6 +1303,7 @@ mod search_tests {
         home.service_name = "Home Assistant at office".into();
         home.endpoints = (0..40)
             .map(|i| McpToolEndpoint {
+                async_operation: None,
                 endpoint_id: format!("home{i}"),
                 name: format!("get_states_{i}"),
                 description: Some("Home Assistant REST API: read entity states".into()),

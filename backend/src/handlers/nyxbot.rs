@@ -721,6 +721,7 @@ pub async fn connect(
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
     let row = NyxbotChannel {
+        gateway_threads: Default::default(),
         follow_capacity_revision: 0,
         follow_binding_generation: 0,
         id: id.clone(),
@@ -980,7 +981,7 @@ fn gateway_policy(
         .chars()
         .take(60)
         .collect();
-    json!({
+    let mut policy = json!({
         "schema_version": 1,
         "name": name,
         "profile": {
@@ -997,7 +998,11 @@ fn gateway_policy(
         "sources": [source],
         "partition": {"version": 1, "key": "conversation_and_sender"},
         "reply": {"auto_final": true, "ack_after_ms": 2500, "sinks": [{"type": "source"}]},
-    })
+    });
+    if row.gateway_threads.version == Some(1) {
+        policy["reply"]["thread_contract"] = gateway_threads::policy(&row.gateway_threads);
+    }
+    policy
 }
 
 /// Create the gateway channel, point the route key at it, create the route,
@@ -2692,11 +2697,8 @@ async fn reply_decision(
     }
     // The owner's previous message: only cards raised after it are answered
     // by a plain yes/no.
-    let since = engine::messages(&state.db, &row.user_id, conversation_id, 100, None)
+    let since = engine::previous_user_message(&state.db, &row.user_id, conversation_id, None)
         .await?
-        .into_iter()
-        .rev()
-        .find(|message| message.role == "user")
         .map(|message| message.created_at);
     let Some(decided) = acks::decide_reply(
         &state.db,
@@ -3591,6 +3593,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
     let human = activity["actor"]["kind"] == "human";
     // Admission includes chat reconciliation and turn preparation. Keep that
     // large future off the provider handler's stack as the protocol grows.
+    let mut thread_reply = false;
     let inbound = Box::pin(gateway_inbound(
         &state,
         &row,
@@ -3604,6 +3607,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         &text,
         human,
         &event_key,
+        &mut thread_reply,
     ))
     .await;
     let finish = |status: &'static str, conversation: Option<String>| {
@@ -3615,15 +3619,22 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
                 .db
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
-                    doc! {"_id": &event_key},
+                    if thread_reply {
+                        doc! {"_id": &event_key, "delivery": bson::Bson::Null}
+                    } else {
+                        doc! {"_id": &event_key}
+                    },
                     doc! {"$set": {"status": status, "conversation_id": conversation},
                     "$unset": {"event_context_ciphertext": ""}},
                 )
                 .await;
         }
     };
-    let created = json!({"type": "response.created",
+    let mut created = json!({"type": "response.created",
         "response": {"id": &response_id, "status": "in_progress"}});
+    if thread_reply {
+        created["response"]["thread_reply"] = json!(true);
+    }
     match inbound {
         Ok(Inbound::Reply(text)) => {
             finish("refused", None).await;
@@ -3670,11 +3681,21 @@ async fn gateway_inbound(
     text: &str,
     human: bool,
     event_key: &str,
+    thread_reply: &mut bool,
 ) -> AppResult<Inbound> {
     let conversation = &activity["conversation"];
     let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
     let chat_id = conversation["id"].as_str().unwrap_or_default();
     let thread_id = conversation["thread_id"].as_str();
+    if crate::services::channel_thread_service::gateway::candidate(row, activity)
+        && let Some(result) = Box::pin(thread_follow::gateway_inbound(
+            state, row, activity, text, event_key,
+        ))
+        .await?
+    {
+        *thread_reply = true;
+        return Ok(result);
+    }
     let chat_partition = if kind == "private" {
         // A bot moved from NyxID's relay keeps the chat's thread. The gateway
         // copies the actor and chat IDs from NyxID's relay payload (and Lark's
@@ -3735,12 +3756,19 @@ async fn gateway_inbound(
     if !human || sender.id.is_empty() {
         return Ok(Inbound::Silent);
     }
-    // While the gateway admits only mentions and replies in groups, every
-    // group message it passes on is addressed to the bot.
+    // Only legacy admission implies addressing. A gateway may already have
+    // accepted broader thread admission before its acknowledgement is stored.
+    // Versioned facts must use explicit evidence even during that window.
     let addressed = Some(
         kind == "private"
             || activity["kind"]["mentions_bot"] == true
-            || row.gateway_groups.as_deref() != Some("all")
+            || (row.gateway_groups.as_deref() != Some("all")
+                && activity["thread"].is_null()
+                && !row
+                    .gateway_threads
+                    .follow_chat_ids
+                    .iter()
+                    .any(|id| id == chat_id))
             || match activity["event_id"].as_str() {
                 Some(message_id) => {
                     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
@@ -3947,6 +3975,7 @@ async fn direct_reply(
         headers,
         crate::mw::auth::OptionalAuthUser(auth),
         Json(super::channel_relay::AsyncReplyRequest {
+            thread_reply: false,
             message_id: message_id.to_owned(),
             reply: super::channel_relay::AsyncReplyBody {
                 text: Some(text.to_owned()),
@@ -4221,6 +4250,8 @@ pub async fn relay_callback(
     StatusCode::ACCEPTED.into_response()
 }
 
+#[path = "nyxbot_gateway_threads.rs"]
+mod gateway_threads;
 #[path = "nyxbot_transport.rs"]
 mod transport;
 

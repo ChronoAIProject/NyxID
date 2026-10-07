@@ -868,6 +868,8 @@ pub(crate) async fn stop_group_threads(
     };
     for row in rows {
         engine::request_stop(&state.db, &row.user_id, &row.id).await?;
+        super::mcp_transport::async_operations::cancel_conversation(state, &row.user_id, &row.id)
+            .await?;
         super::machine_cancel::conversation(state, &row.user_id, &row.id).await?;
     }
     Ok(())

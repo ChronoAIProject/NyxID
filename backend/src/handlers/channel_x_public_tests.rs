@@ -196,6 +196,7 @@ async fn x_public_webhook_to_agent_to_bound_reply_is_deduplicated_and_metered() 
                 .unwrap(),
         )]);
         let body = || AsyncReplyRequest {
+            thread_reply: false,
             message_id: message_id.into(),
             reply: AsyncReplyBody {
                 text: Some("Thanks for asking".into()),

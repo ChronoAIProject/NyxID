@@ -577,3 +577,34 @@ as inert text. Retry uses the same card and publication operation; it never
 replays an uncertain POST/PUT. The initiating model turn may already have ended
 when the human approves. The current chat key, owner, proposal/skill revisions
 and publication lease still fence the action.
+
+Authored validation is separate from learned L1 validation at creation, editing,
+review and publication. Authored fields reject credential shapes (provider keys,
+secret assignments, private keys, bearer/JWT tokens, URL passwords and credential
+query parameters). Ordinary reference URLs, paths, versions, example IDs/email
+addresses and long checksums are allowed for owner review. The telemetry scrubber
+is not an authoring policy: its query-URL, email, UUID and unbounded `basic`/`token`
+matches reject ordinary prose. L1 additionally rejects long token-like runs and
+retains all of its existing redaction and validation rules unchanged.
+
+Authored caps count Unicode scalar characters: name 64 (Ornn ASCII slug),
+description 400, SKILL.md 7,500, optional paths 160 and file contents 2,000 each,
+at most eight extra files, rationale/safety notes 1,000 each. The total serialized
+proposal, including metadata and JSON escaping, stays at 7,500 characters with a
+30,000-byte ceiling (four bytes per character). L1 keeps its 8,000-byte ceiling.
+No script or binary files are allowed. The deterministic ZIP adds bounded
+frontmatter and nine entries at most; NyxID's existing 4 MiB archive limit remains.
+[Ornn's upload defaults](https://github.com/ChronoAIProject/Ornn/blob/c93036d6be7cb19c7ca3294da930594978714fd6/ornn-api/src/infra/config.ts#L132)
+are 50 MiB uploaded/expanded, 25 MiB per entry and 1,000 entries; remote format
+validation still applies. Envelope encryption adds at most 1,056 bytes (including
+the bounded wrapped DEK), far below MongoDB's 16 MiB document bound.
+
+Refusals retain `validation_error` / 1008 and include safe `details`, for example
+`{"rule":"credential_shape","field":"files[2].content","line":14}`. Lines are
+one-based within the original field; fields are fixed schema names with zero-based
+array indices, never supplied filenames. Size errors use `too_large`, `field`,
+`limit`, `actual` and `unit` (`characters`, `bytes` or `items`); total-budget errors
+use `field: "draft"`. Other fixed rules cover required text, slug/path constraints,
+duplicates, text-only content, input/schema/kind shape and base matching. Unknown
+JSON keys report their containing object. No matched text or raw parser errors
+enter diagnostics, logs or audit. No new permission or publication path is added.

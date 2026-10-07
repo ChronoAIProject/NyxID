@@ -156,6 +156,20 @@ macro_rules! assistant_direct_billing_routes {
                 )
             ),
             (
+                "/nyxagent/conversations/{id}/steer",
+                "/api/v1/assistant/nyxagent/conversations/{id}/steer",
+                "handlers::assistant_nyxagent::steer",
+                post(handlers::assistant_nyxagent::steer),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
+                "/nyxagent/conversations/{id}/capabilities",
+                "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
+                "handlers::assistant_nyxagent::capabilities",
+                get(handlers::assistant_nyxagent::capabilities),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
                 "/nyxagent/models",
                 "/api/v1/assistant/nyxagent/models",
                 "handlers::assistant_nyxagent::models",
@@ -1653,6 +1667,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/reply",
             post(handlers::channel_relay::async_reply).layer(DefaultBodyLimit::max(
+                crate::services::channel_media_service::request_body_limit(
+                    router_state
+                        .as_ref()
+                        .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
+                            state.config.channel_media_max_bytes
+                        }),
+                ),
+            )),
+        )
+        .route(
+            "/thread-reply",
+            post(handlers::channel_relay::async_thread_reply).layer(DefaultBodyLimit::max(
                 crate::services::channel_media_service::request_body_limit(
                     router_state
                         .as_ref()

@@ -232,12 +232,11 @@ async fn draft(
         .await
         .map_err(|_| not_found())?;
     let text = std::str::from_utf8(&bytes).map_err(|_| not_found())?;
-    let valid = learning::validate_generated(text)?.ok_or_else(not_found)?;
-    let body = serde_json::from_slice(&valid).map_err(|_| not_found())?;
     if row.source == ProposalSource::Authored {
-        super::assistant_skill_authoring::validate_body(&body)?;
+        return super::assistant_skill_authoring::decode_body(text);
     }
-    Ok(body)
+    let valid = learning::validate_generated(text)?.ok_or_else(not_found)?;
+    serde_json::from_slice(&valid).map_err(|_| not_found())
 }
 
 /// Improvements may only target an active L1 root at its exact current B2 pin.
@@ -355,11 +354,13 @@ pub async fn edit(
     if row.revision != expected_revision || row.status != "pending" {
         return Err(conflict());
     }
-    let encoded = learning::validate_generated(&value.to_string())?.ok_or_else(conflict)?;
+    let encoded = if row.source == ProposalSource::Authored {
+        let body = super::assistant_skill_authoring::decode_body(&value.to_string())?;
+        super::assistant_skill_authoring::validate_body(&body)?
+    } else {
+        learning::validate_generated(&value.to_string())?.ok_or_else(conflict)?
+    };
     let value: GeneratedProposal = serde_json::from_slice(&encoded).map_err(|_| conflict())?;
-    if row.source == ProposalSource::Authored {
-        super::assistant_skill_authoring::validate_body(&value)?;
-    }
     validate_proposal_base(&state.db, &agent, &value, row.source).await?;
     let encrypted = state.encryption_keys.encrypt(&encoded).await?;
     let fingerprint = super::assistant_action_receipts::fingerprint_sensitive_material(&format!(

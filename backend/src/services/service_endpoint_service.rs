@@ -12,6 +12,7 @@ use crate::services::content_type::normalize_content_type;
 /// Input for creating or upserting a single endpoint.
 #[derive(Clone)]
 pub struct EndpointInput {
+    pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     pub name: String,
     pub description: Option<String>,
     pub method: String,
@@ -179,6 +180,7 @@ pub async fn create_endpoint(
     let now = Utc::now();
 
     let endpoint = ServiceEndpoint {
+        async_operation: input.async_operation.clone(),
         target_id: input.target_id.clone(),
         id: Uuid::new_v4().to_string(),
         service_id: service_id.to_string(),
@@ -541,7 +543,8 @@ async fn reconcile_existing_endpoint(
         EndpointSyncActivation::ForceActive => true,
         EndpointSyncActivation::PreserveExisting => existing.is_active,
     };
-    let unchanged = existing.description == input.description
+    let unchanged = existing.async_operation == input.async_operation
+        && existing.description == input.description
         && existing.method == input.method.to_uppercase()
         && existing.path == input.path
         && existing.target_id == input.target_id
@@ -614,6 +617,11 @@ async fn reconcile_existing_endpoint(
         }
     }
     set_doc.insert("supports_idempotency_key", input.supports_idempotency_key);
+    set_doc.insert(
+        "async_operation",
+        bson::to_bson(&input.async_operation)
+            .map_err(|_| AppError::Internal("Invalid async contract".into()))?,
+    );
 
     let mut filter = doc! { "_id": &existing.id, "service_id": service_id };
     filter.extend(writable_operation_generation_filter());
@@ -638,6 +646,7 @@ async fn insert_endpoint_or_reconcile(
     let retry_input = input.clone();
     // Create new endpoint
     let endpoint = ServiceEndpoint {
+        async_operation: input.async_operation.clone(),
         target_id: input.target_id.clone(),
         id: Uuid::new_v4().to_string(),
         service_id: service_id.to_string(),
@@ -851,6 +860,7 @@ mod tests {
 
     fn make_input(name: &str, method: &str, path: &str) -> EndpointInput {
         EndpointInput {
+            async_operation: None,
             target_id: None,
             name: name.to_string(),
             description: Some(format!("{name} endpoint")),

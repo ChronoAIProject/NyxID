@@ -53,7 +53,7 @@ pub(super) fn package(
     zip.start_file(format!("{name}/SKILL.md"), options)
         .map_err(|_| invalid())?;
     zip.write_all(front.as_bytes()).map_err(|_| invalid())?;
-    // validate_generated runs before this function. All file names are safe,
+    // Source-specific validation runs before this function. All file names are safe,
     // unique UTF-8 text paths; the archive is never extracted on the API host.
     for file in &draft.files {
         zip.start_file(format!("{name}/{}", file.path), options)

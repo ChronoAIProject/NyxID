@@ -24,6 +24,8 @@ pub struct MachineOption {
     ceiling: nyxid_machine::authority::Capabilities,
     legacy: bool,
     mode: String,
+    execution_note: &'static str,
+    separated_setup_note: Option<&'static str>,
     separated: Option<nyxid_machine::context::Support>,
     saved_login_ids: Option<Vec<String>>,
     revocation_pending: bool,
@@ -76,6 +78,15 @@ pub async fn options(
                 capabilities: assignment.capabilities,
                 ceiling: nyxid_machine::authority::Capabilities::legacy(&profile),
                 legacy: assignment.legacy,
+                execution_note: crate::services::machine_tools::execution_note(
+                    &assignment.mode,
+                    profile.separated.as_ref().is_some_and(|s| s.available),
+                ),
+                separated_setup_note: profile
+                    .separated
+                    .as_ref()
+                    .is_none_or(|s| !s.available)
+                    .then_some(crate::services::machine_tools::SEPARATED_SETUP_NOTE),
                 mode: assignment.mode,
                 separated: profile.separated.clone(),
                 saved_login_ids: assignment.saved_login_ids,

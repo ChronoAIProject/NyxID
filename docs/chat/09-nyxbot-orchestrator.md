@@ -1014,3 +1014,66 @@ calls in the same turn reuse the proposal/card; uncertain publication reconciles
 without repeating the mutation. Never package or publish through Ornn Playground,
 sandboxes, machines or raw Ornn upload APIs. See `AGENT_LEARNING.md` for the shared
 review contract and org publication limitation.
+
+### Gateway group-thread follow
+
+Lark/Feishu gateway channels can use the same followed child conversations as
+the relay only after [thread contract 1](../CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md)
+is advertised and accepted. The existing follow flag remains authoritative.
+The management sweep projects follow-enabled chats into bounded per-chat gateway
+admission; NyxID filters admitted events with the same sender, mention, live org
+and follow policies as relay events. An other-person-only mention is context,
+not a new turn; broadcasts never activate follow. Native replies explicitly bind
+to the original event and root, including delayed replies. Legacy gateways keep
+follow unavailable. Lark/Feishu on the gateway remain text-only, including org
+bots; media and edit parity are separate work.
+
+## Asynchronous service results
+
+A trusted catalog `x-nyxid-async-operation` contract lets an assistant submit
+long work, end its turn, and receive the result later. Registration reserves
+capacity before upstream execution and persists the returned opaque operation
+ID. The watch binds the owner, agent, conversation, initiating turn, conversation
+key, exact service and submit endpoint. Repeated idempotent receipts from the
+same conversation key/service reuse the existing watch. An uncertain submit is
+never replayed automatically; the thread receives `submission_uncertain`.
+
+Delivery captures the initiating turn's channel/reply-channel binding, group
+request, specialist report target, voice request, and automation run. A later
+web message or a different chat cannot redirect that result. Nested async work
+inherits the event turn's saved destination. Results enter `pending_events` once,
+transactionally with the watch transition, then take their own event turn through
+the existing owner pool and loop guards. Busy threads and full event queues defer
+without dropping other events. Async results are not drained into unrelated user
+turns or coalesced with a different delivery place. Channel delivery retains live
+channel and organization checks; group replies use the originating member thread.
+Hidden voice requests and automation runs remain pending until their async work
+and resumed turn settle. Cancelling a voice task also cancels its family's watches.
+
+A separate 15-second backstop sweep claims due watches with 60-second MongoDB
+leases; each attempt is limited to 45 seconds. Per-watch polling backoff starts at
+5 seconds and caps at 60 seconds. Every status/result/cancel request reloads the
+same conversation credential and live key/grants/organization authority, resolves
+the exact operation through the normal service proxy, and uses normal rate limits,
+approvals, billing and service concurrency slots. This narrow durable authority
+permits only the declared operations for the saved operation ID while the submitting
+turn is idle; it does not create a synthetic live turn or enable other idle tools.
+Replica restarts recover leases, and stale workers cannot publish results after
+another claim or Stop.
+
+Limits are 32 active watches per owner, 8 per conversation, and 2 hours of service
+work. Reservations serialize per owner and conversation across replicas. Status
+and result reads are capped at 16 KiB. Successful results and upstream failure
+details are untrusted, JSON-quoted data in per-turn input context, never stable
+instructions. Retained payloads use envelope encryption, are erased on settlement
+or cancellation, and expire after 4 hours even if delivery is deferred. An expired
+payload produces `result_expired`; terminal metadata is TTL-cleaned. Audit contains
+identifiers and stable reasons, never operation payloads, returned IDs or credentials.
+
+Completion, `operation_failed`, `timeout`, `authority_lost`, `result_unavailable`,
+`result_too_large`, and submission failures resume the same thread with a stable
+reason. Stops suppress queued completions, cancel durable watches, and make a
+bounded best-effort call to the declared cancel operation under live authority.
+Conversation deletion removes its watches after attempting cancellation. A late
+poll cannot recreate a deleted watch or overwrite cancellation. Services without
+a trusted contract and legacy event behavior remain unchanged.

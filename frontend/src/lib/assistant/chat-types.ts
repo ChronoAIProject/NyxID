@@ -19,6 +19,7 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly steering?: import("@/schemas/assistant-nyxagent").NyxAgentSteering | null;
   readonly artifacts?: ArtifactContentBlock[];
   readonly id: string;
   readonly role: ChatMessageRole;

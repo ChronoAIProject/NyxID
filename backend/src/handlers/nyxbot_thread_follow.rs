@@ -51,16 +51,66 @@ pub(super) async fn inbound(
     if row.transport != "direct" {
         return Ok(false);
     }
+    let key = sha256_hex(format!(
+        "thread-follow:v1\0{}\0{message}",
+        row.channel_bot_id
+    ));
+    Ok(
+        inbound_impl(state, row, payload, message, text, &key, false)
+            .await?
+            .is_some(),
+    )
+}
+
+pub(super) async fn gateway_inbound(
+    state: &AppState,
+    row: &NyxbotChannel,
+    activity: &Value,
+    text: &str,
+    event_key: &str,
+) -> AppResult<Option<Inbound>> {
+    if !threads::gateway::candidate(row, activity)
+        || !threads::gateway::retain(&state.db, row, activity).await?
+    {
+        return Ok(None);
+    }
+    let payload = json!({"conversation":{"type":activity["conversation"]["kind"]},
+        "sender":{"display_name":activity["actor"]["display_name"]}});
+    inbound_impl(
+        state,
+        row,
+        &payload,
+        activity["event_id"].as_str().unwrap_or_default(),
+        text,
+        event_key,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn inbound_impl(
+    state: &AppState,
+    row: &NyxbotChannel,
+    payload: &Value,
+    message: &str,
+    text: &str,
+    event_key: &str,
+    gateway: bool,
+) -> AppResult<Option<Inbound>> {
+    if !threads::gateway::supports(row) {
+        return Ok(None);
+    }
     // Resolve the adapter before any database work. Private chats on adapters
     // without private-thread support are legacy-only, so the dormant follow
     // path must be a zero-read fast path for them.
     let private = payload["conversation"]["type"] == "private";
     let Ok(platform_adapter) = adapter_for(state, &row.channel_bot_id, &row.platform) else {
-        return Ok(false);
+        return Ok(None);
     };
     let capabilities = platform_adapter.thread_capabilities();
     if !capabilities.thread_follow || (private && !capabilities.private_thread) {
-        return Ok(false);
+        return Ok(None);
     }
     let on = enabled(state, &row.user_id).await?;
     if !on
@@ -73,13 +123,13 @@ pub(super) async fn inbound(
             .await?
             .is_none()
     {
-        return Ok(false);
+        return Ok(None);
     }
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
     let adapter = adapter(state, &bot)?;
     let capabilities = adapter.thread_capabilities();
     if !capabilities.thread_follow || (private && !capabilities.private_thread) {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(source) = state
         .db
@@ -90,27 +140,30 @@ pub(super) async fn inbound(
         })
         .await?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(mut facts) = source.thread_context.clone() else {
-        return Ok(false);
+        return Ok(None);
     };
     let sender_id = source.sender_platform_id.as_deref().unwrap_or_default();
     if facts.sender_kind != ThreadSenderKind::Human || sender_id.is_empty() {
-        return Ok(true);
+        return Ok(Some(Inbound::Silent));
     }
     if text.trim().is_empty() {
-        return Ok(true);
+        return Ok(Some(Inbound::Silent));
     }
     let sender = Sender {
         id: sender_id,
         display_name: payload["sender"]["display_name"].as_str(),
     };
     if let Some(linked) = link_owner(state, row, &sender, text, false).await? {
+        if gateway {
+            return Ok(Some(linked));
+        }
         if let Inbound::Reply(reply) = linked {
             direct_reply(state, row, message, &reply, None).await?;
         }
-        return Ok(true);
+        return Ok(Some(Inbound::Silent));
     }
     // Only this signed callback can improve address evidence. Never convert
     // the legacy "unknown means owner" rule into follow authority.
@@ -178,11 +231,11 @@ pub(super) async fn inbound(
     )
     .await?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let facts = target.facts();
     if facts.kind == ThreadKind::Unknown {
-        return Ok(false);
+        return Ok(None);
     }
     let addressed = matches!(
         facts.address,
@@ -219,7 +272,7 @@ pub(super) async fn inbound(
         "channel_id":&row.id,"user_id":&row.user_id,"partition":{"$in":exact_keys},"record_scope":{"$ne":follow::SCOPE},
     }).limit(2).await?.try_collect().await?;
     if exact.len() > 1 {
-        return Ok(false);
+        return Ok(None);
     }
     let exact = exact.pop();
     let parent = chats::record_chat(
@@ -250,7 +303,7 @@ pub(super) async fn inbound(
     if facts.kind == ThreadKind::Email
         && follow::eligible_for_facts(row, &parent, facts, sender_id).is_none()
     {
-        return Ok(true);
+        return Ok(Some(Inbound::Silent));
     }
     let settings = if facts.kind == ThreadKind::Email {
         match email_settings(
@@ -271,6 +324,9 @@ pub(super) async fn inbound(
                     reply_to_platform_message_id: None,
                     metadata: None,
                 };
+                if gateway {
+                    return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+                }
                 threads::delivery::send_reply(
                     &state.db,
                     adapter.as_ref(),
@@ -280,7 +336,7 @@ pub(super) async fn inbound(
                     &reply,
                 )
                 .await?;
-                return Ok(true);
+                return Ok(Some(Inbound::Silent));
             }
             Err(error) => return Err(error),
         }
@@ -296,7 +352,7 @@ pub(super) async fn inbound(
         .as_deref()
         .is_some_and(|s| s != "follow")
     {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(_guest) = follow::eligible_for_facts(row, &settings, facts, sender_id) else {
         if facts.kind != ThreadKind::Email
@@ -310,6 +366,9 @@ pub(super) async fn inbound(
                 reply_to_platform_message_id: None,
                 metadata: None,
             };
+            if gateway {
+                return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+            }
             threads::delivery::send_reply(
                 &state.db,
                 adapter.as_ref(),
@@ -320,7 +379,7 @@ pub(super) async fn inbound(
             )
             .await?;
         }
-        return Ok(true);
+        return Ok(Some(Inbound::Silent));
     };
     let agent_id = match settings.agent_id.clone().or_else(|| row.agent_id.clone()) {
         Some(id) => id,
@@ -346,8 +405,8 @@ pub(super) async fn inbound(
     )
     .await;
     let (child, binding, stopped) = match selection {
-        Ok(follow::Selection::Legacy) => return Ok(false),
-        Ok(follow::Selection::Quiet) => return Ok(true),
+        Ok(follow::Selection::Legacy) => return Ok(None),
+        Ok(follow::Selection::Quiet) => return Ok(Some(Inbound::Silent)),
         Ok(follow::Selection::Child(c, b)) => (c, b, false),
         Ok(follow::Selection::Stopped(c, b)) => (c, b, true),
         Err(AppError::Conflict(_)) => {
@@ -359,6 +418,9 @@ pub(super) async fn inbound(
                 reply_to_platform_message_id: None,
                 metadata: None,
             };
+            if gateway {
+                return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+            }
             threads::delivery::send_reply(
                 &state.db,
                 adapter.as_ref(),
@@ -368,7 +430,7 @@ pub(super) async fn inbound(
                 &reply,
             )
             .await?;
-            return Ok(true);
+            return Ok(Some(Inbound::Silent));
         }
         Err(e) => return Err(e),
     };
@@ -399,6 +461,11 @@ pub(super) async fn inbound(
         )
         .await;
     }
+    if gateway {
+        // Reconcile admission before starting work, so a failed management
+        // request cannot discard an already-started turn receiver.
+        let _ = chats::sync_gateway_groups(state, row, true).await?;
+    }
     let result = if stopped {
         Ok(Inbound::Reply(
             "Stopped following this thread. Its history is still available in NyxID.".into(),
@@ -413,13 +480,19 @@ pub(super) async fn inbound(
             binding.guest,
             addressed,
             Some(binding.clone()),
-            &sha256_hex(format!(
-                "thread-follow:v1\0{}\0{message}",
-                row.channel_bot_id
-            )),
+            event_key,
         ))
         .await
     };
+    if gateway {
+        return Ok(Some(match result {
+            Ok(Inbound::Busy) => {
+                Inbound::Reply("I'm busy right now. Please try again in a moment.".into())
+            }
+            Ok(value) => value,
+            Err(_) => Inbound::Reply("I could not start that. Please try again.".into()),
+        }));
+    }
     let reply = match result {
         Ok(Inbound::Reply(reply)) => Some(reply),
         Ok(Inbound::Silent) => None,
@@ -443,7 +516,7 @@ pub(super) async fn inbound(
     }
     // Opening reservations expire under the revision-fenced sweep. Another
     // simultaneous event may still be claiming this shared reservation.
-    Ok(true)
+    Ok(Some(Inbound::Silent))
 }
 
 async fn email_settings(
@@ -507,6 +580,10 @@ pub(crate) async fn send(
     text: &str,
 ) -> AppResult<()> {
     let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
+    if threads::gateway::negotiated(&channel) {
+        follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        return super::gateway_threads::send(state, &channel, origin, conversation, text).await;
+    }
     let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
     let adapter = adapter(state, &bot)?;
     let token = crate::services::channel_credentials::resolve_bot_token(
@@ -643,6 +720,7 @@ pub(crate) async fn prelude(
                 "conversation_id": &row.id,
                 "user_id": &row.user_id,
                 "role": "user",
+                "steering": mongodb::bson::Bson::Null,
                 "seq": {"$lt": row.message_count},
             })
             .sort(doc! {"seq": -1})

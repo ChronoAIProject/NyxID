@@ -566,3 +566,6 @@ async fn machine_receipt_records_correlated_cards_without_arguments_or_output() 
     task.abort();
     f.state.db.drop().await.unwrap();
 }
+
+#[path = "machine_discovery_tests.rs"]
+mod discovery;

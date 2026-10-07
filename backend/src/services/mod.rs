@@ -124,6 +124,7 @@ pub mod oauth_service;
 pub mod openapi_parser;
 pub mod openclaw_channel_service;
 pub mod operation_descriptor;
+pub(crate) mod operation_path;
 pub mod oracle_login_profile_service;
 pub mod oracle_login_snapshot_service;
 pub mod oracle_pool_service;
@@ -211,6 +212,7 @@ pub mod assistant_live;
 pub mod assistant_nyxagent;
 pub mod assistant_profile_routing;
 pub mod assistant_settings_service;
+pub mod assistant_steering;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
 pub mod channel_retry_ingress;
@@ -289,3 +291,5 @@ mod machine_access_tests;
 
 pub mod service_concurrency_service;
 pub mod utility_inference_service;
+
+pub mod async_service_operation;

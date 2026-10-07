@@ -485,6 +485,7 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            response_body_limit: None,
             actor_user_id: Some(&caller.actor_user_id),
             caller_token: None,
             delegation_restrictions: caller.delegation_restrictions.clone(),
