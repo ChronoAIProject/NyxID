@@ -4123,6 +4123,206 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_oauth_connect_and_refresh_use_seeded_protocols() {
+        use crate::services::provider_service;
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let db = connect_test_database("cloud_oauth_protocols")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+
+        for slug in ["cloudflare", "supabase-management", "railway"] {
+            server.reset().await;
+            let mut provider = provider_service::get_provider_by_slug(&db, slug)
+                .await
+                .unwrap();
+            provider.token_url = Some(format!("{}/token", server.uri()));
+            provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
+            provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .replace_one(doc! { "_id": &provider.id }, &provider)
+                .await
+                .unwrap();
+
+            for byo in [false, true] {
+                server.reset().await;
+                let key = insert_pending_user_api_key(
+                    &db,
+                    &enc,
+                    &provider.id,
+                    byo.then_some("byo-client"),
+                    byo.then_some("byo-secret"),
+                )
+                .await;
+                let result = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    &key.user_id,
+                    &provider.id,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    key.connection_id.as_deref(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = reqwest::Url::parse(&result.authorization_url).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert_eq!(
+                    query["client_id"],
+                    if byo { "byo-client" } else { "client-id" }
+                );
+                assert_eq!(
+                    query["redirect_uri"],
+                    "https://nyxid.example/api/v1/providers/callback"
+                );
+                assert_eq!(query["code_challenge_method"], "S256");
+                if slug == "supabase-management" {
+                    assert!(!query.contains_key("scope"));
+                    assert!(
+                        super::ensure_additional_scopes_supported(&provider, &["all".into()])
+                            .is_err()
+                    );
+                } else {
+                    assert!(
+                        query["scope"]
+                            .split_whitespace()
+                            .any(|s| s == "offline_access")
+                    );
+                }
+                if slug == "railway" {
+                    assert_eq!(query["prompt"], "consent");
+                    assert!(
+                        query["scope"]
+                            .split_whitespace()
+                            .any(|s| s == "project:viewer")
+                    );
+                    assert!(
+                        !query["scope"]
+                            .split_whitespace()
+                            .any(|s| s.ends_with(":member") || s.ends_with(":admin"))
+                    );
+                }
+
+                let basic = if byo {
+                    "Basic YnlvLWNsaWVudDpieW8tc2VjcmV0"
+                } else {
+                    "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
+                };
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .and(header("authorization", basic))
+                    .and(header("content-type", "application/x-www-form-urlencoded"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "access_token": "connected-access", "refresh_token": "connected-refresh", "expires_in": 3600
+                    })))
+                    .expect(1).mount(&server).await;
+                super::handle_oauth_callback(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    &provider.id,
+                    "cloud-code",
+                    &query["state"],
+                )
+                .await
+                .unwrap();
+                let request = &server.received_requests().await.unwrap()[0];
+                let form: HashMap<_, _> = url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect();
+                assert_eq!(form["grant_type"], "authorization_code");
+                assert_eq!(form["code"], "cloud-code");
+                assert_eq!(form["redirect_uri"], query["redirect_uri"]);
+                let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(Sha256::digest(form["code_verifier"].as_bytes()));
+                assert_eq!(challenge, query["code_challenge"]);
+                assert!(!form.contains_key("client_secret"));
+
+                let connected = db
+                    .collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! { "_id": &key.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(connected.status, "active");
+                assert_eq!(
+                    enc.decrypt(connected.access_token_encrypted.as_ref().unwrap())
+                        .await
+                        .unwrap(),
+                    b"connected-access"
+                );
+                server.reset().await;
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .and(header("authorization", basic))
+                    .and(header("content-type", "application/x-www-form-urlencoded"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "access_token": "refreshed-access", "refresh_token": "rotated-refresh", "expires_in": 3600
+                    })))
+                    .expect(1).mount(&server).await;
+                let refreshed = super::refresh_user_api_key_in_place(&db, &enc, &connected, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    enc.decrypt(refreshed.refresh_token_encrypted.as_ref().unwrap())
+                        .await
+                        .unwrap(),
+                    b"rotated-refresh"
+                );
+                assert_eq!(refreshed.credential_epoch, connected.credential_epoch);
+                let request = &server.received_requests().await.unwrap()[0];
+                let form: HashMap<_, _> = url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect();
+                assert_eq!(form["grant_type"], "refresh_token");
+                assert_eq!(form["refresh_token"], "connected-refresh");
+                assert!(!form.contains_key("client_secret"));
+                if slug == "railway" {
+                    let admin = super::initiate_oauth_connect(
+                        &db,
+                        &enc,
+                        "https://nyxid.example",
+                        &key.user_id,
+                        &provider.id,
+                        None,
+                        None,
+                        &["workspace:admin".into()],
+                        None,
+                        key.connection_id.as_deref(),
+                        None,
+                        None,
+                    )
+                    .await;
+                    if byo {
+                        let url = reqwest::Url::parse(&admin.unwrap().authorization_url).unwrap();
+                        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                        assert!(
+                            query["scope"]
+                                .split_whitespace()
+                                .any(|s| s == "workspace:admin")
+                        );
+                    } else {
+                        assert!(matches!(admin, Err(AppError::ValidationError(_))));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn oauth_refresh_contracts_cover_both_stores_and_legacy_encodings() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};

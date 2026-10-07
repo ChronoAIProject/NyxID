@@ -24,6 +24,18 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "cloudflare",
+        include_str!("../../specs/catalog/cloudflare.openapi.json"),
+    ),
+    (
+        "supabase-management",
+        include_str!("../../specs/catalog/supabase-management.openapi.json"),
+    ),
+    (
+        "railway",
+        include_str!("../../specs/catalog/railway.openapi.json"),
+    ),
+    (
         "ifttt-mcp",
         include_str!("../../specs/catalog/ifttt-mcp.openapi.json"),
     ),
@@ -177,6 +189,9 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
+    ("api-cloudflare", "cloudflare"),
+    ("api-supabase-management", "supabase-management"),
+    ("api-railway", "railway"),
     ("api-elevenlabs", "elevenlabs"),
     ("api-facebook", "facebook"),
     ("api-feishu", "lark"),

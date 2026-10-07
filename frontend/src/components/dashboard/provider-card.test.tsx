@@ -69,6 +69,25 @@ function renderCard(token?: UserProviderToken, provider = telegramProvider) {
 }
 
 describe("ProviderCard", () => {
+  it.each([
+    ["cloudflare", "Cloudflare", "api-cloudflare"],
+    ["supabase-management", "Supabase Management", "api-supabase-management"],
+    ["railway", "Railway", "api-railway"],
+  ])("renders the brand SVG for the %s provider", (slug, name, catalogSlug) => {
+    const { container } = renderCard(undefined, {
+      ...telegramProvider,
+      id: `provider-${slug}`,
+      slug,
+      name,
+      provider_type: "oauth2",
+    });
+    expect(screen.getByText(name)).toBeInTheDocument();
+    expect(
+      container.querySelector(`svg[data-slug="${catalogSlug}"]`),
+    ).toBeInTheDocument();
+    expect(container.querySelector('[data-fallback="true"]')).toBeNull();
+  });
+
   it("renders telegram identity metadata for connected accounts", () => {
     const token = makeTelegramToken({
       username: "nyx_user",

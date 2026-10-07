@@ -218,6 +218,7 @@ With NyxID running and an Agent Key in hand, pick the workflow that matches what
 | [**Reach a Localhost API from a Cloud-Hosted Agent**](docs/quickstarts/node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
 | [**Wrap a REST API as MCP Tools**](docs/quickstarts/mcp-wrapping.md) | An OpenAPI spec is exposed as typed MCP tools to Claude Code / Cursor / VS Code / Codex with no MCP server code. | OpenAPI → MCP auto-wrap |
 | [**Use Supabase as an AI Agent Database**](docs/quickstarts/supabase.md) | A Supabase project becomes a credential-brokered PostgREST database for scoped AI agents. | Per-user endpoint + encrypted API key |
+| [**Connect Cloudflare, Supabase Management, or Railway**](docs/CLOUD_PLATFORM_OAUTH.md) | Connect a cloud account through a shared or BYO OAuth app for scoped management API access. | PKCE OAuth, encrypted tokens, and refresh |
 
 > For a per-interface reference walkthrough that ends with `HTTP/1.1 200` from your first proxied call (Web UI · CLI · AI-driven · Direct API), see the [Connecting AI Services hub](docs/connecting-services/).
 
