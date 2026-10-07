@@ -1109,6 +1109,103 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    for (slug, name, description, authorization_url, token_url, documentation_url) in [
+        (
+            "cloudflare",
+            "Cloudflare",
+            "Manage Cloudflare accounts, zones, DNS, and Workers through OAuth. API permissions and account access are selected in Cloudflare.",
+            "https://dash.cloudflare.com/oauth2/auth",
+            "https://dash.cloudflare.com/oauth2/token",
+            "https://developers.cloudflare.com/fundamentals/oauth/",
+        ),
+        (
+            "supabase-management",
+            "Supabase Management",
+            "Manage Supabase organizations and projects through OAuth. Project database access uses the separate Supabase Data API connector.",
+            "https://api.supabase.com/v1/oauth/authorize",
+            "https://api.supabase.com/v1/oauth/token",
+            "https://supabase.com/docs/guides/integrations/build-a-supabase-integration",
+        ),
+        (
+            "railway",
+            "Railway",
+            "Manage selected Railway workspaces and projects through OAuth and the GraphQL API. Viewer permissions are requested by default.",
+            "https://backboard.railway.com/oauth/auth",
+            "https://backboard.railway.com/oauth/token",
+            "https://docs.railway.com/integrations/oauth",
+        ),
+    ] {
+        if slug_exists!(slug) {
+            continue;
+        }
+        let revocation_url =
+            (slug == "cloudflare").then(|| "https://dash.cloudflare.com/oauth2/revoke".to_string());
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(authorization_url.to_string()),
+            token_url: Some(token_url.to_string()),
+            revocation: revocation_url.as_ref().map(|url| RevocationConfig {
+                request_encoding: "form".to_string(),
+                style: "rfc7009".to_string(),
+                url: url.clone(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
+            revocation_url,
+            default_scopes: match slug {
+                "cloudflare" => Some(vec!["openid".to_string(), "offline_access".to_string()]),
+                "railway" => Some(
+                    [
+                        "openid",
+                        "email",
+                        "profile",
+                        "offline_access",
+                        "project:viewer",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+                // Supabase configures permissions on the registered app; its
+                // authorize `scope` parameter is deprecated.
+                _ => None,
+            },
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(documentation_url.to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: Some("form".to_string()),
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: slug != "supabase-management",
+            extra_auth_params: (slug == "railway")
+                .then(|| HashMap::from([("prompt".to_string(), "consent".to_string())])),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: i32::from(slug == "cloudflare"),
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug, "Seeded cloud OAuth provider");
+        seeded_count += 1;
+    }
+
     // Telnyx (API Key)
     if !slug_exists!("telnyx") {
         let provider = ProviderConfig {
@@ -4083,6 +4180,75 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              connection strings, Storage, Edge Functions, or Realtime. Secret keys and legacy \
              `service_role` keys bypass Row Level Security. Supabase schemas are project-specific, \
              so NyxID exposes the generic proxy tool unless the user supplies a separate OpenAPI spec.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "cloudflare",
+        service_slug: "api-cloudflare",
+        service_name: "Cloudflare",
+        base_url: "https://api.cloudflare.com/client/v4",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Cloudflare account, zone, DNS, and Workers management through an OAuth connection.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.cloudflare.com"),
+        auth_notes: Some(
+            "Register a confidential Cloudflare OAuth client using client_secret_basic. Configure API permissions on that client; users select accounts and optional permissions during consent. NyxID uses PKCE and requests offline_access for refresh tokens.",
+        ),
+        known_limitations: Some(
+            "Private OAuth clients are restricted to members of the client's Cloudflare account. A managed client serving other accounts must be public and verify its publisher domain. Account administrators may block new public OAuth authorizations. The hosted overlay covers account, zone, and DNS reads; other APIs remain available through the generic proxy.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "supabase-management",
+        service_slug: "api-supabase-management",
+        service_name: "Supabase Management",
+        base_url: "https://api.supabase.com/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Supabase organization and project management through OAuth, including infrastructure configuration and provisioning.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://supabase.com"),
+        auth_notes: Some(
+            "Create an OAuth app in Supabase organization settings. Permissions are configured on the app, so NyxID omits the deprecated scope parameter. Token exchange and refresh use form encoding, HTTP Basic authentication, and PKCE.",
+        ),
+        known_limitations: Some(
+            "Management OAuth tokens are not project Data API keys or end-user Supabase Auth JWTs. Use api-supabase with a project URL and API key for table access. Changing app permissions requires users to reauthorize. Revoke the app in Supabase when remote access must be removed; no revocation endpoint is seeded.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "railway",
+        service_slug: "api-railway",
+        service_name: "Railway",
+        base_url: "https://backboard.railway.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Railway GraphQL API access to selected projects and workspaces through OAuth. Viewer access is the default; request member scopes to manage resources.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://railway.com"),
+        auth_notes: Some(
+            "Register a Web OAuth app in Railway workspace settings > Developer. NyxID uses HTTP Basic authentication and PKCE. openid is required; offline_access plus prompt=consent obtains rotating refresh tokens. API requests are JSON POSTs to /graphql/v2.",
+        ),
+        known_limitations: Some(
+            "Users choose which projects or workspaces to share; token access is capped by their actual role. Access tokens expire after one hour. Arbitrary GraphQL requests may contain mutations and are marked as requiring approval in the hosted overlay. Revoke remote access in Railway Account Settings > Apps; no revocation endpoint is seeded.",
         ),
     },
     DefaultServiceSeed {
@@ -10464,6 +10630,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_oauth_seeding_preserves_operator_settings_and_data_api() {
+        let db = seed_default_catalog("cloud_oauth_seeding")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+        let client_id = enc.encrypt(b"configured-cloud-client").await.unwrap();
+        let client_secret = enc.encrypt(b"configured-cloud-secret").await.unwrap();
+        let mut identities = Vec::new();
+        for (slug, service_slug) in [
+            ("cloudflare", "api-cloudflare"),
+            ("supabase-management", "api-supabase-management"),
+            ("railway", "api-railway"),
+        ] {
+            let mut provider = super::get_provider_by_slug(&db, slug).await.unwrap();
+            let service = services
+                .find_one(doc! { "slug": service_slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(provider.credential_mode, "both");
+            assert!(provider.supports_pkce);
+            assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+            assert_eq!(
+                service.provider_config_id.as_deref(),
+                Some(provider.id.as_str())
+            );
+            assert_eq!(service.service_category, "connection");
+            assert!(service.requires_user_credential);
+            let requirement = requirements
+                .find_one(doc! { "service_id": &service.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(requirement.provider_config_id, provider.id);
+            assert_eq!(requirement.injection_method, "bearer");
+            assert_eq!(requirement.injection_key.as_deref(), Some("Authorization"));
+            assert!(crate::services::catalog_spec_registry::spec_for_slug(service_slug).is_some());
+            identities.push((slug, provider.id.clone(), service_slug, service.id));
+            provider.credential_mode = "admin".into();
+            provider.client_id_encrypted = Some(client_id.clone());
+            provider.client_secret_encrypted = Some(client_secret.clone());
+            providers
+                .replace_one(doc! { "_id": &provider.id }, provider)
+                .await
+                .unwrap();
+        }
+        let provider_count = providers.count_documents(doc! {}).await.unwrap();
+        let service_count = services.count_documents(doc! {}).await.unwrap();
+        for _ in 0..2 {
+            super::seed_default_providers(&db, &enc).await.unwrap();
+            super::seed_default_services(&db, &enc).await.unwrap();
+            for (slug, provider_id, service_slug, service_id) in &identities {
+                let provider = super::get_provider_by_slug(&db, slug).await.unwrap();
+                assert_eq!(&provider.id, provider_id);
+                assert_eq!(provider.credential_mode, "admin");
+                assert_eq!(provider.client_id_encrypted.as_ref(), Some(&client_id));
+                assert_eq!(
+                    provider.client_secret_encrypted.as_ref(),
+                    Some(&client_secret)
+                );
+                let service = services
+                    .find_one(doc! { "slug": *service_slug })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(&service.id, service_id);
+                assert_eq!(
+                    requirements
+                        .count_documents(doc! { "service_id": service_id })
+                        .await
+                        .unwrap(),
+                    1
+                );
+            }
+        }
+        assert_eq!(
+            providers.count_documents(doc! {}).await.unwrap(),
+            provider_count
+        );
+        assert_eq!(
+            services.count_documents(doc! {}).await.unwrap(),
+            service_count
+        );
+        let data_provider = super::get_provider_by_slug(&db, "supabase").await.unwrap();
+        assert_eq!(data_provider.provider_type, "api_key");
+        assert!(data_provider.requires_gateway_url);
+        let data_service = services
+            .find_one(doc! { "slug": "api-supabase" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(data_service.auth_method, "header");
+        assert_eq!(data_service.auth_key_name, "apikey");
+    }
+
+    #[tokio::test]
     async fn seed_default_providers_creates_known_slugs() {
         let Some(db) = connect_test_database("prov_svc_seed_slugs").await else {
             eprintln!("skipping: no MongoDB");
@@ -10481,6 +10746,9 @@ mod tests {
             "cohere",
             "deepseek",
             "supabase",
+            "supabase-management",
+            "cloudflare",
+            "railway",
             "elevenlabs",
             "twilio",
             "twitter",

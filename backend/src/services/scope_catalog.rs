@@ -108,6 +108,16 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
         "ifttt-mcp" => Some(&["mcp"]),
+        "railway" => Some(&[
+            "openid",
+            "email",
+            "profile",
+            "offline_access",
+            "project:viewer",
+            "project:member",
+            "workspace:viewer",
+            "workspace:member",
+        ]),
         "google" => Some(super::google_workspace::MANAGED_SCOPES),
         // Curated-broad: common recoverable read + authoring capabilities are
         // one-click. Excluded (-> BYO): `write:org` (alters org membership /
@@ -168,6 +178,21 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
         "twitter" => TWITTER,
         "google" => GOOGLE,
         "google-cloud" => GOOGLE_CLOUD,
+        "cloudflare" => &[
+            (
+                "openid",
+                "Account identity",
+                "Identify the connected Cloudflare user. API permissions are configured on the OAuth client.",
+                false,
+            ),
+            (
+                "offline_access",
+                "Keep connected",
+                "Refresh Cloudflare access without repeating authorization.",
+                false,
+            ),
+        ],
+        "railway" => RAILWAY,
         "github" => GITHUB,
         "facebook" => FACEBOOK,
         "discord" => DISCORD,
@@ -189,13 +214,70 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 sensitive: *sensitive,
-                required: slug == "ifttt-mcp",
+                required: slug == "ifttt-mcp" || (slug == "railway" && *scope == "openid"),
             })
             .collect(),
     )
 }
 
 // Tuple shape: (scope, label, description, sensitive)
+
+const RAILWAY: &[(&str, &str, &str, bool)] = &[
+    (
+        "openid",
+        "Account identity",
+        "Required by Railway for every OAuth authorization.",
+        false,
+    ),
+    (
+        "email",
+        "Email address",
+        "Read your Railway account email address.",
+        false,
+    ),
+    (
+        "profile",
+        "Profile",
+        "Read your Railway name and picture.",
+        false,
+    ),
+    (
+        "offline_access",
+        "Keep connected",
+        "Receive rotating refresh tokens for continued access.",
+        false,
+    ),
+    (
+        "project:viewer",
+        "Read selected projects",
+        "View projects you choose during authorization.",
+        false,
+    ),
+    (
+        "project:member",
+        "Manage selected projects",
+        "Modify projects you choose, within your existing role.",
+        true,
+    ),
+    (
+        "workspace:viewer",
+        "Read selected workspaces",
+        "View workspaces you choose during authorization.",
+        false,
+    ),
+    (
+        "workspace:member",
+        "Manage selected workspaces",
+        "Modify selected workspace resources, within your existing role.",
+        true,
+    ),
+    (
+        "workspace:admin",
+        "Administer selected workspaces",
+        "Administer selected workspaces. Requires your own OAuth app.",
+        true,
+    ),
+];
 
 const TWITTER: &[(&str, &str, &str, bool)] = &[
     (
@@ -1040,6 +1122,8 @@ mod tests {
     #[test]
     fn known_oauth_providers_have_catalogs() {
         for slug in [
+            "cloudflare",
+            "railway",
             "twitter",
             "google",
             "google-cloud",
