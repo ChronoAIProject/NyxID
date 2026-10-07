@@ -1454,6 +1454,7 @@ mod tests {
                         tokens: 7,
                         token_breakdown: None,
                         audio_tokens: None,
+                        image_tokens: None,
                     },
                     None,
                     None,

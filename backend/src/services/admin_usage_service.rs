@@ -24,6 +24,8 @@ const TOKEN_FIELDS: &[&str] = &[
     "cache_creation_tokens",
     "audio_input_tokens",
     "audio_output_tokens",
+    "image_input_tokens",
+    "image_output_tokens",
 ];
 const COST_FIELDS: &[&str] = &["gross_cost", "wallet_cost", "grant_cost", "allowance_cost"];
 const COUNT_FIELDS: &[&str] = &[
@@ -52,7 +54,7 @@ pub struct AdminUsageQuery {
     pub metric: Option<String>,
     /// quantity, requests, cost, total_tokens, prompt_tokens, completion_tokens,
     /// cached_tokens, cache_creation_tokens, audio_input_tokens, or
-    /// audio_output_tokens (descending).
+    /// audio_output_tokens, image_input_tokens, or image_output_tokens (descending).
     pub sort: Option<String>,
     pub page: Option<u64>,
     pub per_page: Option<u64>,
@@ -80,6 +82,11 @@ pub struct UsageStats {
     pub audio_input_tokens: i64,
     #[serde(default)]
     pub audio_output_tokens: i64,
+    /// Provider-reported image subsets, already included in input/output.
+    #[serde(default)]
+    pub image_input_tokens: i64,
+    #[serde(default)]
+    pub image_output_tokens: i64,
     /// Prompt + completion, following provider accounting. Cache counts may
     /// overlap prompt counts and must not be added to this total.
     pub total_tokens: i64,
@@ -366,6 +373,8 @@ fn token_source(field: &str) -> String {
     match field {
         "audio_input_tokens" => "$audio_tokens.input_tokens".into(),
         "audio_output_tokens" => "$audio_tokens.output_tokens".into(),
+        "image_input_tokens" => "$image_tokens.input_tokens".into(),
+        "image_output_tokens" => "$image_tokens.output_tokens".into(),
         _ => format!("$token_breakdown.{field}"),
     }
 }

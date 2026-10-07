@@ -257,6 +257,9 @@ pub struct UsageMeterRow {
     /// only, never priced).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_tokens: Option<crate::models::service_billing::AudioTokens>,
+    /// Image subsets of input/output, retained for observability only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_tokens: Option<crate::models::service_billing::ImageTokens>,
     #[serde(default)]
     #[serde(with = "crate::models::credits::whole")]
     pub reserved_credits: Credits,

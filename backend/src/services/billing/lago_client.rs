@@ -3173,6 +3173,7 @@ mod tests {
             model: None,
             token_breakdown: None,
             audio_tokens: None,
+            image_tokens: None,
             reserved_credits: crate::models::credits::Credits::from_whole(1),
             funding: Some(crate::models::usage_meter::UsageFunding {
                 settled: true,

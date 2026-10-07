@@ -14,25 +14,17 @@ import { BillingBenefits } from "@/components/billing/billing-benefits";
 import { BillingWalletCard } from "@/components/billing/billing-wallet-card";
 import { BillingTopUpHistory } from "@/components/billing/billing-topup-history";
 import { BillingUsageSummary } from "@/components/billing/billing-usage-summary";
-import {
-  ServiceUsage,
-  UsageMetricsDisclosure,
-} from "@/components/billing/billing-usage-details";
+import { BillingUsageExplorer } from "@/components/billing/billing-usage-explorer";
+import { BillingActivity } from "@/components/billing/billing-activity";
 import { BenefitHelp } from "@/components/billing/benefit-help";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { periods } from "@/lib/billing-display";
 import { groupRows } from "@/lib/billing-usage";
-import {
-  AnalyticsSelect,
-  FilterCard,
-  FilterPicker,
-} from "@/components/billing-analytics/filter-picker";
-import { DataTableFilterChips } from "@/components/data-table/data-table-controls";
-import type { DataTableFilterField } from "@/types/data-table";
+import { AnalyticsSelect } from "@/components/billing-analytics/filter-picker";
+import { BillingMultiSelect } from "@/components/billing/billing-multi-select";
 import {
   BILLING_SERVICE_FILTER_LIMIT,
   normalizeBillingSearch,
@@ -225,23 +217,12 @@ export function BillingPage() {
           ) : (
             <>
               <BillingUsageSummary rows={rows} />
-              <Card className="usage-results">
-                <CardHeader>
-                  <CardTitle>Usage breakdown</CardTitle>
-                  <p className="text-12 text-muted-foreground">
-                    Expand a service for its models, agents, and funding.
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <UsageMetricsDisclosure
-                    rows={rows}
-                    totals={
-                      selected.length ? undefined : usageQuery.data?.totals
-                    }
-                  />
-                  <ServiceUsage catalog={catalog} rows={rows} />
-                </CardContent>
-              </Card>
+              <BillingActivity />
+              <BillingUsageExplorer
+                catalog={catalog}
+                rows={rows}
+                totals={selected.length ? undefined : usageQuery.data?.totals}
+              />
             </>
           )}
         </TabsContent>
@@ -259,16 +240,6 @@ function billingUrlSearch(search: BillingSearch) {
   };
 }
 
-const SERVICE_FILTER_FIELD: DataTableFilterField<"services"> = {
-  key: "services",
-  label: "Services",
-  value_type: "enum",
-  operator: "includes",
-  multiple: true,
-  options: [],
-};
-
-/** The admin usage filter card, with the personal usage options and periods. */
 function UsageFilters({
   services,
   values,
@@ -284,38 +255,24 @@ function UsageFilters({
   period: BillingUsagePeriod;
   onPeriodChange: (period: BillingUsagePeriod) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const needle = query.trim().toLowerCase();
-  const all = services.map((group) => ({
-    id: group.key,
-    label: group.name,
-    detail: group.rows[0]?.service_slug ?? undefined,
-  }));
-  const options = all.filter((option) =>
-    `${option.label} ${option.detail ?? ""}`.toLowerCase().includes(needle),
-  );
-  const nameOf = (key: string) =>
-    all.find((option) => option.id === key)?.label ?? key;
   return (
-    <FilterCard
-      pickers={
-        <FilterPicker
-          label="Services"
-          description="Services with recorded usage in this period."
-          disabled={disabled}
-          values={values}
-          onChange={onServicesChange}
-          open={open}
-          onOpenChange={setOpen}
-          search={query}
-          onSearchChange={setQuery}
-          searchPlaceholder="Search services"
-          options={{ status: "success", options, total: options.length }}
-          limit={BILLING_SERVICE_FILTER_LIMIT}
-        />
-      }
-      aside={
+    <BillingMultiSelect
+      label="Services"
+      itemLabel="Service"
+      emptyLabel="All"
+      description="Services with recorded usage in this period."
+      className="rounded-xl border border-border/50 bg-card px-4 py-3"
+      disabled={disabled}
+      values={values}
+      onChange={onServicesChange}
+      options={services.map((group) => ({
+        id: group.key,
+        label: group.name,
+        detail: group.rows[0]?.service_slug ?? undefined,
+      }))}
+      limit={BILLING_SERVICE_FILTER_LIMIT}
+    >
+      <div className="ml-auto min-w-0">
         <AnalyticsSelect
           label="Time range"
           inline
@@ -326,35 +283,8 @@ function UsageFilters({
             label,
           }))}
         />
-      }
-    >
-      <DataTableFilterChips
-        search=""
-        searchFields={[]}
-        searchFilters={[]}
-        filters={
-          values.length
-            ? [
-                {
-                  field: SERVICE_FILTER_FIELD,
-                  values,
-                  valueLabels: values.map(nameOf),
-                },
-              ]
-            : []
-        }
-        onEditSearch={() => undefined}
-        onRemoveSearch={() => undefined}
-        onEditSearchValue={() => undefined}
-        onRemoveSearchValue={() => undefined}
-        onEdit={() => {
-          setQuery("");
-          setOpen(true);
-        }}
-        onRemove={() => onServicesChange([])}
-        onClear={() => onServicesChange([])}
-      />
-    </FilterCard>
+      </div>
+    </BillingMultiSelect>
   );
 }
 

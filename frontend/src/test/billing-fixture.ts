@@ -7,6 +7,33 @@ import type {
   CreditGrant,
   UserAllowanceBalance,
 } from "@/schemas/billing-credits";
+import type { ApiKeyUsage } from "@/types/api";
+
+export function billingAgentUsage(
+  overrides: Partial<ApiKeyUsage> = {},
+): ApiKeyUsage {
+  return {
+    api_key_id: "research-agent",
+    api_key_name: "Research agent",
+    platform: null,
+    request_count: 29,
+    success_count: 27,
+    error_count: 2,
+    error_rate: 2 / 29,
+    last_used_at: "2026-10-07T00:00:00Z",
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    reported_cost: null,
+    top_services: [],
+    daily_buckets: [3, 0, 8, 2, 5, 1, 10].map((requests, index) => ({
+      date: `2026-10-${String(index + 1).padStart(2, "0")}`,
+      request_count: requests,
+      error_count: index === 2 || index === 4 ? 1 : 0,
+    })),
+    ...overrides,
+  };
+}
 
 export const billingCatalog = [
   { slug: "example-llm", name: "Example LLM", inference: null },
@@ -86,6 +113,79 @@ export function billingAllowance(
     remaining_quantity: 800,
     ...overrides,
   };
+}
+
+export function billingExpandedAllowances(): UserAllowanceBalance[] {
+  const metrics = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "images",
+  ] as const;
+  return metrics.flatMap((metric) => [
+    billingAllowance(metric, {
+      allowance: {
+        ...billingAllowance(metric).allowance,
+        id: `${metric}-small`,
+        quantity: 1_000_000,
+      },
+      consumed_quantity: 1_000_000,
+      reserved_quantity: 0,
+      remaining_quantity: 0,
+    }),
+    billingAllowance(metric, {
+      allowance: {
+        ...billingAllowance(metric).allowance,
+        id: `${metric}-large`,
+        quantity: 100_000_000,
+      },
+      consumed_quantity: 4_213_490,
+      reserved_quantity: 536_202,
+      remaining_quantity: 95_250_308,
+    }),
+  ]);
+}
+
+export function billingExpandedRows(): BillingUsageRow[] {
+  const metrics = [
+    "tokens",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "images",
+  ] as const;
+  const quantities: Record<string, number> = {
+    tokens: 8_975_496,
+    input_tokens: 24_192_034,
+    output_tokens: 2_814_729,
+    cache_read_tokens: 837_541_120,
+    cache_write_tokens: 0,
+    images: 0,
+  };
+  const weights = new Map<string, number>();
+  const cumulative = new Map<string, number>();
+  for (let index = 0; index < 178; index++) {
+    const metric = metrics[index % metrics.length]!;
+    weights.set(metric, (weights.get(metric) ?? 0) + index + 1);
+  }
+  return Array.from({ length: 178 }, (_, index) => {
+    const metric = metrics[index % metrics.length]!;
+    const priorWeight = cumulative.get(metric) ?? 0;
+    cumulative.set(metric, priorWeight + index + 1);
+    const total = quantities[metric]!;
+    const weight = weights.get(metric)!;
+    return billingRow({
+      metric: metrics[index % metrics.length]!,
+      model: `Model ${(index % 11) + 1}`,
+      api_key_id: `agent-${index % 4}`,
+      api_key_name: `Agent ${(index % 4) + 1}`,
+      quantity:
+        Math.floor((total * (priorWeight + index + 1)) / weight) -
+        Math.floor((total * priorWeight) / weight),
+    });
+  });
 }
 export function billingRow(
   overrides: Partial<BillingUsageRow> = {},

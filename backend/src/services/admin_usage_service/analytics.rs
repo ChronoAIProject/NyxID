@@ -90,6 +90,8 @@ impl AnalyticsQuery {
             "cache_creation_tokens",
             "audio_input_tokens",
             "audio_output_tokens",
+            "image_input_tokens",
+            "image_output_tokens",
             "quantity",
             "wallet_cost",
             "grant_cost",
@@ -370,6 +372,8 @@ fn value(stats: &UsageStats, options: &AnalyticsOptions) -> Option<i64> {
         "cache_creation_tokens" => Some(stats.cache_creation_tokens),
         "audio_input_tokens" => Some(stats.audio_input_tokens),
         "audio_output_tokens" => Some(stats.audio_output_tokens),
+        "image_input_tokens" => Some(stats.image_input_tokens),
+        "image_output_tokens" => Some(stats.image_output_tokens),
         "quantity" => Some(*stats.quantities.get(&options.metric).unwrap_or(&0)),
         _ => None,
     }

@@ -17,6 +17,7 @@ import {
   billingRow as row,
   billingUsage as usage,
   billingWallet,
+  billingAgentUsage,
 } from "@/test/billing-fixture";
 import { BillingPage } from "./billing";
 
@@ -27,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   grants: vi.fn(),
   allowances: vi.fn(),
   catalog: vi.fn(),
+  activity: vi.fn(),
   provision: vi.fn(),
   topup: vi.fn(),
   receipt: vi.fn(),
@@ -45,6 +47,7 @@ vi.mock("@/hooks/use-billing-credits", () => ({
   useCurrentAllowances: mocks.allowances,
 }));
 vi.mock("@/hooks/use-keys", () => ({ useCatalog: mocks.catalog }));
+vi.mock("@/hooks/use-api-keys", () => ({ useApiKeysUsage: mocks.activity }));
 vi.mock("@/lib/navigation", () => ({ openExternal: mocks.openExternal }));
 const query = (data: unknown, error: unknown = null) => ({
   data,
@@ -55,7 +58,7 @@ const query = (data: unknown, error: unknown = null) => ({
   isError: Boolean(error),
   refetch: vi.fn(),
 });
-async function renderPage(url = "/billing?tab=usage") {
+async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
   const root = createRootRoute();
   const route = createRoute({
     getParentRoute: () => root,
@@ -79,6 +82,10 @@ async function renderPage(url = "/billing?tab=usage") {
     name: "Billing & Usage",
     hidden: true,
   });
+  if (exploreGroups) {
+    const disclosure = screen.queryByText("Explore by service, model or agent");
+    if (disclosure) await userEvent.click(disclosure);
+  }
   return { history, router };
 }
 async function select(label: string, option: string) {
@@ -91,13 +98,14 @@ function serviceFilter() {
 const picker = () => within(screen.getByRole("dialog"));
 /** An option row; its name is the service followed by its slug line. */
 const option = (name: string) =>
-  picker().getByRole("button", { name: new RegExp(`^${name}`) });
-/** The applied-filter chip, as rendered by the shared DataTableFilterChips. */
-const servicesChip = () =>
-  screen.queryByRole("button", { name: /^Edit Services filter:/ });
-async function applyServices(names: string[]) {
+  picker().getByRole("checkbox", { name: new RegExp(`^${name}`) });
+const servicesChip = (name?: string) =>
+  screen.queryAllByRole("button", {
+    name: name ? `Edit service filter: ${name}` : /^Edit service filter:/,
+  })[0] ?? null;
+async function selectServices(names: string[]) {
   for (const name of names) await userEvent.click(option(name));
-  await userEvent.click(picker().getByRole("button", { name: "Apply" }));
+  await userEvent.click(picker().getByRole("button", { name: "Done" }));
 }
 function servicesParam(history: { location: { search: string } }) {
   const raw = new URLSearchParams(history.location.search).get("services");
@@ -124,8 +132,32 @@ beforeEach(() => {
   mocks.grants.mockReturnValue(query({ grants: [] }));
   mocks.allowances.mockReturnValue(query({ allowances: [] }));
   mocks.catalog.mockReturnValue(query(billingCatalog));
+  mocks.activity.mockReturnValue(query([]));
 });
 describe("BillingPage", () => {
+  it("opens on visual quantities and funding with the grouped list collapsed", async () => {
+    await renderPage("/billing?tab=usage", false);
+    expect(screen.getByText("Usage overview", { exact: true })).toBeVisible();
+    expect(
+      screen.getByRole("region", { name: "Funding composition" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("combobox", { name: "Compare quantities by" }),
+    ).toHaveTextContent("Service");
+    expect(
+      document.querySelector(".usage-group-disclosure"),
+    ).not.toHaveAttribute("open");
+    expect(
+      document.querySelector(".expandable-service > summary"),
+    ).not.toBeVisible();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByText("Explore by service, model or agent"),
+    );
+    expect(
+      document.querySelector(".expandable-service > summary"),
+    ).toBeVisible();
+  });
   it("defaults to Billing and preserves the wallet and top-up history actions", async () => {
     await renderPage("/billing");
     expect(screen.getByRole("tab", { name: "Billing" })).toHaveAttribute(
@@ -133,7 +165,7 @@ describe("BillingPage", () => {
       "active",
     );
     expect(screen.getByText("95 credits")).toBeVisible();
-    expect(screen.queryByText("Usage breakdown")).not.toBeInTheDocument();
+    expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "View breakdown" }),
     );
@@ -170,9 +202,16 @@ describe("BillingPage", () => {
         selector: ".expandable-name > strong",
       }),
     );
-    await userEvent.click(screen.getByText("Models, agents & billing layers"));
-    await userEvent.click(screen.getByText("Full metering & funding details"));
-    expect(screen.getByText("platform_tokens")).toBeVisible();
+    expect(
+      screen.queryByRole("tab", { name: /^Records/ }),
+    ).not.toBeInTheDocument();
+    const detail = document.querySelector(".detailed-usage")!;
+    expect(
+      within(detail as HTMLElement).getByRole("region", {
+        name: "Funding composition",
+      }),
+    ).toHaveTextContent("0.00024 credits");
+    expect(detail.querySelector(".usage-quantity-chart")).toBeVisible();
   });
   it("offers only used services and filters every summary, detail, and funding value", async () => {
     mocks.usage.mockReturnValue(query(usage(twoServiceRows())));
@@ -187,14 +226,14 @@ describe("BillingPage", () => {
     ).toBeVisible();
     expect(option("Free service")).toHaveTextContent("free-service");
     expect(
-      picker().queryByRole("button", { name: /^Unused service/ }),
+      picker().queryByRole("checkbox", { name: /^Unused service/ }),
     ).not.toBeInTheDocument();
-    await applyServices(["Free service"]);
+    await selectServices(["Free service"]);
     expect(screen.queryByText("Example LLM")).not.toBeInTheDocument();
     expect(
       screen.getByText("Free", { exact: true, selector: ".usage-status" }),
     ).toBeVisible();
-    expect(servicesChip()).toHaveTextContent("Services includes Free service");
+    expect(servicesChip()).toHaveTextContent("Service: Free service");
     expect(servicesParam(history)).toEqual(["free-service"]);
     await act(() => history.back());
     await waitFor(() =>
@@ -216,59 +255,86 @@ describe("BillingPage", () => {
         ?.textContent?.includes("Reported requests");
     expect(totals()).toBe(true);
     await userEvent.click(serviceFilter());
-    await applyServices(["Free service", "Example LLM"]);
-    expect(servicesChip()).toHaveTextContent(
-      "Services includes any of Free service, Example LLM",
+    await selectServices(["Free service", "Example LLM"]);
+    expect(servicesChip("Free service")).toHaveTextContent(
+      "Service: Free service",
     );
+    expect(servicesChip("Example LLM")).toHaveTextContent(
+      "Service: Example LLM",
+    );
+    expect(serviceFilter()).toHaveTextContent("2 selected");
     expect(servicesParam(history)).toEqual(["free-service", "example-llm"]);
     expect(screen.queryByText("third")).not.toBeInTheDocument();
     expect(totals()).toBe(false);
   });
-  it("discards a draft on Cancel and clears the selection on Clear + Apply", async () => {
+  it("updates service selection immediately and clears it with Clear and Done", async () => {
     mocks.usage.mockReturnValue(query(usage(twoServiceRows())));
     const { history } = await renderPage(
       `/billing?tab=usage&services=${encodeURIComponent('["free-service"]')}`,
     );
     await userEvent.click(serviceFilter());
     await userEvent.click(option("Example LLM"));
-    await userEvent.click(picker().getByRole("button", { name: "Cancel" }));
-    expect(servicesParam(history)).toEqual(["free-service"]);
+    await waitFor(() =>
+      expect(servicesParam(history)).toEqual(["free-service", "example-llm"]),
+    );
+    expect(option("Example LLM")).toBeChecked();
+    expect(
+      picker().queryByRole("button", { name: "Apply" }),
+    ).not.toBeInTheDocument();
+    expect(
+      picker().queryByRole("button", { name: "Cancel" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(picker().getByRole("button", { name: "Done" }));
     await userEvent.click(serviceFilter());
-    expect(option("Example LLM")).toHaveAttribute("aria-pressed", "false");
+    expect(option("Example LLM")).toBeChecked();
     await userEvent.click(picker().getByRole("button", { name: "Clear" }));
-    await userEvent.click(picker().getByRole("button", { name: "Apply" }));
-    expect(servicesParam(history)).toBeUndefined();
+    await waitFor(() => expect(servicesParam(history)).toBeUndefined());
+    expect(option("Example LLM")).not.toBeChecked();
+    await userEvent.click(picker().getByRole("button", { name: "Done" }));
     expect(servicesChip()).toBeNull();
+    expect(serviceFilter()).toHaveTextContent("All");
   });
-  it("reopens the picker from the applied selection, via the trigger or the chip", async () => {
+  it("reopens the picker from a chip and removes one service without clearing others", async () => {
     mocks.usage.mockReturnValue(
       query(usage([...twoServiceRows(), row({ service_slug: "third" })])),
     );
     const { history } = await renderPage();
     await userEvent.click(serviceFilter());
-    await applyServices(["Free service", "Example LLM"]);
+    await selectServices(["Free service", "Example LLM"]);
+    await userEvent.click(servicesChip("Free service")!);
+    expect(option("Free service")).toBeChecked();
+    expect(option("Example LLM")).toBeChecked();
+    expect(option("third")).not.toBeChecked();
+    await userEvent.type(
+      picker().getByRole("textbox", { name: "Search services" }),
+      "third",
+    );
+    expect(picker().getAllByRole("checkbox")).toHaveLength(1);
+    await userEvent.click(option("third"));
+    await waitFor(() =>
+      expect(servicesParam(history)).toEqual([
+        "free-service",
+        "example-llm",
+        "third",
+      ]),
+    );
+    await userEvent.click(picker().getByRole("button", { name: "Done" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove service: third" }),
+    );
     await waitFor(() =>
       expect(servicesParam(history)).toEqual(["free-service", "example-llm"]),
     );
-    // Reopen: both applied services are checked and counted.
+    expect(servicesChip("Free service")).toBeVisible();
+    expect(servicesChip("Example LLM")).toBeVisible();
     await userEvent.click(serviceFilter());
-    expect(picker().getByText("2 selected")).toBeVisible();
-    expect(option("Free service")).toHaveAttribute("aria-pressed", "true");
-    expect(option("Example LLM")).toHaveAttribute("aria-pressed", "true");
-    expect(option("third")).toHaveAttribute("aria-pressed", "false");
-    // A discarded edit keeps the applied selection.
-    await userEvent.click(option("third"));
-    expect(picker().getByText("3 selected")).toBeVisible();
-    await userEvent.click(picker().getByRole("button", { name: "Cancel" }));
-    expect(servicesParam(history)).toEqual(["free-service", "example-llm"]);
-    // The chip reopens the picker from the applied selection too.
-    await userEvent.click(servicesChip()!);
-    expect(picker().getByText("2 selected")).toBeVisible();
-    expect(option("third")).toHaveAttribute("aria-pressed", "false");
-    await userEvent.click(picker().getByRole("button", { name: "Cancel" }));
-    // Removing the chip clears the filter.
+    expect(
+      picker().getByRole("textbox", { name: "Search services" }),
+    ).toHaveValue("");
+    expect(option("third")).not.toBeChecked();
+    await userEvent.click(picker().getByRole("button", { name: "Done" }));
     await userEvent.click(
-      screen.getByRole("button", { name: "Remove Services filter" }),
+      screen.getAllByRole("button", { name: "Clear filters" })[0]!,
     );
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
   });
@@ -481,12 +547,18 @@ describe("BillingPage", () => {
         /^1 charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated\. Amounts marked ≥ are lower bounds\./,
       ).length,
     ).toBeGreaterThan(0);
-    // The single expanded record has nothing to expand and no ≥ marks.
+    await userEvent.click(
+      screen.getByText("Example LLM", {
+        selector: ".expandable-name > strong",
+      }),
+    );
     expect(
-      screen.getByText(
-        /^This charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated\. Credit-grant funding is still exact\.$/,
-      ),
-    ).toBeInTheDocument();
+      screen.queryByRole("tab", { name: /^Records/ }),
+    ).not.toBeInTheDocument();
+    const detail = document.querySelector(".detailed-usage")!;
+    expect(detail.querySelector(".funding-visual")).toHaveTextContent(
+      "Some funding values are unavailable.",
+    );
     expect(screen.getByText("Includes free usage")).toBeVisible();
     expect(
       screen.getByText("Acknowledged", { selector: ".usage-status" }),
@@ -494,6 +566,84 @@ describe("BillingPage", () => {
     expect(
       screen.queryByText("Pending", { exact: true }),
     ).not.toBeInTheDocument();
+  });
+  it("switches the optional breakdown between services, models, and agents and searches its groups", async () => {
+    mocks.usage.mockReturnValue(
+      query(
+        usage([
+          row({
+            model: "Model A",
+            api_key_id: "agent-a",
+            api_key_name: "Research agent",
+            estimated_credits: "0.000000000012",
+            wallet_credits: "0.000000000012",
+            grant_credits: "0",
+            allowance_credits: "0",
+          }),
+          row({
+            model: "Model B",
+            api_key_id: "agent-b",
+            api_key_name: "Writing agent",
+            estimated_credits: "0.000000000003",
+            wallet_credits: "0.000000000003",
+            grant_credits: "0",
+            allowance_credits: "0",
+          }),
+        ]),
+      ),
+    );
+    await renderPage();
+    await select("Group by", "Model");
+    expect(
+      screen.getByText("Model A", { selector: ".expandable-name > strong" }),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Model B", { selector: ".expandable-name > strong" }),
+    ).toBeVisible();
+    await select("Group by", "Agent");
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Search usage groups" }),
+      "Research",
+    );
+    expect(
+      screen.getByText("Research agent", {
+        selector: ".expandable-name > strong",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("Writing agent")).not.toBeInTheDocument();
+  });
+  it("shows daily request and error lines and selects one agent independently of billing filters", async () => {
+    mocks.activity.mockReturnValue(
+      query([
+        billingAgentUsage(),
+        billingAgentUsage({
+          api_key_id: "writer",
+          api_key_name: "Writing agent",
+        }),
+      ]),
+    );
+    await renderPage();
+    expect(
+      screen.getByRole("img", {
+        name: "Daily activity: 58 requests and 4 errors across 7 UTC days",
+      }),
+    ).toBeVisible();
+    await select("Activity agent", "Writing agent");
+    expect(
+      screen.getByRole("img", {
+        name: "Daily activity: 29 requests and 2 errors across 7 UTC days",
+      }),
+    ).toBeVisible();
+    await select("Activity time range", "Last 30 days");
+    expect(mocks.activity).toHaveBeenLastCalledWith(30);
+    await userEvent.click(screen.getByText("View daily values"));
+    const table = screen.getByRole("table", {
+      name: "Agent activity per UTC day",
+    });
+    expect(within(table).getAllByRole("row")).toHaveLength(8);
+    expect(within(table).getAllByRole("row")[3]).toHaveTextContent(
+      "2026-10-0381",
+    );
   });
   it("shows the spend as unavailable when no charged record is priced", async () => {
     mocks.usage.mockReturnValue(

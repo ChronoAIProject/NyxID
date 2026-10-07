@@ -81,8 +81,46 @@ previous user-token price lane.
 
 `/billing` is the actual application page. **Billing** contains Wallet, Credit grants &
 free usage, and Top-up history. **Usage** contains the filters, Spend / Activity / Tokens
-summary, and expandable service records. The page uses live billing APIs and inherits
-the application's fonts and theme.
+summary, daily agent activity, and a single interactive breakdown. The page uses
+live APIs and inherits the application's fonts and theme.
+
+Daily agent activity reuses the AI Services request data from
+`GET /api/v1/api-keys/usage?days=7|30`. It shows request and error lines, with an
+independent time range and personal-agent selector. Dates are UTC. This chart
+covers agent requests across all services; billing service and period filters
+apply to the breakdown, not to the activity chart. Agent activity is based on
+request audit records, while billing reflects finalized metered usage, so the
+counts can differ. Exact daily values remain available below the chart.
+
+The usage overview starts with a quantity line graph across services and a horizontal
+funding composition bar. Service filters in Usage and metric filters in both Billing
+and Usage use one shared multiselect matching the AI Services pattern: an inline
+selected count, searchable checkbox options, immediate updates, Clear/Done controls,
+and a removable chip for each selected value. Removing a chip removes only that value;
+Clear filters removes the complete selection. An empty service filter includes all
+services; an empty metric filter plots no metrics. Compatible metrics have separate lines;
+images, bytes, requests and voice seconds use separate graphs with their original units.
+Token quantities may overlap and are never added into a combined total. Missing
+metric/category combinations are gaps, not inferred zeroes.
+
+The horizontal axis is categorical, not time. Up to eight categories appear per graph
+page, with a consistent vertical scale across pages and exact hover values. Clearing
+the selection keeps the graph frame and the comparison's available categories on the
+horizontal axis. An instruction overlay opens the metric picker. The empty graph has
+no data lines or numeric quantity ticks.
+
+The grouped service, model, agent, layer and metric explorer is available in a collapsed
+optional disclosure. Expanded groups show quantity graphs and funding composition,
+with no Records tab or per-record card list. Exact metric and funding values and
+allowance-covered units remain available in compact disclosures. The funding bar
+shows grants, allowances and wallet funding. Incomplete amounts retain lower-bound or
+Unavailable labels; the bar explicitly describes known funding when reporting is
+incomplete. Percentages are calculated from the exact known funding amounts, never
+from their rounded display labels.
+
+Billing has no pie charts. The usage API returns period aggregates, so daily cost,
+funding and token trends are unavailable. Daily request and error history uses the
+separate agent-activity endpoint described above.
 
 | UI element                                                         | Meaning                                                                                                                                                                                                                     | Source                                         |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
@@ -213,8 +251,16 @@ relative to its own limit. One tooltip explains percentage used, excluding reser
 and lists each metric's percentage. Zero usage stays zero.
 
 Details retain each grant's original, used, remaining and reserved amount, expiry,
-issuance, status and activation; and each allowance's limit, consumed, reserved, remaining,
-recurrence, period start and reset/expiry. Expiry dates stay in these expansions.
+issuance, status and activation. Free usage details use the same Metrics multiselect
+as quantity comparisons. Each selected metric/window has a separate balance panel;
+options identify different windows and flag exhausted allowances. Compact balance rows retain
+each allowance's independent limit, consumed, reserved and remaining quantity.
+The gauge distinguishes consumed units from reserved units with a patterned segment;
+its percentage and meter value still report consumption only. Remaining quantities
+use readable foreground text. Each group shows recurrence,
+period start and reset/expiry once; at most five allowances appear per page.
+Exhausted allowances are flagged even when another allowance for the same metric
+still has available units. Expiry dates stay in these expansions.
 Help beside Credit grants and Free usage derives scope and cadence from the API response.
 Funding remains matching platform allowances first, then eligible grants in expiry order,
 then wallet credits. Empty benefits are omitted; loading, retry and rollout states remain.
@@ -262,7 +308,7 @@ distinct from the history table's (`models/billing_topup_session.rs:7-13`):
 
 Backed by `GET /api/v1/billing/usage?period=`, aggregated from `usage_meter`.
 The API groups by service × layer × metric code × model × API key × ack state × billable state;
-the table collapses these into expandable service rows.
+the overview compares service quantities visually, with grouped exploration available on demand.
 
 **Which rows exist:** a non-null `quantity` and a status of `finalized`, or `dead_letter`
 that was actually forwarded. Both wallet-backed and observability-only rows are included.
@@ -272,15 +318,15 @@ never sent to Lago, and render **Free** with **—** cost.
 
 ### Summary and expandable details
 
-| Group                               | Meaning                                                                                                                                                                                                                                                                                                                                                                                  |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Spend**                           | Estimated credits, covered by benefits (grants + allowances), and wallet-funded cost. When some records cannot be priced, the total is shown as a lower bound (`≥`) over the priced records with a note counting the unpriced ones; it reads Unavailable only when no charged record is priced (free records contribute zero but never make a total known). Empty usage totals are zero. |
-| **Activity**                        | Metered request quantity, services used, images and bytes. These are metric quantities, not unique HTTP request counts.                                                                                                                                                                                                                                                                  |
-| **Tokens**                          | Total-token metric plus separate input/output and cache-read/write metrics. Missing classes show a dash, not a fabricated count. Token totals and classes may overlap and are never added together.                                                                                                                                                                                      |
-| **All metrics & funding**           | Exact quantities grouped into Tokens, Cache, and Requests & other units. Funding shows all three sources; allowance-covered units stay separate by metric. All-service API request/byte/event totals remain available here.                                                                                                                                                              |
-| **Service rows**                    | Catalog display name, quantities, estimated cost and settlement status. Services are grouped under AI models, Connected apps, or Other services using catalog inference metadata.                                                                                                                                                                                                        |
-| **Service expansion**               | Metered quantities and funding, then Models, agents & billing layers, with every returned aggregate record accessible.                                                                                                                                                                                                                                                                   |
-| **Full metering & funding details** | Per-record costs, funding, allowance-covered units, requests, bytes, events, original provider token breakdown, meter code and agent-key identity.                                                                                                                                                                                                                                       |
+| Group                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Spend**                 | Estimated credits, covered by benefits (grants + allowances), and wallet-funded cost. When some records cannot be priced, the total is shown as a lower bound (`≥`) over the priced records with a note counting the unpriced ones; it reads Unavailable only when no charged record is priced (free records contribute zero but never make a total known). Empty usage totals are zero. |
+| **Activity**              | Metered request quantity, services used, images and bytes. These are metric quantities, not unique HTTP request counts.                                                                                                                                                                                                                                                                  |
+| **Tokens**                | Total-token metric plus separate input/output and cache-read/write metrics. Missing classes show a dash, not a fabricated count. Token totals and classes may overlap and are never added together.                                                                                                                                                                                      |
+| **All metrics & funding** | Exact quantities grouped into Tokens, Cache, and Requests & other units. Funding shows all three sources; allowance-covered units stay separate by metric. All-service API request/byte/event totals remain available here.                                                                                                                                                              |
+| **Grouped exploration**   | Optional collapsed explorer for service, model, agent, billing-layer or metric groups. Service rows retain catalog names, quantities, estimated cost and settlement status.                                                                                                                                                                                                              |
+| **Service expansion**     | Quantity line graphs and a horizontal funding composition bar, with exact values and allowance units in disclosures.                                                                                                                                                                                                                                                                     |
+| **Funding composition**   | Exact known grant, allowance and wallet amounts determine the bar proportions. Missing amounts stay unavailable or lower bounds and are clearly labeled. No pie chart or record list.                                                                                                                                                                                                    |
 
 Estimated cost is the gross cost of the full finalized quantity, including benefit-covered
 units. New settlements use persisted exact gross costs; historical rows are priced by the
