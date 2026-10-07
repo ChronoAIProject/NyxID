@@ -1,0 +1,65 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Railway GraphQL",
+    "version": "v1-nyxid-overlay",
+    "description": "Railway GraphQL API using an OAuth bearer token. Users select accessible projects or workspaces during consent. Arbitrary GraphQL bodies can contain mutations; the operation always requires approval."
+  },
+  "servers": [
+    {
+      "url": "https://backboard.railway.com"
+    }
+  ],
+  "externalDocs": {
+    "url": "https://docs.railway.com/integrations/api"
+  },
+  "paths": {
+    "/graphql/v2": {
+      "post": {
+        "operationId": "graphql_request",
+        "summary": "Run a Railway GraphQL request",
+        "description": "Execute a Railway GraphQL query or mutation. Viewer scopes permit reads; member scopes permit changes within the user's role. This operation can mutate infrastructure and always requires approval. Example project discovery query: query { externalWorkspaces { id name projects { id name } } }.",
+        "x-aevatar-tool": {
+          "name": "graphql_request",
+          "description": "Execute a Railway GraphQL query or mutation. Viewer scopes permit reads; member scopes permit changes within the user's role. This operation can mutate infrastructure and always requires approval. Example project discovery query: query { externalWorkspaces { id name projects { id name } } }.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream API response."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "query"
+                ],
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "GraphQL query or mutation document."
+                  },
+                  "variables": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Variables for the GraphQL document."
+                  },
+                  "operationName": {
+                    "type": "string",
+                    "description": "Operation to execute when the document contains multiple operations."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

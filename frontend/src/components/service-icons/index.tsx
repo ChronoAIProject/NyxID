@@ -59,6 +59,9 @@ import ApiFeishuBotIcon from "./api-feishu-bot";
 import ApiTelegramBotIcon from "./api-telegram-bot";
 import ApiWhatsappBusinessIcon from "./api-whatsapp-business";
 import ApiSupabaseIcon from "./api-supabase";
+import ApiSupabaseManagementIcon from "./api-supabase-management";
+import ApiCloudflareIcon from "./api-cloudflare";
+import ApiRailwayIcon from "./api-railway";
 import ApiElevenLabsIcon from "./api-elevenlabs";
 import ApiTelnyxIcon from "./api-telnyx";
 import ApiTwilioIcon from "./api-twilio";
@@ -156,6 +159,9 @@ export const SPEC_CATALOG_SLUGS = [
   "api-telegram-bot",
   "api-whatsapp-business",
   "api-supabase",
+  "api-supabase-management",
+  "api-cloudflare",
+  "api-railway",
   "api-elevenlabs",
   "api-telnyx",
   "api-twilio",
@@ -254,6 +260,12 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-telegram-bot": ApiTelegramBotIcon,
   "api-whatsapp-business": ApiWhatsappBusinessIcon,
   "api-supabase": ApiSupabaseIcon,
+  "api-supabase-management": ApiSupabaseManagementIcon,
+  "supabase-management": ApiSupabaseManagementIcon,
+  "api-cloudflare": ApiCloudflareIcon,
+  cloudflare: ApiCloudflareIcon,
+  "api-railway": ApiRailwayIcon,
+  railway: ApiRailwayIcon,
   "api-elevenlabs": ApiElevenLabsIcon,
   "api-telnyx": ApiTelnyxIcon,
   telnyx: ApiTelnyxIcon,
@@ -305,7 +317,14 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   talos: TalosIcon,
 } satisfies Readonly<
   Record<
-    Slug | CustomSlug | "telnyx" | "platform-telnyx" | "aurinko",
+    | Slug
+    | CustomSlug
+    | "telnyx"
+    | "platform-telnyx"
+    | "aurinko"
+    | "supabase-management"
+    | "cloudflare"
+    | "railway",
     IconComponent
   >
 >;

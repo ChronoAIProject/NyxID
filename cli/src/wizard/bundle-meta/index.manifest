@@ -31,6 +31,7 @@ frontend/src/components/service-icons/api-box.tsx
 frontend/src/components/service-icons/api-calendly.tsx
 frontend/src/components/service-icons/api-capsule-crm.tsx
 frontend/src/components/service-icons/api-clickup.tsx
+frontend/src/components/service-icons/api-cloudflare.tsx
 frontend/src/components/service-icons/api-crowdin.tsx
 frontend/src/components/service-icons/api-dialpad.tsx
 frontend/src/components/service-icons/api-discord-bot.tsx
@@ -69,6 +70,7 @@ frontend/src/components/service-icons/api-miro.tsx
 frontend/src/components/service-icons/api-notion.tsx
 frontend/src/components/service-icons/api-pagerduty.tsx
 frontend/src/components/service-icons/api-productboard.tsx
+frontend/src/components/service-icons/api-railway.tsx
 frontend/src/components/service-icons/api-reddit.tsx
 frontend/src/components/service-icons/api-sentry.tsx
 frontend/src/components/service-icons/api-shippo.tsx
@@ -76,6 +78,7 @@ frontend/src/components/service-icons/api-slack-bot.tsx
 frontend/src/components/service-icons/api-slack.tsx
 frontend/src/components/service-icons/api-spotify.tsx
 frontend/src/components/service-icons/api-square.tsx
+frontend/src/components/service-icons/api-supabase-management.tsx
 frontend/src/components/service-icons/api-supabase.tsx
 frontend/src/components/service-icons/api-telegram-bot.tsx
 frontend/src/components/service-icons/api-telnyx.tsx
