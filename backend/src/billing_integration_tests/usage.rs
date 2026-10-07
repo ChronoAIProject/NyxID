@@ -27,6 +27,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         model: Some("test-model".into()),
         token_breakdown: None,
         audio_tokens: None,
+        image_tokens: None,
         reserved_credits: crate::models::credits::Credits::from_whole(0),
         funding: None,
         quantity: Some(quantity),

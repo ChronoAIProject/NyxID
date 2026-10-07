@@ -14,23 +14,12 @@ export function sumTokenMetrics(
   selected: readonly TokenMetric[],
 ): number {
   const hasTotal = selected.includes("total_tokens");
-  return selected.reduce(
-    (sum, metric) =>
-      sum +
-      (hasTotal &&
-      (metric === "prompt_tokens" || metric === "completion_tokens")
-        ? 0
-        : usage[metric]),
-    0,
-  );
+  if (hasTotal) return usage.total_tokens;
+  return selected.reduce((sum, metric) => sum + usage[metric], 0);
 }
 
 export function hasRedundantTokenSelection(
   selected: readonly TokenMetric[],
 ): boolean {
-  return (
-    selected.includes("total_tokens") &&
-    (selected.includes("prompt_tokens") ||
-      selected.includes("completion_tokens"))
-  );
+  return selected.includes("total_tokens") && selected.length > 1;
 }

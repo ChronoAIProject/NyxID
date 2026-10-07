@@ -188,10 +188,32 @@ Totals, filters, and whole-window Top N membership are independent of the interv
 | Requests | One count from the primary platform metering record; component and resale rows do not count again. |
 | Billing events | Metering records; one request can generate several. |
 | Total, input, output, cache-read, cache-write tokens | Provider-reported token fields on the primary record. Total is input + output; caches may overlap and are not added again. |
+| Image input/output tokens | Provider-reported image subsets of input/output. These remain included in Total tokens and are never charged as an additional token class. |
 | Billed units | The selected metered quantity: requests, tokens, input/output/cache tokens, bytes, or images. Billed input can differ from provider-reported input. |
 | Gross, wallet, grant, allowance cost | Exact decimal-credit strings; legacy micros are aggregate display projections. These are usage costs, not fiat revenue or wallet balances. |
 | Exact-cost, legacy, uncosted events | Cost provenance counts. Legacy and uncosted can overlap; they are not three mutually exclusive shares. |
 | Active users and services | Existing distinct whole-window totals in the summary. Do not sum distinct counts across groups or periods. |
+
+Hover, keyboard-focus, or tap the summary token value to see exact input + output
+arithmetic and recorded image/audio subsets. The summary keeps its existing metric
+picker. Selecting Total alongside other token fields still shows Total, without
+adding overlapping input/output/cache counts. Custom selections without Total
+show their arithmetic and explain that caches can overlap input.
+
+Image subset capture supports OpenAI-style image token detail fields and Gemini
+IMAGE modality token counts. On OpenAI-compatible Images generation/edit/variation
+responses and image completion stream events, reported output tokens describe image
+output; input uses the provider's explicit image detail. Image counts are separate
+units and are never converted into tokens. The additive `image_tokens` meter field
+and `image_input_tokens`/`image_output_tokens` analytics measures follow the audio
+observability path through crash recovery and hourly/daily rollups. Only the primary
+platform row contributes those token measures. Covering indexes advance to v6,
+created before the matching v5 definitions are retired.
+
+Previously stored records and older backends lack image subsets. Their overall
+input/output totals are preserved, and the UI does not infer a missing image
+breakdown. New image details require the updated backend; a local frontend using
+the production backend can show only the fields that backend already returns.
 
 Panels can break down by service, acting user, billing account, or credential class.
 Credential classes use the same names as the platform's List view. Service/user/

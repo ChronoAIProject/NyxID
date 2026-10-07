@@ -15,6 +15,9 @@ export const usageStatsSchema = z.object({
   // Audio subsets of input/output; absent from older servers.
   audio_input_tokens: count.default(0),
   audio_output_tokens: count.default(0),
+  // Image subsets are absent from older servers and historical records.
+  image_input_tokens: count.default(0),
+  image_output_tokens: count.default(0),
   total_tokens: count,
   gross_cost: creditsSchema.nullable().optional(),
   gross_cost_micros: count.nullable(),

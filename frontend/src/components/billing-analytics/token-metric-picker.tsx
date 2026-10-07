@@ -37,8 +37,8 @@ export function TokenOverlapHint({
         </button>
       </TooltipTrigger>
       <TooltipContent className="max-w-64">
-        Total tokens already includes input and output. Selected input and
-        output counts are shown but not added again.
+        Total tokens is input + output. Selected input, output, and cache counts
+        are shown but not added again; cache counts can overlap input.
       </TooltipContent>
     </Tooltip>
   );

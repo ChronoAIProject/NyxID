@@ -60,6 +60,7 @@ import { AnalyticsSelect, PanelControls } from "./controls";
 import { SortablePanel } from "./sortable-panel";
 import { TokenMetricCaption, TokenMetricPicker } from "./token-metric-picker";
 import { sumTokenMetrics, type TokenMetric } from "./token-metrics";
+import { TokenUsageValue } from "./token-usage-value";
 import "./operations.css";
 
 export type AnalyticsSample = (
@@ -245,12 +246,14 @@ function Summary({
             </p>
           )}
           <div className="mt-3 flex flex-wrap items-baseline gap-x-2">
-            <span className="font-display text-28 font-medium leading-none tracking-tight tabular-nums">
-              {stat.value}
-            </span>
-            <span className="text-10 text-muted-foreground">
-              {stat.suffix}
-            </span>
+            {stat.tokenControl ? (
+              <TokenUsageValue usage={data.totals} selected={tokenTypes} />
+            ) : (
+              <span className="font-display text-28 font-medium leading-none tracking-tight tabular-nums">
+                {stat.value}
+              </span>
+            )}
+            <span className="text-10 text-muted-foreground">{stat.suffix}</span>
           </div>
           {stat.tokenControl ? (
             <TokenMetricCaption selected={tokenTypes} />
