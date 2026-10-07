@@ -1,5 +1,6 @@
 import { Fragment, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -66,6 +67,8 @@ import {
   recordedSourceLabel,
   insightStatusLabel,
 } from "@/lib/service-insights";
+import { FadeIn } from "./service-card-motion";
+import { useRevealMotion } from "@/hooks/use-card-sequence";
 
 const authNames: Record<string, string> = {
   bearer: "Bearer",
@@ -188,6 +191,7 @@ export function ServiceConnectionTable({
   } | null>(initialPanel);
   const [observedAt] = useState(Date.now);
   const insights = useServiceInsights(connections, suppliedInsights);
+  const reveal = useRevealMotion();
   const toggle = (id: string, view: "details" | "history" | InsightPanel) =>
     setOpen((current) =>
       current?.id === id && current.view === view ? null : { id, view },
@@ -280,8 +284,12 @@ export function ServiceConnectionTable({
                   data-service-connection-row={key.id}
                   className={cn(
                     "[&>td]:align-top [&>td]:py-3",
-                    // The opened panel continues this entry, so no rule between them.
-                    expanded && "border-b-0 bg-muted/20 hover:bg-muted/20",
+                    // The pool row and opened panel continue this entry, so no rule between them.
+                    memberships.length > 0 && "border-b-0",
+                    // The pool row is part of this entry, so they highlight together.
+                    expanded
+                      ? "border-b-0 bg-muted/20 hover:bg-muted/20"
+                      : "[&:has(+tr[data-service-connection-pools]:hover)]:bg-overlay",
                   )}
                 >
                   <TableCell>
@@ -359,31 +367,6 @@ export function ServiceConnectionTable({
                       </span>
                       {editable && renderActions?.(key)}
                     </p>
-                    {memberships.map((pool) => {
-                      const member = pool.members.find(
-                        (member) => member.user_service_id === key.id,
-                      )!;
-                      return (
-                        <button
-                          key={pool.id}
-                          type="button"
-                          onClick={() => onViewPool?.(pool.id)}
-                          className="mt-1 flex w-full min-w-0 items-start gap-1.5 text-left text-11 text-primary-text hover:underline"
-                          title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
-                        >
-                          <PoolStrategyIcon
-                            strategy={pool.strategy}
-                            className="mt-0.5 size-3 shrink-0"
-                          />
-                          <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">
-                            {pool.name} ·{" "}
-                            {pool.strategy === "priority"
-                              ? `Priority ${member.priority ?? 0}`
-                              : poolStrategyLabel(pool)}
-                          </span>
-                        </button>
-                      );
-                    })}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1.5">
@@ -642,41 +625,102 @@ export function ServiceConnectionTable({
                     </p>
                   </TableCell>
                 </TableRow>
-                {expanded && (
+                {memberships.length > 0 && (
                   <TableRow
-                    id={panelId}
-                    className="bg-muted/20 hover:bg-muted/20"
+                    data-service-connection-pools={key.id}
+                    className={
+                      expanded
+                        ? "border-b-0 bg-muted/20 hover:bg-muted/20"
+                        : "[tr:hover+&]:bg-overlay"
+                    }
                   >
+                    {/* Full width so pool names never stretch the connection column. */}
                     <TableCell
                       colSpan={5}
-                      className="whitespace-normal px-3 pb-3 pt-0"
+                      className="whitespace-normal pb-3 pt-0"
                     >
-                      <div className="rounded-xl border border-border/60 bg-card">
-                        {open.view === "history" ? (
-                          <PanelSection icon={History} title="History">
-                            <ServiceHistory serviceId={key.id} />
-                          </PanelSection>
-                        ) : open.view === "details" ? (
-                          <PanelSection icon={Info} title="Connection details">
-                            <ConnectionMetadata
-                              connection={key}
-                              insight={insight}
-                            />
-                          </PanelSection>
-                        ) : (
-                          <ConnectionInsightPanel
-                            key={`${key.id}:${open.view}`}
-                            connection={key}
-                            insight={insight}
-                            view={open.view}
-                            state={insights}
-                            catalog={catalog}
-                          />
-                        )}
-                      </div>
+                      <p className="mb-1.5 text-11 font-medium text-muted-foreground">
+                        Member of service pools
+                      </p>
+                      <ul
+                        aria-label={`Pools using ${key.label}`}
+                        className="flex flex-col items-start gap-1.5"
+                      >
+                        {memberships.map((pool) => {
+                          const member = pool.members.find(
+                            (member) => member.user_service_id === key.id,
+                          )!;
+                          return (
+                            <li key={pool.id} className="min-w-0">
+                              <button
+                                type="button"
+                                onClick={() => onViewPool?.(pool.id)}
+                                className="flex min-w-0 items-start gap-1.5 rounded-sm text-left text-11 text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                                title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
+                              >
+                                <PoolStrategyIcon
+                                  strategy={pool.strategy}
+                                  className="mt-0.5 size-3 shrink-0"
+                                />
+                                <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                                  {pool.name} ·{" "}
+                                  {pool.strategy === "priority"
+                                    ? `Priority ${member.priority ?? 0}`
+                                    : poolStrategyLabel(pool)}
+                                </span>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
                     </TableCell>
                   </TableRow>
                 )}
+                <AnimatePresence initial={false}>
+                  {expanded && (
+                    <TableRow
+                      key="panel"
+                      id={panelId}
+                      className="bg-muted/20 hover:bg-muted/20"
+                    >
+                      <TableCell colSpan={5} className="whitespace-normal p-0">
+                        <motion.div {...reveal} className="overflow-clip">
+                          <div className="px-3 pb-3">
+                            <FadeIn
+                              key={open.view}
+                              className="rounded-xl border border-border/60 bg-card"
+                            >
+                              {open.view === "history" ? (
+                                <PanelSection icon={History} title="History">
+                                  <ServiceHistory serviceId={key.id} />
+                                </PanelSection>
+                              ) : open.view === "details" ? (
+                                <PanelSection
+                                  icon={Info}
+                                  title="Connection details"
+                                >
+                                  <ConnectionMetadata
+                                    connection={key}
+                                    insight={insight}
+                                  />
+                                </PanelSection>
+                              ) : (
+                                <ConnectionInsightPanel
+                                  key={`${key.id}:${open.view}`}
+                                  connection={key}
+                                  insight={insight}
+                                  view={open.view}
+                                  state={insights}
+                                  catalog={catalog}
+                                />
+                              )}
+                            </FadeIn>
+                          </div>
+                        </motion.div>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </AnimatePresence>
               </Fragment>
             );
           })}

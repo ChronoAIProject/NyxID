@@ -246,6 +246,20 @@ impl AudioTokens {
     }
 }
 
+/// Provider-reported image subsets of input/output. Observability only;
+/// already included in the token breakdown and never priced again.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ImageTokens {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+impl ImageTokens {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformUsage {
     pub requests: i64,
@@ -268,6 +282,8 @@ pub struct PlatformUsage {
     pub token_breakdown: Option<TokenBreakdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_tokens: Option<AudioTokens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_tokens: Option<ImageTokens>,
 }
 
 impl PlatformUsage {
@@ -298,6 +314,11 @@ impl PlatformUsage {
 
     pub fn with_audio_tokens(mut self, audio: Option<AudioTokens>) -> Self {
         self.audio_tokens = audio.filter(|audio| !audio.is_empty());
+        self
+    }
+
+    pub fn with_image_tokens(mut self, images: Option<ImageTokens>) -> Self {
+        self.image_tokens = images.filter(|images| !images.is_empty());
         self
     }
 }

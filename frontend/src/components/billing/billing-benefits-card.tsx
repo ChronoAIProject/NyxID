@@ -6,67 +6,17 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { billingMetricLabel } from "@/lib/billing-units";
 import {
   compact,
-  number,
   serviceName,
-  timestamp,
   type BillingCatalog,
 } from "@/lib/billing-display";
 import { metricFamily } from "@/lib/billing-usage";
 import { StackedMeter, StackSwatch } from "./stacked-meter";
 import { CreditGrantsRow } from "./billing-grants-row";
 import { DetailsAction } from "./details-action";
-import {
-  equalShareStack,
-  stackStatus,
-  stackStatusClass,
-} from "@/lib/benefit-stack";
+import { equalShareStack, stackStatusClass } from "@/lib/benefit-stack";
 import { cn } from "@/lib/utils";
 import { FreeUsageHelp } from "./benefit-help";
-
-function UsedGauge({
-  used,
-  limit,
-  label,
-}: {
-  used: number;
-  limit: number;
-  label: string;
-}) {
-  const percent =
-    limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0;
-  const formatted =
-    percent > 0 && percent < 0.01
-      ? "<0.01"
-      : number(Math.round(percent * 100) / 100);
-  return (
-    <span
-      className={cn(
-        "benefit-meter",
-        { exhausted: "is-exhausted", warning: "is-warning", normal: null }[
-          stackStatus(percent)
-        ],
-      )}
-    >
-      <span
-        className="benefit-track"
-        role="meter"
-        aria-label={`${label} used`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percent}
-        aria-valuetext={`${formatted}% used`}
-      >
-        {/* A floor keeps a tiny non-zero value visible as a pill. */}
-        <span
-          style={{
-            width: percent > 0 ? `max(var(--bar-min), ${percent}%)` : 0,
-          }}
-        />
-      </span>
-      <span className="benefit-meter-caption">{formatted}% used</span>
-    </span>
-  );
-}
+import { BillingAllowanceDetails } from "./billing-allowance-details";
 
 export function BillingBenefitsCard({
   grants: activeGrants,
@@ -147,9 +97,6 @@ export function BillingBenefitsCard({
                   };
                 }),
             );
-            const unitSteps = new Map(
-              stack.items.map((item) => [item.key, item.step]),
-            );
             return (
               <details
                 className={cn(
@@ -201,96 +148,7 @@ export function BillingBenefitsCard({
                   </div>
                 </summary>
                 <div className="benefit-expanded">
-                  <div className="benefit-allowances">
-                    {families.map((family) => (
-                      <div className="benefit-unit-family" key={family.name}>
-                        <span>{family.name}</span>
-                        <div>
-                          {family.units.map(([key, rows]) => {
-                            const remaining = rows.reduce(
-                              (sum, row) => sum + row.remaining_quantity,
-                              0,
-                            );
-                            const limit = rows.reduce(
-                              (sum, row) => sum + row.allowance.quantity,
-                              0,
-                            );
-                            const consumed = rows.reduce(
-                              (sum, row) => sum + row.consumed_quantity,
-                              0,
-                            );
-                            const metric = rows[0]!.allowance.metric;
-                            return (
-                              <div className="benefit-unit" key={key}>
-                                <span className="capitalize stack-labelled">
-                                  <StackSwatch step={unitSteps.get(key) ?? 0} />
-                                  {billingMetricLabel(metric)}
-                                </span>
-                                <span
-                                  title={`${number(remaining)} of ${number(limit)} remaining`}
-                                >
-                                  <strong>{compact(remaining)}</strong> /{" "}
-                                  {compact(limit)} left
-                                </span>
-                                <UsedGauge
-                                  used={consumed}
-                                  limit={limit}
-                                  label={`${serviceName(catalog, slug)} ${billingMetricLabel(metric)}`}
-                                />
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <p className="fine-print mt-3 mb-5">
-                    Each allowance has its own limit. Percentages show consumed
-                    usage; reservations are listed separately.
-                  </p>
-                  {balances.map((balance) => (
-                    <section key={balance.allowance.id}>
-                      <h4 className="capitalize">
-                        {billingMetricLabel(balance.allowance.metric)}
-                      </h4>
-                      <dl className="split-facts">
-                        <div>
-                          <dt>Limit</dt>
-                          <dd>{number(balance.allowance.quantity)}</dd>
-                        </div>
-                        <div>
-                          <dt>Remaining</dt>
-                          <dd>{number(balance.remaining_quantity)}</dd>
-                        </div>
-                        <div>
-                          <dt>Consumed</dt>
-                          <dd>{number(balance.consumed_quantity)}</dd>
-                        </div>
-                        <div>
-                          <dt>Reserved</dt>
-                          <dd>{number(balance.reserved_quantity)}</dd>
-                        </div>
-                        <div>
-                          <dt>Recurrence</dt>
-                          <dd>
-                            {balance.allowance.recurrence.replaceAll("_", " ")}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Period starts</dt>
-                          <dd>{timestamp(balance.period_start)}</dd>
-                        </div>
-                        <div>
-                          <dt>Resets / expires</dt>
-                          <dd>
-                            {balance.period_end
-                              ? timestamp(balance.period_end)
-                              : "No reset or expiry"}
-                          </dd>
-                        </div>
-                      </dl>
-                    </section>
-                  ))}
+                  <BillingAllowanceDetails families={families} />
                 </div>
               </details>
             );

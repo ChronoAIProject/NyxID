@@ -6,8 +6,20 @@ import {
 } from "./admin-usage";
 import { metricLabel } from "./billing-metrics";
 import { usageFixture } from "@/test/admin-usage-fixture";
+import { usageStatsSchema } from "./admin-usage";
 
 describe("admin usage contracts", () => {
+  it("accepts older responses without image subsets while preserving reported totals", () => {
+    const response = usageFixture();
+    const { image_input_tokens, image_output_tokens, ...older } =
+      response.totals;
+    expect(image_input_tokens + image_output_tokens).toBe(0);
+    expect(usageStatsSchema.parse(older)).toMatchObject({
+      total_tokens: 120,
+      image_input_tokens: 0,
+      image_output_tokens: 0,
+    });
+  });
   it("validates totals, identities, costs and retains future metrics", () => {
     const response = usageFixture();
     response.totals.quantities.new_unit = 9;

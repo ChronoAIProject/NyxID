@@ -143,16 +143,25 @@ After the CLI is installed, choose where it should log in:
 >
 > The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) end-to-end. It should use the CLI installer by default and only run the Docker backend setup if you explicitly ask to self-host.
 
-> **Prefer a plugin install?** If your agent has a plugin marketplace, add the NyxID skill that way instead of copying files — it stays in sync with the repo on update. The skill still calls the `nyxid` CLI (installed above), so keep that step.
+> **Prefer a plugin install?** The Claude Code and Codex plugins connect your agent to NyxID's hosted MCP server and bundle an MCP-first NyxID skill; they need no CLI. The last command opens NyxID sign-in. When you approve the app, choose the services it may use (or all services). Connect a service afterwards to expose its tools.
 >
 > **Claude Code**
 >
-> ```
-> /plugin marketplace add ChronoAIProject/NyxID
-> /plugin install nyxid@nyxid
+> ```bash
+> claude plugin marketplace add ChronoAIProject/NyxID
+> claude plugin install nyxid@nyxid
+> claude mcp login plugin:nyxid:nyxid
 > ```
 >
-> **Codex / Cursor** — point the runtime at `https://github.com/ChronoAIProject/NyxID`; it reads `.codex-plugin/plugin.json` / `.cursor-plugin/plugin.json` and loads the bundled skills from `skills/`.
+> **Codex**
+>
+> ```bash
+> codex plugin marketplace add ChronoAIProject/NyxID
+> codex plugin add nyxid@nyxid
+> codex mcp login nyxid
+> ```
+>
+> `claude mcp login` needs Claude Code 2.1.284 or later; on older versions run `/mcp` inside Claude Code to sign in. The same Claude marketplace also offers `nyxid-cli@nyxid`, the CLI edition that bundles every skill in `skills/` (it calls the `nyxid` CLI installed above). **Cursor**: see [`integrations/cursor-plugin/`](integrations/cursor-plugin/). Maintainers: see [`docs/PLUGINS.md`](docs/PLUGINS.md).
 
 #### Hosted (Recommended)
 

@@ -90,6 +90,8 @@ impl AnalyticsQuery {
             "cache_creation_tokens",
             "audio_input_tokens",
             "audio_output_tokens",
+            "image_input_tokens",
+            "image_output_tokens",
             "quantity",
             "wallet_cost",
             "grant_cost",
@@ -370,6 +372,8 @@ fn value(stats: &UsageStats, options: &AnalyticsOptions) -> Option<i64> {
         "cache_creation_tokens" => Some(stats.cache_creation_tokens),
         "audio_input_tokens" => Some(stats.audio_input_tokens),
         "audio_output_tokens" => Some(stats.audio_output_tokens),
+        "image_input_tokens" => Some(stats.image_input_tokens),
+        "image_output_tokens" => Some(stats.image_output_tokens),
         "quantity" => Some(*stats.quantities.get(&options.metric).unwrap_or(&0)),
         _ => None,
     }
@@ -464,32 +468,36 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
     let keys = rows.iter().map(&group_key).collect::<AppResult<Vec<_>>>()?;
     let refs: Vec<_> = keys.iter().flatten().cloned().collect();
     let service = options.breakdown == "service";
-    let labels: Vec<Document> = if options.breakdown == "credential_class" {
-        Vec::new()
-    } else {
-        db.collection::<Document>(if service {
-            "downstream_services"
-        } else {
-            "users"
-        })
-        .find(if service {
-            doc! { "$or": [{ "_id": { "$in": &refs } }, { "slug": { "$in": &refs } }] }
-        } else {
-            doc! { "_id": { "$in": &refs } }
-        })
-        .projection(if service {
-            doc! { "name": 1, "slug": 1 }
-        } else {
-            doc! { "display_name": 1, "email": 1 }
-        })
-        .max_time(QUERY_TIMEOUT)
-        .await
-        .map_err(query_error)?
-        .try_collect()
-        .await
-        .map_err(query_error)?
-    };
     let mut names = HashMap::new();
+    if service {
+        let labels: Vec<Document> = db
+            .collection(crate::models::downstream_service::COLLECTION_NAME)
+            .find(doc! { "$or": [{ "_id": { "$in": &refs } }, { "slug": { "$in": &refs } }] })
+            .projection(doc! { "name": 1, "slug": 1 })
+            .max_time(QUERY_TIMEOUT)
+            .await
+            .map_err(query_error)?
+            .try_collect()
+            .await
+            .map_err(query_error)?;
+        for row in labels {
+            if let Ok(label) = row.get_str("name") {
+                for key in [row.get_str("_id").ok(), row.get_str("slug").ok()]
+                    .into_iter()
+                    .flatten()
+                {
+                    names.insert(key.to_owned(), label.to_owned());
+                }
+            }
+        }
+    } else if options.breakdown != "credential_class" {
+        names = crate::services::reporting_identity_service::resolve(db, &refs, QUERY_TIMEOUT)
+            .await
+            .map_err(query_error)?
+            .into_iter()
+            .map(|(id, identity)| (id, identity.label().to_owned()))
+            .collect();
+    }
     if options.breakdown == "credential_class" {
         for (key, label) in [
             ("user_owned", "User's own key (BYOK)"),
@@ -501,24 +509,6 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
             ("unknown", "Unknown credential class"),
         ] {
             names.insert(key.to_owned(), label.to_owned());
-        }
-    }
-    for row in labels {
-        let label = if service {
-            row.get_str("name").ok()
-        } else {
-            row.get_str("display_name")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| row.get_str("email").ok())
-        };
-        if let Some(label) = label {
-            for key in [row.get_str("_id").ok(), row.get_str("slug").ok()]
-                .into_iter()
-                .flatten()
-            {
-                names.insert(key.to_owned(), label.to_owned());
-            }
         }
     }
     let mut label_counts = HashMap::<String, usize>::new();

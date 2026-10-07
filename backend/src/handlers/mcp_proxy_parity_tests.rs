@@ -31,11 +31,19 @@ async fn legacy_fixture() -> Fixture {
     f
 }
 
-async fn session_headers(f: &Fixture, actor: &str, mut headers: HeaderMap) -> HeaderMap {
+/// `fallback` mirrors production: only sessions minted from unrestricted
+/// first-party access tokens may authenticate without a live bearer, so
+/// owner sessions pass `true` and service-account sessions pass `false`.
+async fn session_headers(
+    f: &Fixture,
+    actor: &str,
+    fallback: bool,
+    mut headers: HeaderMap,
+) -> HeaderMap {
     let sid = f
         .state
         .mcp_sessions
-        .create_with_proxy_access(actor, true)
+        .create_with_proxy_access(actor, true, fallback)
         .await
         .unwrap()
         .unwrap();
@@ -78,7 +86,7 @@ async fn service_account(f: &Fixture, owner: &str) -> (String, HeaderMap) {
     .await
     .unwrap()
     .access_token;
-    let headers = session_headers(f, &sa.id, bearer(&token)).await;
+    let headers = session_headers(f, &sa.id, false, bearer(&token)).await;
     (sa.id, headers)
 }
 
@@ -217,7 +225,7 @@ async fn mcp_proxy_caller_bearer_matches_rest_for_each_auth_type_direct_and_node
         ("relay", bearer(&relay)),
         ("session", cookie),
     ] {
-        callers.push((name, session_headers(&f, &f.owner, headers).await));
+        callers.push((name, session_headers(&f, &f.owner, true, headers).await));
     }
     callers.push(("service-account", sa_headers));
     for node in [false, true] {
@@ -380,7 +388,7 @@ async fn mcp_proxy_node_provider_path_query_and_headers_match_rest() {
 async fn mcp_proxy_session_fallback_never_replays_an_invalid_bearer() {
     let f = Box::pin(legacy_fixture()).await;
     let invalid = uuid::Uuid::new_v4().to_string();
-    let headers = session_headers(&f, &f.owner, bearer(&invalid)).await;
+    let headers = session_headers(&f, &f.owner, true, bearer(&invalid)).await;
     let auth = authenticate_mcp(&f.state, &headers, true)
         .await
         .ok()
