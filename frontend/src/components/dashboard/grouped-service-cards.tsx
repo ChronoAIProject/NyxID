@@ -9,7 +9,7 @@ import {
 } from "react";
 import { ChevronRight, Clock3, History } from "lucide-react";
 import { useServiceView } from "@/hooks/use-service-view";
-import { useServiceCardTransition } from "@/hooks/use-service-card-transition";
+import { MotionConfig } from "motion/react";
 import { ServiceViewToolbar } from "./service-view-toolbar";
 import { ServiceConnectionTable } from "./service-connection-table";
 import { ServiceAvatarStack } from "./service-avatar-stack";
@@ -20,6 +20,14 @@ import {
   type ServiceRoutingPools,
 } from "@/hooks/use-service-routing-pools";
 import { ServicePoolRoutingPanel } from "./service-pool-routing-panel";
+import {
+  CardReveal,
+  FadeIn,
+  Glide,
+  MotionCard,
+  MotionSurface,
+} from "./service-card-motion";
+import { useCardSequence } from "@/hooks/use-card-sequence";
 import { ServicePoolSummary } from "./service-pool-summary";
 import { PoolStrategyIcon } from "./service-pool-icons";
 import { useAuthStore } from "@/stores/auth-store";
@@ -56,7 +64,10 @@ import type { CatalogEntry, KeyInfo } from "@/types/keys";
 function GroupCard({
   group,
   expanded,
+  open,
+  layoutKey,
   onToggle,
+  onClosed,
   insights,
   connections,
   search,
@@ -71,7 +82,11 @@ function GroupCard({
   readonly allConnections: readonly KeyInfo[];
   readonly group: ServiceConnectionGroup;
   readonly expanded: boolean;
+  /** False while the body folds away before the card collapses. */
+  readonly open: boolean;
+  readonly layoutKey: string | null;
   readonly onToggle: (card: HTMLElement | null) => void;
+  readonly onClosed: () => void;
   readonly insights: ServiceInsightsState;
   readonly connections: readonly KeyInfo[];
   readonly search: string;
@@ -280,14 +295,12 @@ function GroupCard({
   };
 
   return (
-    <section
+    <MotionCard
       ref={cardRef}
+      layoutKey={layoutKey}
       aria-labelledby={headingId}
-      style={{
-        viewTransitionName: `service-card-${headingId.replace(/[^a-zA-Z0-9-]/g, "")}`,
-      }}
       className={cn(
-        "min-w-0 scroll-mt-[calc(var(--service-filters-height,0px)+24px)] sm:scroll-mt-[calc(var(--service-filters-height,0px)+20px)] rounded-xl border border-border bg-card shadow-sm",
+        "min-w-0 scroll-mt-[calc(var(--service-filters-height,0px)+24px)] sm:scroll-mt-[calc(var(--service-filters-height,0px)+20px)] border border-border bg-card shadow-sm",
         expanded
           ? "sm:col-span-2 xl:col-span-3"
           : "relative focus-within:z-10 hover:z-10",
@@ -303,14 +316,20 @@ function GroupCard({
             : undefined,
         )}
       >
-        <div
+        <MotionSurface
+          style={{
+            borderTopLeftRadius: 12,
+            borderTopRightRadius: 12,
+            borderBottomLeftRadius: expanded ? 0 : 12,
+            borderBottomRightRadius: expanded ? 0 : 12,
+          }}
           className={cn(
             "relative flex flex-col bg-card",
-            expanded ? "rounded-t-xl shadow-sm" : "h-72 rounded-xl",
+            expanded ? "shadow-sm" : "h-72",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
-            <div className="flex items-start gap-3">
+            <Glide className="flex items-start gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
                 <ServiceIcon
                   slug={group.iconSlug}
@@ -343,13 +362,15 @@ function GroupCard({
               {disabled > 0 && (
                 <Badge variant="secondary">{disabled} disabled</Badge>
               )}
-            </div>
+            </Glide>
             {!expanded && (
-              <p className="line-clamp-2 h-8 shrink-0 text-xs leading-4 text-muted-foreground">
-                {search.trim()
-                  ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
-                  : group.description}
-              </p>
+              <Glide className="shrink-0">
+                <p className="line-clamp-2 h-8 text-xs leading-4 text-muted-foreground">
+                  {search.trim()
+                    ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
+                    : group.description}
+                </p>
+              </Glide>
             )}
             <div
               className={cn(
@@ -359,65 +380,71 @@ function GroupCard({
                   : "space-y-0.5",
               )}
             >
-              <ServiceBillingSummary
-                connections={connections}
-                insights={insights}
-                catalog={catalog}
-                serviceName={group.name}
-                onOpen={(id) => openSummary("billing", id)}
-              />
-              <ServicePoolSummary
-                pools={pools}
-                loading={routing.loading}
-                incomplete={routing.incomplete}
-                serviceName={group.name}
-                expanded={expanded && routingOpen}
-                contentId={contentId}
-                onOpen={() => {
-                  setRoutingOpen(true);
-                  if (!expanded) onToggle(cardRef.current);
-                }}
-              />
-              <TooltipProvider delayDuration={100} disableHoverableContent>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        openSummary(latestUse ? "requests" : "access");
-                      }}
-                      aria-expanded={expanded}
-                      aria-controls={contentId}
-                      aria-label={`Show agent keys and use for ${group.name}`}
-                      className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
-                    >
-                      <Clock3
-                        className="size-3.5 shrink-0 text-muted-foreground"
-                        aria-hidden="true"
-                      />
-                      <span className="truncate">{agents.text}</span>
-                      <span
-                        className="shrink-0 text-muted-foreground"
-                        aria-hidden="true"
+              <Glide className="min-w-0">
+                <ServiceBillingSummary
+                  connections={connections}
+                  insights={insights}
+                  catalog={catalog}
+                  serviceName={group.name}
+                  onOpen={(id) => openSummary("billing", id)}
+                />
+              </Glide>
+              <Glide className="min-w-0">
+                <ServicePoolSummary
+                  pools={pools}
+                  loading={routing.loading}
+                  incomplete={routing.incomplete}
+                  serviceName={group.name}
+                  expanded={expanded && routingOpen}
+                  contentId={contentId}
+                  onOpen={() => {
+                    setRoutingOpen(true);
+                    if (!expanded) onToggle(cardRef.current);
+                  }}
+                />
+              </Glide>
+              <Glide className="min-w-0">
+                <TooltipProvider delayDuration={100} disableHoverableContent>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openSummary(latestUse ? "requests" : "access");
+                        }}
+                        aria-expanded={expanded}
+                        aria-controls={contentId}
+                        aria-label={`Show agent keys and use for ${group.name}`}
+                        className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
                       >
-                        ·
-                      </span>
-                      <span className="shrink-0 whitespace-nowrap text-muted-foreground">
-                        {insights.status === "ready"
-                          ? useText
-                          : "Last use unavailable"}
-                      </span>
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent
-                    collisionPadding={12}
-                    className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words leading-relaxed [overflow-wrap:anywhere]"
-                  >
-                    {agents.title}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-              <div className="flex h-6 min-w-0 items-center justify-between gap-2">
+                        <Clock3
+                          className="size-3.5 shrink-0 text-muted-foreground"
+                          aria-hidden="true"
+                        />
+                        <span className="truncate">{agents.text}</span>
+                        <span
+                          className="shrink-0 text-muted-foreground"
+                          aria-hidden="true"
+                        >
+                          ·
+                        </span>
+                        <span className="shrink-0 whitespace-nowrap text-muted-foreground">
+                          {insights.status === "ready"
+                            ? useText
+                            : "Last use unavailable"}
+                        </span>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      collisionPadding={12}
+                      className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words leading-relaxed [overflow-wrap:anywhere]"
+                    >
+                      {agents.title}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </Glide>
+              <Glide className="flex h-6 min-w-0 items-center justify-between gap-2">
                 <button
                   type="button"
                   aria-label={`Show last edit for ${group.name}`}
@@ -446,35 +473,37 @@ function GroupCard({
                   items={sources}
                   label={`Show sources for ${group.name}`}
                 />
-              </div>
+              </Glide>
             </div>
           </div>
           <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                if (expanded && routingOpen) setRoutingOpen(false);
-                else {
-                  setRoutingOpen(false);
-                  onToggle(cardRef.current);
-                }
-              }}
-              aria-expanded={expanded && !routingOpen}
-              aria-controls={contentId}
-              aria-label={`${expanded && !routingOpen ? "Collapse" : "Expand"} ${group.name} connections`}
-            >
-              <ChevronRight
-                className={cn(
-                  "size-3.5 transition-transform motion-reduce:transition-none",
-                  expanded && "rotate-90",
-                )}
-              />
-              {expanded && !routingOpen
-                ? "Hide connections"
-                : `View ${matchingCount} ${matchingCount === 1 ? "connection" : "connections"}`}
-            </Button>
-            <div className="flex items-center gap-2 pr-2">
+            <Glide>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (expanded && routingOpen) setRoutingOpen(false);
+                  else {
+                    setRoutingOpen(false);
+                    onToggle(cardRef.current);
+                  }
+                }}
+                aria-expanded={expanded && !routingOpen}
+                aria-controls={contentId}
+                aria-label={`${expanded && !routingOpen ? "Collapse" : "Expand"} ${group.name} connections`}
+              >
+                <ChevronRight
+                  className={cn(
+                    "size-3.5 transition-transform motion-reduce:transition-none",
+                    expanded && "rotate-90",
+                  )}
+                />
+                {expanded && !routingOpen
+                  ? "Hide connections"
+                  : `View ${matchingCount} ${matchingCount === 1 ? "connection" : "connections"}`}
+              </Button>
+            </Glide>
+            <Glide className="flex items-center gap-2 pr-2">
               {matchingCount < count && (
                 <span className="text-11 text-muted-foreground">
                   {matchingCount} of {count} match
@@ -488,19 +517,19 @@ function GroupCard({
               >
                 Service details
               </Link>
-            </div>
+            </Glide>
           </div>
-        </div>
+        </MotionSurface>
       </div>
       <div
         id={contentId}
         hidden={!expanded}
         className="overflow-hidden rounded-b-xl"
       >
-        {expanded && (
+        <CardReveal open={open} onClosed={onClosed}>
           <div className="border-t border-border bg-background/30">
             {routingOpen ? (
-              <>
+              <FadeIn key="routing">
                 <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
                   {pools.map((pool) => (
                     <Button
@@ -552,27 +581,29 @@ function GroupCard({
                     Additional organization pools may require admin access.
                   </p>
                 )}
-              </>
+              </FadeIn>
             ) : (
-              <ServiceConnectionTable
-                key={requestedPanel?.version ?? 0}
-                initialPanel={requestedPanel}
-                connections={connections}
-                insights={insights}
-                serviceName={group.name}
-                renderActions={renderConnectionActions}
-                catalog={catalog}
-                pools={pools}
-                onViewPool={(id) => {
-                  setRouteId(id);
-                  setRoutingOpen(true);
-                }}
-              />
+              <FadeIn key="connections">
+                <ServiceConnectionTable
+                  key={requestedPanel?.version ?? 0}
+                  initialPanel={requestedPanel}
+                  connections={connections}
+                  insights={insights}
+                  serviceName={group.name}
+                  renderActions={renderConnectionActions}
+                  catalog={catalog}
+                  pools={pools}
+                  onViewPool={(id) => {
+                    setRouteId(id);
+                    setRoutingOpen(true);
+                  }}
+                />
+              </FadeIn>
             )}
           </div>
-        )}
+        </CardReveal>
       </div>
-    </section>
+    </MotionCard>
   );
 }
 
@@ -590,7 +621,6 @@ export function GroupedServiceCards({
   readonly renderTable?: (keys: readonly KeyInfo[]) => ReactNode;
 }) {
   const view = useServiceView();
-  const animateCards = useServiceCardTransition();
   const containerRef = useRef<HTMLDivElement>(null);
   const filtersRef = useRef<HTMLDivElement>(null);
   const [filtersStuck, setFiltersStuck] = useState(false);
@@ -656,6 +686,14 @@ export function GroupedServiceCards({
   const matchingKeys = visible.flatMap(({ matches }) => matches);
   const insights = useServiceInsights(renderTable ? [] : keys);
   const routing = useServiceRoutingPools(keys, !renderTable);
+  const expandedId = expanded[0] ?? null;
+  const sequence = useCardSequence({
+    expanded: expandedId,
+    commit: (next) => view.setExpanded(next ? [next] : []),
+    isRendered: (id) =>
+      !renderTable && visible.some(({ group }) => group.id === id),
+    toolbarRef: filtersRef,
+  });
 
   return (
     <div ref={containerRef} className="space-y-6 [overflow-anchor:none]">
@@ -677,7 +715,7 @@ export function GroupedServiceCards({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => animateCards(() => view.setExpanded([]))}
+            onClick={() => sequence.request(null)}
           >
             Collapse
           </Button>
@@ -687,33 +725,34 @@ export function GroupedServiceCards({
         renderTable ? (
           renderTable(matchingKeys)
         ) : (
-          <div className="grid items-start gap-6 sm:grid-cols-2 xl:grid-cols-3">
-            {visible.map(({ group, matches }) => (
-              <GroupCard
-                key={group.id}
-                group={group}
-                expanded={expanded.includes(group.id)}
-                insights={insights}
-                routing={routing}
-                allConnections={keys}
-                catalog={catalog?.find((entry) => entry.slug === group.slug)}
-                connections={matches}
-                search={filters.search}
-                onToggle={(card) =>
-                  animateCards(
-                    () =>
-                      view.setExpanded(
-                        expanded.includes(group.id) ? [] : [group.id],
-                      ),
-                    expanded.includes(group.id) ? undefined : card,
-                    filtersRef.current,
-                  )
-                }
-                renderConnectionActions={renderConnectionActions}
-                filtersRef={filtersRef}
-              />
-            ))}
-          </div>
+          <MotionConfig reducedMotion="user">
+            <div className="grid items-start gap-6 sm:grid-cols-2 xl:grid-cols-3">
+              {visible.map(({ group, matches }) => (
+                <GroupCard
+                  key={group.id}
+                  group={group}
+                  expanded={expandedId === group.id}
+                  open={sequence.isOpen(group.id)}
+                  layoutKey={expandedId}
+                  insights={insights}
+                  routing={routing}
+                  allConnections={keys}
+                  catalog={catalog?.find((entry) => entry.slug === group.slug)}
+                  connections={matches}
+                  search={filters.search}
+                  onToggle={(card) =>
+                    sequence.request(
+                      expandedId === group.id ? null : group.id,
+                      card,
+                    )
+                  }
+                  onClosed={sequence.onClosed}
+                  renderConnectionActions={renderConnectionActions}
+                  filtersRef={filtersRef}
+                />
+              ))}
+            </div>
+          </MotionConfig>
         )
       ) : (
         <p className="py-10 text-center text-sm text-muted-foreground">

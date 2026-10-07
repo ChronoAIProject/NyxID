@@ -1,5 +1,6 @@
 import { Fragment, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -66,6 +67,8 @@ import {
   recordedSourceLabel,
   insightStatusLabel,
 } from "@/lib/service-insights";
+import { FadeIn } from "./service-card-motion";
+import { useRevealMotion } from "@/hooks/use-card-sequence";
 
 const authNames: Record<string, string> = {
   bearer: "Bearer",
@@ -188,6 +191,7 @@ export function ServiceConnectionTable({
   } | null>(initialPanel);
   const [observedAt] = useState(Date.now);
   const insights = useServiceInsights(connections, suppliedInsights);
+  const reveal = useRevealMotion();
   const toggle = (id: string, view: "details" | "history" | InsightPanel) =>
     setOpen((current) =>
       current?.id === id && current.view === view ? null : { id, view },
@@ -642,41 +646,51 @@ export function ServiceConnectionTable({
                     </p>
                   </TableCell>
                 </TableRow>
-                {expanded && (
-                  <TableRow
-                    id={panelId}
-                    className="bg-muted/20 hover:bg-muted/20"
-                  >
-                    <TableCell
-                      colSpan={5}
-                      className="whitespace-normal px-3 pb-3 pt-0"
+                <AnimatePresence initial={false}>
+                  {expanded && (
+                    <TableRow
+                      key="panel"
+                      id={panelId}
+                      className="bg-muted/20 hover:bg-muted/20"
                     >
-                      <div className="rounded-xl border border-border/60 bg-card">
-                        {open.view === "history" ? (
-                          <PanelSection icon={History} title="History">
-                            <ServiceHistory serviceId={key.id} />
-                          </PanelSection>
-                        ) : open.view === "details" ? (
-                          <PanelSection icon={Info} title="Connection details">
-                            <ConnectionMetadata
-                              connection={key}
-                              insight={insight}
-                            />
-                          </PanelSection>
-                        ) : (
-                          <ConnectionInsightPanel
-                            key={`${key.id}:${open.view}`}
-                            connection={key}
-                            insight={insight}
-                            view={open.view}
-                            state={insights}
-                            catalog={catalog}
-                          />
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                )}
+                      <TableCell colSpan={5} className="whitespace-normal p-0">
+                        <motion.div {...reveal} className="overflow-clip">
+                          <div className="px-3 pb-3">
+                            <FadeIn
+                              key={open.view}
+                              className="rounded-xl border border-border/60 bg-card"
+                            >
+                              {open.view === "history" ? (
+                                <PanelSection icon={History} title="History">
+                                  <ServiceHistory serviceId={key.id} />
+                                </PanelSection>
+                              ) : open.view === "details" ? (
+                                <PanelSection
+                                  icon={Info}
+                                  title="Connection details"
+                                >
+                                  <ConnectionMetadata
+                                    connection={key}
+                                    insight={insight}
+                                  />
+                                </PanelSection>
+                              ) : (
+                                <ConnectionInsightPanel
+                                  key={`${key.id}:${open.view}`}
+                                  connection={key}
+                                  insight={insight}
+                                  view={open.view}
+                                  state={insights}
+                                  catalog={catalog}
+                                />
+                              )}
+                            </FadeIn>
+                          </div>
+                        </motion.div>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </AnimatePresence>
               </Fragment>
             );
           })}
