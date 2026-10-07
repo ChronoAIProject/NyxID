@@ -12,9 +12,11 @@ import type { AccountPanel } from "@/lib/assistant/account-panel-search";
 
 const Settings = lazy(() => import("@/pages/settings").then((m) => ({ default: m.SettingsPage })));
 const Billing = lazy(() => import("@/pages/billing").then((m) => ({ default: m.BillingPage })));
+const NyxBot = lazy(() => import("./nyxbot-settings-content").then((m) => ({ default: m.NyxBotSettingsContent })));
 const panels = {
   settings: { title: "Account Settings", description: "Manage your account settings and preferences.", width: "md:max-w-3xl" },
   billing: { title: "Billing & Usage", description: "Your balance, benefits, and usage in one place.", width: "md:max-w-5xl" },
+  nyxbot: { title: "NyxBot settings", description: "NyxBot runs with full access to your connected services and account; specialists use only what you or NyxBot grant them. These settings apply to all of your agents.", width: "md:max-w-2xl" },
 };
 
 export function AssistantAccountPanel() {
@@ -52,7 +54,7 @@ export function AssistantAccountPanel() {
           <DialogFocusReturnContext value={true}>
           <Suspense fallback={<p role="status" className="text-12 text-text-tertiary">Loading {panel.title}...</p>}>
             {current.panel === "settings" ? <Settings presentation="panel" /> :
-              <Billing presentation="panel" />}
+              current.panel === "billing" ? <Billing presentation="panel" /> : <NyxBot />}
           </Suspense>
           </DialogFocusReturnContext>
         </DialogBody>

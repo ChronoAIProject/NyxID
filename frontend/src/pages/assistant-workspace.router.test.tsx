@@ -1,7 +1,3 @@
-vi.mock("@/pages/settings", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/pages/settings")>();
-  return { ...original, SettingsPage: (props: Parameters<typeof original.SettingsPage>[0]) => <><original.SettingsPage {...props} /><button onClick={() => useCreditsDenialStore.getState().notify({ key: "account-action", payer: "self", actorId: "person" })}>Try account action</button></> };
-});
 import { ASSISTANT_SHELL_ROUTES, withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
 import { useCreditsDenialStore } from "@/stores/credits-denial-store";
 import type { ComponentProps, ReactNode } from "react";
@@ -112,12 +108,15 @@ vi.mock("@/hooks/use-theme", () => ({
 vi.mock("@/components/dashboard/theme-toggle", () => ({
   ThemeToggle: () => null,
 }));
+vi.mock("@/components/assistant/nyxbot-settings-content", () => ({
+  NyxBotSettingsContent: () => <button onClick={() => useCreditsDenialStore.getState().notify({ key: "nyxbot-action", payer: "self", actorId: "person" })}>Try NyxBot action</button>,
+}));
 vi.mock("@/components/assistant/approvals-view", () => ({ ApprovalsView: () => <h2>Approvals workspace content</h2> }));
 vi.mock("@/components/assistant/plugins-view", () => ({ PluginsView: () => <h2>Plugins workspace content</h2> }));
 vi.mock("@/components/assistant/assistant-chat-page", async () => {
   const { AssistantShell } = await import("@/components/assistant/assistant-shell");
   const { AssistantSidebar } = await import("@/components/assistant/assistant-sidebar");
-  const { NyxBotSettingsButton } = await import("@/components/assistant/nyxbot-settings-dialog");
+  const { NyxBotSettingsButton } = await import("@/components/assistant/nyxbot-settings-button");
   const Chat = () => <AssistantShell title="Chat" headerActions={<NyxBotSettingsButton />} sidebar={<div data-testid={`sidebar-${userHasFeature(useAuthStore.getState().user, FEATURE_FLAG.NYXAGENT_ENGINE) ? "nyxagent" : "actor"}`}><AssistantSidebar conversations={[]} activeConversationId={undefined} onNewChat={vi.fn()} onSelect={vi.fn()} onDelete={vi.fn()} /></div>}><h2>Chat background</h2></AssistantShell>;
   return { AssistantChatPage: Chat, DirectAssistantChatPage: Chat, NyxAgentAssistantChatPage: Chat };
 });
@@ -335,7 +334,7 @@ it.each([false, undefined])("strips unavailable billing capability %s with repla
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
-it.each(["settings", "billing"])("preserves a signed-out %s panel for login return_to", async (panel) => {
+it.each(["settings", "billing", "nyxbot"])("preserves a signed-out %s panel for login return_to", async (panel) => {
   useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false });
   const assign = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
   const path = `/assistant?panel=${panel}&panelTab=security`;
@@ -395,7 +394,7 @@ it.each(["Control", "Meta", "Shift", "Alt"])("keeps the drawer on %s-modified St
   expect(router.state.location.pathname).toBe("/assistant/plugins");
 });
 
-it("lets the menu consume Escape before the drawer and hands account focus to the header", async () => {
+it("lets the menu consume Escape before the drawer and hands NyxBot focus to the header", async () => {
   await open("/assistant/plugins");
   await drawerAccountMenu();
   await userEvent.keyboard("{Escape}");
@@ -404,14 +403,14 @@ it("lets the menu consume Escape before the drawer and hands account focus to th
   const trigger = within(screen.getAllByTestId("sidebar-nyxagent")[1]!).getByRole("button", { name: "Account menu" });
   await waitFor(() => expect(trigger).toHaveFocus());
   await userEvent.click(trigger);
-  await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
-  expect(await screen.findByRole("dialog", { name: "Account Settings" })).toBeVisible();
+  await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
+  expect(await screen.findByRole("dialog", { name: "NyxBot settings" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Close chats", hidden: true })).not.toBeInTheDocument();
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.getByRole("button", { name: "User menu" })).toHaveFocus());
 });
 
-it.each(["/assistant?panel=settings&panelTab=display", "/assistant?panel=billing&panelTab=usage", "/assistant/machines"])("dismisses the drawer on location change to %s", async (to) => {
+it.each(["/assistant?panel=settings&panelTab=display", "/assistant?panel=billing&panelTab=usage", "/assistant/machines", "/assistant?panel=nyxbot"])("dismisses the drawer on location change to %s", async (to) => {
   const router = await open("/assistant/plugins");
   await userEvent.click(screen.getByRole("button", { name: "Open chats" }));
   await act(() => router.navigate({ to }));
@@ -424,7 +423,7 @@ it.each([true, false])("shares labels, gating, Studio destinations and logout be
   await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
   const items = () => screen.getAllByRole("menuitem").map((item) => ({ text: item.textContent, href: item.getAttribute("href") }));
   const sidebarItems = items();
-  expect(sidebarItems.some((item) => item.text === "NyxBot settings")).toBe(false);
+  expect(sidebarItems.some((item) => item.text === "NyxBot settings")).toBe(nyxagent);
   await userEvent.keyboard("{Escape}");
   await userEvent.click(screen.getByRole("button", { name: "User menu" }));
   expect(items()).toEqual(sidebarItems);
@@ -450,13 +449,14 @@ it.each(["unknown", "%5B%22security%22%5D"])("uses the Settings Profile fallback
   expect(await screen.findByRole("tab", { name: "Profile" })).toHaveAttribute("data-state", "active");
 });
 
-it.each(["Account menu", "User menu"])("restores focus to %s after closing", async (name) => {
+it.each(["Account menu", "User menu", "NyxBot settings"])("restores focus to %s after closing", async (name) => {
   const router = await open("/assistant/plugins");
   const trigger = screen.getByRole("button", { name });
   await userEvent.click(trigger);
-  await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
-  const dialog = await screen.findByRole("dialog", { name: "Account Settings" });
+  if (name !== "NyxBot settings") await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
+  const dialog = await screen.findByRole("dialog", { name: "NyxBot settings" });
   expect(screen.getByRole("button", { name: "Account menu", hidden: true })).toHaveClass("bg-overlay-strong");
+  expect(screen.getByRole("button", { name: "NyxBot settings", hidden: true })).toHaveAttribute("aria-expanded", "true");
   expect(router.state.location.pathname).toBe("/assistant/plugins");
   expect(document.title).toBe("nyxid - Plugins");
   await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
@@ -466,7 +466,7 @@ it.each(["Account menu", "User menu"])("restores focus to %s after closing", asy
   expect(screen.getByRole("menu")).toBeVisible();
 });
 
-it.each(["settings", "billing"])("requires complete auth readiness for %s", async (panel) => {
+it.each(["settings", "billing", "nyxbot"])("requires complete auth readiness for %s", async (panel) => {
   useAuthStore.setState({ user: null, isAuthenticated: true, isLoading: false });
   const router = await open(`/assistant?panel=${panel}`);
   expect(router.state.location.search).toMatchObject({ panel });
@@ -475,7 +475,7 @@ it.each(["settings", "billing"])("requires complete auth readiness for %s", asyn
   expect(await screen.findByRole("dialog")).toBeVisible();
 });
 
-it.each(["billing"])("replaces rejected %s after hydration/refresh and live capability change", async (panel) => {
+it.each(["billing", "nyxbot"])("replaces rejected %s after hydration/refresh and live capability change", async (panel) => {
   for (const retainedUser of [false, true]) {
     useAuthStore.setState({ user: retainedUser ? person : null, isAuthenticated: retainedUser, isLoading: true });
     const router = await open(`/assistant?panel=${panel}`);
@@ -489,6 +489,16 @@ it.each(["billing"])("replaces rejected %s after hydration/refresh and live capa
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     cleanup();
   }
+});
+
+it.each([true, false])("waits for loading auth before resolving NyxAgent enabled=%s", async (enabled) => {
+  useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+  const router = await open("/assistant?panel=nyxbot");
+  expect(router.state.location.search).toEqual({ panel: "nyxbot" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  act(() => { setEngine(enabled); useAuthStore.setState({ isAuthenticated: true, isLoading: false }); });
+  if (enabled) expect(await screen.findByRole("dialog", { name: "NyxBot settings" })).toBeVisible();
+  else { await waitFor(() => expect(router.state.location.search).toEqual({})); expect(router.history.length).toBe(1); }
 });
 
 it.each(["/assistant/settings", "/assistant/settings/nyxbot", "/assistant/billing"])("returns unknown-path 404 for removed %s", async (path) => {
@@ -542,27 +552,27 @@ it("consumes pending top-up before close so Back cannot replay after wallet reso
 });
 
 it.each(["panel-first", "credits-first", "refresh"])("keeps credits visually and logically topmost (%s)", async (order) => {
-  const router = await open(order === "credits-first" ? "/assistant/plugins" : "/assistant/plugins?panel=settings");
-  if (order !== "credits-first") await screen.findByRole("dialog", { name: "Account Settings" });
+  const router = await open(order === "credits-first" ? "/assistant/plugins" : "/assistant/plugins?panel=nyxbot");
+  if (order !== "credits-first") await screen.findByRole("dialog", { name: "NyxBot settings" });
   act(() => useCreditsDenialStore.getState().notify({ key: "denial", payer: "self", actorId: "person" }));
   const credits = await screen.findByRole("dialog", { name: "Not enough credits to continue" });
-  if (order === "credits-first") await act(() => router.navigate({ to: "/assistant/plugins", search: { panel: "settings" } }));
+  if (order === "credits-first") await act(() => router.navigate({ to: "/assistant/plugins", search: { panel: "nyxbot" } }));
   if (order === "refresh") { act(() => useAuthStore.setState({ isLoading: true })); act(() => useAuthStore.setState({ isLoading: false })); }
   expect(credits).toHaveStyle({ zIndex: "120" });
   await userEvent.keyboard("{Tab}");
   expect(credits.contains(document.activeElement)).toBe(true);
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Not enough credits to continue" })).not.toBeInTheDocument());
-  const panel = await screen.findByRole("dialog", { name: "Account Settings" });
+  const panel = await screen.findByRole("dialog", { name: "NyxBot settings" });
   expect(panel).toHaveStyle({ zIndex: "90" });
   await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
   await waitFor(() => expect(router.state.location.search).toEqual({}));
 });
 
-it.each(["dismiss", "purchase"])("hands credits focus back after an account action (%s)", async (action) => {
-  await open("/assistant/plugins?panel=settings");
-  const nyxbot = await screen.findByRole("dialog", { name: "Account Settings" });
-  const trigger = within(nyxbot).getByRole("button", { name: "Try account action" });
+it.each(["dismiss", "purchase"])("hands credits focus back after a NyxBot action (%s)", async (action) => {
+  await open("/assistant/plugins?panel=nyxbot");
+  const nyxbot = await screen.findByRole("dialog", { name: "NyxBot settings" });
+  const trigger = within(nyxbot).getByRole("button", { name: "Try NyxBot action" });
   await userEvent.click(trigger);
   const denial = await screen.findByRole("dialog", { name: "Not enough credits to continue" });
   if (action === "dismiss") {
@@ -582,7 +592,7 @@ it.each(["dismiss", "purchase"])("hands credits focus back after an account acti
   }
 });
 
-it.each(["settings", "billing"])("preserves signed-out %s deep links in login return_to", async (panel) => {
+it.each(["settings", "billing", "nyxbot"])("preserves signed-out %s deep links in login return_to", async (panel) => {
   useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false });
   const assign = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
   const path = `/assistant?panel=${panel}`;

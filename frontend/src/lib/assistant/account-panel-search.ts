@@ -11,7 +11,7 @@ export const ASSISTANT_SHELL_ROUTES = [
   "/assistant/machines/pair",
 ] as const;
 export type AssistantShellRoute = (typeof ASSISTANT_SHELL_ROUTES)[number];
-export type AccountPanel = "settings" | "billing";
+export type AccountPanel = "settings" | "billing" | "nyxbot";
 export interface AccountPanelSearch {
   panel?: AccountPanel;
   panelTab?: string;
@@ -50,6 +50,7 @@ export function parseAccountPanelSearch(search: Record<string, unknown>): Accoun
       panelTab: parseTab(tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT),
     } : {}) };
   }
+  if (search.panel === "nyxbot") return { panel: "nyxbot" };
   if (search.panel !== "billing") return {};
   const billing = billingSearchSchema.parse({
     tab: search.panelTab, period: search.panelPeriod,

@@ -3,7 +3,7 @@ import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
-import { NyxBotSettingsButton } from "./nyxbot-settings-dialog";
+import { NyxBotSettingsButton } from "./nyxbot-settings-button";
 import {
   ChannelBadge,
   PendingEventsNote,

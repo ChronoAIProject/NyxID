@@ -286,10 +286,12 @@ Sidebar organized into 3 groups (4 with admin) separated by labeled section head
 **Admin** (visible only to users with admin or operator role; admin pages share the same dashboard chrome — there is no separate admin layout. Operators see admin pages read-only.) — Users, Invite Codes, Audit Log, Service Accounts, Roles, Groups, Node Registry, Services, Providers
 
 The assistant shell has its own workspace navigation and a shared account menu
-in the sidebar user row and header profile button. Settings and Billing & Usage open as URL-driven modals (`?panel=settings|billing`) over
+in the sidebar user row and header profile button. Settings, Billing & Usage and
+NyxBot settings open as URL-driven modals (`?panel=settings|billing|nyxbot`) over
 the current assistant view, never as in-shell pages. Namespaced `panelTab` and
-billing filter keys preserve the underlying view's search. Billing is capability-gated.
-The existing NyxBot settings dialog remains available through its gear. Notification
+billing filter keys preserve the underlying view's search. NyxBot settings links
+target these panel URLs; the header gear opens the same NyxBot panel. Billing is
+capability-gated and NyxBot settings requires the NyxAgent engine. Notification
 settings links to Studio at `/approvals/settings` with a visible Studio hint.
 Open Studio and Log out complete both menus. Studio `/settings` and `/billing`
 retain their pages and chrome. Lago checkout returns to Studio `/billing`.

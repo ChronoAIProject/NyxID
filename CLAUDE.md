@@ -642,10 +642,11 @@ Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop 
 standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
-Account data (Settings with all six tabs and Billing & Usage when available) opens as URL-driven modals over the
+Account data (Settings with all six tabs, Billing & Usage when available, and
+NyxBot settings for the NyxAgent engine) opens as URL-driven modals over the
 current assistant view using `?panel=` and namespaced `panelTab`/filter keys,
-never as in-shell pages. Both account menus share these actions. The existing
-NyxBot settings dialog remains available through its gear.
+never as in-shell pages. Both account menus share these actions; the header gear
+opens the NyxBot panel, and NyxBot's settings links target the same panel URLs.
 Opening pushes history; Settings tab changes replace, Billing user changes push
 and automatic cleanup replaces. Back immediately after opening closes the panel;
 Back after an explicit close reopens it with any pending top-up already consumed.

@@ -4,7 +4,7 @@ import { billingPanelSearch, parseAccountPanelSearch, withAccountPanelSearch, wi
 import { parseAssistantSearch } from "./search";
 
 describe("account panel search", () => {
-  it.each([undefined, null, "nyxbot", "invalid", ["billing"], 1])("ignores invalid panel %s", (panel) => {
+  it.each([undefined, null, "invalid", ["billing"], 1])("ignores invalid panel %s", (panel) => {
     expect(parseAccountPanelSearch({ panel, panelTab: "security" })).toEqual({});
   });
   it("uses shared settings validation and defaults invalid tabs", () => {
@@ -23,6 +23,6 @@ describe("account panel search", () => {
     const parsed = withAccountPanelSearch((raw) => ({ tab: raw.tab, machine: raw.machine }))(search);
     expect(parsed).toMatchObject({ tab: "logins", machine: "n", mock: 1, panel: "billing", panelTab: "usage" });
     expect(withoutAccountPanel({ ...parsed })).toEqual({ tab: "logins", machine: "n", mock: 1 });
-    expect(parseAssistantSearch({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "settings" })).toEqual({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "settings" });
+    expect(parseAssistantSearch({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "nyxbot" })).toEqual({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "nyxbot" });
   });
 });

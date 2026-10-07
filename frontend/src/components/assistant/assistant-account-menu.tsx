@@ -7,6 +7,7 @@ import {
   ChartNoAxesCombined,
   LogOut,
   Settings,
+  Settings2,
   SlidersHorizontal,
   WalletCards,
 } from "lucide-react";
@@ -19,12 +20,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAssistantDrawerDismiss } from "@/components/assistant/assistant-drawer-context";
 import { useLogout } from "@/hooks/use-auth";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { isBillingAvailable } from "@/types/api";
 
 export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (panel: AccountPanel, params?: AccountPanelParams) => void }) {
   const user = useAuthStore((state) => state.user);
   const billingAvailable = isBillingAvailable(user);
+  const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const dismissDrawer = useAssistantDrawerDismiss();
   const logout = useLogout();
   const navigate = useNavigate();
@@ -79,6 +83,11 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
           <span className="sr-only"> (opens in Studio)</span>
         </Link>
       </DropdownMenuItem>
+      {nyxagentEnabled ? (
+        <DropdownMenuItem onSelect={() => onPanel("nyxbot")}>
+          <Settings2 aria-hidden="true" />NyxBot settings
+        </DropdownMenuItem>
+      ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuItem asChild>
         <Link to="/dashboard" onClick={activateLink}>

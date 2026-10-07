@@ -150,29 +150,30 @@ test("NyxBot settings confirm destructive actions by default; turning that off d
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await page.getByRole("button", { name: "NyxBot settings" }).click();
-  const dialog = page.getByRole("dialog", { name: "NyxBot settings" });
-  const toggle = dialog.getByRole("switch", { name: "Confirm destructive actions" });
+  const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
+  const toggle = settings.getByRole("switch", { name: "Confirm destructive actions" });
   await expect(toggle).toBeChecked();
-  const save = dialog.getByRole("button", { name: "Save settings" });
+  const save = settings.getByRole("button", { name: "Save settings" });
   await expect(save).toBeDisabled();
   await toggle.click();
   await expect(toggle).not.toBeChecked();
-  await expect(dialog.getByRole("alert")).toContainText("without asking you first");
+  await expect(settings.getByRole("alert")).toContainText("without asking you first");
   await save.click();
   await expect(save).toBeDisabled();
 
   // Channel bots: connect one (to NyxBot by default) and get a one-time owner link.
-  await dialog.getByRole("button", { name: "Connect NyxID Approvals" }).click();
-  const link = dialog.getByRole("region", { name: "Owner link" });
+  await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
+  const link = settings.getByRole("region", { name: "Owner link" });
   await expect(link.getByRole("link", { name: "Open link" })).toHaveAttribute(
     "href",
     /^https:\/\/t\.me\/nyxid_approvals_bot\?start=nyxlink_[a-f0-9]{12}$/,
   );
   await expect(link).toContainText("press Start");
   await expect(
-    dialog.getByRole("list", { name: "Connected channel bots" }),
+    settings.getByRole("list", { name: "Connected channel bots" }),
   ).toContainText("NyxID Approvals");
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "NyxBot settings", exact: true })).toHaveCount(0);
   await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
 
   await sendMessage(page, "Delete agent key ci-bot");
@@ -182,7 +183,7 @@ test("NyxBot settings confirm destructive actions by default; turning that off d
   await page.reload();
   await page.getByRole("button", { name: "NyxBot settings" }).click();
   await expect(
-    page.getByRole("dialog").getByRole("switch", { name: "Confirm destructive actions" }),
+    settings.getByRole("switch", { name: "Confirm destructive actions" }),
   ).not.toBeChecked();
 });
 
@@ -335,15 +336,16 @@ test("NyxBot delegates to a specialist, shows it working in the Team strip, and 
 test("channel bots can be relinked to a specialist", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await page.getByRole("button", { name: "NyxBot settings" }).click();
-  const dialog = page.getByRole("dialog", { name: "NyxBot settings" });
-  await dialog.getByRole("button", { name: "Connect NyxID Approvals" }).click();
-  const connected = dialog.getByRole("list", { name: "Connected channel bots" });
+  const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
+  await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
+  const connected = settings.getByRole("list", { name: "Connected channel bots" });
   const agentFor = connected.getByRole("combobox", { name: "Agent for NyxID Approvals" });
   await expect(agentFor).toContainText("NyxBot");
   await agentFor.click();
   await page.getByRole("option", { name: "researcher" }).click();
   await expect(agentFor).toContainText("researcher");
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "NyxBot settings", exact: true })).toHaveCount(0);
   await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
   const researcher = agentsNav(page).getByRole("button", { name: /^researcher, specialist/ });
   await expect(researcher).toContainText("Telegram");
@@ -360,9 +362,9 @@ test("a bot's chats: who can talk, how it answers, and posting are set per chat"
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await page.getByRole("button", { name: "NyxBot settings" }).click();
-  const dialog = page.getByRole("dialog", { name: "NyxBot settings" });
-  await dialog.getByRole("button", { name: "Connect NyxID Approvals" }).click();
-  const connected = dialog.getByRole("list", { name: "Connected channel bots" });
+  const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
+  await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
+  const connected = settings.getByRole("list", { name: "Connected channel bots" });
   await connected.getByRole("button", { name: "Chats and who can talk" }).click();
   const chats = connected.getByRole("list", { name: "Chats of NyxID Approvals" });
   await expect(chats.getByRole("listitem")).toHaveCount(2);
@@ -384,8 +386,7 @@ test("a bot's chats: who can talk, how it answers, and posting are set per chat"
   await page.getByRole("option", { name: "Anyone" }).click();
   await expect(access).toContainText("Anyone");
   await page.reload();
-  await page.getByRole("button", { name: "NyxBot settings" }).click();
-  const reopened = page.getByRole("dialog", { name: "NyxBot settings" });
+  const reopened = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
   const list = reopened.getByRole("list", { name: "Connected channel bots" });
   await list.getByRole("button", { name: "Chats and who can talk" }).click();
   await expect(

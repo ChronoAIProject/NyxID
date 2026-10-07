@@ -799,6 +799,15 @@ describe("AssistantSidebar account menu", () => {
     },
   );
 
+  it("links to NyxBot settings only in NyxAgent mode", async () => {
+    accountMocks.nyxagent = true;
+    renderSidebar();
+    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
+    await waitFor(() => expect(accountMocks.open).toHaveBeenCalledWith("nyxbot", {}, expect.any(HTMLButtonElement), expect.any(Function)));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("waits for logout before navigating to login", async () => {
     let finish: (() => void) | undefined;
     accountMocks.logout.mockReturnValue(
@@ -817,7 +826,7 @@ describe("AssistantSidebar account menu", () => {
     );
   });
 
-  it.each(["settings", "billing"] as const)(
+  it.each(["settings", "billing", "nyxbot"] as const)(
     "marks the user row active in %s",
     (activeView) => {
       accountMocks.panel = activeView;
