@@ -2646,10 +2646,73 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         }
     };
     Some(serde_json::json!({
+        "title": tool_title(name, services)?,
         "readOnlyHint": read_only,
         "destructiveHint": destructive,
         "openWorldHint": open_world,
     }))
+}
+
+/// Human-readable title for a tool listed by [`generate_tool_definitions`].
+/// The Claude connector directory requires a `title` on every tool; it is
+/// published both as the tool's top-level `title` and in its annotations.
+///
+/// Meta-tools use a fixed table. Service tools combine the service name with
+/// the operation name; generic proxies describe the raw request they send.
+/// Unknown names return `None`.
+pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
+    let fixed = match name {
+        "nyx__search_tools" => "Search service tools",
+        "nyx__call_tool" => "Call a service tool",
+        "nyx__connect_service" => "Connect a service",
+        "nyx__wait_for_connection" => "Wait for a connection",
+        "nyx__discover_services" => "Discover services",
+        "nyx__list_connected_services" => "List connected services",
+        "nyx__ssh_list_services" => "List SSH services",
+        "nyx__ssh_exec" => "Run an SSH command",
+        "nyx__oracle_pools" => "List oracle pools",
+        "nyx__oracle_ask" => "Ask an oracle",
+        "nyx__oracle_attach" => "Import a ChatGPT conversation",
+        "nyx__oracle_extract" => "Extract a web page with an oracle",
+        "nyx__oracle_result" => "Get an oracle task result",
+        "nyx__oracle_session" => "Read an oracle conversation",
+        _ => {
+            let (service, endpoint) = resolve_tool_call(name, services)?;
+            let operation = if service.is_generic_proxy {
+                "Send a request".to_string()
+            } else {
+                humanize_operation_name(&endpoint.name)
+            };
+            return Some(format!("{}: {operation}", service.service_name));
+        }
+    };
+    Some(fixed.to_string())
+}
+
+/// `list_items` / `list-items` / `listItems` -> `List items`; names that
+/// already read as prose (`List repositories`) keep their wording.
+fn humanize_operation_name(name: &str) -> String {
+    let mut words = String::with_capacity(name.len() + 4);
+    let mut previous_lower = false;
+    for c in name.trim().chars() {
+        if c == '_' || c == '-' {
+            words.push(' ');
+            previous_lower = false;
+        } else if c.is_ascii_uppercase() && previous_lower {
+            words.push(' ');
+            words.push(c.to_ascii_lowercase());
+            previous_lower = false;
+        } else {
+            words.push(c);
+            previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        }
+    }
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => "Call operation".to_string(),
+    }
 }
 
 pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolService>> {
@@ -8156,6 +8219,51 @@ mod tests {
     // -- list_connected_services tests --
 
     #[test]
+    fn plugin_skill_only_names_real_annotated_meta_tools() {
+        // The Claude and Codex plugin skills are rendered from this template by
+        // scripts/sync-plugins.py. Renaming or removing a meta tool must fail
+        // here instead of shipping a skill that tells agents to call it.
+        const SKILL: &str =
+            include_str!("../../../integrations/plugin-source/skills/nyxid/SKILL.md");
+        let defined: HashSet<String> = generate_tool_definitions(&[], None)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let named: std::collections::BTreeSet<String> = SKILL
+            .match_indices("nyx__")
+            .map(|(start, _)| {
+                SKILL[start..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+                    .collect()
+            })
+            .collect();
+        assert!(!named.is_empty(), "plugin skill names no MCP tools");
+        for name in &named {
+            assert!(
+                defined.contains(name),
+                "plugin skill names unknown MCP tool {name}"
+            );
+            assert!(
+                tool_annotations(name, &[]).is_some(),
+                "plugin skill names {name}, which has no annotations"
+            );
+        }
+    }
+
+    #[test]
+    fn humanize_operation_name_reads_as_prose() {
+        assert_eq!(humanize_operation_name("list_items"), "List items");
+        assert_eq!(humanize_operation_name("create-issue"), "Create issue");
+        assert_eq!(humanize_operation_name("getUserRepos"), "Get user repos");
+        assert_eq!(
+            humanize_operation_name("List repositories"),
+            "List repositories"
+        );
+        assert_eq!(humanize_operation_name("  "), "Call operation");
+    }
+
+    #[test]
     fn tool_annotations_cover_every_meta_tool_with_boolean_hints() {
         for tool in generate_tool_definitions(&[], None) {
             let annotations = tool_annotations(&tool.name, &[])
@@ -8167,6 +8275,11 @@ mod tests {
                     tool.name
                 );
             }
+            assert!(
+                annotations["title"].as_str().is_some_and(|t| !t.is_empty()),
+                "{} is missing a title",
+                tool.name
+            );
         }
         let call_tool = tool_annotations("nyx__call_tool", &[]).unwrap();
         assert_eq!(call_tool["destructiveHint"], true);
@@ -8215,6 +8328,12 @@ mod tests {
         let generic = [generic];
         let a = tool_annotations("items__list_items", &generic).unwrap();
         assert_eq!(a["destructiveHint"], true);
+        assert_eq!(a["title"], "Proxy: Send a request");
+
+        assert_eq!(
+            tool_annotations("items__remove_item", &services).unwrap()["title"],
+            "Items: Remove item"
+        );
     }
 
     #[test]
