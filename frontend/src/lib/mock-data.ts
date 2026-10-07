@@ -3086,7 +3086,15 @@ const MOCK_HANDLERS: MockHandler[] = [
   (p) => (p.match(/^\/llm\/status/) ? MOCK_LLM_STATUS : undefined),
 
   // Public config
-  (p) => (p === "/public/config" ? MOCK_PUBLIC_CONFIG : undefined),
+  (p) =>
+    p === "/public/config"
+      ? new URLSearchParams(window.location.search).get("mock") === "hosted"
+        ? {
+            ...MOCK_PUBLIC_CONFIG,
+            mcp_url: "https://nyx-api.chrono-ai.fun/mcp",
+          }
+        : MOCK_PUBLIC_CONFIG
+      : undefined,
 
   // Auth device-code login
   (p) => {

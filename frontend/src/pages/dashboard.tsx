@@ -5,6 +5,9 @@ import { useApiKeys } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useProxyOnboarding } from "@/hooks/use-proxy-onboarding";
+import { usePublicConfig } from "@/hooks/use-public-config";
+import { AgentPluginsSection } from "@/components/dashboard/agent-plugins-section";
+import { HOSTED_MCP_URL } from "@/lib/agent-plugins";
 import { useRightPanel } from "@/components/layout/dashboard-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -41,6 +44,7 @@ export function DashboardPage() {
   const { data: apiKeys, isLoading: keysLoading } = useApiKeys();
   const { data: services, isLoading: servicesLoading } = useKeys();
   const { data: nodes, isLoading: nodesLoading } = useNodes();
+  const { data: publicConfig } = usePublicConfig();
   const { setRightPanel } = useRightPanel();
   const { firstProxyCallSucceeded, verifyKeyLoading } = useProxyOnboarding();
 
@@ -256,6 +260,8 @@ export function DashboardPage() {
           />
         </div>
       </div>
+
+      {publicConfig?.mcp_url === HOSTED_MCP_URL && <AgentPluginsSection />}
 
       {/* Right panel content — inline on mobile/tablet, hidden on lg+ (shown in sidebar) */}
       <div className="flex flex-col gap-4 lg:hidden">

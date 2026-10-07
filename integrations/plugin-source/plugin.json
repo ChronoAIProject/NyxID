@@ -1,0 +1,50 @@
+{
+  "name": "nyxid",
+  "version": "0.9.0",
+  "mcp_url": "https://nyx-api.chrono-ai.fun/mcp",
+  "homepage": "https://nyx.chrono-ai.fun",
+  "repository": "https://github.com/ChronoAIProject/NyxID",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "ChronoAI",
+    "url": "https://nyx.chrono-ai.fun"
+  },
+  "support_url": "https://github.com/ChronoAIProject/NyxID/issues",
+  "privacy_url": "https://nyx.chrono-ai.fun/privacy",
+  "terms_url": "https://nyx.chrono-ai.fun/terms",
+  "manage_access_url": "https://nyx.chrono-ai.fun/settings/consents",
+  "stores": {
+    "claude": {
+      "package": "integrations/claude-plugin",
+      "clients": "Claude",
+      "assistant": "Claude",
+      "description": "Connect services through NyxID's credential broker and call their APIs without exposing API keys or OAuth tokens to Claude.",
+      "keywords": ["nyxid", "credentials", "oauth", "mcp", "connectors"],
+      "icon": "./assets/icon.svg",
+      "documentation_url": "https://github.com/ChronoAIProject/NyxID/blob/main/integrations/claude-plugin/README.md"
+    },
+    "codex": {
+      "package": "integrations/codex-plugin",
+      "clients": "ChatGPT and Codex",
+      "assistant": "The assistant",
+      "description": "Use NyxID to connect services and access them through its credential broker.",
+      "keywords": ["nyxid", "credentials", "oauth", "mcp"],
+      "interface": {
+        "displayName": "NyxID",
+        "shortDescription": "Connect services with NyxID",
+        "longDescription": "Use NyxID to discover connected services, start a hosted connection, and invoke authorized operations through its credential broker. Sign-in and credential entry happen on NyxID's website. Available actions depend on your account's service grants and approval settings.",
+        "developerName": "ChronoAI",
+        "category": "Developer Tools",
+        "capabilities": ["Discover connections", "Use authorized service tools"],
+        "defaultPrompt": [
+          "Show my connected NyxID services.",
+          "Help me connect a service in NyxID.",
+          "List my GitHub repositories through NyxID."
+        ],
+        "composerIcon": "./assets/composer-icon.svg",
+        "logo": "./assets/logo.svg"
+      },
+      "release_notes": "Ships a single MCP-first NyxID skill instead of the CLI skill family, declares behavior hints on every tool, and explains how to share more services with the app."
+    }
+  }
+}

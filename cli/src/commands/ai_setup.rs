@@ -39,10 +39,24 @@ const PLUGIN_MARKETPLACE_SOURCE: &str = "ChronoAIProject/NyxID";
 /// Marketplace name declared in `.claude-plugin/marketplace.json`.
 const PLUGIN_MARKETPLACE_NAME: &str = "nyxid";
 
-/// `<plugin>@<marketplace>` spec for the bundled NyxID plugin, which ships
-/// every repo skill (nyxid, the aevatar family, github/firecrawl-via-nyxid,
-/// the Ornn manual, ...), not just `skills/nyxid`.
-const PLUGIN_SPEC: &str = "nyxid@nyxid";
+/// `<plugin>@<marketplace>` spec for the CLI edition of the NyxID plugin,
+/// which ships every repo skill (nyxid, the aevatar family,
+/// github/firecrawl-via-nyxid, the Ornn manual, ...), not just `skills/nyxid`.
+/// The marketplace's `nyxid` plugin is the hosted-MCP package submitted to the
+/// Claude directory; this command installs the CLI skills instead.
+const PLUGIN_SPEC: &str = "nyxid-cli@nyxid";
+
+/// Before the rename, `nyxid ai-setup` installed the CLI edition as
+/// `nyxid@nyxid`. That name now belongs to the hosted-MCP package, whose first
+/// version is 0.9.0, so an installed `nyxid@nyxid` below it is the old CLI
+/// bundle and is replaced by [`PLUGIN_SPEC`].
+const LEGACY_CLI_PLUGIN_SPEC: &str = "nyxid@nyxid";
+const FIRST_MCP_PLUGIN_VERSION: (u64, u64, u64) = (0, 9, 0);
+
+/// Status label of the Claude Code CLI-edition plugin row. Its presence comes
+/// from Claude Code's plugin registry, not the cache directory, which Claude
+/// Code keeps for a while after an uninstall.
+const CLAUDE_PLUGIN_STATUS_LABEL: &str = "plugin (all skills)";
 
 /// The default hosted NyxID URL used in the repo's SKILL.md.
 /// Replaced with the user's actual server URL at install time.
@@ -318,9 +332,10 @@ fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
     match tool {
         AiToolTarget::ClaudeCode => Ok(vec![
             (
-                "plugin (all skills)".into(),
-                home.join(".claude/plugins/marketplaces")
-                    .join(PLUGIN_MARKETPLACE_NAME),
+                CLAUDE_PLUGIN_STATUS_LABEL.into(),
+                home.join(".claude/plugins/cache")
+                    .join(PLUGIN_MARKETPLACE_NAME)
+                    .join(PLUGIN_SPEC.split('@').next().unwrap_or(PLUGIN_SPEC)),
             ),
             (
                 "skill (legacy)".into(),
@@ -508,7 +523,7 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
             eprintln!(
                 "Use /nyxid in Claude Code, or just ask about NyxID and it activates automatically."
             );
-            if claude_plugin_marketplace_present() {
+            if claude_cli_plugin_present() {
                 eprintln!(
                     "Installed via the plugin marketplace: every bundled skill (nyxid, the aevatar family, github-via-nyxid, ...) is available, and `claude plugin update {PLUGIN_SPEC}` keeps them current."
                 );
@@ -597,13 +612,86 @@ fn run_claude(args: &[&str]) -> Result<()> {
     );
 }
 
-/// True when the NyxID plugin marketplace has been added to Claude Code.
-fn claude_plugin_marketplace_present() -> bool {
-    home_dir().is_ok_and(|home| {
-        home.join(".claude/plugins/marketplaces")
-            .join(PLUGIN_MARKETPLACE_NAME)
-            .exists()
+/// Whether a `skill_paths` entry is installed. The Claude Code plugin row is
+/// read from the plugin registry; every other entry is a file on disk.
+fn skill_entry_installed(tool: AiToolTarget, label: &str, path: &Path) -> bool {
+    if tool == AiToolTarget::ClaudeCode && label == CLAUDE_PLUGIN_STATUS_LABEL {
+        claude_cli_plugin_present()
+    } else {
+        path.exists()
+    }
+}
+
+/// Claude Code's registry of installed plugins
+/// (`~/.claude/plugins/installed_plugins.json`), if present and readable.
+fn claude_plugin_registry() -> Option<serde_json::Value> {
+    let path = home_dir()
+        .ok()?
+        .join(".claude/plugins/installed_plugins.json");
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Installed versions of `spec` (`<plugin>@<marketplace>`) in the registry.
+fn installed_plugin_versions(registry: &serde_json::Value, spec: &str) -> Vec<String> {
+    registry["plugins"][spec]
+        .as_array()
+        .map(|installs| {
+            installs
+                .iter()
+                .filter_map(|install| install["version"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version
+        .split(['-', '+'])
+        .next()?
+        .split('.')
+        .map(|part| part.parse::<u64>().ok());
+    Some((
+        parts.next()??,
+        parts.next()??,
+        parts.next().flatten().unwrap_or(0),
+    ))
+}
+
+/// True when the registry holds the CLI edition under its current name.
+fn cli_plugin_installed(registry: &serde_json::Value) -> bool {
+    !installed_plugin_versions(registry, PLUGIN_SPEC).is_empty()
+}
+
+/// True when the registry holds the pre-rename CLI edition as `nyxid@nyxid`.
+fn legacy_cli_plugin_installed(registry: &serde_json::Value) -> bool {
+    installed_plugin_versions(registry, LEGACY_CLI_PLUGIN_SPEC)
+        .iter()
+        .any(|version| parse_version(version).is_some_and(|v| v < FIRST_MCP_PLUGIN_VERSION))
+}
+
+/// True when the CLI edition is installed under either name.
+fn claude_cli_plugin_present() -> bool {
+    claude_plugin_registry().is_some_and(|registry| {
+        cli_plugin_installed(&registry) || legacy_cli_plugin_installed(&registry)
     })
+}
+
+/// Replace a pre-rename `nyxid@nyxid` CLI install once [`PLUGIN_SPEC`] is
+/// installed, so the old bundle does not linger beside it (and a later
+/// `claude plugin update nyxid@nyxid` cannot silently swap it for the MCP
+/// package).
+fn remove_legacy_cli_plugin() {
+    if !claude_plugin_registry().is_some_and(|registry| legacy_cli_plugin_installed(&registry)) {
+        return;
+    }
+    match run_claude(&["plugin", "uninstall", LEGACY_CLI_PLUGIN_SPEC]) {
+        Ok(()) => eprintln!(
+            "  Replaced the earlier {LEGACY_CLI_PLUGIN_SPEC} CLI bundle with {PLUGIN_SPEC}. For the hosted MCP connection, run `claude plugin install {LEGACY_CLI_PLUGIN_SPEC}`."
+        ),
+        Err(error) => eprintln!(
+            "  Warning: could not uninstall the earlier {LEGACY_CLI_PLUGIN_SPEC} CLI bundle ({error}); run `claude plugin uninstall {LEGACY_CLI_PLUGIN_SPEC}` to remove it."
+        ),
+    }
 }
 
 /// Install every bundled NyxID skill through the Claude Code plugin
@@ -618,6 +706,7 @@ fn try_install_claude_plugin() -> Result<bool> {
     run_claude(&["plugin", "marketplace", "add", PLUGIN_MARKETPLACE_SOURCE])?;
     eprintln!("  Installing plugin {PLUGIN_SPEC} (all bundled skills)...");
     run_claude(&["plugin", "install", PLUGIN_SPEC])?;
+    remove_legacy_cli_plugin();
 
     // The legacy per-skill copy shadows the plugin's `nyxid` skill (personal
     // skills take precedence), so a stale copy would pin users to the old
@@ -911,7 +1000,9 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
     // Check which tools are installed before fetching
     for &t in &tools {
         let paths = skill_paths(t)?;
-        let installed = paths.iter().any(|(_, p)| p.exists());
+        let installed = paths
+            .iter()
+            .any(|(label, p)| skill_entry_installed(t, label, p));
         if installed {
             installed_tools.push(t);
         } else if tool.is_some() {
@@ -934,13 +1025,19 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
         match t {
             AiToolTarget::ClaudeCode => {
                 let plugin_managed = base.trim_end_matches('/') == DEFAULT_HOSTED_URL
-                    && claude_plugin_marketplace_present()
+                    && claude_cli_plugin_present()
                     && claude_cli_available();
                 if plugin_managed {
                     // Plugin-managed: refresh the marketplace clone and the
                     // installed plugin instead of rewriting skill files.
                     run_claude(&["plugin", "marketplace", "update", PLUGIN_MARKETPLACE_NAME])?;
-                    run_claude(&["plugin", "update", PLUGIN_SPEC])?;
+                    // Installs made before the CLI edition was renamed hold
+                    // `nyxid@nyxid`, which is now the MCP package, so the CLI
+                    // edition may not be installed yet.
+                    if run_claude(&["plugin", "update", PLUGIN_SPEC]).is_err() {
+                        run_claude(&["plugin", "install", PLUGIN_SPEC])?;
+                    }
+                    remove_legacy_cli_plugin();
                     eprintln!("  Plugin {PLUGIN_SPEC} updated.");
                 } else {
                     install_claude_code(&content, &base).await?;
@@ -981,7 +1078,7 @@ fn status() -> Result<()> {
         let paths = skill_paths(tool)?;
 
         for (label, path) in &paths {
-            let status_str = if path.exists() {
+            let status_str = if skill_entry_installed(tool, label, path) {
                 let date = std::fs::metadata(path)
                     .and_then(|m| m.modified())
                     .ok()
@@ -1013,13 +1110,70 @@ fn status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_path_is_configured, cargo_setup_command, shell_escape_double_quoted, shell_rc_path,
+        cargo_path_is_configured, cargo_setup_command, cli_plugin_installed,
+        legacy_cli_plugin_installed, parse_version, shell_escape_double_quoted, shell_rc_path,
     };
     use std::{
         fs,
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    fn registry(entries: &[(&str, &str)]) -> serde_json::Value {
+        let mut plugins = serde_json::Map::new();
+        for (spec, version) in entries {
+            plugins
+                .entry(spec.to_string())
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({ "scope": "user", "version": version }));
+        }
+        serde_json::json!({ "version": 2, "plugins": plugins })
+    }
+
+    #[test]
+    fn pre_rename_nyxid_install_is_the_legacy_cli_bundle() {
+        assert!(legacy_cli_plugin_installed(&registry(&[(
+            "nyxid@nyxid",
+            "0.8.7"
+        )])));
+        // 0.9.0+ under `nyxid@nyxid` is the hosted-MCP package, not the CLI bundle.
+        assert!(!legacy_cli_plugin_installed(&registry(&[(
+            "nyxid@nyxid",
+            "0.9.0"
+        )])));
+        assert!(!legacy_cli_plugin_installed(&registry(&[(
+            "nyxid@nyxid",
+            "1.2.3"
+        )])));
+        assert!(!legacy_cli_plugin_installed(&registry(&[])));
+        assert!(!legacy_cli_plugin_installed(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn cli_edition_is_detected_by_its_current_name_only() {
+        assert!(cli_plugin_installed(&registry(&[(
+            "nyxid-cli@nyxid",
+            "0.8.8"
+        )])));
+        assert!(!cli_plugin_installed(&registry(&[(
+            "nyxid@nyxid",
+            "0.9.0"
+        )])));
+        assert!(!cli_plugin_installed(&registry(&[(
+            "nyxid-cli@other",
+            "0.8.8"
+        )])));
+    }
+
+    #[test]
+    fn parse_version_handles_prerelease_and_short_forms() {
+        assert_eq!(parse_version("0.8.7"), Some((0, 8, 7)));
+        assert_eq!(parse_version("0.9.0-rc.1"), Some((0, 9, 0)));
+        assert_eq!(parse_version("1.2"), Some((1, 2, 0)));
+        assert_eq!(parse_version("unknown"), None);
+    }
 
     #[test]
     fn cargo_path_detection_matches_default_home_entries() {

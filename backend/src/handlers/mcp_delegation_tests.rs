@@ -489,7 +489,7 @@ async fn mcp_delegation_service_account_keeps_its_subject_not_its_owner() {
     let sid = f
         .state
         .mcp_sessions
-        .create_with_proxy_access(&sa.id, true)
+        .create_with_proxy_access(&sa.id, true, false)
         .await
         .unwrap()
         .unwrap();
