@@ -1,3 +1,4 @@
+pub mod access_denial;
 pub mod skill_draft;
 pub mod voice_start;
 use axum::http::StatusCode;
@@ -103,6 +104,13 @@ pub enum AppError {
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
+
+    /// Same forbidden / 1002 response with additive, fixed recovery metadata.
+    #[error("Forbidden: {message}")]
+    ForbiddenWithGuidance {
+        message: String,
+        guidance: Box<access_denial::AccessDenial>,
+    },
 
     #[error("Not found: {0}")]
     NotFound(String),
@@ -750,6 +758,15 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Generic policy refusals, with or without additive recovery guidance.
+    /// Specialized 403 errors retain their own control-flow semantics.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(
+            self,
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. }
+        )
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
@@ -761,7 +778,7 @@ impl AppError {
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive => StatusCode::CONFLICT,
@@ -980,7 +997,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
-            Self::Forbidden(_) => 1002,
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
@@ -1240,7 +1257,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
-            Self::Forbidden(_) => "forbidden",
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
@@ -1494,6 +1511,13 @@ impl AppError {
             AppError::SkillDraftValidation(diagnostic) => {
                 Some(serde_json::to_value(diagnostic).expect("fixed skill draft diagnostic"))
             }
+            AppError::ForbiddenWithGuidance { guidance, .. } => {
+                Some(serde_json::to_value(guidance).expect("fixed access denial metadata"))
+            }
+            AppError::Unauthorized(_) | AppError::AuthenticationFailed(_) => {
+                Some(serde_json::json!({"reason":"authentication_failed"}))
+            }
+            AppError::TokenExpired => Some(serde_json::json!({"reason":"credential_expired"})),
             AppError::ServicePoolAttemptsExhausted { attempts }
             | AppError::ServicePoolDeadlineExceeded { attempts } => {
                 Some(serde_json::json!({ "attempts": attempts }))
@@ -1578,6 +1602,28 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[test]
+    fn generic_forbidden_classification_includes_guidance_only() {
+        for error in [
+            AppError::Forbidden("Denied".into()),
+            AppError::unsupported_credential("Denied", access_denial::CredentialType::ApiKey),
+            AppError::insufficient_scope("Denied"),
+        ] {
+            assert!(error.is_forbidden());
+            assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), 1002);
+            assert_eq!(error.error_key(), "forbidden");
+            assert_eq!(error.to_string(), "Forbidden: Denied");
+        }
+        for error in [
+            AppError::Unauthorized("Invalid".into()),
+            AppError::NotFound("Missing".into()),
+            AppError::ApiKeyScopeForbidden("Specialized".into()),
+        ] {
+            assert!(!error.is_forbidden());
+        }
+    }
 
     #[tokio::test]
     async fn request_body_too_large_has_structured_413_contract() {

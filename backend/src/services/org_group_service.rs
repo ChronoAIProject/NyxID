@@ -95,7 +95,7 @@ pub async fn authorize(
         org::resolve_key_access(db, actor, Some(&group.user_id))
             .await
             .map_err(|e| match e {
-                AppError::Forbidden(_) => missing(),
+                error if error.is_forbidden() => missing(),
                 other => other,
             })?
             .ok_or_else(missing)?
@@ -139,7 +139,7 @@ pub async fn list(db: &Database, actor: &str) -> AppResult<Vec<Access>> {
         if is_org(&row) && !snapshots.contains_key(&row.user_id) {
             let access = match org::resolve_key_access(db, actor, Some(&row.user_id)).await {
                 Ok(access) => access,
-                Err(AppError::Forbidden(_)) => None,
+                Err(error) if error.is_forbidden() => None,
                 Err(error) => return Err(error),
             };
             snapshots.insert(row.user_id.clone(), access);

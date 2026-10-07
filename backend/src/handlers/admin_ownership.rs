@@ -282,7 +282,8 @@ pub async fn authorization(
             platform: row.get_str("platform").ok().map(str::to_owned),
             slug: row.get_str("slug").ok().map(str::to_owned),
         }),
-        Ok(_) | Err(AppError::Forbidden(_) | AppError::NotFound(_)) => None,
+        Ok(_) => None,
+        Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => None,
         Err(error) => return Err(error),
     };
     Ok(Json(TransferAuthorization {

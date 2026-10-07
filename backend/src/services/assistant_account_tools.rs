@@ -445,7 +445,7 @@ pub fn error_result(error: AppError) -> ToolResult {
                     "message": message}),
             };
         }
-        AppError::Forbidden(_) | AppError::Unauthorized(_) => {
+        error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
             "This operation requires a conversation key and human acknowledgement."
         }
         AppError::Conflict(_) => {

@@ -195,7 +195,7 @@ pub(crate) async fn settled(state: &AppState, event_id: &str) {
 async fn process_selected(state: &AppState, event_id: &str, gateway_only: bool) {
     match Box::pin(process_inner(state, event_id, gateway_only)).await {
         Ok(()) => {}
-        Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+        Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => {
             let _ = refuse(state, event_id).await;
         }
         Err(_) => {

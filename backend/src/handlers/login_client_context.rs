@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, header};
 use std::net::{IpAddr, SocketAddr};
 
 pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> AppResult<()> {
-    use crate::mw::auth::AuthMethod;
+    use crate::{errors::access_denial::CredentialType, mw::auth::AuthMethod};
     if !matches!(
         user.auth_method,
         AuthMethod::Session | AuthMethod::AccessToken
@@ -18,8 +18,18 @@ pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> App
         || user.api_key_id.is_some()
         || user.acting_client_id.is_some()
     {
-        return Err(AppError::Forbidden(
-            "A first-party human account session is required".into(),
+        let credential = match user.auth_method {
+            AuthMethod::ApiKey => CredentialType::ApiKey,
+            AuthMethod::Delegated => CredentialType::Delegated,
+            AuthMethod::Relay => CredentialType::Relay,
+            AuthMethod::ServiceAccount => CredentialType::ServiceAccount,
+            _ if user.api_key_id.is_some() => CredentialType::ApiKey,
+            _ if user.acting_client_id.is_some() => CredentialType::Delegated,
+            _ => CredentialType::OauthClient,
+        };
+        return Err(AppError::unsupported_credential(
+            "A first-party human account session is required",
+            credential,
         ));
     }
     Ok(())

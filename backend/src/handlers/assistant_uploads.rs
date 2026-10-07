@@ -190,7 +190,7 @@ mod tests {
                 Request::new(Body::empty()),
             )
             .await;
-            assert!(matches!(result, Err(AppError::Forbidden(_))));
+            assert!(result.is_err_and(|error| error.is_forbidden()));
         }
     }
 }

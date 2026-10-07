@@ -352,7 +352,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 Some(super::assistant_nyxagent::SERVER_TURN_POLICY),permit,Some(&request.id))).await?;
             Ok(())
         }).await;
-        if matches!(result, Err(AppError::NotFound(_) | AppError::Forbidden(_)))
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is_forbidden() || matches!(error, AppError::NotFound(_)))
             || request.expires_at <= chrono::Utc::now()
         {
             state

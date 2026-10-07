@@ -16,6 +16,14 @@ Authentication resolves the live parent key for scopes, service/node restriction
 
 Login credential labels combine the sanitized client hostname and requested profile (up to 96 characters), so separate profiles on one machine remain identifiable. Public preview exposes request context and status only; key metadata is available through authenticated selection and self routes or credential delivery. Approval, denial, and delivery audits retain the actor's IP and user agent, with the request ID linking the events. A failed expiry cleanup is logged and retained for retry while the sweep continues processing other exchanges.
 
+### Channel list credential boundaries
+
+An Agent Key login does not authorize the human management commands `nyxid channel-bot list` or `nyxid channel-event channel list`. These require human account access (session cookie or account access token): personal lists are owner-scoped and `--org` requires org-admin access. Their existing OAuth-client account policy is unchanged; first-party-only routes separately reject OAuth-client tokens. To use a management list, ask a human to run `nyxid login` and choose account access, or explicitly select an existing human profile. Never fall back to another identity, create credentials or widen permissions automatically.
+
+Agents already have a narrower read-only discovery path: `GET /api/v1/channel-relay/conversations?page=1&per_page=50`, authenticated with the assigned active API key. It lists only that exact key's active conversation assignments, including device channels (`platform=device`). It does not list all bots, grant management access or discover other keys' assignments. There is no separate channel-event discovery endpoint. No assignments means an empty list.
+
+Unsupported credential types return the same 403, `forbidden` / `1002` and message as before, with additive `details.reason = credential_type_unsupported`, `credential_type`, `accepted: ["user_session"]` and a safe hint. The accepted value describes human account recovery, not a scope or resource grant. CLI text and JSON expose that reason plus manual guidance; the two list commands also point to the assigned-conversation route. Scope failures use `insufficient_scope`; resource permission failures are not mislabelled as credential-type failures. Authentication failures use 401 with `authentication_failed` or `credential_expired` when expiry is reported. Deny-only route guards run before credential verification, so their type-based 403 makes no claim about validity (even an expired API-key-shaped token is rejected there before authentication). See [Error Format](API.md#error-format).
+
 ## Asset ownership transfer
 
 General Agent Keys with `write` or `admin` scope and `allow_all_services=true`

@@ -48,7 +48,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
     match err {
         AppError::BadRequest(_) | AppError::CredentialUnavailable(_) => (400, 1000),
         AppError::Unauthorized(_) => (401, 1001),
-        AppError::Forbidden(_) => (403, 1002),
+        error if error.is_forbidden() => (403, 1002),
         AppError::NotFound(_) => (404, 1003),
         AppError::RateLimited => (429, 1005),
         AppError::ServiceConcurrencyLimited => (429, 12600),
@@ -9968,6 +9968,10 @@ mod tests {
         );
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::Forbidden("x".into())),
+            (403, 1002)
+        );
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::insufficient_scope("Missing scope")),
             (403, 1002)
         );
         assert_eq!(
