@@ -1,5 +1,9 @@
 # PostHog OAuth compatibility
 
+For the registered confidential-client connector, follow
+[PostHog OAuth connections](POSTHOG_CONNECTIONS.md). The CIMD approach below
+is the separate public-client implementation plan.
+
 Checked against PostHog's current documentation and live authorization-server
 metadata on 2026-10-07. PostHog supports OAuth 2.0 authorization-code connections
 for third-party apps, S256 PKCE, refresh tokens, and token revocation.

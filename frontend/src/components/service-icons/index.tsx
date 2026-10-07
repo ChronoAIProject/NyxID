@@ -38,6 +38,8 @@ import ApiGoogleDocsIcon from "./api-google-docs";
 import ApiGoogleSheetsIcon from "./api-google-sheets";
 import ApiGoogleSlidesIcon from "./api-google-slides";
 import ApiNotionIcon from "./api-notion";
+import ApiPosthogIcon from "./api-posthog";
+import ApiPosthogEuIcon from "./api-posthog-eu";
 import ApiGoogleCloudIcon from "./api-google-cloud";
 import ApiGithubIcon from "./api-github";
 import ApiGithubPatIcon from "./api-github-pat";
@@ -139,6 +141,8 @@ export const SPEC_CATALOG_SLUGS = [
   "api-google-slides",
   "api-google-cloud",
   "api-notion",
+  "api-posthog",
+  "api-posthog-eu",
   "api-github",
   "api-github-pat",
   "api-facebook",
@@ -240,6 +244,10 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-google-slides": ApiGoogleSlidesIcon,
   "api-google-cloud": ApiGoogleCloudIcon,
   "api-notion": ApiNotionIcon,
+  "api-posthog": ApiPosthogIcon,
+  "api-posthog-eu": ApiPosthogEuIcon,
+  posthog: ApiPosthogIcon,
+  "posthog-eu": ApiPosthogEuIcon,
   "api-github": ApiGithubIcon,
   "api-github-pat": ApiGithubPatIcon,
   "api-facebook": ApiFacebookIcon,
@@ -324,7 +332,9 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
     | "aurinko"
     | "supabase-management"
     | "cloudflare"
-    | "railway",
+    | "railway"
+    | "posthog"
+    | "posthog-eu",
     IconComponent
   >
 >;
