@@ -129,6 +129,15 @@ Applied selections are displayed below the controls using the audit log's shared
 Names resolve independently of the search results, including after reload. The
 custom time range starts with the currently selected relative window.
 
+Acting-user and billing-account filters include service accounts by their full
+configured names. List identities, chart slices and series, and admin audit-log
+subjects resolve people and organizations from `users` and service accounts from
+`service_accounts` using batched, projected reads. Deactivated service accounts
+still resolve for historical reports. Names are current display metadata; the
+stored UUIDs, usage attribution, and audit-chain entries are preserved. Missing
+identities retain the existing unknown-user or UUID fallback. Audit substring
+search and User ID filters continue to match stored IDs.
+
 Synthetic data is restricted to `import.meta.env.DEV && import.meta.env.MODE ===
 "test"`. Playwright launches Vite with `--mode test` and exercises its fixtures at
 `/admin/usage?mock=1&sample=overview|operations|explorer`. The test fixture banner

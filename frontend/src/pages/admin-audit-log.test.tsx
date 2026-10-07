@@ -172,6 +172,28 @@ describe("AdminAuditLogPage", () => {
     expect(screen.getByText("Showing 1-2 of 2 events")).toBeInTheDocument();
   });
 
+  it("renders the resolved service-account name alongside its UUID", () => {
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    const accountName = "Heca production worker for engineering automation";
+    mockUseAdminAuditLog.mockReturnValue({
+      data: {
+        ...auditResponse,
+        entries: auditResponse.entries.map((entry) => ({
+          ...entry,
+          user_display_name: entry.user_id === accountId ? accountName : null,
+        })),
+      },
+      isLoading: false,
+      isFetching: false,
+      isPlaceholderData: false,
+      error: null,
+      refetch: mockRefetch,
+    });
+    render(<AdminAuditLogPage />);
+    expect(screen.getByText(accountName)).toHaveAttribute("title", accountName);
+    expect(screen.getByText(accountId)).toBeInTheDocument();
+  });
+
   it("no longer renders the standalone user-id / api-key-id search form", () => {
     render(<AdminAuditLogPage />);
 
