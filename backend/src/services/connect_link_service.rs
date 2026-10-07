@@ -247,7 +247,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
 }
 
 fn normalize_scopes(scopes: &[String]) -> AppResult<Vec<String>> {
-    // Parse the whole request together so the shared count limit applies across entries.
+    // Parse the whole request together so the shared byte bound applies across entries.
     let mut scopes = user_token_service::parse_additional_scopes(Some(&scopes.join(" ")))?;
     let mut seen = std::collections::HashSet::new();
     scopes.retain(|scope| seen.insert(scope.clone()));
@@ -1693,17 +1693,25 @@ mod tests {
     }
 
     #[test]
-    fn scopes_reuse_shared_character_length_and_total_count_limits() {
+    fn scopes_reuse_shared_character_length_and_total_byte_limits() {
         for raw in [
             vec!["bad<scope>".to_string()],
             vec!["x".repeat(257)],
-            (0..101).map(|i| format!("scope{i}")).collect(),
+            vec!["x".repeat(256); 64],
         ] {
             assert!(matches!(
                 normalize_scopes(&raw),
                 Err(AppError::ValidationError(_))
             ));
         }
+    }
+
+    #[test]
+    fn scopes_accept_large_selections_and_dedupe_in_order() {
+        let expected: Vec<String> = (0..101).map(|i| format!("scope{i}")).collect();
+        let mut raw = expected.clone();
+        raw.push("scope0,scope100".to_string());
+        assert_eq!(normalize_scopes(&raw).unwrap(), expected);
     }
 
     #[tokio::test]
