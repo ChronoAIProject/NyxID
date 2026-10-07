@@ -281,7 +281,7 @@ describe("KeysPage", () => {
       await userEvent.click(
         screen.getByRole("button", { name: /^Expand .+ connections$/ }),
       );
-      const reorder = screen.getByRole("button", { name: "Agent order" });
+      const reorder = screen.getByRole("button", { name: "Reorder discovery" });
       expect(reorder).toBeDisabled();
       expect(reorder).toHaveAttribute("title", "Loading agent order");
       state[pending] = false;

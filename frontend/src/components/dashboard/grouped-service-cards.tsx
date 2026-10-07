@@ -320,6 +320,7 @@ function GroupCard({
     >
       <div
         ref={headerRef}
+        data-service-order-actions
         data-stuck={expanded && headerStuck}
         className={cn(
           "service-card-header",
@@ -492,12 +493,14 @@ function GroupCard({
             </div>
           </div>
           <div
-            data-service-order-actions
             className="flex min-h-12 shrink-0 flex-wrap items-center gap-3 border-t border-border/70 px-4 py-2"
           >
             <Button
               variant="ghost"
               size="sm"
+              className={cn(
+                expanded && !routingOpen && "bg-overlay text-foreground",
+              )}
               onClick={() => {
                 if (expanded && routingOpen) setRoutingOpen(false);
                 else {
@@ -519,36 +522,6 @@ function GroupCard({
                 ? "Hide connections"
                 : `View ${matchingCount} ${matchingCount === 1 ? "connection" : "connections"}`}
             </Button>
-            {ordering ? (
-              <div
-                role="group"
-                aria-label={`Agent order actions for ${group.name}`}
-                className="flex items-center gap-2"
-              >
-                <ServiceOrderActions order={ordering} formId={orderFormId} />
-              </div>
-            ) : (
-              expanded &&
-              agentOrder &&
-              group.id.startsWith("catalog:") &&
-              group.connections.length >= 2 && (
-                <Button
-                  ref={orderButton}
-                  type="button"
-                  size="sm"
-                  variant="primary"
-                  disabled={Boolean(agentOrder.reason)}
-                  title={
-                    agentOrder.reason ??
-                    "Set agent discovery order within this service"
-                  }
-                  onClick={() => agentOrder.start(group)}
-                >
-                  <ListOrdered className="size-3.5" aria-hidden="true" />
-                  Agent order
-                </Button>
-              )
-            )}
             <div className="ml-auto flex flex-wrap items-center gap-2 pr-2">
               {matchingCount < count && (
                 <span className="text-11 text-muted-foreground">
@@ -565,6 +538,33 @@ function GroupCard({
               </Link>
             </div>
           </div>
+          {expanded && agentOrder && (
+            <ServiceAgentOrderPanel
+              group={group}
+              order={agentOrder}
+              actions={
+                ordering ? (
+                  <ServiceOrderActions order={ordering} formId={orderFormId} />
+                ) : (
+                  <Button
+                    ref={orderButton}
+                    type="button"
+                    size="sm"
+                    variant="primary"
+                    disabled={Boolean(agentOrder.reason)}
+                    title={
+                      agentOrder.reason ??
+                      "Reorder discovery within this service"
+                    }
+                    onClick={() => agentOrder.start(group)}
+                  >
+                    <ListOrdered className="size-3.5" aria-hidden="true" />
+                    Reorder discovery
+                  </Button>
+                )
+              }
+            />
+          )}
         </div>
       </div>
       <div
@@ -578,13 +578,6 @@ function GroupCard({
               <p className="p-3 text-11 text-muted-foreground">
                 Kept visible while ordering
               </p>
-            )}
-            {agentOrder && (
-              <ServiceAgentOrderPanel
-                group={group}
-                order={agentOrder}
-                hasPool={pools.length > 0}
-              />
             )}
             {routingOpen && !ordering ? (
               <>

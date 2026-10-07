@@ -771,3 +771,156 @@ All three renewed nits and the second CI rendering timeout are corrected
 locally. ROOT reviewed the explicit AC-33 security rule and provenance;
 fresh final-head CI and the literal aggregate/analysis/alert evidence plus
 Opus sign-off remain required before marking PR #1796 ready.
+
+### Interim discovery summary placement revision
+
+CI workflow `37578725903` completed successfully on published `a60afb9c`,
+including backend tests and both backend coverage jobs, normal Frontend,
+Coverage (Frontend), CLI tests and coverage, wizard freshness and CI Pipeline.
+ROOT inspected the completed checks; Opus independently confirmed the same
+result. Together with CodeQL workflow `37578725940`, the four zero-result
+merge analyses and literal neutral aggregate `112653487531`, this closes the
+previous coverage/security validation on that head. These are historical
+results because the user then asked to move Agent order beside the discovery
+summary. They do not substitute for checks on the revised publication.
+
+ROOT personally reviewed the new shared summary/disclosure split and both
+call sites. The compact summary and one action group sit below Hide connections
+on cards and below the overview tabs. Explicit gaps keep controls next to the
+summary; narrow layouts wrap them directly below it. The shared summary owns
+the existing loading/read-error/404 feedback and Retry. The full explanation
+remains in normal flow, so opening it cannot cover the connection table with
+a tall sticky header. Both surfaces retain their CTA refs and focus effects.
+The native external Save still targets the dedicated order form, and its
+nearest `data-service-order-actions` ancestor now covers the complete sticky
+surface used by the existing repeated-error reveal calculation. The card's
+ResizeObserver measures that same complete header. The original Hide
+connections chevron and row interactions are unchanged.
+
+ROOT inspected actual idle desktop-card and mobile-overview screenshots and
+scrolled mobile-card and desktop-overview editing screenshots from
+`/tmp/nyxid-service-preference-discovery-row-final-browser-results/`.
+They show the CTA or Agent order/Cancel/Save beside the discovery summary,
+natural wrapping with aligned left edges, readable controls and a visible
+table beneath the sticky cover. The real-route width cases also check physical
+proximity, open explanation scrolling, native form association, raw mouse Save,
+keyboard Cancel, focus return and repeated failed-save visibility. The initial
+browser attempt's missing working directory and the initial unit harness's
+obsolete panel usage are recorded as failed attempts, not passing evidence;
+their corrected executions use separate recheck logs.
+
+Opus's additional wording nit on `a60afb9c` was accepted: the plan must refer to
+the published nit corrections by their commit, rather than calling them an
+unpublished follow-up. The updated plan and architecture contract reflect the
+new discovery-row placement. Fresh frozen-source validation, exact published
+head checks and final Opus plan/implementation/delivery approval remain the
+publication gates. Their completed evidence will be recorded in PR metadata
+without a source-only evidence commit after approval.
+
+Opus's early review independently confirmed the revised implementation and
+returned two plan corrections: the old body placement in §5.2 and the error
+reveal's reference to an action bar rather than the complete sticky section.
+ROOT accepted both. Opus also observed the existing expanded mobile card
+header's height; ROOT verified that the requested placement still leaves
+visible connection rows, operable actions and unobscured repeated errors at
+390px. The open explanation scrolls away. No unrelated header compaction is
+needed to satisfy this change. An initial screenshot caught a view-transition
+snapshot; ROOT inspected the final-run replacement screenshots, which are clear.
+
+### Compact settings row and on-demand help
+
+The user subsequently rejected the dense explanation, the separate summary
+and help rows, and the combined inline disclosure. Those intermediate layouts
+and their passing checks above are historical. ROOT directed a compact shared
+settings row: preferred connection and counts, one Agent order or editing
+action group, and a quiet How it works popover trigger. The long inline
+explanation is removed from the connection table. The new help contains three
+short rules, the existing Service Pools link and brief conditional protocol
+and gateway notes. Technical discovery, rank, credential and execution
+contracts remain in the architecture/API documentation and unchanged code.
+
+ROOT personally reviewed the consolidated `ServiceAgentOrderPanel`, both
+sticky call sites and the updated tests. One semantic section now owns the
+summary, controls, status/Retry and help. The popover uses the existing shared
+Radix primitive, a labelled heading, viewport width and available-height bounds,
+and normal Escape/outside-click dismissal. Its portal contributes no height to
+the sticky section. The original Hide connections chevron is retained; the
+help trigger uses the same ChevronRight geometry and open rotation. The prior
+join-specific borders/shadows and separate body disclosure are removed.
+Dedicated native order forms, external Save, complete-cover error measurement,
+focus restoration and shrinking-inventory Cancel remain intact.
+
+ROOT inspected dark-mode idle desktop-card, open desktop-card help, open mobile
+editing help and scrolled mobile-overview screenshots in
+`/tmp/nyxid-service-preference-settings-row-focused-browser-results/`. The
+default view presents one compact settings row directly above the table,
+with no permanent help row or explanation wall. Mobile editing keeps Agent
+order, Cancel, Save and How it works together. The bounded help is readable
+and stays inside the viewport; closing it restores the table view.
+Final frozen-source logs, exact-head CI/security evidence and Opus approval
+remain required before publication is marked ready.
+
+### Info tooltip and explicit discovery CTA
+
+The user's next screenshot review supersedes the popover requirement above:
+the primary entry is **Reorder discovery**, the editing context is **Discovery
+order**, and help uses the usual Info icon and Tooltip. Hide connections keeps
+the existing ghost button's hover appearance while expanded, scoped to this
+page's card call site. The exact connection chevron and shared Button remain
+unchanged. The former popover evidence is historical and cannot close the
+latest UI criteria. Noninteractive tooltip copy replaces the popup-only pool
+link; existing Service Pools navigation and routing remain available through
+their original controls.
+
+ROOT fetched and integrated main `f0d06a72` (plugin/MCP update #1789) in merge
+`631b4994`, preserving the uncommitted UI changes and user attachments. Personal
+review of the auto-merged MCP source confirms search and list-connected still
+use the preferred loader, which retains the original loader vector, scoped
+guest filtering and native rows with null rank. New tool titles and bearer
+session restrictions retain their main implementation. Fresh merged-source
+backend feature execution and final UI/build/wizard checks are in progress;
+publication, exact-head security evidence and Opus approval remain pending.
+
+After the daemon restart, ROOT checked the disconnected implementation worker
+and sent a recovery prompt. The provider restarted successfully and the worker
+confirmed it could retain implementation and local-validation ownership. The
+user's requested Opus 5.5 fallback was therefore unnecessary. Missing temporary
+validation resources were recreated; old log references remain historical.
+
+Opus reviewed the merged working tree independently and confirmed the compact
+settings row, CTA names, status live regions, tooltip copy and scoped Hide
+connections styling. ROOT accepted its tooltip interaction finding: mouse
+clicks after hover and keyboard activation after focus must keep help open;
+only touch taps toggle it. The worker implemented that distinction and added
+real-route hover/click and focus/Enter assertions beside the touch coverage.
+ROOT personally inspected the fix, assertions and documentation. Keyboard
+focus wording is explicit. Existing setting/status/form strings deliberately
+retain "agent order" while the entry and editing labels use discovery wording.
+
+Fresh focused validation passes 100 tests across ten files. Production build,
+lint (zero errors, 29 unrelated warnings), formatting and regenerated wizard
+build pass. These are local results, not published-head approval. The earlier
+30-scenario browser pass predates the modality fix and remains historical.
+The first full coverage attempt hit an unrelated usage-router timeout; that
+failure is preserved and does not count as passing coverage. Complete frozen
+browser/coverage, merged backend/CLI execution, wizard freshness, published-head
+CI/security evidence and renewed Opus delivery approval remain pending.
+
+ROOT independently verified the completed recovery evidence in §18: complete
+Node 22 unit and V8 runs pass all 4,777 tests across 467 files, with 73.17%
+line coverage and unchanged thresholds/timeouts. All 30 frozen browser cases
+pass, including the corrected desktop and touch tooltip interactions. ROOT
+inspected the final 390px idle card and 1440px scrolled overview editing/help
+screenshots; controls, rows and bounded help remain readable. Node 22 production
+and wizard builds and lint pass; the wizard bytes match the browser-tested
+bundle. Backend preference tests pass 14/14, neighboring filters pass 5+1+1,
+and CLI unit/subprocess/transport/freshness checks pass 3+4+4+1, all with zero
+ignored tests. Formatting and backend/CLI all-target Clippy with `-D warnings`
+pass. The earlier failed coverage run and interrupted timestamp-only rebuild
+remain separately recorded; neither is represented as passing evidence.
+
+The worker's final source binding matches the reviewed tracked changes; only
+this ROOT-owned evidence addition follows it. ROOT closes the accepted source
+findings and local validation gates. Publication, CI/security on that exact
+published head, and Opus delivery approval remain pending. Attachments remain
+outside the commit.

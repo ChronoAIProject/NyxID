@@ -10,7 +10,7 @@ export function ServiceOrderActions({
 }) {
   return (
     <>
-      <span className="text-12 font-medium">Agent order</span>
+      <span className="text-12 font-medium">Discovery order</span>
       <Button
         type="button"
         variant="outline"

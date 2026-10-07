@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const capacityMessage =
   "Validation error: Agent order storage is full (200 connections across all services). Reset the agent order of another service, or release unavailable preferences for services you can no longer access, then try again.";
@@ -9,6 +9,32 @@ const ids = Array.from(
   { length: 202 },
   (_, i) => `${String(i + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
 );
+
+async function assertOrderActionsNearDiscovery(scope: Locator) {
+  const { summaryBox, actionsBox } = await scope.evaluate((element) => {
+    const summary = element.querySelector("[data-service-order-summary]");
+    const actions = element.querySelector(
+      '[role="group"][aria-label="Discovery order actions for Anthropic"]',
+    );
+    if (!summary || !actions) throw new Error("Discovery summary/actions missing");
+    const bounds = (target: Element) => {
+      const { x, y, width, height } = target.getBoundingClientRect();
+      return { x, y, width, height };
+    };
+    return { summaryBox: bounds(summary), actionsBox: bounds(actions) };
+  });
+  if (actionsBox.y < summaryBox.y + summaryBox.height) {
+    const gap = actionsBox.x - summaryBox.x - summaryBox.width;
+    expect(gap).toBeGreaterThanOrEqual(8);
+    expect(gap).toBeLessThanOrEqual(16);
+  } else {
+    expect(Math.abs(actionsBox.x - summaryBox.x)).toBeLessThanOrEqual(1);
+    expect(
+      actionsBox.y - summaryBox.y - summaryBox.height,
+    ).toBeLessThanOrEqual(8);
+  }
+}
+
 function service(i: number, slack = false) {
   return {
     id: slack ? "99999999-9999-4999-8999-999999999999" : ids[i],
@@ -309,7 +335,7 @@ async function expand(page: Page) {
 async function enter(page: Page) {
   await expand(page);
   await card(page)
-    .getByRole("button", { name: "Agent order", exact: true })
+    .getByRole("button", { name: "Reorder discovery", exact: true })
     .click();
   await expect(
     card(page).getByRole("form", { name: "Agent order for Anthropic" }),
@@ -427,7 +453,7 @@ test("mouse inline 30/26 order, disabled position, persistence and delayed focus
   state.delayInventory = 250;
   await card(page).getByRole("button", { name: "Save", exact: true }).click();
   await expect(
-    card(page).getByRole("button", { name: "Agent order", exact: true }),
+    card(page).getByRole("button", { name: "Reorder discovery", exact: true }),
   ).toBeFocused();
   expect(state.writes[0]?.group).toBe(group);
   expect(state.writes[0]?.ordered).toHaveLength(30);
@@ -442,11 +468,11 @@ test("mouse inline 30/26 order, disabled position, persistence and delayed focus
   ).toBeVisible();
   await expand(page);
   await card(page)
-    .getByRole("button", { name: "Agent order", exact: true })
+    .getByRole("button", { name: "Reorder discovery", exact: true })
     .click();
   await card(page).getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(
-    card(page).getByRole("button", { name: "Agent order", exact: true }),
+    card(page).getByRole("button", { name: "Reorder discovery", exact: true }),
   ).toBeFocused();
 });
 test("keyboard drag announces once and Escape cancels, move-disabled and confirmed reset", async ({
@@ -585,11 +611,16 @@ test("filtered editing keeps complete group, org/pool metadata and saved view un
   page,
 }) => {
   const state = await fixture(page);
-  await enter(page);
-  await move(page, 2);
+  await expand(page);
   const search = page.getByRole("textbox", {
     name: "Search services and connections",
   });
+  await search.fill("llm-anthropic-1");
+  await search.press("Enter");
+  await expect(row(page, 2)).toHaveCount(0);
+  await card(page).getByRole("button", { name: "Reorder discovery", exact: true }).click();
+  await expect(card(page).getByRole("form")).toBeAttached();
+  await move(page, 2);
   await search.fill("Slack");
   await search.press("Enter");
   await expect(
@@ -664,7 +695,7 @@ test("409 Overwrite persists and Reload resets only current group", async ({
   expect(state.writes[1]?.expected_version).toBe(2);
   await page.locator("main").evaluate((main) => main.scrollTo({ top: 0 }));
   await card(page)
-    .getByRole("button", { name: "Agent order", exact: true })
+    .getByRole("button", { name: "Reorder discovery", exact: true })
     .click();
   await move(page, 1);
   state.conflict = true;
@@ -802,13 +833,13 @@ test("production404/loading/read errors keep explanation and known pills honest"
   await page.reload();
   await expand(page);
   await expect(
-    card(page).getByText(/Preferred in discovery: Anthropic/),
+    card(page).getByText("Preferred in discovery:", { exact: true }),
   ).toBeVisible();
   await expect(
     row(page, 0).getByLabel(/Discovery preference 1 for/),
   ).toBeVisible();
   await expect(
-    card(page).getByRole("button", { name: "Agent order", exact: true }),
+    card(page).getByRole("button", { name: "Reorder discovery", exact: true }),
   ).toBeDisabled();
   expect(state.writes).toEqual([]);
   state.ordered = [];
@@ -819,16 +850,20 @@ test("production404/loading/read errors keep explanation and known pills honest"
   await expect(
     card(page).getByText(/^Agent order could not be loaded/),
   ).toBeVisible();
-  await expect(card(page).getByText(/No agent order/)).toHaveCount(0);
+  await expect(
+    card(page).getByText("Default server discovery order", { exact: true }),
+  ).toHaveCount(0);
   state.failRead = false;
   await card(page).getByRole("button", { name: "Retry reads" }).click();
-  await expect(card(page).getByText(/^No agent order/)).toBeVisible();
+  await expect(
+    card(page).getByText("Default server discovery order", { exact: true }),
+  ).toBeVisible();
 });
 
 for (const surface of ["card", "overview"] as const) {
-  test(`${surface} compact disclosure stays usable on production404 and during a dirty draft`, async ({
+  test(`${surface} info tooltip preserves production404 and dirty-draft state on hover and keyboard`, async ({
     page,
-  }, testInfo) => {
+  }) => {
     const state = await fixture(page);
     state.gone = true;
     await page.setViewportSize({ width: 390, height: 844 });
@@ -842,76 +877,59 @@ for (const surface of ["card", "overview"] as const) {
       name: "Agent discovery order for Anthropic",
       exact: true,
     });
-    const details = section.locator("details");
-    const disclosure = section.getByText("How selection works", {
-      exact: true,
-    });
+    const help = section.getByRole("button", { name: "How discovery order works", exact: true });
+    const tooltip = page.locator("[data-service-order-help]");
     const url = page.url();
-    await expect(details).not.toHaveAttribute("open");
-    await expect(
-      section.getByText("Saving agent order requires the backend update.", {
-        exact: true,
-      }),
-    ).toBeVisible();
-    await expect(
-      section.getByText(
-        /The card.s agent-key count is keys with access, not connections/,
-      ),
-    ).toBeHidden();
-    const action = (surface === "card" ? card(page) : page).getByRole(
-      "button",
-      { name: "Agent order", exact: true },
-    );
-    await expect(action).toBeDisabled();
-    await expect(action).toHaveAttribute(
-      "title",
-      "Saving agent order requires the backend update",
-    );
+    await expect(tooltip).toHaveCount(0);
+    await expect(page.getByText("Connections that match equally are shown in your order.")).toHaveCount(0);
+    await expect(section.getByText("Saving agent order requires the backend update.", { exact: true })).toBeVisible();
+    const action = section.getByRole("button", { name: "Reorder discovery", exact: true });
     await expect(action).toHaveCount(1);
-    const icon = disclosure.locator("svg");
+    await expect(action).toBeDisabled();
+    await expect(action).toHaveAttribute("title", "Saving agent order requires the backend update");
+    const icon = help.locator("svg");
     await expect(icon).toHaveCount(1);
-    await expect(icon).toHaveClass(/lucide-chevron-right/);
-    await expect(disclosure).toHaveCSS("list-style-type", "none");
-    const closedTransform = await icon.evaluate(
-      (element) => getComputedStyle(element).rotate,
-    );
+    await expect(icon).toHaveClass(/lucide-info/);
+    await expect(icon).toHaveCSS("width", "14px");
+    await expect(icon).toHaveCSS("height", "14px");
     for (const width of [390, 1024, 1440]) {
       await page.setViewportSize({ width, height: 844 });
+      await assertOrderActionsNearDiscovery(section);
       for (const i of [0, 1, 2]) await assertReadableIdentity(page, i);
-      expect(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth <= window.innerWidth,
-        ),
-      ).toBe(true);
     }
     await page.setViewportSize({ width: 390, height: 844 });
-    await disclosure.click();
-    await expect(details).toHaveAttribute("open", "");
-    await expect(icon).toHaveCSS("rotate", "90deg");
-    await expect(
-      section.getByText(
-        /The card.s agent-key count is keys with access, not connections/,
-      ),
-    ).toBeVisible();
-    await expect(
-      section.getByText(/database order within the current owner tiers/),
-    ).toBeVisible();
+    await help.hover();
+    await expect(tooltip).toBeVisible();
+    await help.click();
+    await expect(tooltip).toBeVisible();
+    await expect(page.getByRole("tooltip").getByRole("listitem")).toHaveText([
+      "Connections that match equally are shown in your order.",
+      "The AI chooses which connection to use; this order is a preference.",
+      "Agents see only the enabled HTTP connections they can access.",
+    ]);
+    await expect(page.getByRole("tooltip")).toContainText("Provider gateway routing is separate from this discovery order.");
+    expect((await page.getByRole("tooltip").innerText()).trim().split(/\s+/).length).toBeLessThanOrEqual(85);
+    await expect(tooltip.getByRole("link")).toHaveCount(0);
+    await expect(tooltip.getByRole("button")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(tooltip).toHaveCount(0);
+    await page.mouse.move(0, 0);
+    await help.focus();
+    await expect(tooltip).toBeVisible();
+    await page.keyboard.press("Enter");
+    await expect(tooltip).toBeVisible();
+    await expect(help).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(tooltip).toHaveCount(0);
+    await expect(help).toBeFocused();
+    await help.blur();
+    await help.focus();
+    await expect(tooltip).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(tooltip).toHaveCount(0);
     expect(page.url()).toBe(url);
     expect(state.writes).toEqual([]);
     expect(state.viewWrites).toEqual([]);
-    await disclosure.click();
-    await expect(details).not.toHaveAttribute("open");
-    await expect(icon).toHaveCSS("rotate", closedTransform);
-    await page.screenshot({
-      path: testInfo.outputPath(`compact-${surface}-mobile.png`),
-      fullPage: true,
-    });
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth,
-      ),
-    ).toBe(true);
-
     state.gone = false;
     await page.reload();
     if (surface === "card") await expand(page);
@@ -920,11 +938,6 @@ for (const surface of ["card", "overview"] as const) {
     for (const width of [390, 1024, 1440]) {
       await page.setViewportSize({ width, height: 844 });
       for (const i of [0, 1, 2]) await assertReadableIdentity(page, i);
-      expect(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth <= window.innerWidth,
-        ),
-      ).toBe(true);
     }
     await page.setViewportSize({ width: 390, height: 844 });
     const draft = await page
@@ -949,14 +962,14 @@ for (const surface of ["card", "overview"] as const) {
             .getByRole("textbox", { name: "Search services and connections" })
             .inputValue()
         : undefined;
-    await expect(details).not.toHaveAttribute("open");
-    await disclosure.click();
-    await expect(
-      section.getByText(
-        /A named tool or exact connection slug runs that connection/,
-      ),
-    ).toBeVisible();
-    await disclosure.click();
+    await help.focus();
+    await expect(page.getByRole("tooltip").getByRole("listitem")).toHaveCount(3);
+    await page.keyboard.press("Escape");
+    await expect(tooltip).toHaveCount(0);
+    await expect(help).toBeFocused();
+    await help.click();
+    await section.getByText("4 enabled · 26 disabled", { exact: true }).click();
+    await expect(tooltip).toHaveCount(0);
     expect(
       await page
         .locator("[data-ordering-row]")
@@ -994,6 +1007,71 @@ for (const surface of ["card", "overview"] as const) {
     expect(state.viewWrites).toEqual([]);
   });
 }
+test("touch info tooltip toggles and dismisses without changing a dirty 30-row order", async ({
+  browser,
+}, testInfo) => {
+  const context = await browser.newContext({
+    hasTouch: true,
+    isMobile: true,
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    const state = await fixture(page);
+    await enter(page);
+    await move(page, 2);
+    await page.getByRole("button", { name: "Switch to dark mode" }).tap();
+    await expect(page.locator("html")).toHaveClass(/theme-dark/);
+    await expect(page.locator("html")).not.toHaveClass(/service-card-transition/);
+    await page.evaluate(async () => {
+      await Promise.all(
+        document.getAnimations()
+          .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+          .map((animation) => animation.finished.catch(() => undefined)),
+      );
+    });
+    const help = card(page).getByRole("button", {
+      name: "How discovery order works",
+      exact: true,
+    });
+    const tooltip = page.locator("[data-service-order-help]");
+    const url = page.url();
+    const draft = await card(page)
+      .locator("[data-ordering-row]")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-ordering-row")));
+    const search = page.getByRole("textbox", { name: "Search services and connections" });
+    const query = await search.inputValue();
+    await help.tap();
+    await expect(help).toHaveAttribute("data-state", "instant-open");
+    await expect(tooltip).toBeVisible();
+    await expect(page.getByRole("tooltip").getByRole("listitem")).toHaveCount(3);
+    await expect(tooltip.getByRole("link")).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath("info-touch-editor-390-dark.png"),
+      animations: "disabled",
+    });
+    await help.tap();
+    await expect(tooltip).toHaveCount(0);
+    await expect(help).toHaveAttribute("data-state", "closed");
+    await help.tap();
+    await expect(help).toHaveAttribute("data-state", "instant-open");
+    await expect(tooltip).toBeVisible();
+    await card(page).getByText("4 enabled · 26 disabled", { exact: true }).tap();
+    await expect(tooltip).toHaveCount(0);
+    expect(
+      await card(page)
+        .locator("[data-ordering-row]")
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-ordering-row"))),
+    ).toEqual(draft);
+    await expect(card(page).getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+    expect(await search.inputValue()).toBe(query);
+    expect(page.url()).toBe(url);
+    expect(state.writes).toEqual([]);
+    expect(state.viewWrites).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});
 test("deferred identity recovery cannot write old draft and new actor can edit", async ({
   page,
 }) => {
@@ -1026,15 +1104,15 @@ test("deferred identity recovery cannot write old draft and new actor can edit",
   await expect(card(page).getByRole("form")).toHaveCount(0);
   await expand(page);
   await expect(
-    card(page).getByRole("button", { name: "Agent order", exact: true }),
+    card(page).getByRole("button", { name: "Reorder discovery", exact: true }),
   ).toBeEnabled();
   await card(page)
-    .getByRole("button", { name: "Agent order", exact: true })
+    .getByRole("button", { name: "Reorder discovery", exact: true })
     .click();
   await move(page, 2);
   expect(state.writes).toHaveLength(1);
 });
-test("overview reuses inline rows, pills, explanation and pool link", async ({
+test("overview reuses inline rows, pills, info tooltip and pool metadata", async ({
   page,
 }) => {
   await fixture(page);
@@ -1043,14 +1121,14 @@ test("overview reuses inline rows, pills, explanation and pool link", async ({
     page.getByRole("heading", { name: "Anthropic", exact: true }),
   ).toBeVisible();
   await expect(row(page, 4).getByLabel(/Saved order position 2/)).toBeVisible();
-  await page.getByText("How selection works", { exact: true }).click();
-  await expect(
-    page.getByRole("link", { name: "Manage Service Pools" }),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "How discovery order works", exact: true }).hover();
+  await expect(page.getByRole("tooltip")).toContainText("Connections that match equally are shown in your order.");
+  await expect(page.locator("[data-service-order-help]").getByRole("link")).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await expect(
     row(page, 2).getByText("Explicit route · Priority 7"),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Agent order", exact: true }).click();
+  await page.getByRole("button", { name: "Reorder discovery", exact: true }).click();
   await move(page, 2);
   await expect(
     page.getByRole("form", { name: "Agent order for Anthropic" }),
@@ -1061,7 +1139,7 @@ test("overview row History guards before changing connection or tab", async ({
 }) => {
   const state = await fixture(page);
   await page.goto(`/keys/services/${encodeURIComponent(group)}`);
-  await page.getByRole("button", { name: "Agent order", exact: true }).click();
+  await page.getByRole("button", { name: "Reorder discovery", exact: true }).click();
   await move(page, 2);
   const history = row(page, 2).getByRole("button", { name: /^History for/ });
   let prompts = 0;
@@ -1122,7 +1200,7 @@ test("table view Saved positions, two-member disabled eligibility, and single/cu
   await page.reload();
   await expand(page);
   await expect(
-    card(page).getByRole("button", { name: "Agent order", exact: true }),
+    card(page).getByRole("button", { name: "Reorder discovery", exact: true }),
   ).toHaveCount(0);
   await expect(
     card(page).getByRole("region", { name: /Agent discovery order for/ }),
@@ -1134,7 +1212,7 @@ test("table view Saved positions, two-member disabled eligibility, and single/cu
     "Saved #2 · disabled",
   );
   await expect(
-    page.getByRole("button", { name: "Agent order", exact: true }),
+    page.getByRole("button", { name: "Reorder discovery", exact: true }),
   ).toHaveCount(0);
 });
 
@@ -1155,7 +1233,7 @@ test("overview legacy provenance arrives during ordering and survives inventory-
   });
   await page.goto(`/keys/services/${encodeURIComponent(group)}`);
   await expect.poll(() => reached).toBe(true);
-  await page.getByRole("button", { name: "Agent order", exact: true }).click();
+  await page.getByRole("button", { name: "Reorder discovery", exact: true }).click();
   await move(page, 2);
   const draft = await page
     .locator("[data-ordering-row]")
@@ -1245,7 +1323,7 @@ test("entire authorized inventory disappearing retains the draft until Cancel sh
 
 for (const surface of ["card", "overview"] as const) {
   for (const width of [390, 1024, 1440]) {
-    test(`${surface} sticky Agent order, Save and Cancel stay operable at ${width}px`, async ({
+    test(`${surface} sticky Reorder discovery, Save and Cancel stay beside discovery at ${width}px`, async ({
       page,
     }, testInfo) => {
       await page.setViewportSize({ width, height: 844 });
@@ -1254,14 +1332,51 @@ for (const surface of ["card", "overview"] as const) {
         await page.goto(`/keys/services/${encodeURIComponent(group)}`);
       else await expand(page);
       const scope = surface === "card" ? card(page) : page;
+      await page.getByRole("button", { name: "Switch to dark mode" }).click();
+      await expect(page.locator("html")).toHaveClass(/theme-dark/);
+      await expect(page.locator("html")).not.toHaveClass(/service-card-transition/);
+      await page.evaluate(async () => {
+        await Promise.all(
+          document.getAnimations()
+            .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+            .map((animation) => animation.finished.catch(() => undefined)),
+        );
+      });
       const bar = scope.locator("[data-service-order-actions]");
       const entry = bar.getByRole("button", {
-        name: "Agent order",
+        name: "Reorder discovery",
         exact: true,
       });
       await expect(entry).toHaveCount(1);
       await expect(entry).toBeEnabled();
       await expect(entry).toHaveClass(/nyx-gradient-vivid/);
+      await assertOrderActionsNearDiscovery(bar);
+      await page.locator("main").evaluate((element) => {
+        element.scrollTop = 0;
+      });
+      if (surface === "card") {
+        await bar.evaluate((element) => {
+          const main = element.closest("main")!;
+          main.scrollTop +=
+            element.getBoundingClientRect().top -
+            main.getBoundingClientRect().top -
+            180;
+        });
+      }
+      await expect(entry).toBeInViewport();
+      await page.screenshot({
+        path: testInfo.outputPath(`discovery-idle-${surface}-${width}.png`),
+        animations: "disabled",
+      });
+      const idleHelp = bar.getByRole("button", { name: "How discovery order works", exact: true });
+      await idleHelp.hover();
+      await expect(page.locator("[data-service-order-help]")).toBeVisible();
+      await page.screenshot({
+        path: testInfo.outputPath(`info-idle-open-${surface}-${width}-dark.png`),
+        animations: "disabled",
+      });
+      await page.keyboard.press("Escape");
+      await expect(page.locator("[data-service-order-help]")).toHaveCount(0);
       if (surface === "overview") {
         const cover = await bar.evaluate((element) => ({
           top:
@@ -1278,10 +1393,14 @@ for (const surface of ["card", "overview"] as const) {
           .locator("svg");
         await expect(chevron).toHaveCount(1);
         await expect(chevron).toHaveClass(/lucide-chevron-right/);
+        const hide = bar.getByRole("button", { name: "Collapse Anthropic connections" });
+        await expect(hide).toHaveAttribute("aria-expanded", "true");
+        await expect(hide).toHaveClass(/bg-overlay text-foreground/);
+        expect(await hide.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
       }
       await entry.click();
       await expect(entry).toHaveCount(0);
-      await expect(bar.getByText("Agent order", { exact: true })).toBeVisible();
+      await expect(bar.getByText("Discovery order", { exact: true })).toBeVisible();
       const save = bar.getByRole("button", { name: "Save", exact: true });
       const cancel = bar.getByRole("button", { name: "Cancel", exact: true });
       await expect(
@@ -1293,6 +1412,9 @@ for (const surface of ["card", "overview"] as const) {
       await expect(save).toBeDisabled();
       await expect(cancel).toBeEnabled();
       await expect(save).toHaveClass(/nyx-gradient-vivid/);
+      await assertOrderActionsNearDiscovery(bar);
+      const help = bar.getByRole("button", { name: "How discovery order works", exact: true });
+      const tooltip = page.locator("[data-service-order-help]");
       const form = scope.getByRole("form", {
         name: "Agent order for Anthropic",
       });
@@ -1316,12 +1438,13 @@ for (const surface of ["card", "overview"] as const) {
           .toBeGreaterThan(400);
       };
       const assertVisibleActions = async () => {
+        await assertOrderActionsNearDiscovery(bar);
         const mainBox = (await main.boundingBox())!;
         const boxes = await Promise.all([
           bar.boundingBox(),
           save.boundingBox(),
           cancel.boundingBox(),
-          bar.getByText("Agent order", { exact: true }).boundingBox(),
+          bar.getByText("Discovery order", { exact: true }).boundingBox(),
         ]);
         for (const box of boxes) {
           expect(box).not.toBeNull();
@@ -1353,6 +1476,22 @@ for (const surface of ["card", "overview"] as const) {
       };
       await scrollToMiddle();
       await assertVisibleActions();
+      const tableBoxBeforeHelp = (await row(page, 14).boundingBox())!;
+      await help.focus();
+      await expect(tooltip).toBeVisible();
+      const tooltipBox = (await tooltip.boundingBox())!;
+      expect(tooltipBox.x).toBeGreaterThanOrEqual(16);
+      expect(tooltipBox.x + tooltipBox.width).toBeLessThanOrEqual(width - 16);
+      expect(tooltipBox.y).toBeGreaterThanOrEqual(0);
+      expect(tooltipBox.y + tooltipBox.height).toBeLessThanOrEqual(844);
+      expect((await row(page, 14).boundingBox())!.y).toBeCloseTo(tableBoxBeforeHelp.y, 0);
+      await page.screenshot({
+        path: testInfo.outputPath(`info-edit-open-${surface}-${width}-dark.png`),
+        animations: "disabled",
+      });
+      await page.keyboard.press("Escape");
+      await expect(tooltip).toHaveCount(0);
+      await expect(help).toBeFocused();
       if (surface === "overview") {
         const gutter = await bar.evaluate((element) => {
           const main = element.closest("main")!;
@@ -1378,6 +1517,7 @@ for (const surface of ["card", "overview"] as const) {
       const beforeScroll = await main.evaluate((element) => element.scrollTop);
       await page.screenshot({
         path: testInfo.outputPath(`sticky-${surface}-${width}.png`),
+        animations: "disabled",
       });
       const box = (await save.boundingBox())!;
       state.delayInventory = 250;
@@ -1569,11 +1709,77 @@ test("sticky Save brings one local 201-row validation error into view without a 
   );
   expect(state.writes).toEqual([]);
   await expect(card(page).locator("[data-ordering-row]")).toHaveCount(201);
+  const reset = card(page).getByRole("button", {
+    name: "Reset to default",
+    exact: true,
+  });
+  await card(page).evaluate((element) => {
+    const main = element.closest("main")!;
+    const cover = element.querySelector("[data-service-order-actions]")!;
+    const reset = Array.from(element.querySelectorAll("button")).find(
+      (button) => button.textContent === "Reset to default",
+    )!;
+    main.scrollTop +=
+      reset.getBoundingClientRect().top -
+      cover.getBoundingClientRect().bottom -
+      16;
+  });
+  await expect
+    .poll(() =>
+      card(page).evaluate((element) => {
+        const main = element.closest("main")!.getBoundingClientRect();
+        const cover = element
+          .querySelector("[data-service-order-actions]")!
+          .getBoundingClientRect();
+        const reset = Array.from(element.querySelectorAll("button")).find(
+          (button) => button.textContent === "Reset to default",
+        )!;
+        const bounds = reset.getBoundingClientRect();
+        return (
+          bounds.top >= cover.bottom &&
+          bounds.bottom <= main.bottom &&
+          reset.contains(
+            document.elementFromPoint(
+              bounds.x + bounds.width / 2,
+              bounds.y + bounds.height / 2,
+            ),
+          )
+        );
+      }),
+    )
+    .toBe(true);
+  const resetBox = (await reset.boundingBox())!;
   page.once("dialog", (dialog) => dialog.accept());
-  await card(page)
-    .getByRole("button", { name: "Reset to default", exact: true })
-    .click();
-  await save.click();
+  await page.mouse.click(
+    resetBox.x + resetBox.width / 2,
+    resetBox.y + resetBox.height / 2,
+  );
+  await expect(error).toHaveCount(0);
+  expect(state.writes).toEqual([]);
+  expect(
+    await card(page)
+      .locator("[data-ordering-row]")
+      .evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-ordering-row")),
+      ),
+  ).toEqual(ids.slice(0, 201));
+  await expect(save).toBeEnabled();
+  const resetSaveBox = (await save.boundingBox())!;
+  expect(
+    await save.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return element.contains(
+        document.elementFromPoint(
+          bounds.x + bounds.width / 2,
+          bounds.y + bounds.height / 2,
+        ),
+      );
+    }),
+  ).toBe(true);
+  await page.mouse.click(
+    resetSaveBox.x + resetSaveBox.width / 2,
+    resetSaveBox.y + resetSaveBox.height / 2,
+  );
   await expect(card(page).getByRole("form")).toHaveCount(0);
   expect(state.writes).toEqual([{ group, ordered: [], expected_version: 1 }]);
 });

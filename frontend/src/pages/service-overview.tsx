@@ -175,39 +175,42 @@ export function ServiceOverviewPage() {
       >
         <div
           data-service-order-actions
-          className="sticky top-0 z-10 flex min-h-12 flex-wrap items-center gap-4 border-b border-border bg-background py-2 before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-background sm:before:-top-6 sm:before:h-6"
+          className="sticky top-0 z-10 bg-background before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-background sm:before:-top-6 sm:before:h-6"
         >
-          <TabsList>
-            <TabsTrigger value="connections">Connections</TabsTrigger>
-            <TabsTrigger value="history">History</TabsTrigger>
-          </TabsList>
-          {tab === "connections" &&
-            (agentOrder.groupId === group.id ? (
-              <div
-                role="group"
-                aria-label={`Agent order actions for ${group.name}`}
-                className="flex items-center gap-2"
-              >
-                <ServiceOrderActions order={agentOrder} formId={orderFormId} />
-              </div>
-            ) : group.id.startsWith("catalog:") &&
-              group.connections.length >= 2 ? (
-              <Button
-                ref={orderButton}
-                type="button"
-                variant="primary"
-                size="sm"
-                disabled={Boolean(agentOrder.reason)}
-                title={
-                  agentOrder.reason ??
-                  "Set agent discovery order within this service"
-                }
-                onClick={() => agentOrder.start(group)}
-              >
-                <ListOrdered className="size-4" aria-hidden="true" />
-                Agent order
-              </Button>
-            ) : null)}
+          <div className="flex min-h-12 flex-wrap items-center gap-4 py-2">
+            <TabsList>
+              <TabsTrigger value="connections">Connections</TabsTrigger>
+              <TabsTrigger value="history">History</TabsTrigger>
+            </TabsList>
+          </div>
+          {tab === "connections" && (
+            <ServiceAgentOrderPanel
+              group={group}
+              order={agentOrder}
+              className="bg-background px-0"
+              actions={
+                agentOrder.groupId === group.id ? (
+                  <ServiceOrderActions order={agentOrder} formId={orderFormId} />
+                ) : (
+                  <Button
+                    ref={orderButton}
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    disabled={Boolean(agentOrder.reason)}
+                    title={
+                      agentOrder.reason ??
+                      "Reorder discovery within this service"
+                    }
+                    onClick={() => agentOrder.start(group)}
+                  >
+                    <ListOrdered className="size-4" aria-hidden="true" />
+                    Reorder discovery
+                  </Button>
+                )
+              }
+            />
+          )}
         </div>
         <TabsContent
           value="connections"
@@ -219,11 +222,6 @@ export function ServiceOverviewPage() {
               onRetry={keys.refetch}
             />
           )}
-          <ServiceAgentOrderPanel
-            group={group}
-            order={agentOrder}
-            hasPool={pools.length > 0}
-          />
           <ServiceConnectionTable
             catalog={entry}
             pools={pools}

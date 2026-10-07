@@ -1,8 +1,9 @@
 # Per-service agent discovery order (inside the service group)
 
 Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: Part A
-implemented, with local validation complete for the coverage/Opus corrections,
-user's sticky-action revision and protected CLI release transport (§17).
+implemented, with the latest Reorder discovery / Info-tooltip settings row recorded
+in §18. Coverage/Opus corrections, the prior sticky-action revision and
+protected CLI release transport remain recorded in §17.
 Earlier results in §16 are historical for changed UI interactions. ROOT owns
 direct review and publication; Opus 5.5
 renewed its source review on published corrections `00eef8d7`, closed the seven
@@ -66,8 +67,10 @@ None, catalog_service_id = Some)` → `lookup_user_service` →
 `user_service_service::find_by_catalog_service_id`, an **unsorted `find_one`
 over active rows** (database natural order), personal owner first, then
 organizations in `primary_org_id` order. The person has no control over which
-active Anthropic connection that returns. The group UI states this (§5.2); it
-is the subject of the Part B question (§6).
+active Anthropic connection that returns. The group help says "Provider gateway
+routing is separate from this discovery order" (§5.2); the architecture and
+discovery docs retain these implementation details. This behavior is the
+subject of the Part B question (§6).
 
 **What Part A adds.** A per-service **agent discovery order**, set inside the
 expanded service card. It is advisory metadata for discovery: NyxID lists the
@@ -179,9 +182,10 @@ inventories and the plan promises no equivalence between them:
   agent key whose allowlist covers two of four stored Anthropic connections
   therefore sees dense ranks 1 and 2 on them, while the owner's `/keys` pills
   on the same rows may read `#2` and `#4`.
-- The UI pills are the owner's REST projection and say so: the explanation
-  panel (§5.2 item 4) states that a restricted agent's ranks are dense over
-  what that agent is allowed to see.
+- The UI pills are the owner's REST projection. The architecture and discovery
+  docs explain that a restricted agent's ranks are dense over what that agent
+  is allowed to see; the concise product help states only the enabled HTTP
+  access rule (§5.2).
 
 ### 3.4 Stale ids, scope, identity (unchanged from the accepted design)
 
@@ -359,64 +363,74 @@ No flat editor, no page-level Reorder button, no card replacement.
   overview page, DEV routing preview) and coexist with the pool `Priority n`
   row and the readiness badge; the terms are distinct by design.
 
-### 5.2 Compact summary and collapsed selection disclosure
+### 5.2 Unified discovery settings row and info tooltip
 
-In the expanded card body, beside the billing / pool / agent-use / last-edit
-lines, for every group with two or more connections in its full inventory:
-`Preferred in discovery: <label> · k enabled · d disabled` when a rank exists, or
-`No agent order · default server discovery order · k enabled · d disabled` after
-a successful absent-order read. A stored order with no ranked enabled HTTP row
-reads `Saved order · no enabled HTTP preference · k enabled · d disabled`. Counts
-use `is_active`; the summary does not claim that enabled rows are listed,
-callable, working or verified. While the preference GET is loading, failed or
-returned 404, preserve any preferred connection known from `/keys` metadata
-and add a muted availability suffix. Without known rank metadata, use
-`Loading agent order`, `Agent order could not be loaded`, or `Saved agent
-order unknown` (404) with the counts, never
-`No agent order` from a failed read. The summary and the single **Agent order** action stay visible in the expanded
-card and the overview Connections tab (editing replaces the CTA as §5.4 specifies). Loading/error/404 availability is a
-short truthful line; 404 says **Saving agent order requires the backend
-update** and the disabled action retains the same reason (it does not describe
-Service Pools as unavailable), while read errors provide Retry beside the summary.
-**How selection works** is a native disclosure, collapsed by default on both
-surfaces. Its native marker is hidden and it uses the same lucide ChevronRight
-(size 3.5, gap 1.5, transition-transform, motion-reduce, 90-degree open rotation)
-as Hide connections, with no added toggle state; native keyboard semantics
-remain. Opening or closing it, including on production 404 or during a dirty
-draft, must not change the draft, filters, URL, saved-view state or send a write.
-Long explanation text and protocol/gateway/pool distinctions live only inside
-this disclosure. No full tool-prefix list is repeated above the rows. Content,
-from data already on the page:
+For every catalog group with two or more connections in its full inventory,
+render one shared `ServiceAgentOrderPanel` section below Hide connections in
+an expanded card's sticky header, or below the overview tabs in its sticky
+section. An active editor keeps its controls if refreshed inventory falls
+below two rows. The table has no permanent explanatory area.
 
-1. Enabled HTTP alternatives have distinct tool prefixes based on their row
-   slug (`<slug>__…`); use row identity rather than an exhaustive prefix list.
-   Non-HTTP rows are identified by actual protocol without invented prefixes,
-   and their saved-position/discovery distinction is explained;
-   each connection is a separate copy of the same tools.
-2. Default order: "Without an agent order NyxID lists your own connections
-   before organization connections, newest first within each; an agent key's
-   allowed connections and nodes narrow what it sees."
-3. Preference rule: "Your agent order is advisory for discovery: when copies
-   tie on relevance, NyxID lists them in your order. A better keyword match
-   from another connection is listed above a preferred one."
-4. Health and scope rule: "Enabled HTTP connections can be listed even when their
-   credential is revoked, expired or missing; agents see `executable: false`
-   on those. Disabled connections are not listed. NyxID does not verify
-   providers here; row badges report unavailable or unverified only. The
-   numbers on these pills are your view; an agent key allowed to use only some
-   of these connections sees ranks 1, 2, … over the ones it may use, in the
-   same relative order."
-5. Explicit behavior: "Agents run exactly the tool or slug they name. Routing
-   and failover across these connections happen only through a service pool
-   you call by its slug" with the existing pool link or create link; for LLM
-   provider groups: "`/api/v1/llm/<provider>` and gateway models without
-   `pool:` use one active connection chosen by NyxID in database order, not by
-   this list" (Part B replaces this sentence if confirmed).
-6. Server state is visible outside the disclosure: after a preference GET
-   404, preserve known preferred metadata or say `Saved agent order unknown`,
-   and show `Saving agent order requires the backend update.` The disabled
-   action has the same matching reason. No fake save is
-   possible.
+One flex row with explicit gaps and natural wrapping contains a content-sized
+preference/counts block, its adjacent primary **Reorder discovery** CTA (or the
+one Discovery order label/outline Cancel/primary Save group), and a standard
+small Info button next to the preference text. No `justify-between`, expanding spacer, separate help row,
+ornamental heading or divider distributes these elements.
+
+The compact block has two lines. Its first shows muted **Preferred in
+discovery:** and the known connection name in stronger foreground, inline
+when short and naturally wrapped when long. Without a known preferred row,
+show **Default server discovery order** only after a successful absent-order
+read, or **Saved order · no enabled HTTP preference** when a stored order has
+no ranked enabled HTTP row. The second line reads `k enabled · d disabled`
+from `is_active`; counts do not claim all enabled rows are listed, callable,
+working or verified.
+
+Loading/error/404 reads preserve preferred metadata known from `/keys` and
+add a short availability line within the same section. Without known metadata,
+show **Loading agent order**, **Agent order could not be loaded**, or **Saved
+agent order unknown** (404), never default order from a failed read. A404 says
+**Saving agent order requires the backend update** and disables entry with the
+same reason; this describes preference saving, not Service Pools. Read errors
+retain Retry beside the summary/actions.
+
+The named Info button uses the existing Radix/shadcn Tooltip and project
+ghost-button styling, with a size-7 hit target and size-3.5 Info icon. The
+tooltip opens on mouse hover or keyboard focus. Mouse clicks and keyboard activation keep the tooltip open. Controlled
+toggling applies only to touch; composed Radix handlers must not close it before the tap
+toggle. The tooltip has three short rules:
+
+1. Connections that match equally are shown in your order.
+2. The AI chooses which connection to use; this order is a preference.
+3. Agents see only the enabled HTTP connections they can access.
+
+Mixed-protocol groups add **Other
+protocol connections keep their saved positions but are excluded from tool
+discovery.** Known LLM/provider groups add **Provider gateway routing is separate
+from this discovery order.** Raw paths, tool-prefix examples, database/owner
+ordering, executable fields, dense ranks and card-count internals remain in
+the architecture/discovery docs and §§3–4 rather than the product help.
+
+The tooltip is short, noninteractive and viewport constrained. It contains no
+links, buttons, heading or pool navigation; Service Pools retain their existing
+settings routes and controls. Opening help leaves table geometry unchanged.
+Keyboard focus remains on the Info button, Escape dismisses it, and blur/outside click
+close it. On a real touch390 viewport, tap opens, the next tap closes, and an
+outside tap dismisses. All preserve draft, filter/search/view state, URL and
+saved-view state, and send no preference write. The preference/count block is
+plain; one live status/alert element contains the actual current read-state
+text, even when known preferred metadata is retained, without duplicate error
+copy or announcements.
+
+The expanded Hide connections ghost button retains `bg-overlay text-foreground`,
+matching its standard hover state, while `aria-expanded` is true
+(`expanded && !routingOpen`). Its exact existing ChevronRight and hit target
+are unchanged. This styling applies only to this card control. Previous native
+details, split inline help and text-trigger popover designs are superseded.
+
+The entry CTA is **Reorder discovery** and the editing label is **Discovery
+order**. Existing setting, status, save, reset and form messages deliberately
+retain **agent order**, preserving their established vocabulary.
 
 ### 5.3 Collapsed card chip
 
@@ -425,23 +439,32 @@ exists; activating it expands the card. Nothing otherwise.
 
 ### 5.4 Ordering mode (inline, one group at a time)
 
-- Control: one obvious `Agent order` CTA (`ListOrdered`, `variant="primary"
-  size="sm"`) in the expanded card's **sticky header bottom action bar**, between
-  Hide connections and Service details. The overview places it in the sticky
-  Connections/History tab bar, outside the content's `overflow-hidden` wrapper
-  so it sticks to the actual main scrollport. No duplicate action appears in
-  the compact summary. Rendered for every catalog group whose **full inventory
-  (enabled and disabled) has two or more connections**, including the 30/26
+The CTA/editing labels use discovery vocabulary; existing setting/status and
+save/reset/form messages retain agent order as specified in §5.2.
+
+- Control: one obvious `Reorder discovery` CTA (`ListOrdered`, `variant="primary"
+  size="sm"`) beside the **compact discovery summary**, below Hide connections
+  in the expanded card's sticky header. The overview places the same summary
+  and action row below its Connections/History tabs, within the sticky section
+  outside the content's `overflow-hidden` wrapper. The action follows the
+  summary with an explicit gap, wrapping directly below it at narrow widths;
+  no flex spacer or `justify-between` pushes it away. There is exactly one
+  action set on each surface. Rendered for every catalog group whose **full
+  inventory (enabled and disabled) has two or more connections**, including the 30/26
   case. Loading/refetch, read error, production404 and another group's draft
   disable the idle CTA with the stated reason; read errors retain Retry.
   Table view mixes groups and does not offer an ordering action.
-- During editing, replace the idle CTA with the readable **Agent order** context
-  label, primary **Save** and outline **Cancel** in the same sticky action bar.
-  Do not render a disabled Agent order button or a second Save/Cancel set below
+- During editing, replace the idle CTA with the readable **Discovery order** context
+  label, primary **Save** and outline **Cancel** beside the same discovery summary.
+  Do not render a disabled entry button or a second Save/Cancel set below
   the table. The card bar wraps with a minimum height at narrow widths, retaining
-  its ResizeObserver-based sticky geometry. Hide connections and the order
-  action group stay together with explicit consistent gaps, never
-  `justify-between`; Service details may align separately at the end. Preserve
+  its ResizeObserver-based sticky geometry. The summary and order action group
+  stay together with explicit consistent gaps, never `justify-between` or an
+  expanding spacer. Hide connections and Service details retain their own row;
+  Service details may align separately at its end. The shared settings row,
+  availability and adjacent Info trigger are sticky. The tooltip uses the
+  existing portal; it does not expand the header or
+  connection table. Preserve
   the exact existing Hide connections chevron. Save/Cancel and their context
   remain visible and operable after scrolling at 390/1024/1440 on both surfaces
   (§12 AC-32).
@@ -475,11 +498,11 @@ exists; activating it expands the card. Nothing otherwise.
   Save sends the group's connection ids (enabled and disabled) in table order
   with the current `version`; success invalidates `["service-preference"]` and
   `["keys"]`, exits ordering, toasts "Agent order saved for <service>" and
-  returns focus to `Agent order`.
+  returns focus to `Reorder discovery`.
 - Save is disabled when pristine, busy, read-blocked, awaiting stale recovery
   or at backend capacity. Cancel remains available except while busy. Errors
   from a scrolled Save receive focus and are revealed below the measured sticky
-  action bar, inside the main scrollport; visibility is proved by geometry and
+  section, inside the main scrollport; visibility is proved by geometry and
   hit-testing, not just a visible class. Local 201-row validation and backend
   capacity each render exactly one truthful message. Release success exposes
   Retry save through explicit recovery state, independently of notice wording.
@@ -498,7 +521,7 @@ exists; activating it expands the card. Nothing otherwise.
   the draft: new connections are appended with a "New" marker, removed ones
   are dropped with a notice. A preference refetch during ordering never
   resets the draft; only Reload does.
-- Another group's Agent order is disabled while a draft exists; it never
+- Another group's Reorder discovery is disabled while a draft exists; it never
   discards the draft or prompts. Guards: collapsing the card, switching view
   mode or tab, in-app navigation (TanStack `useBlocker`) and leaving the
   overview page ask "Discard unsaved agent order?"; filter changes do not
@@ -508,7 +531,7 @@ exists; activating it expands the card. Nothing otherwise.
 ### 5.5 Reuse
 
 One renderer (`ServiceConnectionTable`) carries pills and ordering for the
-card and the overview page; `GroupCard` adds chip, summary line and sticky header bottom action-bar
+card and the overview page; `GroupCard` adds chip, summary line and sticky discovery summary/action-row
 controls; one `service-agent-order-panel.tsx` serves both places;
 `useServicePreference()` (GET; 404 → `unavailable` sentinel) and
 `useSaveServiceGroupOrder()`; schemas in `schemas/service-preference.ts`;
@@ -516,8 +539,9 @@ controls; one `service-agent-order-panel.tsx` serves both places;
 
 ## 6. Part B (conditional): implicit gateway routes follow the saved order
 
-Pending the user's asynchronous answer. If **no**: §5.2 item 5 keeps the
-"database order" wording and nothing below is built. If **yes**: Part B is
+Pending the user's asynchronous answer. If **no**: §5.2 keeps the gateway note,
+"Provider gateway routing is separate from this discovery order," and nothing
+below is built. If **yes**: Part B is
 delivered in the same change set as Part A (not deferred to a later PR), with
 these fences:
 
@@ -546,11 +570,11 @@ these fences:
   target, execution-authority digest, audit `user_service_id` and billing
   owner bind to that row; if its credential cannot be materialized or the
   provider fails, the request fails as today with no second attempt.
-- UI: §5.2 item 5 becomes "`/api/v1/llm/<provider>` and gateway models
-  without `pool:` use the first enabled connection in this order among your
-  own connections, then your organizations'; without an order, NyxID's
-  default choice. No retry on another connection." The summary line adds
-  "· also first for implicit gateway calls".
+- UI: only after Part B is authorized, replace §5.2's "Provider gateway routing
+  is separate from this discovery order" note with concise user-facing copy
+  explaining the implicit gateway preference and absence of failover. The
+  architecture/discovery docs retain the precise owner-tier/default-selection
+  behavior. Part A ships the separate-routing note unchanged.
 - Acceptance (Part B only): **AC-B1** named/exact targets unchanged with and
   without an order; **AC-B2** implicit route selects the rank-1 enabled own
   connection when two or more are enabled and today's row when none is
@@ -584,8 +608,9 @@ refresh-retry redirect boundaries), and `cli/tests/wizard_bundle_freshness.rs`.
 
 Frontend: `components/dashboard/service-connection-table.tsx` (pill line,
 ordering mode, Save/Cancel), `components/dashboard/grouped-service-cards.tsx`
-(chip, summary line, sticky header bottom action-bar controls, `orderingGroupId`, kept-mounted rule,
-guards), new `components/dashboard/service-agent-order-panel.tsx`,
+(chip, summary line, sticky discovery summary/action-row controls, `orderingGroupId`, kept-mounted rule,
+guards), `components/dashboard/service-agent-order-panel.tsx` (one shared sticky
+settings row with summary, actions, status, help trigger and bounded on-demand tooltip),
 `components/dashboard/service-order-rows.tsx`,
 `components/dashboard/service-order-actions.tsx`,
 `pages/service-overview.tsx`, `hooks/use-service-preference.ts`,
@@ -618,8 +643,8 @@ bullet). `docs/plans/service-tool-preference-review.md` is ROOT-owned.
 
 Additive fields and routes only. Against a server without the route, the UI
 shows known preferred metadata or `Saved agent order unknown`, enabled/disabled
-counts and `Saving agent order requires the backend update.`, the collapsed
-selection disclosure, and the Agent order control disabled with the same
+counts and `Saving agent order requires the backend update.`, the on-demand
+Info tooltip, and the Reorder discovery control disabled with the same
   reason; the unavailable endpoint is `/api/v1/service-preferences`, not Pools.
   The production-backed preview has no preference mock, local persistence or
   fabricated success toast. The separately authorized seeded sample preview
@@ -717,11 +742,12 @@ Frontend
    **Release unavailable preferences** confirm and **Retry save**;
    all-connections rendering; draft preservation across `/keys` refetch.
 10. `grouped-service-cards.tsx`: chip, summary line (enabled/disabled counts,
-    explicit order-saving backend status), sticky header bottom action-bar controls with the stated states and the
+    explicit order-saving backend status), sticky discovery summary/action-row controls with the stated states and the
     full-inventory ≥ 2 rule, `orderingGroupId`, kept-mounted-while-ordering,
     guards (collapse, view/tab, `useBlocker`, identity); other-group entry disabled.
-11. `service-agent-order-panel.tsx` with §5.2 items 1–6 and pool link; mount
-    in the card and `service-overview.tsx`.
+11. `service-agent-order-panel.tsx` with §5.2's three short rules and conditional
+    protocol/gateway notes in the noninteractive Info tooltip; mount the shared
+    settings row in the card and `service-overview.tsx`.
 12. **Source migration of the superseded UI**: delete
     `service-preference-editor.tsx` (+ test), remove the `keys.tsx` Reorder
     button, editor swap and their `keys.test.tsx` cases, drop the flat
@@ -735,7 +761,8 @@ Frontend
 
 Part B (only if the user answers yes; same change set): 15. `ImplicitProviderSelection`
 context and `select_implicit_provider_connection`; gateway call sites;
-tests AC-B1..B7; §5.2 item 5 wording and summary suffix; docs.
+tests AC-B1..B7; revise §5.2's separate gateway-routing note only for the
+authorized implicit-routing behavior; docs.
 
 ## 12. Acceptance criteria (Part A)
 
@@ -854,17 +881,25 @@ tests AC-B1..B7; §5.2 item 5 wording and summary suffix; docs.
   position; the collapsed chip reads `Preferred: <label>` only with a rank-1
   connection and expands the card. Verified in the expanded card, table view
   mode and `/keys/services/$groupId`.
-- **AC-18** (local, *revised*): the summary line reads `k enabled · d
-  disabled` from `is_active`, uses "default server discovery order" (never "newest
-  first" alone, never listed/callable/working/verified), and appears for every
-  group with a full inventory ≥ 2; **How selection works** is collapsed by
-  default on card and overview and contains the §5.2 selection, scope, protocol,
-  pool and conditional gateway details. No exhaustive prefix list or repeated
-  open explanation appears above rows. Summary/status/Retry and one Agent order
-  action remain discoverable while loading, on read error and after a GET 404
-  (disabled with the stated reasons), including the 30/26 group. Disclosure
-  toggles on 404 and while dirty preserve draft/filters/URL and write nothing;
-  narrow-width layout contains horizontal scrolling to the table.
+- **AC-18** (local, *revised*): one shared settings section contains the
+  content-sized two-line preference/counts block, adjacent order actions and
+  accessible small **Info** trigger with natural gaps/wrapping. Known names have
+  stronger foreground; default/saved/loading/error/unknown state remains honest.
+  Counts use `is_active` and never claim working/verified/executable status.
+  No permanent help area or separate help row exists above the table. The
+  on-demand tooltip shows exactly the three §5.2 rules and only applicable
+  short protocol/gateway sentences. It has no interactive links or controls;
+  Service Pools retain their existing navigation. Technical contracts remain
+  in docs. Tooltip bounds fit390/1024/1440, and opening it does not move rows.
+  Mouse hover, keyboard focus and real touch tap open it; Escape, blur, outside
+  click/tap and a second trigger tap close it without discarding or saving.
+  Keyboard focus stays on the Info button. Dark card/overview idle/editing/
+  open-tooltip screenshots prove the unified design.
+  Loading/error/404 status, Retry and one disabled CTA with matching reason
+  remain discoverable, including30/26. One live element announces read state
+  even with a known preference. Tooltip toggles preserve draft, filters,
+  search, Personal/All, auto-connected, saved view and URL and send no write;
+  table horizontal overflow remains contained at narrow widths.
 - **AC-19** (real-route Playwright with real sensors, plus unit tests for
   buttons, *revised*): in the expanded 30-connection card, mouse-dragging a
   disabled stored row above an enabled one updates `Saved #p · disabled` and `Discovery
@@ -903,7 +938,9 @@ tests AC-B1..B7; §5.2 item 5 wording and summary suffix; docs.
   the slot-refill rule, non-executable listing, advisory nature and the
   independent-client non-guarantee; API doc states the merge guarantees and
   capacity error; architecture doc carries the §2 table and the
-  implicit-gateway explanation.
+  implicit-gateway explanation. User-facing architecture docs describe the
+  unified sticky preference/counts/Reorder discovery settings row and its
+  brief noninteractive Info tooltip, with technical contracts retained in docs.
 - **AC-25**: slug-based key reads, catalog-curation writes, key-update and
   saved-view routes retain prior auth and behavior; OAuth application tokens
   cannot write preferences.
@@ -967,14 +1004,25 @@ tests AC-B1..B7; §5.2 item 5 wording and summary suffix; docs.
 
 - **AC-32** (real-route browser + form boundary tests, new): at **390/1024/1440**
   on the actual expanded card and overview, idle shows exactly one obvious
-  primary Agent order CTA in the sticky section. Editing replaces it with one
-  readable Agent order context label and exactly one primary Save/outline Cancel
-  set in that section, with deliberate gaps keeping primary controls together
-  (no `justify-between` distribution), with no disabled Agent order button or duplicate table
-  actions. Real bounding boxes and hit-testing prove the controls remain inside
+  primary Reorder discovery CTA beside the discovery summary, below the separate
+  Hide connections or overview tabs row. Editing replaces it with one readable
+  Discovery order context label and exactly one primary Save/outline Cancel set
+  beside that same summary. Real bounding boxes prove the gap is 8–16px when
+  beside it, or at most 8px with aligned left edges when naturally wrapped
+  below it; no `justify-between` or expanding spacer distributes these controls.
+  There is no disabled entry button during editing or duplicate table action set.
+  The summary has separate preference and count lines, with a named Info button
+  beside the preference text in the same shared settings section. No text help
+  button, standalone help row or expanding prose appears above the table;
+  the brief tooltip fits the viewport and leaves table positions unchanged.
+  Dark idle, editing and open-tooltip captures prove this on card/overview390/1440, while
+  all six390/1024/1440 width cases retain strict proximity/sticky proof.
+  Real bounding boxes and hit-testing prove the controls remain inside
   the main scrollport and viewport, do not overlap or cause horizontal overflow,
   and work after scrolling; card wrapping preserves ResizeObserver sticky
-  geometry and the exact Hide connections chevron. Overview sticks to main,
+  geometry and the exact Hide connections chevron. The expanded-only Hide
+  connections control retains standard ghost hover `bg-overlay text-foreground`,
+  a stable hit target and truthful `aria-expanded`. Overview sticks to main,
   outside the overflow-hidden content wrapper, with an opaque background
   covering main's 16px mobile / 24px wider top gutter. Passing rows cannot show
   above the actions, and the cover leaves normal unscrolled metadata visible.
@@ -983,7 +1031,10 @@ tests AC-B1..B7; §5.2 item 5 wording and summary suffix; docs.
   is available except busy. Real mouse Save and keyboard Cancel restore focus
   after delayed inventory refetch. A scrolled invalid or failed Save reveals
   one focused error below the sticky cover; all 201 IDs, local no-PUT proof and
-  confirmed reset remain. Clicking Show all/fewer keys in the real access panel
+  confirmed reset remain. Reset is physically reachable below the full sticky
+  cover and hit-tested before a real pointer click; confirmation retains all
+  201 rows and the next Save sends exactly `ordered:[]` plus `expected_version`.
+  Clicking Show all/fewer keys in the real access panel
   while dirty sends no preference PUT and keeps the order. No unrelated service,
   filter, URL or saved-view write occurs.
 
@@ -1054,8 +1105,9 @@ MCP projections; discovery applies slot refill inside today's loader list and
 inside identical-relevance search buckets built from the original vector, so
 unrelated services never move and empty preferences are byte-identical; `executable` and `preference_rank` added
 to MCP discovery rows; UI entirely inside the expanded service card and the
-per-service overview (pill line below the readable wrapping label/readiness header, summary line,
-compact honest server-state line and collapsed-by-default selection disclosure, inline
+per-service overview (pill line below the readable wrapping label/readiness header,
+  unified sticky two-line summary/Reorder discovery/Info row, compact honest
+server-state line and on-demand brief tooltip, inline
 drag/keyboard ordering with Save/Cancel, reset and in-banner capacity
 recovery), leaving the #1685 grid,
 toolbar, filters, saved views, insights and pools unchanged. Part B is
@@ -1081,12 +1133,15 @@ complete a revised criterion.
 
 The global editor has been removed. Part A uses the existing grouped/table/
 overview architecture, scoped CAS writes and same-group discovery-slot refill.
-The user's latest screenshot review replaces the open repeated explanation
-with the §5.2 compact summary and collapsed **How selection works** disclosure.
+The logs below predate the user's final Info-tooltip correction. The current
+§5.2 unified settings row and its fresh evidence are recorded in §18; native
+details and text-trigger popover evidence here are historical for the changed UI.
 The historical source used a single header entry and table-bottom Save/Cancel.
 The latest user requirement replaces those controls with the sticky action set
 specified in §5.4 and AC-32. Fresh coverage and frozen-source UI gates are being
-recorded in §17; the historical browser result below does not prove AC-32. ROOT owns publication and the separate review
+recorded in §§17–18; §18 carries the current settings-row evidence. The
+historical browser result below does not prove the revised AC-32. ROOT owns
+publication and the separate review
 record; Part B remains unimplemented pending the user's answer.
 
 The final authority correction is narrowly opt-in in `api-client.ts`: guards
@@ -1192,13 +1247,13 @@ close ROOT's separate review findings or grant Opus sign-off):
 - [x] **AC-15** — real DB fixture verifies exact scoped audit `{group,count,version}`, hidden-release `{released_hidden,version}`, no connection IDs, no extra audits on rejected/no-op writes and valid chained append path.
 - [x] **AC-16** — 3 CLI unit and 4 real subprocess tests pass grouped show/table/JSON, slug/group resolution, strict scoped body/version,409/capacity errors, reset, confirmed release and rejection of flat set. Reversed saved-order output derives current HTTP ranks; active SSH does not inflate ranks and disabled rows retain saved positions.
 - [x] **AC-17** — real browser covers below-header Discovery/Saved pills, pool Priority, duplicate/long labels, usable ≥64px normal/editing label width at390/1024/1440 with readiness/pill non-overlap, contained tablet/mobile table overflow, filtered stable ranks, collapsed chip and actual overview/table renderer. Hook/table test covers HTTP versus SSH saved-position semantics.
-- [x] **AC-18** — real browser card/overview disclosure scenarios pass collapsed defaults, production404 reason/status, known pills, dirty draft/URL/filter preservation and narrow layout. Hook tests cover loading/error honesty and null-inference provider explanation without invented URLs.
+- [x] **AC-18 historical execution** — the then-current card/overview disclosure passed production404 reason/status, known pills, dirty draft/URL/filter preservation and narrow layout. This does not prove the revised settings-row/Info-tooltip criterion; fresh evidence is recorded in §18. Hook coverage of protocol/gateway/read honesty is retained and rerun there.
 - [x] **AC-19** — actual mouse/touch/keyboard sensors pass pickup/move/drop, Escape rollback, single live region, disabled-to-end, confirmed default reset and unrelated Slack/toolbar preservation.
 - [x] **AC-20** — browser fixtures assert dirty gating, exact scoped request body/order/version, disabled rows included, reset `ordered:[]`, Cancel and no saved-view writes.
 - [x] **AC-21** — browser passes successful409 Overwrite/Reload, actual400 stale-ID refresh + failed inventory read/Retry, network retry, capacity confirmation/cancel/release/refetched-version Retry save and production404 no-write behavior.
 - [x] **AC-22** — strict grouped/request/release schema tests pass absent response, unknown fields, duplicates, versions,201 IDs and reset shape; >200 local/retry/overwrite errors remain visible without uncaught Zod errors.
 - [x] **AC-23** — final full frontend/production build/lint/wizard regeneration, rebuilt-source wizard freshness and Rust formatting pass. Final backend/CLI all-target Clippy passes with `-D warnings`, exit0, no suppression. Remote CI/final review remains ROOT-owned.
-- [x] **AC-24** — API/discovery/architecture/chat/CLAUDE docs match scoped merge, relevance-slot/advisory semantics, executable metadata, restricted ranks, protocol distinctions, explicit pools and unchanged implicit gateway. §5.2 incorporates the user's compact disclosure correction.
+- [x] **AC-24 historical review** — API/discovery/architecture/chat/CLAUDE docs matched scoped merge, relevance-slot/advisory semantics, executable metadata, restricted ranks, protocol distinctions, explicit pools and unchanged implicit gateway. The revised product help and current documentation coherence require the fresh §18 review.
 - [x] **AC-25** — mounted HTTP scopes/slug/config fixture preserves route confinement and OAuth write rejection; dedicated `curation_router_scoped_discovery_history_and_route_confinement` execution also passed against the explicit isolated database.
 - [x] **AC-26** — live visibility/property/HTTP fixtures pass hidden/stale/unrelated relative-order preservation, scope-dense responses, reset/no-op and strict body/auth errors. Only explicit hidden release removes unauthorized IDs.
 - [x] **AC-27** — browser proves kept-mounted filtered group/full metadata and pool Priority, collapse/other-card/view/tab/navigation guard, overview row History guard, delayed focus restoration, late provenance, entire inventory disappearance/Cancel and no saved-view write.
@@ -1226,6 +1281,11 @@ new CodeQL cleartext-transmission alerts 465/466 on `delete_with_body`, now cove
 by AC-33. This section supersedes changed frontend interaction evidence in §16;
 backend production source remains unchanged. ROOT's review record is preserved
 and ROOT alone closes findings, publishes and requests renewed review.
+
+The revised AC-18, AC-24 and AC-32 for the final unified row / Info
+tooltip require fresh rechecks, recorded in §18. The following sticky-toolbar
+and inline-disclosure logs are historical for the changed UI, while remaining
+evidence for unchanged coverage, identity, persistence and security boundaries.
 
 Implemented corrections: one exact server capacity message; one local limit
 message; explicit ready-to-retry recovery state; unrelated outline change
@@ -1360,7 +1420,7 @@ CLI job was stopped before compiling, preserving that backend process.
 Opus's renewed source review on
 `00eef8d7bfb0c44e8bad4ae85659f1abc257ffd7` confirmed correctness, security and
 execution behavior and closed the seven earlier findings. It returned three
-nits, all addressed in this unpublished follow-up: remove the unused panel
+nits, all addressed in `a60afb9c`: remove the unused panel
 `action` prop/type/render slot; make the exact Hide connections chevron
 requirement a complete sentence; and distinguish the prior reviewed `0ea6cfa3`
 from published corrections `00eef8d7` in this section. The architecture text
@@ -1481,3 +1541,93 @@ retain that label and its proof; any additional missing configuration, analysis
 error or new alert blocks delivery. Final head and test-merge SHA bindings,
 job/analysis facts and review approval remain in ROOT's PR body. No old analysis
 was deleted, no SARIF synthesized and no scanner finding suppressed or dismissed.
+
+
+## 18. Restart recovery and final Info-tooltip validation
+
+Fresh local evidence on merged `631b4994`, after the final Info-tooltip and
+Reorder discovery correction, was reconstructed on 2026-10-07. The previous
+`/tmp` target, config and historical logs were absent after restart. Prior
+sections remain historical records; none of those missing logs is represented
+as a newly executed result. All new logs below live under
+`/tmp/nyxid-service-preference-restart/`.
+
+The accepted modality correction records the pointer type on pointer-down:
+mouse clicks and keyboard activation keep help open, while touch taps toggle.
+Real card and overview routes assert hover then click and focus then Enter;
+the separate touch case retains second-tap and outside-tap dismissal. Existing
+agent-order setting/status/save/reset/form wording is deliberate; the entry
+CTA is Reorder discovery and the editing label is Discovery order. Keyboard
+focus remains on Info; pointer-down does not claim to move mouse focus there.
+ROOT accepted the implementation and final screenshots. ROOT owns the review
+record, publication, exact-head security evidence and final Opus sign-off.
+
+The isolated Vitest config imports the current repository Vite config, retaining
+its plugins, setup, inclusion/exclusion lists, default 5000ms timeout and 15%
+line-coverage threshold. It changes only the happy-dom origin to localhost4629
+and binds the current frontend root. The temporary `vitest.config.mts` and
+`queued-suites.json` retain exact setup/commands; per-gate exit statuses are in
+`frontend-results.json` and `rust-results.json`.
+
+| Gate | Fresh result | New evidence under the directory above |
+|---|---|---|
+| Frozen affected UI/hooks/schema/transport units | 10 files / 100 tests passed, exit0 | `frozen-focused.log` |
+| Settled Node22 analytics route | 1/1 passed; test1335ms, unchanged5000ms timeout | `node22-analytics-isolated.log` |
+| Complete Node22 unit suite | 467 files / 4777 tests passed;160.44s, exit0 | `node22-full-unit.log` |
+| Complete Node22 V8 | 467 files / 4777 tests passed;73.17% lines with unchanged15% gate, exit0 | `node22-full-v8.log`, `node22-coverage/coverage-summary.json` |
+| Node22 production build / lint | Both exit0; production and credential-accept build plus mock-footprint assertion; lint0 errors /29 unrelated baseline warnings | `node22-build.log`, `node22-lint.log` |
+| Node22 wizard rebuild / source closure | Exit0;171 manifest files plus extras match `6a459342b1003e3be417e4a0645c2867afffafc5a0e9efb7dc809e688818f860` | `node22-wizard-build.log`, `wizard-source-closure.json` |
+| Frozen real-route browser | Service-preference plus wizard-scope suites30/30 passed,3.2m, exit0; desktop hover-click/focus-Enter, touch dismissal, all six390/1024/1440 sticky cases and201-row validation proof | `frozen-browser.log`, `frozen-browser-results/` |
+| Backend preference / database | 14/14 passed,0 failed/ignored,4.40s after recovered cold compile | `backend-preference.log` |
+| Backend search / agent relevance / scoped route confinement | 5/5,1/1,1/1 passed;0 failed/ignored | `backend-search.log`, `backend-agent-search.log`, `backend-curation.log` |
+| CLI unit / subprocess / transport / rebuilt wizard freshness | 3/3,4/4,4/4,1/1 passed;0 failed/ignored | `cli-order-unit.log`, `cli-order-subprocess.log`, `cli-order-transport.log`, `cli-wizard-freshness.log` |
+| Rust format / backend+CLI all-target Clippy | Both exit0; Clippy retains jobs1 and `-D warnings`, no suppression | `rust-format.log`, `clippy.log` |
+
+The shell initially used native Node26.3.0. Frozen focused/browser evidence
+states that runtime; the final build/wizard/lint/full unit/V8 runs use the
+repository-pinned major, native Node22.21.1. The Node22 wizard rebuild produced
+identical tracked bytes to the browser-tested bundle, verified against the
+frozen hashes; no additional browser execution was needed. Final mobile and
+desktop idle/open/editing/scrolled screenshots are in
+`frozen-browser-results/`, with `discovery-idle-*` and `info-*-dark.png` names.
+ROOT independently inspected and accepted the final layout/help artifacts.
+
+No global database was used. Docker was unavailable and the installed Homebrew
+MongoDB7 was excluded. An official task-owned MongoDB8.0.0 binary runs with its
+own dbpath and localhost27029, replica set `nyxidPreferenceReview`; readiness
+confirms version8.0.0, primary=true and port27029 in `mongo-readiness.json`.
+Database tests use only the explicit §10 URI and show zero ignored tests.
+The recovered Cargo target is `/tmp/nyxid-service-preference-target`, with
+incremental off, dev/test debug0 and jobs1. The cold backend build took51m55s
+under measured host contention; the selected tests then passed normally.
+
+Failed/interrupted attempts are preserved separately. The first temporary
+config had an incorrect root/import path (`focused.log`), and the second still
+had the duplicated root (`focused-recheck.log`); corrected frozen execution
+passed. The early concurrent Node26 full V8 attempt failed the unrelated
+`admin-usage.router.test.tsx` at the unchanged5000ms timeout:466 files/4776 tests
+passed and1 failed,353.61s (`full-coverage.log`). This remains failed evidence.
+The host had13.5GiB swap use and frequent compiler I/O waits; after own Cargo/UI
+compilation settled, the isolated analytics test, complete Node22 unit and
+complete V8 suites all passed without any analytics source edit, timeout
+change, retry, exclusion or coverage-threshold reduction. Happy-dom navigation
+ECONNREFUSED4629 diagnostics alone were not treated as test failures.
+
+Byte-identical wizard regeneration changed timestamps, causing a later Cargo
+search command to start a redundant backend rebuild. Only that task-owned
+redundant Cargo/compiler attempt was interrupted; its -15 result is preserved
+in `rust-timestamp-attempt-results.json`, `backend-search-timestamp-attempt.log`
+and `timestamp-rebuild-interruption.json`, never counted as a pass. The actual
+remaining backend filters ran against the freshly compiled test binary from
+the successful14-test run, copied to `backend-frozen-tests` and hashed in
+`backend-frozen-test-sha256.txt`. Frozen source and embedded wizard bytes match;
+no production source changed between those executions. CLI targets and
+all-target Clippy subsequently rebuilt and passed from the final checkout.
+
+Implementation is locally validated and source-frozen, with no further fix
+pending. The evidence-only addition here does not change tested production
+inputs. `final-source.json` binds the final tracked diff, including the current
+ROOT-owned review-document hash without modifying that document. Attachments
+remain untracked. No commit, push, merge, deployment or production write was
+performed by this recovery worker. Exact published-head CI/security and final
+Opus approval are still required before ROOT marks delivery ready.

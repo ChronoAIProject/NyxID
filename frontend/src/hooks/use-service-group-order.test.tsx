@@ -32,6 +32,7 @@ const { state, save, release, refetchPreference, refetchKeys } = vi.hoisted(
         updated_at: null,
       },
       pending: false,
+      preferenceError: false,
       unavailable: false,
     },
     save: vi.fn(),
@@ -54,7 +55,7 @@ vi.mock("@/hooks/use-service-preference", () => ({
   SERVICE_ORDER_UNAVAILABLE: "unavailable",
   useServicePreference: () => ({
     data: state.unavailable ? "unavailable" : state.preference,
-    isError: false,
+    isError: state.preferenceError,
     isFetching: state.pending,
     isLoading: false,
     refetch: refetchPreference,
@@ -152,7 +153,7 @@ function Harness({
           externalOrderActions={sticky}
         />
       ) : (
-        <ServiceAgentOrderPanel group={entry} order={order} />
+        <ServiceAgentOrderPanel group={entry} order={order} actions={null} />
       )}
     </>
   );
@@ -164,6 +165,7 @@ beforeEach(() => {
   state.fetching = false;
   state.pending = false;
   state.unavailable = false;
+  state.preferenceError = false;
   state.stamp = 1;
   state.preference = {
     groups: [{ group, ordered: [key(0).id] }],
@@ -356,18 +358,40 @@ it("unknown read states preserve known keys pills and never claim absent order",
   state.unavailable = true;
   const { rerender } = render(<Harness />);
   expect(screen.getByText(/Saved agent order unknown/)).toBeVisible();
-  expect(screen.queryByText(/No agent order/)).toBeNull();
+  expect(screen.queryByText("Default server discovery order")).toBeNull();
   state.inventory[0] = { ...key(0), preference_rank: 1 };
   rerender(<Harness />);
-  expect(screen.getByText(/Preferred in discovery: Anthropic/)).toBeVisible();
+  const summary = within(
+    screen.getByRole("region", { name: "Agent discovery order for Anthropic" }),
+  );
+  expect(summary.getByText("Preferred in discovery:")).toBeVisible();
+  expect(summary.getByText("Anthropic", { exact: true })).toBeVisible();
+  expect(summary.getByRole("status")).toHaveTextContent(
+    "Saving agent order requires the backend update.",
+  );
   state.unavailable = false;
+  state.pending = true;
+  rerender(<Harness />);
+  expect(summary.getByText("Preferred in discovery:")).toBeVisible();
+  expect(summary.getByRole("status")).toHaveTextContent("Loading agent order.");
+  expect(summary.getAllByText("Loading agent order.")).toHaveLength(1);
+  state.pending = false;
+  state.preferenceError = true;
+  rerender(<Harness />);
+  expect(summary.getByText("Preferred in discovery:")).toBeVisible();
+  expect(summary.getByRole("alert")).toHaveTextContent(
+    "Agent order could not be loaded.",
+  );
+  expect(summary.getAllByText("Agent order could not be loaded.")).toHaveLength(1);
+  state.preferenceError = false;
   state.pending = true;
   state.inventory[0] = key(0);
   rerender(<Harness />);
-  expect(screen.getAllByText(/Loading agent order/).length).toBeGreaterThan(0);
-  expect(screen.queryByText(/No agent order/)).toBeNull();
+  expect(summary.getByRole("status")).toHaveTextContent("Loading agent order.");
+  expect(summary.getAllByText("Loading agent order.")).toHaveLength(1);
+  expect(screen.queryByText("Default server discovery order")).toBeNull();
 });
-it("shows HTTP tool prefixes and protocol-specific saved positions without inventing SSH discovery", () => {
+it("explains HTTP eligibility and retains protocol-specific saved positions without inventing SSH discovery", () => {
   state.inventory = [
     key(0),
     {
@@ -383,16 +407,19 @@ it("shows HTTP tool prefixes and protocol-specific saved positions without inven
     { group, ordered: [key(1).id, key(2).id, key(0).id] },
   ];
   const { rerender } = render(<Harness table />);
-  const disclosure = screen.getByText("How selection works");
-  expect(disclosure.closest("details")).not.toHaveAttribute("open");
-  fireEvent.click(disclosure);
-  // happy-dom does not implement the native summary toggle.
-  disclosure.closest("details")!.open = true;
-  expect(screen.getByText("slug__…")).toBeVisible();
+  const help = screen.getByRole("button", { name: "How discovery order works" });
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  fireEvent.click(help);
+  expect(
+    within(screen.getByRole("tooltip")).getByText(
+      "Agents see only the enabled HTTP connections they can access.",
+    ),
+  ).toBeVisible();
+  expect(screen.queryByText("slug__…")).toBeNull();
   expect(screen.queryByText("ssh-server__…")).toBeNull();
-  expect(screen.getByText(/Other protocols \(SSH\)/)).toHaveTextContent(
-    "not part of connected MCP tool discovery",
-  );
+  expect(
+    within(screen.getByRole("tooltip")).getByText(/Other protocol connections keep their saved positions/),
+  ).toHaveTextContent("excluded from tool discovery");
   fireEvent.click(screen.getByText("Start"));
   const ssh = document.querySelector(
     `[data-service-connection-row="${key(1).id}"]`,
@@ -493,18 +520,18 @@ it("capacity release confirms, keeps draft, handles CAS and uses released versio
 it("explains real provider groups with null inference without guessing a provider slug", () => {
   state.inventory = state.inventory.map((key) => ({ ...key, inference: null }));
   const { rerender } = render(<Harness />);
-  const explanation = screen
-    .getByText("How selection works")
-    .closest("details")!;
-  expect(explanation).not.toHaveAttribute("open");
-  explanation.open = true;
-  expect(screen.getByText("/api/v1/llm/{provider}")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "How discovery order works" }));
+  expect(
+    within(screen.getByRole("tooltip")).getByText("Provider gateway routing is separate from this discovery order."),
+  ).toBeVisible();
   state.inventory = state.inventory.map((key) => ({
     ...key,
     catalog_service_slug: "admin-renamed-catalog",
     service_category: "llm",
   }));
   rerender(<Harness />);
-  expect(screen.getByText("/api/v1/llm/{provider}")).toBeVisible();
+  expect(
+    within(screen.getByRole("tooltip")).getByText("Provider gateway routing is separate from this discovery order."),
+  ).toBeVisible();
   expect(screen.queryByText("/api/v1/llm/admin-renamed-catalog")).toBeNull();
 });

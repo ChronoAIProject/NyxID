@@ -937,24 +937,38 @@ service group. Existing grouped cards keep normal display order; an expanded
 card or service overview provides inline drag handles, Move up/down, disabled-row
 positions and confirmed Reset to default. All group rows remain visible during
 editing even if filters change. No global editor replaces the page and editing
-does not write saved-view settings. A compact summary shows enabled/disabled
-counts and saved/default/unknown order. The single primary Agent order CTA sits
-in the card's sticky header bottom action bar, or the overview's sticky tab bar.
-Editing replaces it with a readable Agent order label, one primary Save button
-and one outline Cancel button in the same section. Explicit gaps keep controls
-together; narrow bars wrap and remain operable while scrolled. Save targets a
+does not write saved-view settings. A content-sized summary shows the preference
+or honest saved/default/unknown state on one line, with enabled/disabled counts
+beneath it. Known preferred names use stronger foreground beside the muted
+label. The single primary Reorder discovery CTA sits
+beside this discovery summary, below the card's Hide connections toolbar or
+below the overview's Connections/History tabs. Editing replaces it with a
+readable Discovery order label, one primary Save button and one outline Cancel
+button beside the same summary. Explicit gaps keep the summary and controls
+together, with natural wrapping and no expanding spacer. This compact row and
+its availability status remain sticky and operable while scrolled. Save targets a
 dedicated native order form outside the connection table, so unrelated panel
 buttons cannot submit the order. Invalid/failed submissions focus and reveal
 one error below the sticky cover, including repeated same-error attempts.
-The longer **How selection works** disclosure is collapsed by default on cards
-and overview; it contains scope, protocol, pool and gateway distinctions without
-repeating every connection prefix. Disclosure toggles preserve drafts, filters
-and navigation. Failed/loading/404 reads keep a short honest availability line,
-Retry when applicable, and known `/keys` pills visible while disabling entry.
-Production404 says “Saving agent order requires the backend update” and keeps
-unknown order honest; it refers to the absent preference route, never to Service
-Pools availability. The disclosure uses the same rotating chevron as Hide
-connections. Connection labels keep a usable minimum width in normal/editing
+The named **Info** button sits beside the preference text in that same shared
+section. Its standard tooltip gives three short rules: equal matches follow the saved order; the AI chooses a
+connection and this order is advisory; agents see only enabled HTTP connections
+they can access. Only applicable short protocol/gateway notes are added.
+The tooltip is noninteractive, with no links or buttons; Service Pools retain
+their existing settings navigation. Normal LLM copy is at most about 85 words.
+Implementation details remain in this documentation. No separate help row,
+inline explanatory area or extra settings box sits above the table. The tooltip
+leaves table geometry unchanged. Hover and keyboard focus open it; mouse/keyboard activation keeps it open,
+while touch taps toggle. Escape, blur, outside click/tap and the
+second trigger tap dismiss it without saving or discarding. Keyboard focus
+stays on the Info button. Failed/loading/404 reads keep a short honest availability
+line, Retry when applicable, and known `/keys` pills while disabling entry.
+Production404 says “Saving agent order requires the backend update”; it refers
+to preference saving and never Service Pools availability. One live state
+element announces actual loading/errors even when the preferred connection is
+known. Hide connections keeps its existing ChevronRight and retains the
+standard ghost hover background/text while expanded, scoped to this control.
+Connection labels keep a usable minimum width in normal/editing
 headers; readiness wraps below when necessary and order pills remain beneath it. Conflicts preserve the
 draft and offer scoped Reload/Overwrite, bound to the original identity.
 
@@ -972,8 +986,8 @@ discovery can include an unavailable credential with `executable: false`.
 Disabled stored rows show `Saved #p · disabled` and no discovery rank. Restricted callers
 see dense ranks over their permitted discovered connections: the owner's REST
 Discovery #2 and #4 can become MCP #1 and #2. A disabled Saved #1 is excluded
-from those MCP ranks. The selection disclosure explains this, advisory choice, relevance,
-exact names and explicit pools without promising that the model picks a row.
+from those MCP ranks. These technical contracts describe the behavior behind
+the concise product help; it does not promise that the model picks a row.
 
 Scoped saves merge only currently authorized IDs of the requested group, preserve
 all unrelated/hidden/stale IDs and their order, and append stored visible IDs
