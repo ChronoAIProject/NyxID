@@ -1,4 +1,8 @@
 import "@testing-library/jest-dom/vitest";
+import { MotionGlobalConfig } from "motion/react";
+
+// Tests assert final states; Motion still runs exits, at zero duration.
+MotionGlobalConfig.skipAnimations = true;
 
 // happy-dom 20.x ships a stub `localStorage` without the Storage API
 // methods (it expects a `--localstorage-file` path to enable full

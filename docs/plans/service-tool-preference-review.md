@@ -924,3 +924,38 @@ this ROOT-owned evidence addition follows it. ROOT closes the accepted source
 findings and local validation gates. Publication, CI/security on that exact
 published head, and Opus delivery approval remain pending. Attachments remain
 outside the commit.
+
+### Main service-card motion merge and final local review
+
+GitHub retained stale base and test-merge metadata after publication of
+`19fffb3a`. Reapplying the existing `main` base exposed current main `b90f07ac`,
+including service-card motion/pool visuals, reporting identities and billing
+visualizations. ROOT started the merge and delegated conflict resolution to
+the recovered implementation worker. Generated wizard conflicts were resolved
+by rebuilding, not selecting either side.
+
+ROOT and Opus reviewed the combined source. Main's motion sequence and pool
+rows remain. Each connection's main, pool and animated details rows form one
+sortable tbody; the keyboard getter aligns complete group centers. Dirty
+ordering guards run before sequence requests. Editing exclusively expands its
+own card, and a before-paint update reconciles ephemeral expansion without an
+account-default write. This preserves Save/Cancel focus after view restoration.
+The complete sticky header remains the error-reveal measurement boundary.
+
+ROOT inspected the final 390px idle card and 1440px scrolled editing/help card
+screenshots under `merge-b90/browser-refreshed-results/`. The discovery controls
+and bounded help remain readable. ROOT accepts the resolved source and local
+gates documented in §19: 4,789 tests across 468 files pass in full unit and V8
+runs, with 73.25% line coverage and unchanged thresholds/timeouts; all 41
+Chromium cases and two WebKit grouped-drag cases pass. Chromium native touch
+is covered; genuine WebKit touch dragging is not claimed. Production/wizard
+builds, the recomputed wizard closure, lint, formatting, backend preference
+14 tests and neighboring 5+1+1 tests, CLI 3+4+4+1 tests and all-target Clippy
+pass. Backend and CLI tests have zero ignored cases. Failed/interrupted interim
+attempts remain separately recorded and are not represented as final passes.
+
+No unresolved merge entries or unstaged tracked changes remain before this
+review addition. Attachments remain untracked. ROOT will publish the merge
+and bind remote CI, full backend/billing execution, security analysis and
+renewed Opus sign-off to its exact commit. Earlier published-head approvals
+remain historical and do not grant final delivery approval.

@@ -211,11 +211,17 @@ vi.mock("@/components/orgs/org-avatar", () => ({
 import { KeysPage } from "./keys";
 import { useServiceCardView } from "@/stores/service-card-view-store";
 
-function expandConnections() {
-  for (const button of screen.queryAllByRole("button", {
+async function expandConnections() {
+  const buttons = screen.queryAllByRole("button", {
     name: /^Expand .+ connections$/,
-  }))
-    fireEvent.click(button);
+  });
+  for (const button of buttons) fireEvent.click(button);
+  // Expansion is sequenced: a previously open body closes before the next opens.
+  const body = buttons.at(-1)?.getAttribute("aria-controls");
+  if (body)
+    await waitFor(() =>
+      expect(document.getElementById(body)?.firstElementChild).toBeVisible(),
+    );
 }
 
 function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
@@ -351,7 +357,9 @@ describe("KeysPage", () => {
       gamma.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      within(alpha.closest("tr")!).getByText("Example route · Priority 7"),
+      within(
+        document.querySelector('[data-service-connection-pools="alpha"]') as HTMLElement,
+      ).getByText("Example route · Priority 7"),
     ).toBeVisible();
     const alphaCell = within(alpha.closest("td")!);
     expect(
@@ -387,7 +395,7 @@ describe("KeysPage", () => {
     expect(within(group).getByText("2 connections")).toBeVisible();
     expect(screen.queryByText("openai")).not.toBeInTheDocument();
     expect(screen.queryByTestId("api-key-table")).not.toBeInTheDocument();
-    expandConnections();
+    await expandConnections();
     expect(within(group).getByText("openai")).toBeVisible();
     expect(within(group).getByText("openai-work")).toBeVisible();
     expect(
@@ -413,7 +421,7 @@ describe("KeysPage", () => {
     ];
     render(<KeysPage />);
     await screen.findByRole("button", { name: "Expand OpenAI connections" });
-    expandConnections();
+    await expandConnections();
     expect(screen.getByText("https://api.openai.com")).toBeVisible();
     expect(screen.getByText("my-openai")).toBeVisible();
     expect(
@@ -466,7 +474,7 @@ describe("KeysPage", () => {
     },
   );
 
-  it("omits oauth2 and api_key credential pills from service cards", () => {
+  it("omits oauth2 and api_key credential pills from service cards", async () => {
     state.keys = [
       makeKey({
         id: "oauth-service",
@@ -489,7 +497,7 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    expandConnections();
+    await expandConnections();
 
     expect(screen.queryByText("oauth2")).not.toBeInTheDocument();
     expect(screen.queryByText("api_key")).not.toBeInTheDocument();
@@ -553,7 +561,7 @@ describe("KeysPage", () => {
     expect(
       screen.queryByRole("button", { name: "Filters" }),
     ).not.toBeInTheDocument();
-    expandConnections();
+    await expandConnections();
     expect(screen.getByText("My OpenAI")).toBeVisible();
     expect(screen.getByText("Platform counterpart")).toBeVisible();
   });
@@ -595,7 +603,7 @@ describe("KeysPage", () => {
     }
   });
 
-  it("keeps organization identity and role in the connection table", () => {
+  it("keeps organization identity and role in the connection table", async () => {
     state.keys = [
       makeKey({
         id: "org-key",
@@ -615,7 +623,7 @@ describe("KeysPage", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Service view: Personal" }),
     );
-    expandConnections();
+    await expandConnections();
 
     expect(screen.getAllByText("Acme Org").length).toBeGreaterThan(0);
     expect(screen.getByTitle("Acme Org · Organization · member")).toBeVisible();
@@ -648,7 +656,7 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    expandConnections();
+    await expandConnections();
 
     await user.click(screen.getByRole("button", { name: /reconnect/i }));
 
@@ -678,7 +686,7 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    expandConnections();
+    await expandConnections();
 
     expect(screen.getByText("Disabled")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /reconnect/i }));
@@ -688,7 +696,7 @@ describe("KeysPage", () => {
     );
   });
 
-  it("badges an OAuth credential with known expired connection health", () => {
+  it("badges an OAuth credential with known expired connection health", async () => {
     state.keys = [
       makeKey({
         id: "expired-oauth",
@@ -701,7 +709,7 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    expandConnections();
+    await expandConnections();
 
     expect(screen.getByText("Reconnect needed")).toBeInTheDocument();
     expect(
@@ -722,7 +730,7 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    expandConnections();
+    await expandConnections();
 
     await user.click(
       screen.getByRole("button", { name: /continue authentication/i }),
@@ -734,7 +742,7 @@ describe("KeysPage", () => {
     );
   });
 
-  it("hides reconnect for read-only org-inherited OAuth services", () => {
+  it("hides reconnect for read-only org-inherited OAuth services", async () => {
     state.keys = [
       makeKey({
         id: "org-oauth",
@@ -757,7 +765,7 @@ describe("KeysPage", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Service view: Personal" }),
     );
-    expandConnections();
+    await expandConnections();
 
     expect(
       screen.queryByRole("button", { name: /reconnect/i }),
@@ -765,7 +773,7 @@ describe("KeysPage", () => {
     expect(screen.getByTitle("Acme Org · Organization · member")).toBeVisible();
   });
 
-  it("does not offer reconnect when organization access is denied despite an admin role", () => {
+  it("does not offer reconnect when organization access is denied despite an admin role", async () => {
     state.keys = [
       makeKey({
         credential_type: "oauth2",
@@ -785,7 +793,7 @@ describe("KeysPage", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Service view: Personal" }),
     );
-    expandConnections();
+    await expandConnections();
     expect(screen.getByText("No access")).toBeVisible();
     expect(
       screen.queryByRole("button", { name: /Reconnect/ }),

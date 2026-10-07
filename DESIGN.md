@@ -86,6 +86,21 @@ Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`)
 
 ## Components
 
+### Service pool and routing icons
+
+Use `ServicePoolIcon` and `PoolStrategyIcon` from
+`components/dashboard/service-pool-icons.tsx` for pools and their routing
+strategies. Priority routing is the default visual reference: each load is a
+hollow circle, connected by a rounded stroke. All variants share Lucide's 24×24
+viewBox, 2-unit stroke, rounded caps and joins, and `currentColor`. Load nodes
+share a 3-unit circle radius. Weighted routing uses a tilted balance beam with
+circular loads at different heights; round robin arranges three loads around a
+cycle with separated clockwise arrows and visible gaps before each node; the
+service-pool mark is a circular ring with five evenly spaced load nodes.
+Each strategy must have a distinct silhouette at the 14px inline size. Reuse this
+family in cards, tables, summaries, route panels, and routing controls so the same
+shapes retain their meaning.
+
 ### Buttons
 - **Height:** default `h-8`, sm `h-7`, lg `h-9`, icon `h-8 w-8`
 - **Text:** `text-12 font-medium`

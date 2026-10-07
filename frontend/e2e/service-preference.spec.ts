@@ -331,6 +331,40 @@ async function expand(page: Page) {
     .getByRole("button", { name: "Expand Anthropic connections", exact: true })
     .click();
   await expect(card(page).getByRole("table")).toBeVisible();
+  await settleCard(page);
+}
+async function settleCard(page: Page) {
+  await expect
+    .poll(() =>
+      card(page).evaluate((element) => {
+        const trigger = element.querySelector<HTMLButtonElement>(
+          'button[aria-label="Collapse Anthropic connections"]',
+        );
+        const content = trigger?.getAttribute("aria-controls");
+        const reveal = content
+          ? document.getElementById(content)?.firstElementChild
+          : null;
+        return Boolean(
+          reveal &&
+          getComputedStyle(reveal).opacity === "1" &&
+          reveal.getBoundingClientRect().height >= reveal.scrollHeight - 1 &&
+          !element.hasAttribute("data-moving"),
+        );
+      }),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      card(page).evaluate((element) => element.hasAttribute("data-moving")),
+    )
+    .toBe(false);
+  await card(page).evaluate(async (element) => {
+    await Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => undefined)),
+    );
+  });
 }
 async function enter(page: Page) {
   await expand(page);
@@ -343,6 +377,7 @@ async function enter(page: Page) {
   await expect(
     row(page, 0).getByRole("button", { name: /^Drag / }),
   ).toBeEnabled();
+  await expect(row(page, 0).getByRole("button", { name: /^Drag / })).toBeFocused();
 }
 async function move(page: Page, i: number) {
   await row(page, i)
@@ -366,7 +401,23 @@ async function drag(page: Page, from: number, to: number) {
   await expect(
     page.locator('[role="status"][aria-live="assertive"]'),
   ).toHaveCount(1);
-  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 15 });
+  const fromGroup = await page
+    .locator(`[data-sortable-connection="${ids[from]}"]`)
+    .boundingBox();
+  const toGroup = await page
+    .locator(`[data-sortable-connection="${ids[to]}"]`)
+    .boundingBox();
+  if (!fromGroup || !toGroup) throw Error("No sortable groups");
+  await page.mouse.move(
+    b.x + b.width / 2,
+    a.y +
+      a.height / 2 +
+      toGroup.y +
+      toGroup.height / 2 -
+      fromGroup.y -
+      fromGroup.height / 2,
+    { steps: 15 },
+  );
   await expect(
     page.getByRole("status").filter({ hasText: /^Moved to position/ }),
   ).toBeVisible();
@@ -553,12 +604,26 @@ test("touch drag, readable editing identities and contained tablet/mobile table 
   await enter(page);
   const handle = row(page, 4).getByRole("button", { name: /^Drag / });
   await handle.scrollIntoViewIfNeeded();
+  await handle.evaluate(element => {
+    const main = element.closest("main")!;
+    const header = element.closest("section")!.querySelector("[data-service-order-actions]")!;
+    const safeTop = header.getBoundingClientRect().bottom + 12;
+    const top = element.getBoundingClientRect().top;
+    if (top < safeTop) main.scrollTop -= safeTop - top;
+  });
+  await expect.poll(() => handle.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+  })).toBe(true);
   const a = await handle.boundingBox();
   const b = await row(page, 0)
     .getByRole("button", { name: /^Drag / })
     .boundingBox();
   expect(a).not.toBeNull();
   expect(b).not.toBeNull();
+  const fromGroup = (await page.locator(`[data-sortable-connection="${ids[4]}"]`).boundingBox())!;
+  const toGroup = (await page.locator(`[data-sortable-connection="${ids[0]}"]`).boundingBox())!;
+  const delta = toGroup.y + toGroup.height / 2 - fromGroup.y - fromGroup.height / 2;
   const session = await context.newCDPSession(page);
   await session.send("Input.dispatchTouchEvent", {
     type: "touchStart",
@@ -570,10 +635,11 @@ test("touch drag, readable editing identities and contained tablet/mobile table 
       touchPoints: [
         {
           x: a!.x + a!.width / 2,
-          y: a!.y + a!.height / 2 + ((b!.y - a!.y) * i) / 12,
+          y: a!.y + a!.height / 2 + (delta * i) / 12,
         },
       ],
     });
+  await expect(handle).toHaveAttribute("aria-pressed", "true");
   await session.send("Input.dispatchTouchEvent", {
     type: "touchEnd",
     touchPoints: [],
@@ -628,7 +694,7 @@ test("filtered editing keeps complete group, org/pool metadata and saved view un
   ).toBeVisible();
   await expect(card(page).getByRole("table")).toBeVisible();
   await expect(
-    row(page, 2).getByText("Explicit route · Priority 7"),
+    page.locator(`[data-service-connection-pools="${ids[2]}"]`).getByText("Explicit route · Priority 7"),
   ).toBeVisible();
   await expect(
     row(page, 2).getByText(
@@ -1126,7 +1192,7 @@ test("overview reuses inline rows, pills, info tooltip and pool metadata", async
   await expect(page.locator("[data-service-order-help]").getByRole("link")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(
-    row(page, 2).getByText("Explicit route · Priority 7"),
+    page.locator(`[data-service-connection-pools="${ids[2]}"]`).getByText("Explicit route · Priority 7"),
   ).toBeVisible();
   await page.getByRole("button", { name: "Reorder discovery", exact: true }).click();
   await move(page, 2);
@@ -1783,3 +1849,243 @@ test("sticky Save brings one local 201-row validation error into view without a 
   await expect(card(page).getByRole("form")).toHaveCount(0);
   expect(state.writes).toEqual([{ group, ordered: [], expected_version: 1 }]);
 });
+
+for (const modality of ["mouse", "keyboard", "touch"] as const) {
+  test(`pool and open details move as one sortable connection with ${modality}`, async ({
+    browser,
+    baseURL,
+  }) => {
+    const context = await browser.newContext({
+      baseURL,
+      viewport: { width: 1440, height: 1000 },
+      hasTouch: modality === "touch",
+    });
+    const page = await context.newPage();
+    await fixture(page);
+    await enter(page);
+    await row(page, 2)
+      .getByRole("button", { name: /^Details for/ })
+      .click();
+    const unit = page.locator(`[data-sortable-connection="${ids[2]}"]`);
+    await expect(
+      unit.getByText("Connection details", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      unit.locator(`[data-service-connection-pools="${ids[2]}"]`),
+    ).toContainText("Priority 7");
+    await settleCard(page);
+    await expect(card(page).getByRole("form")).toBeAttached();
+    const handle = row(page, 2).getByRole("button", { name: /^Drag / });
+    await handle.scrollIntoViewIfNeeded();
+    if (modality === "mouse") await drag(page, 2, 0);
+    else if (modality === "keyboard") {
+      await handle.focus();
+      await page.keyboard.press("Space");
+      await expect(handle).toHaveAttribute("aria-pressed", "true");
+      await page.keyboard.press("ArrowUp");
+      await expect(page.locator('[id^="DndLiveRegion-"]')).toContainText(
+        "Moved to position 2",
+      );
+      await page.keyboard.press("ArrowUp");
+      await expect(page.locator('[id^="DndLiveRegion-"]')).toContainText(
+        "Moved to position 1",
+      );
+      await page.keyboard.press("Space");
+    } else {
+      const a = await handle.boundingBox();
+      const b = await row(page, 0)
+        .getByRole("button", { name: /^Drag / })
+        .boundingBox();
+      if (!a || !b) throw Error("No grouped touch handles");
+      const fromGroup = (await unit.boundingBox())!;
+      const toGroup = (await page
+        .locator(`[data-sortable-connection="${ids[0]}"]`)
+        .boundingBox())!;
+      const delta =
+        toGroup.y + toGroup.height / 2 - fromGroup.y - fromGroup.height / 2;
+      const session = await context.newCDPSession(page);
+      await session.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: a.x + a.width / 2, y: a.y + a.height / 2 }],
+      });
+      for (let i = 1; i <= 12; i++)
+        await session.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [
+            {
+              x: a.x + a.width / 2,
+              y: a.y + a.height / 2 + (delta * i) / 12,
+            },
+          ],
+        });
+      await expect(handle).toHaveAttribute("aria-pressed", "true");
+      await expect
+        .poll(() => unit.evaluate((body) => body.style.transform))
+        .not.toBe("");
+      await session.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+    }
+    await expect(
+      row(page, 2).getByLabel(/Discovery preference 1 for/),
+    ).toBeVisible();
+    await expect(unit.locator("tr")).toHaveCount(3);
+    await expect(
+      unit.getByText("Connection details", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      unit.locator(`[data-service-connection-pools="${ids[2]}"]`),
+    ).toContainText("Priority 7");
+    await expect
+      .poll(() =>
+        page
+          .locator("[data-sortable-connection]")
+          .first()
+          .getAttribute("data-sortable-connection"),
+      )
+      .toBe(ids[2]);
+    await context.close();
+  });
+}
+
+for (const reducedMotion of ["no-preference", "reduce"] as const) {
+  test(`dirty ordering stays revealed through filters and default restore, then guards switching: ${reducedMotion}`, async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion });
+    const state = await fixture(page);
+    await enter(page);
+    await move(page, 2);
+    const form = card(page).getByRole("form");
+    const formId = await form.getAttribute("id");
+    const search = page.getByRole("textbox", {
+      name: "Search services and connections",
+    });
+    await search.fill("Slack");
+    await search.press("Enter");
+    await expect(card(page).getByRole("table")).toBeVisible();
+    await page.locator("main").evaluate((main) => {
+      main.scrollTop = 0;
+    });
+    await page
+      .getByRole("button", { name: "Saved views", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Restore default", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Service view: All services", exact: true })
+      .click();
+    await expect(form).toHaveAttribute("id", formId!);
+    await expect(card(page).getByRole("table")).toBeVisible();
+    await expect(card(page).locator("[data-ordering-row]")).toHaveCount(30);
+    await expect(
+      card(page).getByRole("button", { name: "Save", exact: true }),
+    ).toBeEnabled();
+    await page
+      .getByRole("button", { name: "Service view: Personal", exact: true })
+      .click();
+    await card(page).evaluate((element) => {
+      const main = element.closest("main")!;
+      main.scrollTop +=
+        element.getBoundingClientRect().top -
+        main.getBoundingClientRect().top +
+        400;
+    });
+    await expect(
+      card(page).locator("[data-service-order-actions]"),
+    ).toHaveAttribute("data-stuck", "true");
+    const geometry = await card(page).evaluate((element) => {
+      const header = element
+        .querySelector("[data-service-order-actions]")!
+        .getBoundingClientRect();
+      const bounds = element.getBoundingClientRect();
+      return {
+        left: header.left - bounds.left,
+        right: bounds.right - header.right,
+      };
+    });
+    expect(Math.abs(geometry.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.right)).toBeLessThanOrEqual(1);
+    const other = page
+      .getByRole("region", { name: "Slack", exact: true })
+      .getByRole("button", { name: "Expand Slack connections", exact: true });
+    let prompts = 0;
+    page.once("dialog", async (dialog) => {
+      prompts++;
+      await dialog.dismiss();
+    });
+    await other.click();
+    expect(prompts).toBe(1);
+    await expect(form).toHaveAttribute("id", formId!);
+    await expect(card(page).getByRole("table")).toBeVisible();
+    page.once("dialog", async (dialog) => {
+      prompts++;
+      await dialog.accept();
+    });
+    await other.click();
+    expect(prompts).toBe(2);
+    await expect(form).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("region", { name: "Slack", exact: true })
+        .getByRole("table"),
+    ).toBeVisible();
+    expect(state.writes).toEqual([]);
+    expect(state.viewWrites).toEqual([]);
+  });
+}
+
+for (const action of ["Save", "Cancel"] as const) {
+  test(`default restore with changed ephemeral expansion keeps one card open and returns focus after ${action}`, async ({
+    page,
+  }) => {
+    const state = await fixture(page);
+    await enter(page);
+    await move(page, 2);
+    await page.evaluate(async () => {
+      const { useServiceCardView } =
+        await import("/src/stores/service-card-view-store.ts");
+      useServiceCardView.setState({
+        expanded: ["catalog:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+      });
+    });
+    await expect(
+      page.getByRole("button", { name: /^Collapse .* connections$/ }),
+    ).toHaveCount(1);
+    await expect(card(page).getByRole("table")).toBeVisible();
+    await page.locator("main").evaluate((main) => {
+      main.scrollTop = 0;
+    });
+    await page
+      .getByRole("button", { name: "Saved views", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Restore default", exact: true })
+      .click();
+    await expect(
+      page.getByRole("button", { name: /^Collapse .* connections$/ }),
+    ).toHaveCount(1);
+    await card(page).getByRole("button", { name: action, exact: true }).click();
+    await expect(card(page).getByRole("form")).toHaveCount(0);
+    await expect(
+      card(page).getByRole("button", {
+        name: "Reorder discovery",
+        exact: true,
+      }),
+    ).toBeFocused();
+    await expect(card(page).getByRole("table")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /^Collapse .* connections$/ }),
+    ).toHaveCount(1);
+    const expanded = await page.evaluate(async () => {
+      const { useServiceCardView } =
+        await import("/src/stores/service-card-view-store.ts");
+      return useServiceCardView.getState().expanded;
+    });
+    expect(expanded).toEqual([group]);
+    expect(state.writes).toHaveLength(action === "Save" ? 1 : 0);
+    expect(state.viewWrites).toEqual([]);
+  });
+}

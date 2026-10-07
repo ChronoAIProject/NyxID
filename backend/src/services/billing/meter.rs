@@ -580,6 +580,7 @@ pub(super) fn reserved_row(
         model: None,
         token_breakdown: None,
         audio_tokens: None,
+        image_tokens: None,
         reserved_credits,
         funding,
         quantity: None,
@@ -669,6 +670,11 @@ async fn finalize_matching(
         && let Ok(audio) = bson::to_bson(audio)
     {
         set.insert("audio_tokens", audio);
+    }
+    if let Some(images) = request_usage.and_then(|usage| usage.image_tokens.as_ref())
+        && let Ok(images) = bson::to_bson(images)
+    {
+        set.insert("image_tokens", images);
     }
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
@@ -2216,12 +2222,17 @@ mod tests {
             input_tokens: 90,
             output_tokens: 25,
         };
+        let images = crate::models::service_billing::ImageTokens {
+            input_tokens: 10,
+            output_tokens: 15,
+        };
         settle(
             &db,
             &metered,
             PlatformUsage::llm_completion(640, 160)
                 .with_token_breakdown(Some(breakdown))
-                .with_audio_tokens(Some(audio)),
+                .with_audio_tokens(Some(audio))
+                .with_image_tokens(Some(images)),
             None,
             Some("test-model".to_string()),
         )
@@ -2236,6 +2247,7 @@ mod tests {
             .expect("row exists");
         assert_eq!(row.token_breakdown, Some(breakdown));
         assert_eq!(row.audio_tokens, Some(audio));
+        assert_eq!(row.image_tokens, Some(images));
 
         // An empty breakdown is dropped instead of stored as zeros.
         let empty = PlatformUsage::llm_completion(64, 1).with_token_breakdown(Some(

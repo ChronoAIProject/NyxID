@@ -2,7 +2,6 @@ import { createContext, useContext, type ReactNode } from "react";
 import { GripVertical } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 
 type DragHandle = Pick<
@@ -15,22 +14,16 @@ export function ServiceOrderRow({
   ordering,
   blocked,
   children,
-  className,
 }: {
   readonly id: string;
   readonly ordering: boolean;
   readonly blocked: boolean;
   readonly children: ReactNode;
-  readonly className: string;
 }) {
   if (!ordering)
-    return (
-      <TableRow data-service-connection-row={id} className={className}>
-        {children}
-      </TableRow>
-    );
+    return <tbody data-service-connection-group={id}>{children}</tbody>;
   return (
-    <SortableServiceRow id={id} blocked={blocked} className={className}>
+    <SortableServiceRow id={id} blocked={blocked}>
       {children}
     </SortableServiceRow>
   );
@@ -39,12 +32,10 @@ function SortableServiceRow({
   id,
   blocked,
   children,
-  className,
 }: {
   readonly id: string;
   readonly blocked: boolean;
   readonly children: ReactNode;
-  readonly className: string;
 }) {
   const {
     attributes,
@@ -59,11 +50,10 @@ function SortableServiceRow({
     <DragHandleContext.Provider
       value={{ attributes, listeners, setActivatorNodeRef }}
     >
-      <TableRow
+      <tbody
         ref={setNodeRef}
-        data-service-connection-row={id}
-        data-ordering-row={id}
-        className={className}
+        data-service-connection-group={id}
+        data-sortable-connection={id}
         style={{
           transform: CSS.Transform.toString(transform),
           transition,
@@ -71,7 +61,7 @@ function SortableServiceRow({
         }}
       >
         {children}
-      </TableRow>
+      </tbody>
     </DragHandleContext.Provider>
   );
 }

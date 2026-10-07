@@ -12,6 +12,8 @@ export function usageStats(
     cache_creation_tokens: 5,
     audio_input_tokens: 0,
     audio_output_tokens: 0,
+    image_input_tokens: 0,
+    image_output_tokens: 0,
     total_tokens: 120,
     gross_cost_micros: 2_000_000,
     wallet_cost_micros: 1_000_000,

@@ -1533,6 +1533,7 @@ mod tests {
             model: None,
             token_breakdown: None,
             audio_tokens: None,
+            image_tokens: None,
             reserved_credits: crate::models::credits::Credits::from_whole(0),
             funding: Some(UsageFunding {
                 credits_per_unit_micros: 500_000,

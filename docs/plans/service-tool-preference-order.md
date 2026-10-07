@@ -442,6 +442,18 @@ exists; activating it expands the card. Nothing otherwise.
 The CTA/editing labels use discovery vocabulary; existing setting/status and
 save/reset/form messages retain agent order as specified in §5.2.
 
+Cards use main's one-card-at-a-time close/reflow/reveal sequence. Every
+collapse or group switch checks the draft guard before requesting motion.
+The editing group forces the card's expansion, span, layout identity and
+CardReveal body open exclusively for that group even when filters or a
+saved-view restore change the stored expansion. Reconcile the ephemeral
+expansion to that group before paint, without saving account defaults, so
+Save/Cancel preserve the expanded card and return focus to Reorder discovery.
+Dirty forms and delayed focus stay mounted through reflow.
+Each logical connection uses one sortable tbody containing its actual main
+row, sibling pool-membership row and animated detail/history panel row; all
+remain usable during editing and move together with measured group geometry.
+
 - Control: one obvious `Reorder discovery` CTA (`ListOrdered`, `variant="primary"
   size="sm"`) beside the **compact discovery summary**, below Hide connections
   in the expanded card's sticky header. The overview places the same summary
@@ -875,8 +887,9 @@ authorized implicit-routing behavior; docs.
   label; disabled stored rows show `Saved #p · disabled`; active non-HTTP stored rows show
   their actual protocol's saved-position pill and no MCP prefix/discovery rank;
   unstored and `connection:`
-  singleton rows show neither; a pool-member row shows `Priority n` plus its
-  pill; two rows labelled "Anthropic" are distinguished by slug and pill;
+  singleton rows show neither; a pool member shows `Priority n` in its
+  sibling `data-service-connection-pools` row and its discovery/saved pill
+  in the main row of the same logical connection; two rows labelled "Anthropic" are distinguished by slug and pill;
   filters hide rows but never change visible pill text or any row/group
   position; the collapsed chip reads `Preferred: <label>` only with a rank-1
   connection and expands the card. Verified in the expanded card, table view
@@ -907,7 +920,8 @@ authorized implicit-routing behavior; docs.
   dragging at a 390px viewport with contained table scrolling and no document
   horizontal overflow; Move up/down,
   `Move disabled to end` and `Reset to default` (with confirm) behave as
-  §5.4; the single dnd-kit live region announces; the Slack card, toolbar,
+  §5.4; pool membership and open detail panels move as one sortable connection
+  in mouse, keyboard and touch proofs; the single dnd-kit live region announces; the Slack card, toolbar,
   store and saved view are unchanged throughout.
 - **AC-20** (local, *revised*): Save disabled until a change, enabled after a
   move; Cancel exits ordering without writes and removes the editor/Save action.
@@ -958,11 +972,13 @@ authorized implicit-routing behavior; docs.
   surfaces, the chip, the prod-404 read-only state, conflict/unknown-id/
   capacity/network recovery including the release confirmation and retry
   save, draft survival across a `/keys` refetch, the
-  kept-mounted card under filter changes, guards on collapse/view/tab/navigation, disabled other-group entry, focus return, and that saved view, filters, store
+  kept-mounted and revealed card under filter/Personal-All/saved-view changes
+  including reduced motion, guards before collapse/other-card/view/tab/navigation, disabled other-group entry, focus return, and that saved view, filters, store
   and other cards are unchanged (no `PUT /users/me/preferences/services`).
 - **AC-28** (*revised*): read failure cannot enable saving; a two-connection
   group (one enabled, one disabled) can be ordered; the 30/26/duplicate-label
-  group renders, drags and saves; identity change discards the draft and exits
+  group renders, drags complete connection row groups and saves; main service-card
+  scroll alignment/sticky geometry passes in normal and reduced motion; identity change discards the draft and exits
   ordering; caches are identity-separated; stale inventory recovery has tests.
 - **AC-29** (DB, *revised*): grouped GET returns only groups with ≥ 1
   authorized stored id and never a `connection:` group; stored ids the caller
@@ -1631,3 +1647,124 @@ ROOT-owned review-document hash without modifying that document. Attachments
 remain untracked. No commit, push, merge, deployment or production write was
 performed by this recovery worker. Exact published-head CI/security and final
 Opus approval are still required before ROOT marks delivery ready.
+
+## 19. Merge of main b90f07ac and fresh local validation
+
+This merge combines historical preference head
+`19fffb3a243c0bd39a680d331a359ded4304d199` with main
+`b90f07ac50499f6f654d2fffd9f96f1a83bd0f50`. Earlier published-head approvals
+and CI results remain historical. ROOT owns the merge commit, publication,
+review record, exact-head CI/security acceptance and final Opus delivery review.
+The implementation worker resolves and stages local source and generated assets.
+Attachments remain untracked.
+
+Main's motion sequence, sticky connected surfaces, pool rows and icon conventions
+are retained. Ordering pins effective expansion exclusively to the editing group
+and reconciles the ephemeral expansion before paint; it does not save account
+defaults. Save/Cancel keep the card expanded and restore focus to Reorder discovery,
+even after a default restore with a different ephemeral expansion. Each sortable
+connection is one tbody containing its actual main row, pool row and animated
+panel. Variable-height keyboard moves align group centers with the existing
+closest-center collision detector. Mouse/touch test destinations also account for
+the complete group height. Pool Priority assertions now inspect the sibling pool
+row while discovery/saved pills remain in the main row. The browser helper waits
+for complete reveal height/opacity and settled layout before geometry measurements.
+No timeout, coverage threshold, retry, exclusion or guard was relaxed.
+
+All new logs/configs are under
+`/tmp/nyxid-service-preference-restart/merge-b90/`. Final source binding starts at
+`source-frozen-final.json`; documentation and regenerated wizard outputs are bound
+separately at completion. Node is 22.21.1. Fresh `mongo-readiness.json` confirms
+MongoDB 8.0.0, replica set `nyxidPreferenceReview`, writable primary
+`127.0.0.1:27029`; Rust tests use that explicit isolated URI and one Cargo process
+at a time. The global Homebrew MongoDB 7 instance is not used.
+
+Interim attempts are preserved:
+
+- `focused.log`: 67 passed, one failed pool-text assertion after main moved the
+  membership to a sibling row. The assertion was adapted without changing its
+  Priority value or discovery-pill expectation.
+- `browser-focused.log`, `browser-sensors-2.log`, `browser-debug*.log`: new
+  open-panel group-drag assertions exposed unequal-height coordinate handling.
+  Center-aligned keyboard coordinates and group-center pointer destinations
+  subsequently passed all three actual Chromium sensors.
+- `browser-sensors-3.log`: 13 passed, one early 1024px sticky failure after
+  opening/theme change. The old settle check could finish before reveal began;
+  the helper now polls full reveal and absence of data-moving. The unchanged
+  sticky assertions passed the targeted rerun in `browser-guards.log`.
+- `browser-guards.log`: the new default-restore setup waited for Saved views while
+  main's compact toolbar omitted it; the second case was interrupted. The test
+  now scrolls to the full toolbar. `browser-guards-2.log` preserves two failures
+  from a fixed 200px scroll that had not reached the card's sticky boundary;
+  the test now scrolls from measured card position. Both normal/reduced cases
+  passed in `browser-guards-3.log`.
+- `browser-expansion.log`: four fresh passes, including dirty default restore
+  after changed ephemeral expansion followed by successful Save/Cancel, one-card
+  expansion and focus return. These precede extraction of the unchanged keyboard
+  helper into its own module; final affected checks refresh on the frozen source.
+- `full-unit-before-expansion.log` was interrupted on ROOT's accepted Opus
+  expansion/focus fixes. `full-unit-before-helper-extract.log` passed 468 files,
+  4,789 tests. The in-flight V8 run was then interrupted to remove a new Fast
+  Refresh warning by extracting the keyboard helper; both interruption records
+  and the coverage attempt are retained. `lint-targeted-after-extract.log` is clean.
+- `browser-webkit.log` preserves a temporary external-config startup failure from
+  an omitted webServer cwd. The corrected installed WebKit2336 harness passed
+  grouped mouse/keyboard 2/2 in `browser-webkit-2.log`. Genuine WebKit touch-drag
+  automation is unavailable through the public Playwright API: WebKit has tap
+  support but no CDP/raw touch-move session. No synthetic touch is claimed.
+
+- `build-invalid-test-env.log`: the local serial runner carried NODE_ENV=test
+  from Vitest into npm build. The unchanged production mock-footprint guard
+  correctly rejected a dev-only chunk (exit1). The runner now scopes that
+  environment variable to Vitest commands; production build/wizard/lint are
+  rerun on the unchanged frozen source. Passed unit/V8 evidence is retained.
+
+- `browser-40of41.log` preserves the complete first frozen run:40 passed,
+  one original390px touch test failed its first-position assertion. The native
+  sensor never picked up the handle after scrollIntoViewIfNeeded placed it under
+  the complete sticky header. `browser-mobile-isolated-2.log` preserves that
+  pickup failure; `browser-mobile-isolated-3.log` passes after the test scrolls
+  the handle below the measured header, verifies actual elementFromPoint hit,
+  waits initial focus and uses complete group-center coordinates. No production
+  source changed; the first-position/pickup/mobile overflow assertions remain.
+  The complete browser suite refreshes under `source-frozen-browser.json`;
+  comparison proves only its E2E test file changed, so unit/V8/build/wizard
+  production-input evidence remains valid.
+
+Final local frontend evidence (all commands under Node22.21.1):
+
+| Gate | Result | Log under merge-b90 |
+| --- | --- | --- |
+| Reproducible dependency installation | npm ci exit0; main package/lock retained | npm-ci.log |
+| Frozen focused unit | 11 files,122 tests passed; exit0 | focused-final.log |
+| Frozen full unit | 468 files,4,789 tests passed; exit0,173.36s | full-unit.log |
+| Frozen full V8 | 468 files,4,789 tests passed; exit0; lines73.25% vs unchanged15% gate, statements71.49%, branches66.45%, functions68.58% | full-v8.log |
+| Production build | exit0; credential-accept output and production mock-footprint check passed | build-final.log |
+| Wizard rebuild/closure | exit0;171 producer inputs; recorded/computed hash both ae039241d19e412e04c881ffc0ad2e1644bf74785371b1324af09949b308f012 | wizard-build.log; wizard-source-closure.json |
+| Lint | exit0,0 errors and existing29 warnings; refreshed browser file targeted lint also clean | lint-final.log; lint-browser-refreshed.log |
+| Complete real-route browser | 41/41 Chromium passed, exit0,211.53s; main scroll4/4, mobile native touch, grouped sensors, tooltip/sticky/focus/error regressions and generated wizard shim | browser-final.log; browser-refreshed-results/ |
+| Additional WebKit | grouped mouse/keyboard2/2 passed, exit0,9.14s; native WebKit touch drag is not covered | webkit-final.log; webkit-final-results/ |
+| Rust formatting | exit0,5.65s | rust-format.log |
+| Merged backend preference | 14 passed,0 failed,0 ignored; fresh Cargo build against merged source and isolated Mongo8 | backend-preference.log |
+| Backend search/agent/curation | 5+1+1 passed,0 failed,0 ignored; freshly built SHA-bound executable | backend-search.log; backend-agent-search.log; backend-curation.log; backend-artifact-binding.json |
+| CLI unit/subprocess/transport | 3+4+4 passed,0 failed,0 ignored | cli-order-unit.log; cli-integration.log |
+| CLI wizard freshness | 1 passed,0 failed,0 ignored | cli-integration.log |
+| All-target Clippy | exit0 with -D warnings; serial jobs1,270.61s | clippy.log |
+
+Production/unit/wizard inputs remain byte-identical to source-frozen-final.json.
+The browser test-only refresh is bound by source-frozen-browser.json. Complete
+old40/41 browser artifacts remain separately available; no old failure is counted
+as a final pass. Final screenshot paths are recorded for ROOT's artifact review.
+Full backend, billing and usage execution remains an exact-head CI gate owned by
+ROOT; local Rust gates cover the feature filters, CLI and all-target Clippy as
+requested. Exact published-head CI/wizard/security and final Opus sign-off remain
+pending publication by ROOT; this section grants no delivery approval.
+
+After the fresh merged Cargo backend preference build passed, a second filtered
+Cargo invocation unnecessarily recompiled the backend. That duplicate build was
+interrupted and preserved in backend-search-rebuild-interrupted.log. Remaining
+backend filters ran on a copy of the just-built merged executable, SHA256
+fe2cc6b1c2b412e2b67eb51ee71dd068c7feafd8753dcad528e847d94ea220ac,
+with the explicit isolated Mongo8 URI. No historical executable was used.
+All requested local gates now pass; ROOT owns final review-record append and
+publication-bound CI/security/sign-off.

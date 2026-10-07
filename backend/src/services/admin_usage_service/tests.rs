@@ -136,6 +136,81 @@ async fn identities_without_display_names_use_email() {
 }
 
 #[tokio::test]
+async fn service_account_names_resolve_in_lists_and_analytics() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+
+    let db = connect_test_database("usage_service_account")
+        .await
+        .unwrap();
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let now = hour(Utc::now());
+    db.collection::<Document>(crate::models::service_account::COLLECTION_NAME)
+        .insert_many([
+            doc! { "_id": &actor, "name": "Heca production worker", "is_active": true },
+            doc! { "_id": &owner, "name": "Heca retired billing account", "is_active": false },
+        ])
+        .await
+        .unwrap();
+    let mut row = meter(&actor, &owner, "example", 42);
+    row.insert(
+        "created_at",
+        bson::DateTime::from_chrono(now - chrono::Duration::hours(2)),
+    );
+    insert(&db, row).await;
+
+    for folded in [false, true] {
+        if folded {
+            fold_once(&db, now).await.unwrap();
+        }
+        let list = read(
+            &db,
+            AdminUsageQuery {
+                user: Some(actor.clone()),
+                ..query()
+            },
+        )
+        .await;
+        assert_eq!(list.ranking[0].user.display_name, "Heca production worker");
+        assert_eq!(list.ranking[0].user.user_type, "service_account");
+        assert!(list.ranking[0].user.email.is_none());
+        assert_eq!(
+            list.selected_user.unwrap().display_name,
+            "Heca production worker"
+        );
+        assert_eq!(
+            list.ranking[0].billing_owner.as_ref().unwrap().display_name,
+            "Heca retired billing account"
+        );
+        for (breakdown, expected) in [
+            ("user", "Heca production worker"),
+            ("owner", "Heca retired billing account"),
+        ] {
+            let chart = get_analytics(
+                &db,
+                AnalyticsQuery {
+                    breakdown: Some(breakdown.into()),
+                    measure: Some("requests".into()),
+                    top: Some(5),
+                    actors: Some(actor.clone()),
+                    owners: Some(owner.clone()),
+                    ..Default::default()
+                }
+                .validate(Utc::now())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(chart.slices[0].label, expected);
+            assert_eq!(chart.series[0].label, expected);
+            assert_eq!(chart.total, Some(1));
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn deduplicates_components_and_resale_and_attributes_org_usage() {
     let db = connect_test_database("admin_usage_dedupe")
         .await
@@ -154,6 +229,10 @@ async fn deduplicates_components_and_resale_and_attributes_org_usage() {
     primary.insert("metric", "input_tokens");
     primary.insert("wallet_id", "wallet");
     primary.insert("token_breakdown", doc! { "prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 25, "cache_creation_tokens": 5 });
+    primary.insert(
+        "image_tokens",
+        doc! { "input_tokens": 70, "output_tokens": 10 },
+    );
     primary.insert("funding", doc! { "total_charge_micros": 100, "wallet_funded_micros": 30, "grant_funded_micros": 20, "allowance_funded_micros": 50 });
     insert(&db, primary.clone()).await;
     for (suffix, layer, metric, quantity) in [
@@ -206,6 +285,9 @@ async fn deduplicates_components_and_resale_and_attributes_org_usage() {
     assert_eq!(result.totals.quantities["input_tokens"], 100);
     assert_eq!(result.totals.quantities["output_tokens"], 20);
     assert_eq!(result.totals.quantities["images"], 3);
+    assert_eq!(result.totals.total_tokens, 120);
+    assert_eq!(result.totals.image_input_tokens, 70);
+    assert_eq!(result.totals.image_output_tokens, 10);
     assert_eq!(result.totals.total_tokens, 120);
     assert_eq!(result.totals.cached_tokens, 25);
     assert_eq!(result.totals.cache_creation_tokens, 5);
@@ -1696,9 +1778,9 @@ async fn hourly_and_daily_reductions_have_covering_indexes() {
     ] {
         // Flat Decimal128 mirrors use covered index slots after normalization.
         for index in [
-            "usage_rollup_reduce_window_exact_v5",
-            "usage_rollup_reduce_actor_exact_v5",
-            "usage_rollup_reduce_owner_exact_v5",
+            "usage_rollup_reduce_window_exact_v6",
+            "usage_rollup_reduce_actor_exact_v6",
+            "usage_rollup_reduce_owner_exact_v6",
         ] {
             let mut group = doc! { "_id": "$single_display_key" };
             for field in usage_rollup::MEASURES
@@ -1714,10 +1796,10 @@ async fn hourly_and_daily_reductions_have_covering_indexes() {
             }
             let mut filter = doc! { bucket: { "$gte": bson::DateTime::from_chrono(end - chrono::Duration::days(1)), "$lt": bson::DateTime::from_chrono(end) }, "single_display_key": { "$ne": null } };
             match index {
-                "usage_rollup_reduce_actor_exact_v5" => {
+                "usage_rollup_reduce_actor_exact_v6" => {
                     filter.insert("actor", "actor");
                 }
-                "usage_rollup_reduce_owner_exact_v5" => {
+                "usage_rollup_reduce_owner_exact_v6" => {
                     filter.insert("owner", "owner");
                 }
                 _ => (),
@@ -2076,6 +2158,10 @@ async fn analytics_calendar_intervals_and_token_measures_conserve_folded_usage()
             },
         );
         row.insert("token_breakdown", doc! { "prompt_tokens": 80_i64, "completion_tokens": 20_i64, "cached_tokens": 30_i64, "cache_creation_tokens": 5_i64 });
+        row.insert(
+            "image_tokens",
+            doc! { "input_tokens": 50_i64, "output_tokens": 10_i64 },
+        );
         row.insert("wallet_id", "wallet");
         row.insert("funding", doc! { "total_charge_micros": 100_i64, "wallet_funded_micros": 100_i64, "grant_funded_micros": 0_i64, "allowance_funded_micros": 0_i64 });
         insert(&db, row).await;
@@ -2097,6 +2183,8 @@ async fn analytics_calendar_intervals_and_token_measures_conserve_folded_usage()
                 ("total_tokens", 300),
                 ("cached_tokens", 90),
                 ("cache_creation_tokens", 15),
+                ("image_input_tokens", 150),
+                ("image_output_tokens", 30),
             ] {
                 let response = get_analytics(
                     &db,
@@ -2460,7 +2548,7 @@ async fn covered_credit_mirrors_preserve_legacy_scale_and_explicit_null() {
     let explain = db
         .run_command(doc! {
             "explain": { "aggregate": collection.name(), "pipeline": pipeline, "cursor": {},
-                "hint": "usage_rollup_reduce_window_exact_v5" },
+                "hint": "usage_rollup_reduce_window_exact_v6" },
             "verbosity": "executionStats",
         })
         .await

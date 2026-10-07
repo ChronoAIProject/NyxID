@@ -995,6 +995,22 @@ async fn covering_index_upgrade_retires_only_superseded_definitions() {
                 (name, value.clone())
             })
             .collect();
+        let mut v5_keys = v4_keys.clone();
+        v5_keys.insert("audio_input_tokens", 1);
+        v5_keys.insert("audio_output_tokens", 1);
+        summaries
+            .create_index(
+                IndexModel::builder()
+                    .keys(v5_keys)
+                    .options(
+                        IndexOptions::builder()
+                            .name("usage_rollup_reduce_window_exact_v5".to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
         summaries
             .create_index(
                 IndexModel::builder()
@@ -1066,7 +1082,8 @@ async fn covering_index_upgrade_retires_only_superseded_definitions() {
         assert!(!names.contains(&"usage_rollup_reduce_window"));
         assert!(!names.contains(&"usage_rollup_reduce_window_exact_v3"));
         assert!(!names.contains(&"usage_rollup_reduce_window_exact_v4"));
-        assert!(names.contains(&"usage_rollup_reduce_window_exact_v5"));
+        assert!(!names.contains(&"usage_rollup_reduce_window_exact_v5"));
+        assert!(names.contains(&"usage_rollup_reduce_window_exact_v6"));
         assert!(names.contains(&"custom_service_lookup"));
     }
     db.drop().await.unwrap();
