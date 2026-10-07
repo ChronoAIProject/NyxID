@@ -940,12 +940,12 @@ editing even if filters change. No global editor replaces the page and editing
 does not write saved-view settings. A compact summary shows enabled/disabled
 counts and saved/default/unknown order. The single primary Agent order CTA sits
 in the card's sticky header bottom action bar, or the overview's sticky tab bar.
-Editing replaces it with a readable Agent order label and one primary Save /
-Cancel set in the same section. Explicit gaps keep controls together; narrow
-bars wrap and remain operable while scrolled. Save targets a dedicated native
-order form outside the connection table, so unrelated panel buttons cannot
-submit the order. Invalid/failed submissions focus and reveal one error below
-the sticky cover, including repeated same-error attempts.
+Editing replaces it with a readable Agent order label, one primary Save button
+and one outline Cancel button in the same section. Explicit gaps keep controls
+together; narrow bars wrap and remain operable while scrolled. Save targets a
+dedicated native order form outside the connection table, so unrelated panel
+buttons cannot submit the order. Invalid/failed submissions focus and reveal
+one error below the sticky cover, including repeated same-error attempts.
 The longer **How selection works** disclosure is collapsed by default on cards
 and overview; it contains scope, protocol, pool and gateway distinctions without
 repeating every connection prefix. Disclosure toggles preserve drafts, filters

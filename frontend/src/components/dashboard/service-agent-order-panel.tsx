@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -9,12 +8,10 @@ export function ServiceAgentOrderPanel({
   group,
   order,
   hasPool = false,
-  action,
 }: {
   readonly group: ServiceConnectionGroup;
   readonly order: ServiceGroupOrder;
   readonly hasPool?: boolean;
-  readonly action?: ReactNode;
 }) {
   if (group.connections.length < 2 || !group.id.startsWith("catalog:"))
     return null;
@@ -50,7 +47,6 @@ export function ServiceAgentOrderPanel({
           {summary} · {enabled.length} enabled ·{" "}
           {group.connections.length - enabled.length} disabled
         </p>
-        {action}
         {order.readError && (
           <Button
             type="button"

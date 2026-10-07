@@ -73,14 +73,6 @@ vi.mock("@/hooks/use-service-insights", () => ({
     refresh: vi.fn(),
   }),
 }));
-// Billing tooltips are unrelated to ordering validation; keep their trigger
-// buttons without mounting a Radix tooltip/portal tree for every connection.
-vi.mock("@/components/ui/tooltip", () => ({
-  TooltipProvider: ({ children }: { children: React.ReactNode }) => children,
-  Tooltip: ({ children }: { children: React.ReactNode }) => children,
-  TooltipTrigger: ({ children }: { children: React.ReactNode }) => children,
-  TooltipContent: () => null,
-}));
 function key(i: number): KeyInfo {
   return {
     id: `${String(i + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
@@ -106,9 +98,11 @@ let latest: ReturnType<typeof useServiceGroupOrder>;
 function Harness({
   table = false,
   sticky = false,
+  form = false,
 }: {
   table?: boolean;
   sticky?: boolean;
+  form?: boolean;
 }) {
   const order = useServiceGroupOrder(state.error ? [] : state.inventory);
   useLayoutEffect(() => {
@@ -135,7 +129,21 @@ function Harness({
       {sticky && order.groupId && (
         <ServiceOrderActions order={order} formId="test-order" />
       )}
-      {table && order.groupId ? (
+      {form && order.groupId ? (
+        <div data-testid="order-form">
+          {order.validationError && (
+            <p role="alert">{order.validationError}</p>
+          )}
+          <button type="button" onClick={order.reset}>
+            Reset to default
+          </button>
+          <form
+            id="test-order"
+            aria-label="Agent order for Anthropic"
+            onSubmit={(event) => void order.save(event)}
+          />
+        </div>
+      ) : table && order.groupId ? (
         <ServiceConnectionTable
           connections={order.connections}
           ordering={order}
@@ -242,62 +250,107 @@ it("discard is idempotent so tab plus router blocker asks once, cancellation kee
   });
   expect(window.confirm).toHaveBeenCalledTimes(1);
 });
-it("201-row local validation is visible, sends no PUT and permits confirmed reset", async () => {
+it("validates all 201 IDs in the real order form without a PUT and permits confirmed reset", async () => {
   state.inventory = Array.from({ length: 201 }, (_, i) => key(i));
   const originalIds = state.inventory.map((connection) => connection.id);
-  render(<Harness table sticky />);
+  render(<Harness form sticky />);
   fireEvent.click(screen.getByText("Start"));
   expect(latest.connections.map((connection) => connection.id)).toEqual(
     originalIds,
   );
-  expect(document.querySelectorAll("[data-ordering-row]")).toHaveLength(201);
+  expect(latest.inventory.map((connection) => connection.id)).toEqual(
+    originalIds,
+  );
   const form = document.querySelector("form")!;
-  const tableRoot = form.parentElement!;
-  const controls = within(tableRoot.firstElementChild! as HTMLElement);
-  const row = within(
-    document.querySelector(
-      `[data-ordering-row="${key(1).id}"]`,
-    )! as HTMLElement,
-  );
-  fireEvent.click(
-    row.getByRole("button", { name: "Move Anthropic (connection-1) up" }),
-  );
-  expect(latest.ordered).toEqual([
-    originalIds[1],
-    originalIds[0],
+  const formRoot = form.parentElement!;
+  const movedIds = [
+    originalIds[1]!,
+    originalIds[0]!,
     ...originalIds.slice(2),
-  ]);
+  ];
+  act(() => latest.update(movedIds));
+  expect(latest.ordered).toEqual(movedIds);
+  expect(latest.connections.map((connection) => connection.id)).toEqual(
+    movedIds,
+  );
   const stickySave = document.querySelector<HTMLButtonElement>(
     'button[form="test-order"]',
   )!;
-  expect((stickySave as HTMLButtonElement).form).toBe(form);
-  expect(form.querySelector("table")).toBeNull();
+  expect(stickySave.form).toBe(form);
+  expect(form.elements).toContain(stickySave);
+  expect(stickySave).toBeEnabled();
   fireEvent.click(stickySave);
   await waitFor(
     () => {
-      const alert = tableRoot.querySelector("[role=alert]");
+      const alert = formRoot.querySelector("[role=alert]");
       expect(alert).toBeVisible();
-      expect(alert).toHaveTextContent("At most 200 connections");
-      expect(tableRoot.querySelectorAll('[role="alert"]')).toHaveLength(1);
+      expect(alert).toHaveTextContent(/200/);
+      expect(formRoot.querySelectorAll('[role="alert"]')).toHaveLength(1);
       expect(
-        tableRoot.textContent!.match(/At most 200 connections/g),
+        within(formRoot).getAllByText(latest.validationError!, { exact: true }),
       ).toHaveLength(1);
+      expect(latest.submitCount).toBe(1);
     },
-    { container: tableRoot },
+    { container: formRoot },
   );
+  expect(latest.ordered).toEqual(movedIds);
   expect(save).not.toHaveBeenCalled();
-  fireEvent.click(controls.getByRole("button", { name: "Reset to default" }));
+  fireEvent.click(
+    within(formRoot).getByRole("button", { name: "Reset to default" }),
+  );
   expect(window.confirm).toHaveBeenCalledExactlyOnceWith(
     "Reset this service's agent order to default server discovery order?",
   );
   expect(latest.connections.map((connection) => connection.id)).toEqual(
     originalIds,
   );
-  await act(() => latest.retrySave());
-  expect(save).toHaveBeenCalledExactlyOnceWith(group, {
-    ordered: [],
-    expected_version: 1,
+  await waitFor(() => {
+    expect(formRoot.querySelector("[role=alert]")).toBeNull();
+    expect(stickySave).toBeEnabled();
   });
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.click(stickySave);
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledExactlyOnceWith(group, {
+      ordered: [],
+      expected_version: 1,
+    }),
+  );
+  expect(latest.inventory.map((connection) => connection.id)).toEqual(
+    originalIds,
+  );
+});
+it("external sticky Save submits the real order form while connection rows stay outside it", async () => {
+  const originalIds = state.inventory.map((connection) => connection.id);
+  render(<Harness table sticky />);
+  fireEvent.click(screen.getByText("Start"));
+  const form = document.querySelector("form")!;
+  const tableRoot = form.parentElement!;
+  expect(tableRoot.querySelectorAll("[data-ordering-row]")).toHaveLength(3);
+  expect(tableRoot.querySelector("table")).not.toBeNull();
+  expect(form.querySelector("table")).toBeNull();
+  const stickySave = document.querySelector<HTMLButtonElement>(
+    'button[form="test-order"]',
+  )!;
+  expect(stickySave.form).toBe(form);
+  expect(form.elements).toContain(stickySave);
+  expect(stickySave).toBeDisabled();
+  const row = within(
+    tableRoot.querySelector(
+      `[data-ordering-row="${key(1).id}"]`,
+    )! as HTMLElement,
+  );
+  fireEvent.click(
+    row.getByRole("button", { name: "Move Anthropic (connection-1) up" }),
+  );
+  expect(stickySave).toBeEnabled();
+  fireEvent.click(stickySave);
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledExactlyOnceWith(group, {
+      ordered: [originalIds[1], originalIds[0], originalIds[2]],
+      expected_version: 1,
+    }),
+  );
 });
 it("unknown read states preserve known keys pills and never claim absent order", () => {
   state.unavailable = true;

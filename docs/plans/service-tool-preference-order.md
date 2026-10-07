@@ -3,10 +3,12 @@
 Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: Part A
 implemented, with local validation complete for the coverage/Opus corrections,
 user's sticky-action revision and protected CLI release transport (§17).
-Earlier results in §16 are historical
-for changed UI interactions. ROOT owns direct review and publication; Opus 5.5
-requested changes on published head `0ea6cfa3`, and fresh sign-off remains pending
-on PR #1796.
+Earlier results in §16 are historical for changed UI interactions. ROOT owns
+direct review and publication; Opus 5.5
+renewed its source review on published corrections `00eef8d7`, closed the seven
+earlier findings from `0ea6cfa3`, and requested three final nits. The bounded
+corrections and validation are recorded in §17; final exact-head CI/review
+approval remains ROOT-owned on PR #1796.
 Part B is a conditional proposal outside this delivery (§6).
 
 This revision supersedes the global "Reorder" editor approved on `e72036b7`
@@ -439,9 +441,10 @@ exists; activating it expands the card. Nothing otherwise.
   the table. The card bar wraps with a minimum height at narrow widths, retaining
   its ResizeObserver-based sticky geometry. Hide connections and the order
   action group stay together with explicit consistent gaps, never
-  `justify-between`; Service details may align separately at the end. The exact Hide connections
-  chevron. Save/Cancel and their context remain visible and operable after
-  scrolling at 390/1024/1440 on both surfaces (§12 AC-32).
+  `justify-between`; Service details may align separately at the end. Preserve
+  the exact existing Hide connections chevron. Save/Cancel and their context
+  remain visible and operable after scrolling at 390/1024/1440 on both surfaces
+  (§12 AC-32).
 - `orderingGroupId` plus the draft live in `GroupedServiceCards` (and the
   overview page). While set, the group's card stays mounted and expanded
   regardless of filter changes, Personal/All switches or saved-view restores
@@ -998,8 +1001,19 @@ tests AC-B1..B7; §5.2 item 5 wording and summary suffix; docs.
   bypasses configured proxies and never follows a redirect. Existing profile
   identity fences, TLS trust/environment, telemetry consent, explicit-token
   no-refresh behavior and unrelated generic helpers remain intact. No scanner
-  suppression or dismissal. Final CodeQL aggregate on the republished exact
-  head is required evidence owned by ROOT; a local test pass cannot establish it.
+  suppression or dismissal. Final published exact-head security evidence is
+  ROOT-owned and requires: successful CI Pipeline including wizard freshness;
+  all four current CodeQL scanners (`actions`, `javascript-typescript`, `python`,
+  `rust`) successful; all four merge analyses bound to that exact PR head have
+  `results_count:0` and empty warnings/errors; the aggregate introduces no new
+  alerts; alerts465/466 are fixed, not dismissed; and no PR open alerts remain.
+  If the aggregate is NEUTRAL solely because of the inherited obsolete
+  `.github/workflows/codeql.yml:codeql` category, record it literally as NEUTRAL,
+  with provenance and cross-PR precedent proving the four current language
+  categories cover that superseded configuration. Do not label it SUCCESS.
+  Any additional missing configuration, analysis error or new alert blocks
+  delivery. A local pass cannot establish this remote evidence, and no analysis
+  deletion, synthesized SARIF, suppression or discarded gate is authorized.
 
 ## 13. Decisions
 
@@ -1201,11 +1215,13 @@ not hardcoded product paths:
 behavior before publication.
 
 
-## 17. Coverage, Opus and sticky-action revision (current worktree)
+## 17. Coverage, Opus and sticky-action revision
 
-Published review head: `0ea6cfa3e41eea4cbc03d65e9c4e8d24da5d3fbb`.
-Opus 5.5 requested seven corrections; the user subsequently required sticky
-Agent order/Save/Cancel actions and deliberate spacing (AC-32). ROOT identified
+Prior reviewed head: `0ea6cfa3e41eea4cbc03d65e9c4e8d24da5d3fbb`.
+Those corrections were published on `00eef8d7`. ROOT maintains the final exact
+head binding in the PR body. Opus 5.5 requested seven corrections on the prior
+head; the user subsequently required sticky Agent order/Save/Cancel actions
+and deliberate spacing (AC-32). ROOT identified
 new CodeQL cleartext-transmission alerts 465/466 on `delete_with_body`, now covered
 by AC-33. This section supersedes changed frontend interaction evidence in §16;
 backend production source remains unchanged. ROOT's review record is preserved
@@ -1311,15 +1327,17 @@ unchanged backend evidence remains in §16.
   dirty/busy/read/error gates, physical mouse Save/keyboard Cancel, delayed
   focus, repeated identical errors below the sticky cover, and no unrelated
   access-panel submission. Final390/1440 screenshots were inspected.
-- [ ] **AC-33 final exact-head aggregate** — local URL/TLS/subprocess/profile/
+- [ ] **AC-33 final exact-head security evidence** — local URL/TLS/subprocess/profile/
   network and static gates pass, including actual initial/refresh/retry
-  downgrade refusal and safe loopback proxy bypass. The remote CodeQL aggregate
-  on ROOT's next published exact head has not run and cannot be claimed from
-  local tests. No alert was suppressed or dismissed.
+  downgrade refusal and safe loopback proxy bypass. The final exact head still
+  requires the literal AC-33 CI/scanner/analysis/alert rule above; it cannot be
+  claimed from local tests or historical analyses. No alert was suppressed or
+  dismissed. ROOT records final head/merge bindings and facts in the PR body.
 
-Remote exact-head CodeQL aggregate and fresh Opus sign-off await ROOT's
-publication/review. No remaining local failure or implementation limitation was
-found by the requested executions; this evidence does not close ROOT's review
+Final exact-head CI and review approval remain ROOT-owned. The renewed Opus
+source review and its bounded nit corrections are recorded below. No remaining
+local failure or implementation limitation was found by the requested executions;
+this evidence does not close ROOT's review
 record or grant sign-off. Source is frozen with no further source edits pending.
 Both4630 production-backed and4631 user-authorized sample preview servers are
 preserved; no production writes, new agents, commits or pushes were performed.
@@ -1336,3 +1354,130 @@ review servers. Correct-source screenshots are under
 The first CLI compile command waited on an existing unrelated backend build
 holding `/tmp/nyxid-service-preference-target/debug/.cargo-lock`; the waiting
 CLI job was stopped before compiling, preserving that backend process.
+
+### Renewed Opus source-review nits after published corrections `00eef8d7`
+
+Opus's renewed source review on
+`00eef8d7bfb0c44e8bad4ae85659f1abc257ffd7` confirmed correctness, security and
+execution behavior and closed the seven earlier findings. It returned three
+nits, all addressed in this unpublished follow-up: remove the unused panel
+`action` prop/type/render slot; make the exact Hide connections chevron
+requirement a complete sentence; and distinguish the prior reviewed `0ea6cfa3`
+from published corrections `00eef8d7` in this section. The architecture text
+also specifies one primary Save button and one outline Cancel button.
+The final exact published-head binding remains in ROOT's PR body.
+
+Both production callers omitted the action prop. Removing its undefined slot
+changes no rendered DOM element, class, spacing or chevron. The existing flex
+row remains necessary for the conditional Retry reads button. No visible
+geometry changed, so the existing card/overview CTA browser evidence remains
+applicable and was not blanket rerun. Only the affected hook/panel and real
+page unit files, production type/build checks and lint were executed:
+
+| Gate | New command/result | New log |
+|---|---|---|
+| Affected panel/hook/card/overview unit | `NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts src/hooks/use-service-group-order.test.tsx src/pages/keys.test.tsx src/pages/service-overview.test.tsx --maxWorkers=2`:3 files/45 tests passed9.44s, exit0; isolated happy-dom origin4629 | `/tmp/nyxid-service-preference-opus-nits-unit.log` |
+| Component/caller types and production build | `npm run build`:exit0; includes `tsc -b`, production/credential-accept outputs and mock-footprint assertion | `/tmp/nyxid-service-preference-opus-nits-build.log` |
+| Lint | `npm run lint -- --no-warn-ignored`:exit0;0 errors,29 unrelated baseline warnings, no feature warnings | `/tmp/nyxid-service-preference-opus-nits-lint.log` |
+| Wizard closure preservation | Recomputed all171 manifest inputs plus extras: recorded and computed hash both `6a459342b1003e3be417e4a0645c2867afffafc5a0e9efb7dc809e688818f860`; changed panel is outside this closure | `/tmp/nyxid-service-preference-opus-nits-wizard-closure.json` |
+
+Historical logs and freshness evidence above are preserved. This correction
+changes no wizard producer input, so no bundle regeneration or unrelated
+CLI/Rust/backend/full frontend execution was required. All bounded local gates
+passed; no further source edit is pending. ROOT's review record remains
+untouched by this work. Both4630/4631 previews and the user's separate sample
+persistence remain available; no production writes, agents, commits, pushes,
+merges or deployments were performed.
+
+### Second Coverage CI failure and isolated 201-ID hook boundary
+
+Coverage (Frontend) job `112646436406` on published corrections `00eef8d7`
+failed the same 201-row hook test at the unchanged5000ms timeout:
+4772 tests passed/1 failed across466 files, total301.37s. ROOT downloaded the
+completed job log directly from the API:
+`/tmp/nyxid-service-preference-00e-ci-frontend-coverage.log` (failure around5270).
+No disk error caused this failure. The earlier scoped-query/tooltip
+optimization and local full pass did not sufficiently bound CI renderer cost;
+that conclusion is superseded by this correction. The preceding logs and
+pre-correction test snapshot are preserved, including
+`/tmp/nyxid-service-preference-coverage-boundary/00eef8d7-use-service-group-order.test.tsx`.
+
+The 201-ID case now mounts the real `useServiceGroupOrder` hook, its real
+`useAppForm`/Zod resolver, the real `ServiceOrderActions` and a native externally
+associated form with the hook's actual validation message. It avoids201
+connection/Dnd/Radix subtrees. All201 IDs remain in the actual inventory and
+draft: the exact moved permutation is asserted; external Save increments the
+real form submit count, shows one visible limit message and sends no mutation;
+confirmed Reset retains the complete inventory; a second native Save submits
+exactly `{ordered:[], expected_version:1}`. Validation is not mocked and hook
+logic is not copied into the fixture.
+
+A separate three-row integration case retains the actual table, row movement,
+real actions, native form association, pristine/dirty Save gating, table
+exclusion from the form and the exact saved permutation/version. The previous
+tooltip mock is removed; small-row renderer cases use the actual primitives.
+The full real-route201-row Playwright case is unchanged and remains the
+full-table integration/physical-error-visibility proof. Production source is
+unchanged by this coverage correction; the three-nit source/doc diff above is
+retained. No timeout, retry, threshold or coverage exclusion was relaxed.
+
+| Gate | New command/result | New log |
+|---|---|---|
+| Focused V8 hook/form coverage | `NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts src/hooks/use-service-group-order.test.tsx --coverage --coverage.thresholds.lines=0 --coverage.reportsDirectory=/tmp/nyxid-service-preference-201-hook-focused-coverage --maxWorkers=2 --reporter=verbose`:10/10 passed7.28s, exit0;201-ID boundary93ms, real three-row table/form143ms; original default timeout | `/tmp/nyxid-service-preference-201-hook-focused-coverage.log` |
+| Focused V8 after fixture type correction | Same isolated command, reports `/tmp/nyxid-service-preference-201-hook-focused-recheck-coverage`:10/10 passed8.01s, exit0;201-ID boundary92ms, real three-row table/form208ms | `/tmp/nyxid-service-preference-201-hook-focused-recheck.log` |
+| Production build/type recheck | `npm run build`:exit0; component/test types, production and credential-accept outputs, mock-footprint assertion | `/tmp/nyxid-service-preference-201-hook-build-recheck.log` |
+| Complete V8 after space recovery, settled fixture | `NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts --coverage --coverage.reportsDirectory=/tmp/nyxid-service-preference-201-hook-full-recheck-coverage --maxWorkers=2`:466 files/4774 tests passed215.80s, exit0;73.17% lines with the unchanged15% threshold and default5000ms test timeout | `/tmp/nyxid-service-preference-201-hook-full-recheck.log` |
+| Final lint recheck | `npm run lint -- --no-warn-ignored`:exit0;0 errors,29 unrelated baseline warnings, no feature warnings | `/tmp/nyxid-service-preference-201-hook-lint-recheck.log` |
+| Wizard closure preservation | All171 manifest inputs plus extras recomputed; recorded/computed hash remains `6a459342b1003e3be417e4a0645c2867afffafc5a0e9efb7dc809e688818f860`; changed test is outside the closure | `/tmp/nyxid-service-preference-201-hook-wizard-closure.json` |
+
+The first build found strict indexed-access TS2345 in the new fixture's known
+201-item permutation. Explicit bounds assertions fix that type error without
+changing runtime JavaScript; the failure log is retained at
+`/tmp/nyxid-service-preference-201-hook-build.log`. Focused V8 passed again after
+that correction. The first full local coverage run exited1 while writing a
+temporary shard with ENOSPC:
+`/tmp/nyxid-service-preference-201-hook-full-coverage.log`. It is invalid coverage
+evidence, separate from the real CI rendering timeout. Its12MiB intermediates
+and log remain preserved. Disk availability recovered to6.1GiB before rerun;
+no other target or active process was modified. The full recheck uses the
+settled fixture and a separate reports/log path. Existing non-failing React
+act warnings in two neighboring hook cases also occur in the preceding focused
+log; they are not new diagnostics from the201-ID correction.
+
+The bounded hook/form fixture addresses the second CI rendering-cost finding
+and passes the complete local V8 run; no remote pass or ROOT review closure is
+inferred from that result.
+All requested local gates for this correction passed. The original default
+timeout and full coverage threshold remain unchanged; the focused measurement
+uses the same existing threshold0 convention as the preceding measurements.
+The full201-row browser integration remains unchanged. No unrelated Rust/CLI/
+backend or additional browser runs were performed. Source is frozen with no
+further code edits pending; ROOT owns publication, current remote CI status,
+review closures and the final exact-head binding. ROOT's review record and both
+previews/sample persistence remain untouched by this work.
+
+### Historical CodeQL evidence on published corrections `00eef8d7`
+
+ROOT's independent read-only inspection and Opus's read-only nuance audit
+reported the following facts for `00eef8d7`, bound to merge `080a279e`:
+all four scanner jobs SUCCESS; all four merge analyses `results_count:0` with
+empty warnings/errors; alerts465/466 fixed, not dismissed; and PR open alerts0.
+Aggregate `112646549519` is **NEUTRAL**, not SUCCESS, solely because of the
+inherited obsolete `.github/workflows/codeql.yml:codeql` configuration.
+The feature changes no `.github` workflow.
+
+Provenance: the obsolete main category's last upload was2026-09-21 at
+`0c314264`. The current matrix categories are `actions`,
+`javascript-typescript`, `python` and `rust`, with main uploads on Sept28/Oct5.
+Matrix change #1669 landed in rollup `567dd3ed` on Sept27. The same inherited
+NEUTRAL condition occurs on merged #1685/#1794/#1795/#1797 and open #1789.
+The older `0ea6cfa3` aggregate FAILED for two new high-severity alerts despite
+the same obsolete missing category, demonstrating that new-alert detection was
+not masked. This is historical provenance, not the final head's security pass.
+
+The final published exact head must satisfy AC-33's literal CI/scanner/merge-
+analysis/alert rule. A solely inherited obsolete-category NEUTRAL outcome must
+retain that label and its proof; any additional missing configuration, analysis
+error or new alert blocks delivery. Final head and test-merge SHA bindings,
+job/analysis facts and review approval remain in ROOT's PR body. No old analysis
+was deleted, no SARIF synthesized and no scanner finding suppressed or dismissed.

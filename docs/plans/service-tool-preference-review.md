@@ -680,3 +680,94 @@ All substantiated local implementation findings are corrected. Fresh published
 head CI, its separate aggregate CodeQL verdict and Opus's plan/PR sign-off remain
 required. Their final results belong in the PR evidence so that adding evidence
 does not change an approved source head. No merge or deployment is performed.
+
+### Renewed Opus review and CI boundary-test correction
+
+Opus reviewed published `00eef8d7bfb0c44e8bad4ae85659f1abc257ffd7` and confirmed
+all seven prior corrections plus the sticky layout, external form isolation,
+explicit recovery state and CLI credential transport. It returned three nits.
+ROOT accepted all three, including the optional wording correction, and sent
+them to Sol. ROOT then inspected their minimal source/document diff and the
+completed 45-test unit, production build/type, lint and wizard-closure evidence.
+
+| Renewed finding | Closure |
+|---|---|
+| The panel retains an unused action prop and render slot after controls moved to the sticky bar. | Removed the prop, unused ReactNode import and slot; both callers already omitted it, so DOM geometry and existing browser evidence are preserved. |
+| The plan's exact-chevron requirement is a sentence fragment. | Rewritten as a complete requirement preserving the existing Hide connections chevron. |
+| The latest evidence section implies an unpublished worktree and calls the prior reviewed head the published head. | Removed the worktree-only heading; explicitly distinguishes prior `0ea6cfa3` review from corrections published in `00eef8d7`, with final binding in the PR body. |
+
+Evidence: `/tmp/nyxid-service-preference-opus-nits-unit.log` (3 files / 45 tests),
+`/tmp/nyxid-service-preference-opus-nits-build.log`,
+`/tmp/nyxid-service-preference-opus-nits-lint.log` (zero errors/feature warnings),
+and `/tmp/nyxid-service-preference-opus-nits-wizard-closure.json` (171 inputs,
+unchanged recorded hash).
+
+CI on `00eef8d7` passed normal Frontend, CLI Test, workspace Clippy and wizard
+freshness, but Coverage (Frontend) again timed out in the 201-row hook test at
+the unchanged five-second limit (4,772 passing / one failing). ROOT downloaded
+the completed job's exact log from the API even while the workflow remained
+running: `/tmp/nyxid-service-preference-00e-ci-frontend-coverage.log`, job
+`112646436406`, workflow `37576468011`. The earlier local pass and first query
+optimization did not establish CI stability. ROOT returned this failure to Sol
+for bounded hook/form testing without 201 unrelated heavy row subtrees, retaining
+every ID, validation/no-write/reset assertions and the full-table 201-row browser
+proof. Fresh focused and full coverage execution and final-head CI are required;
+no timeout, threshold, exclusion or retry policy is relaxed.
+
+During concurrent builds, ROOT recovered from a transient shared-disk ENOSPC by
+removing only this task's completed 1.6 GB Rust incremental cache. No active
+Cargo process used that target; the latest CLI checks already disabled
+incremental compilation. Source, logs, compiler-artifact executables and both
+previews were preserved. Completed nit/CLI logs contain no disk failure.
+
+The corrected transport was also scanned on published `00eef8d7` (merge ref
+`080a279e`). All four jobs in CodeQL workflow `37576467932` succeeded, and all
+four merge-ref analyses have zero results and empty warning/error fields. Alerts
+465 and 466 are fixed, not dismissed, and the PR merge ref has zero open alerts.
+The separate aggregate `112646549519` is **neutral**, with no new alerts, solely
+because main retains the obsolete pre-matrix category
+`.github/workflows/codeql.yml:codeql`. ROOT inspected main's analysis history:
+the last legacy upload is `0c314264` on September 21; subsequent September 28 and
+October 5 uploads use all four language categories. Workflow history confirms
+the matrix migration in rollup `567dd3ed` (#1669 via #1670). Opus independently
+verified the same inherited neutral warning on other merged and open PRs. The
+old feature head still failed for its two new high alerts despite that same
+warning, so the inherited category does not mask the feature's new findings.
+
+ROOT accepted Opus's requirement to make AC-33's security pass rule explicit:
+successful final-head CI/wizard/scanner jobs, no new aggregate alerts, both
+transport alerts fixed without dismissal, and zero results/errors/warnings
+across the final-head analyses with no open PR alerts. Neutral is recorded
+literally only for this proven obsolete category; any additional missing
+configuration or scan error blocks delivery. Final published-head evidence is
+still required. No configuration, analysis or alert is deleted or suppressed.
+
+ROOT reviewed the completed coverage correction directly. The 201-ID test uses
+the real ordering hook, form/schema validation and shared sticky actions with
+a lightweight native form fixture. Every ID, the exact permutation, visible
+validation, zero invalid PUTs and confirmed reset body/version are retained.
+A separate three-row case exercises the actual table, row movement, native
+external Save association, pristine/dirty gating and table exclusion. The full
+201-row browser test is preserved. The obsolete tooltip mock is removed, so
+the small renderer cases use their real UI primitives.
+
+Final focused V8 execution passes all ten hook tests; the 201-ID boundary is
+92 ms, and the actual three-row table/form case is 208 ms. The complete V8
+recheck passes 466 files / 4,774 tests in 215.80 seconds with 73.17% lines,
+the existing 15% threshold and default five-second test timeout. Final build,
+type checking and lint pass, and the 171-source wizard closure is unchanged.
+Evidence: `/tmp/nyxid-service-preference-201-hook-focused-recheck.log`,
+`/tmp/nyxid-service-preference-201-hook-full-recheck.log`,
+`/tmp/nyxid-service-preference-201-hook-build-recheck.log`,
+`/tmp/nyxid-service-preference-201-hook-lint-recheck.log`, and
+`/tmp/nyxid-service-preference-201-hook-wizard-closure.json`.
+
+The first local full-coverage attempt failed with ENOSPC and is retained as
+failed evidence in `/tmp/nyxid-service-preference-201-hook-full-coverage.log`;
+the passing recheck uses a separate log/report path after space recovery. A
+strict indexed-access type error in the fixture was corrected before the final
+build and coverage recheck. Neither failed attempt is counted as a pass.
+All three renewed nits and the second CI rendering timeout are corrected
+locally. ROOT reviewed the explicit AC-33 security rule and provenance;
+fresh final-head CI and the literal aggregate/analysis/alert evidence plus
+Opus sign-off remain required before marking PR #1796 ready.
