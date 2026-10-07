@@ -171,7 +171,9 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
         }
     };
 
-    let inputs = match endpoint_inputs_from_spec(&spec) {
+    let inputs = match openapi_parser::parse_openapi_spec_for_url(&spec, spec_url)
+        .and_then(endpoint_inputs_from_parsed)
+    {
         Ok(inputs) if !inputs.is_empty() => inputs,
         Ok(_) => {
             tracing::warn!(slug = %service.slug, "Spec endpoint sync: spec contained no operations");
@@ -270,7 +272,7 @@ fn destination_endpoint_inputs(
             }
         }
     }
-    let parsed = openapi_parser::parse_openapi_spec_value(spec)?;
+    let parsed = openapi_parser::parse_hosted_openapi_spec_value(spec)?;
     let mut inputs = Vec::new();
     let root_origin = spec["servers"][0]["url"]
         .as_str()
@@ -329,8 +331,13 @@ fn destination_endpoint_inputs(
 /// Parse and validate an OpenAPI document into endpoint inputs, applying
 /// the same per-endpoint validation as the admin discover-endpoints route.
 fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<EndpointInput>> {
-    let parsed = openapi_parser::parse_openapi_spec_value(spec)?;
-    let mut inputs = Vec::with_capacity(parsed.len());
+    endpoint_inputs_from_parsed(openapi_parser::parse_hosted_openapi_spec_value(spec)?)
+}
+
+fn endpoint_inputs_from_parsed(
+    parsed: Vec<openapi_parser::ParsedEndpoint>,
+) -> AppResult<Vec<EndpointInput>> {
+    let mut inputs = Vec::new();
     for endpoint in parsed {
         if let Some(content_type) = endpoint.request_content_type.as_deref() {
             validate_request_content_type(content_type)?;
@@ -371,6 +378,23 @@ mod tests {
         assert!(crate::services::retired_service_service::is_retired(
             &service
         ));
+    }
+
+    #[test]
+    fn catalog_spec_github_contents_retains_multisegment_parameter() {
+        for slug in ["api-github", "api-github-pat"] {
+            let inputs = seeded_endpoint_inputs(slug).unwrap();
+            let operation = inputs
+                .iter()
+                .find(|op| op.name == "get_file_contents")
+                .unwrap();
+            let parameters = operation.parameters.as_ref().unwrap().as_array().unwrap();
+            let path = parameters.iter().find(|p| p["name"] == "path").unwrap();
+            assert_eq!(path["x-nyxid-path-segments"], true);
+            for parameter in parameters.iter().filter(|p| p["name"] != "path") {
+                assert!(parameter.get("x-nyxid-path-segments").is_none());
+            }
+        }
     }
 
     /// The `google` overlay gained Drive authoring by addition only. These

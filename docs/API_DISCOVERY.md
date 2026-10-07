@@ -158,6 +158,30 @@ The `/endpoints` response includes structured endpoint data:
 
 The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
 
+Path parameters normally encode their entire value, including `/`. An explicit
+`allowReserved: true` on a path parameter opts it into multiple segments. NyxID
+hosted overlays and stored endpoint rows may also use
+`x-nyxid-path-segments: true`; remote specifications cannot enable that extension
+(it is discarded after resolving parameter references and overrides). The
+parameter's name never grants this behavior. Each segment is encoded separately;
+empty segments in a nonempty value, dot segments, backslashes, controls and
+nested encoded separators/dot segments are refused. A wholly empty value remains
+zero segments for GitHub repository-root reads. The final path still passes the
+unchanged proxy validator. Other reserved characters are not exempted from it.
+The opt-in changes encoding only; existing operation allowlists are not widened.
+
+The shared operation argument builder is used by MCP, node dispatch and exact
+approval creation/redemption. REST proxy requests already carry a concrete path
+and use the same unchanged validator. Endpoint contract digests bind this
+parameter metadata, so adding or removing the opt-in invalidates an old exact
+approval; argument and execution-authority digest formats are unchanged.
+
+The GitHub contents overlay opts in its repository path. Its current overlay has
+no create/update/delete-file or Git tree/blob operations to annotate; any such
+addition must declare file-path parameters explicitly (tree/blob SHA identifiers
+and JSON-body paths do not need this option). Drive and Lark/Feishu overlays use
+file/document IDs or tokens, not multi-segment path parameters.
+
 The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching. Specs may be JSON or YAML: JSON is parsed first and behaves as before; any other body is read as a single YAML 1.2 document (`yes`/`no` stay strings, integer response codes become string keys, anchors, aliases and `<<` merge keys expand) and must be a mapping with an `openapi`, `swagger`, or `asyncapi` field, so text or HTML pages are never taken for a spec. Expanded YAML is bounded separately from the response size (1,000,000 nodes, 10 MiB of text, 64 levels of nesting), which rejects alias bombs. At most four YAML documents are parsed at once per server; a request that waits more than 10 seconds for a slot is answered with 429, while JSON specs never wait. Failures report `Spec was not valid JSON or YAML: <reason>`. The manual `POST /services/{id}/discover-endpoints` route uses the same parser.
 
 ### Rich catalog metadata

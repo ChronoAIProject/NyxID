@@ -48,6 +48,31 @@ enum Swagger2FormBodyKind {
 /// Use this when the spec has already been fetched through a hardened path
 /// (e.g., `api_docs_service::fetch_spec_json`).
 pub fn parse_openapi_spec_value(spec: &serde_json::Value) -> AppResult<Vec<ParsedEndpoint>> {
+    let mut endpoints = parse_hosted_openapi_spec_value(spec)?;
+    // Resolve references/overrides first, then discard NyxID-only authority from
+    // remote specifications, including markers hidden behind arbitrary refs.
+    // Standard allowReserved remains available to remote producers.
+    for endpoint in &mut endpoints {
+        if let Some(parameters) = endpoint
+            .parameters
+            .as_mut()
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for parameter in parameters {
+                if let Some(object) = parameter.as_object_mut() {
+                    object.remove(super::operation_path::PATH_SEGMENTS);
+                }
+            }
+        }
+    }
+    Ok(endpoints)
+}
+
+/// Only compiled overlays may opt in with NyxID-owned parameter metadata.
+/// Callers loading remote specs must use `parse_openapi_spec_value` instead.
+pub(crate) fn parse_hosted_openapi_spec_value(
+    spec: &serde_json::Value,
+) -> AppResult<Vec<ParsedEndpoint>> {
     let is_openapi3 = spec.get("openapi").is_some();
     let is_swagger2 = spec.get("swagger").is_some();
 
@@ -60,6 +85,19 @@ pub fn parse_openapi_spec_value(spec: &serde_json::Value) -> AppResult<Vec<Parse
     parse_endpoints_from_spec(spec, is_openapi3)
 }
 
+/// Follow the existing hosted-overlay URL resolution: known paths use only the
+/// compiled document, never the supplied remote body (regardless of URL host).
+pub(crate) fn parse_openapi_spec_for_url(
+    spec: &serde_json::Value,
+    url: &str,
+) -> AppResult<Vec<ParsedEndpoint>> {
+    if let Some(hosted) = super::api_docs_service::hosted_catalog_spec_for_url(url)? {
+        parse_hosted_openapi_spec_value(&hosted)
+    } else {
+        parse_openapi_spec_value(spec)
+    }
+}
+
 /// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec (JSON or YAML) from a URL.
 ///
 /// For each path+operation, extracts the operationId (or generates one from
@@ -68,6 +106,9 @@ pub async fn parse_openapi_spec(
     client: &reqwest::Client,
     url: &str,
 ) -> AppResult<Vec<ParsedEndpoint>> {
+    if let Some(spec) = super::api_docs_service::hosted_catalog_spec_for_url(url)? {
+        return parse_hosted_openapi_spec_value(&spec);
+    }
     let resp = client
         .get(url)
         .timeout(std::time::Duration::from_secs(30))
@@ -89,17 +130,7 @@ pub async fn parse_openapi_spec(
 
     let spec = crate::services::api_docs_service::parse_spec_body(body).await?;
 
-    // Determine spec version
-    let is_openapi3 = spec.get("openapi").is_some();
-    let is_swagger2 = spec.get("swagger").is_some();
-
-    if !is_openapi3 && !is_swagger2 {
-        return Err(AppError::BadRequest(
-            "Spec must contain an 'openapi' or 'swagger' key".to_string(),
-        ));
-    }
-
-    parse_endpoints_from_spec(&spec, is_openapi3)
+    parse_openapi_spec_for_url(&spec, url)
 }
 
 fn parse_endpoints_from_spec(
@@ -2526,6 +2557,45 @@ mod tests {
     }
 
     // ---- parse_openapi_spec_value ----
+
+    #[test]
+    fn catalog_spec_path_segments_trust_boundary_and_allow_reserved() {
+        let spec = serde_json::json!({
+            "openapi":"3.1.0",
+            "x-parameters":{"file":{"name":"location", "in":"path", "required":true,
+                "x-nyxid-path-segments":true, "schema":{"type":"string"}}},
+            "paths":{"/files/{location}":{"parameters":[{"$ref":"#/x-parameters/file"}],
+                "get":{"operationId":"read"}}}
+        });
+        let parameter =
+            |endpoints: Vec<ParsedEndpoint>| endpoints[0].parameters.as_ref().unwrap()[0].clone();
+        let remote = parameter(parse_openapi_spec_value(&spec).unwrap());
+        assert!(remote.get("x-nyxid-path-segments").is_none());
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&remote, "a/b").unwrap(),
+            "a%2Fb"
+        );
+        let hosted = parameter(parse_hosted_openapi_spec_value(&spec).unwrap());
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&hosted, "a/b").unwrap(),
+            "a/b"
+        );
+        let mut standard = spec.clone();
+        standard["x-parameters"]["file"]["allowReserved"] = serde_json::json!(true);
+        let remote = parameter(parse_openapi_spec_value(&standard).unwrap());
+        assert!(remote.get("x-nyxid-path-segments").is_none());
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&remote, "a/b").unwrap(),
+            "a/b"
+        );
+        let hosted = parse_openapi_spec_for_url(
+            &spec,
+            "https://untrusted.example/api/v1/catalog-specs/github/openapi.json",
+        )
+        .unwrap();
+        assert!(hosted.iter().any(|op| op.name == "get_file_contents"));
+        assert!(!hosted.iter().any(|op| op.name == "read"));
+    }
 
     #[test]
     fn parse_openapi_spec_value_rejects_non_spec_document() {

@@ -312,7 +312,7 @@ fn mcp_credential_class(
 }
 
 /// A single endpoint within a service.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct McpToolEndpoint {
     pub target_id: Option<String>,
     pub endpoint_id: String,
@@ -1626,7 +1626,7 @@ async fn fetch_and_parse_user_spec(
     owner_id: &str,
 ) -> AppResult<ParsedMcpEndpoints> {
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
-    let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+    let parsed = openapi_parser::parse_openapi_spec_for_url(&spec, spec_url)?;
     Ok(parsed_endpoints_to_mcp(parsed))
 }
 
@@ -3235,7 +3235,7 @@ pub fn build_proxy_args(
     let mut body_fields: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
     // Classify parameters
-    let mut path_params = HashSet::new();
+    let mut path_params = HashMap::new();
     let mut query_param_names = HashSet::new();
     let mut header_param_names = HashSet::new();
     let mut header_param_lookup: HashMap<String, String> = HashMap::new();
@@ -3277,7 +3277,7 @@ pub fn build_proxy_args(
                 .unwrap_or(false);
             match param.get("in").and_then(|v| v.as_str()).unwrap_or("") {
                 "path" => {
-                    path_params.insert(name.to_string());
+                    path_params.insert(name.to_string(), param);
                     if is_required {
                         required_path_params.insert(name.to_string());
                     }
@@ -3324,8 +3324,9 @@ pub fn build_proxy_args(
             };
             let normalized_header_key = normalize_header_name(key);
 
-            if path_params.contains(key.as_str()) {
-                path = path.replace(&format!("{{{key}}}"), &urlencoding::encode(&str_value));
+            if let Some(parameter) = path_params.get(key.as_str()) {
+                let encoded = super::operation_path::encode_parameter(parameter, &str_value)?;
+                path = path.replace(&format!("{{{key}}}"), &encoded);
                 provided_path_params.insert(key.clone());
             } else if query_param_names.contains(key.as_str()) {
                 query_params.push((key.clone(), str_value));

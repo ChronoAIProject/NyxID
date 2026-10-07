@@ -486,7 +486,8 @@ mod tests {
         .unwrap();
         for slug in ["api-google-drive", "api-google-workspace"] {
             let spec = spec_for_slug(slug).unwrap();
-            let parsed = crate::services::openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let parsed =
+                crate::services::openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
             assert_eq!(
                 parsed.len(),
                 if slug.ends_with("workspace") { 38 } else { 22 }
@@ -651,7 +652,7 @@ mod tests {
                 spec.get("openapi").is_some(),
                 "spec '{key}' missing openapi version"
             );
-            let endpoints = openapi_parser::parse_openapi_spec_value(&spec)
+            let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec)
                 .unwrap_or_else(|error| panic!("spec '{key}' failed to parse: {error:?}"));
             assert!(!endpoints.is_empty(), "spec '{key}' has no operations");
         }
@@ -672,13 +673,13 @@ mod tests {
         );
         assert_eq!(workspace["servers"][0]["url"], "https://www.googleapis.com");
         assert_eq!(
-            openapi_parser::parse_openapi_spec_value(&drive)
+            openapi_parser::parse_hosted_openapi_spec_value(&drive)
                 .unwrap()
                 .len(),
             22
         );
         assert_eq!(
-            crate::services::openapi_parser::parse_openapi_spec_value(&workspace)
+            crate::services::openapi_parser::parse_hosted_openapi_spec_value(&workspace)
                 .unwrap()
                 .len(),
             38
