@@ -277,6 +277,8 @@ jobs:
   # package allowlist.
   codex-plugin-validate:
     name: Codex Plugin Validate
+    permissions:
+      contents: read
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.codex_plugin == 'true'
     runs-on: ubuntu-latest
@@ -293,6 +295,8 @@ jobs:
   # only when the plugin or its validator changes.
   claude-plugin-validate:
     name: Claude Plugin Validate
+    permissions:
+      contents: read
     needs: changes
     runs-on: ubuntu-latest
     env:
