@@ -1020,6 +1020,21 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .build(),
         )
         .await?;
+    db.collection::<bson::Document>(MESSAGES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"conversation_id": 1, "steering.client_request_id": 1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"steering.client_request_id": {"$type": "string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // One hidden member thread per agent and group.
     db.collection::<bson::Document>(CONVERSATIONS)
         .create_index(
@@ -1170,6 +1185,24 @@ pub async fn list(
     });
     Ok(rows)
 }
+/// Steering is part of its original turn, never a previous-message anchor.
+pub async fn previous_user_message(
+    db: &Database,
+    owner: &str,
+    id: &str,
+    before: Option<i64>,
+) -> AppResult<Option<AssistantMessage>> {
+    let mut filter = doc! {"user_id": owner, "conversation_id": id, "role": "user", "steering": bson::Bson::Null, "execution_pending": {"$ne": true}};
+    if let Some(before) = before {
+        filter.insert("seq", doc! {"$lt": before});
+    }
+    Ok(db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(filter)
+        .sort(doc! {"seq": -1})
+        .await?)
+}
+
 pub async fn messages(
     db: &Database,
     user_id: &str,
@@ -1585,6 +1618,7 @@ pub async fn begin_turn_with_voice(
                 if let Some(lost) = row.active_turn.take() {
                     row.message_count += 1;
                     let message = AssistantMessage {
+                        steering: None,
                         voice: None,
                         execution_pending: false,
                         id: Uuid::new_v4().to_string(),
@@ -1624,6 +1658,7 @@ pub async fn begin_turn_with_voice(
                     .as_ref().filter(|_| !hidden_voice)
                     .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
+                    running_response: None,
                     channel_event_id: start.channel_event_id.clone(),
                     initiating_message_seq: Some(input_seq),
                     voice_request_id: voice_request_id.clone(),
@@ -1746,6 +1781,7 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
+                    steering: None,
                     voice: None,
                     execution_pending: false,
                     id: if hidden_voice { Uuid::new_v4().to_string() } else { message_id.clone() },
@@ -2179,6 +2215,7 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    steering: None,
                     voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
@@ -2767,8 +2804,13 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
     let mut recap = Vec::new();
     for message in history.iter().rev().take(20) {
         let prefix = format!(
-            "\n{}{}: ",
+            "\n{}{}{}: ",
             message.role,
+            message
+                .steering
+                .as_ref()
+                .map(|steer| format!(" (steering, {})", steer.outcome))
+                .unwrap_or_default(),
             if message.status == "failed" {
                 " (partial, failed)"
             } else {
@@ -2958,6 +3000,7 @@ pub struct ResponseStream {
     sequence: Option<u64>,
     pub text: String,
     pub terminal: Option<TurnResult>,
+    pub created: Option<crate::models::assistant_conversation::RunningResponse>,
 }
 impl ResponseStream {
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), TurnError> {
@@ -3015,7 +3058,10 @@ impl ResponseStream {
             .ok_or_else(|| TurnError::new("invalid_stream"))?;
         if !matches!(
             kind,
-            "response.output_text.delta" | "response.completed" | "response.failed"
+            "response.created"
+                | "response.output_text.delta"
+                | "response.completed"
+                | "response.failed"
         ) {
             return Ok(());
         }
@@ -3026,7 +3072,25 @@ impl ResponseStream {
             return Err(TurnError::new("invalid_stream"));
         }
         self.sequence = Some(sequence);
-        if kind == "response.output_text.delta" {
+        if kind == "response.created" {
+            let response = &event["response"];
+            let session = response["conversation"]["id"]
+                .as_str()
+                .filter(|id| prefixed_hex(id, "conv_"))
+                .ok_or_else(|| TurnError::new("invalid_stream"))?;
+            let id = response["id"]
+                .as_str()
+                .filter(|id| {
+                    id.strip_prefix(&format!("resp_{}_", &session[5..]))
+                        .is_some_and(|suffix| prefixed_hex(suffix, ""))
+                })
+                .ok_or_else(|| TurnError::new("invalid_stream"))?;
+            self.created = Some(crate::models::assistant_conversation::RunningResponse {
+                credential_api_key_id: String::new(),
+                response_id: id.to_owned(),
+                session_id: session.to_owned(),
+            });
+        } else if kind == "response.output_text.delta" {
             let delta = event["delta"]
                 .as_str()
                 .ok_or_else(|| TurnError::new("invalid_stream"))?;

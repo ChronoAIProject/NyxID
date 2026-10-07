@@ -77,7 +77,7 @@ pub async fn first_exchange(
     }
     let messages: Vec<_> = db
         .collection::<AssistantMessage>(MESSAGES)
-        .find(doc! {"user_id": actor, "conversation_id": id})
+        .find(doc! {"user_id": actor, "conversation_id": id, "steering": mongodb::bson::Bson::Null})
         .sort(doc! {"seq": 1})
         .limit(2)
         .await?

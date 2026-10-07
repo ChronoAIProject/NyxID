@@ -2697,11 +2697,8 @@ async fn reply_decision(
     }
     // The owner's previous message: only cards raised after it are answered
     // by a plain yes/no.
-    let since = engine::messages(&state.db, &row.user_id, conversation_id, 100, None)
+    let since = engine::previous_user_message(&state.db, &row.user_id, conversation_id, None)
         .await?
-        .into_iter()
-        .rev()
-        .find(|message| message.role == "user")
         .map(|message| message.created_at);
     let Some(decided) = acks::decide_reply(
         &state.db,

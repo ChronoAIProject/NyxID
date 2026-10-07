@@ -720,6 +720,7 @@ pub(crate) async fn prelude(
                 "conversation_id": &row.id,
                 "user_id": &row.user_id,
                 "role": "user",
+                "steering": mongodb::bson::Bson::Null,
                 "seq": {"$lt": row.message_count},
             })
             .sort(doc! {"seq": -1})

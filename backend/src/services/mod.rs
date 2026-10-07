@@ -212,6 +212,7 @@ pub mod assistant_live;
 pub mod assistant_nyxagent;
 pub mod assistant_profile_routing;
 pub mod assistant_settings_service;
+pub mod assistant_steering;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
 pub mod channel_retry_ingress;

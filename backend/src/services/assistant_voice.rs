@@ -237,6 +237,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                steering: None,
                 voice: None,
                 execution_pending: true,
                 id: request.message_id.clone(),
@@ -341,6 +342,7 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        steering: None,
                         id: id.clone(),
                         conversation_id: current.conversation_id,
                         user_id: current.user_id,
@@ -738,6 +740,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,
             user_id: row.user_id.clone(),

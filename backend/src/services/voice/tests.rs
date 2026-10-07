@@ -486,6 +486,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
+            steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: task_id,
             user_id: call.user_id.clone(),
@@ -571,6 +572,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 crate::models::assistant_message::COLLECTION_NAME,
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
+                steering: None,
                 id: result_id.clone(),
                 conversation_id: thread.id.clone(),
                 user_id: call.user_id.clone(),

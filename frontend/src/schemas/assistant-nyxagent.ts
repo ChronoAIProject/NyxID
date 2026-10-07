@@ -86,6 +86,9 @@ export const nyxAgentConversationSchema = z.object({
   active_turn: z
     .object({
       turn_id: z.string(),
+      response_id: z.string().nullish(),
+      steering_allowed: z.boolean().optional(),
+      stop_requested: z.boolean().optional(),
       continuations: z.number().int().nonnegative().optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
@@ -108,7 +111,17 @@ export const nyxAgentConversationSchema = z.object({
  */
 export const nyxAgentMessageRoleSchema = z.enum(["user", "assistant", "orchestrator", "event"]);
 export type NyxAgentMessageRole = z.infer<typeof nyxAgentMessageRoleSchema>;
+export const nyxAgentSteeringSchema = z.object({
+  client_request_id: z.string(),
+  outcome: z.enum(["applied", "may_not_have_applied", "refused"]),
+  code: z.string().nullable(),
+});
+export type NyxAgentSteering = z.infer<typeof nyxAgentSteeringSchema>;
+export const nyxAgentCapabilitiesSchema = z.object({
+  steer: z.object({ max_chars: z.number().int().positive(), max_per_turn: z.number().int().positive() }).nullable(),
+});
 export const nyxAgentMessageSchema = z.object({
+  steering: nyxAgentSteeringSchema.nullish(),
   id: z.string(),
   seq: z.number().int().positive(),
   turn_id: z.string(),
