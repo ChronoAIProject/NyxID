@@ -5400,7 +5400,7 @@ fn parse_proxy_method(method: &str) -> AppResult<reqwest::Method> {
 // Meta-tool: nyx__search_tools
 // ---------------------------------------------------------------------------
 
-const MAX_SEARCH_RESULTS: usize = 25;
+pub(crate) const MAX_SEARCH_RESULTS: usize = 25;
 
 /// Result of searching all tools across all services.
 pub struct SearchResult {
@@ -5426,7 +5426,7 @@ impl ToolSearch {
         let tokens: Vec<String> = query
             .to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|token| !token.is_empty())
+            .filter(|token| !token.is_empty() && !FILLER_WORDS.contains(token))
             .map(str::to_owned)
             .collect();
         Self { tokens }

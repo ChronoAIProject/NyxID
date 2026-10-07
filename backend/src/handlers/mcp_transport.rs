@@ -1609,13 +1609,7 @@ async fn handle_tools_list(
     }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        tool_defs.extend(
-            Box::pin(crate::services::machine_access_service::definitions(
-                &state.db, chat,
-            ))
-            .await
-            .unwrap_or_default(),
-        );
+        tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
         tool_defs.push(crate::services::assistant_upload_service::definition());
     }
 
@@ -3208,6 +3202,75 @@ async fn handle_meta_call_tool(
     }
 }
 
+/// A discovery failure must not hide its cause or remove unrelated tools.
+/// Record only fixed error metadata: no query, identifiers, or error contents.
+async fn machine_discovery_definitions(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> Vec<mcp_service::McpToolDefinition> {
+    match Box::pin(crate::services::machine_access_service::definitions(
+        &state.db, chat,
+    ))
+    .await
+    {
+        Ok(tools) => tools,
+        Err(error) => {
+            tracing::warn!(
+                reason = error.error_key(),
+                error_code = error.error_code(),
+                "Machine tool discovery unavailable"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// NyxAgent serializes the whole MCP result and truncates it at 10,000 chars.
+/// Bound the escaped wire result in bytes (also safe for multi-byte text), keep
+/// complete schemas for the best matches, and explicitly report omitted rows.
+fn bounded_chat_search_result(mut result: serde_json::Value) -> String {
+    loop {
+        let text = result.to_string();
+        let wire =
+            serde_json::json!({"content": [{"type": "text", "text": &text}], "isError": false});
+        if wire.to_string().len() <= 10_000 {
+            return text;
+        }
+        result["truncated"] = serde_json::json!(true);
+        result["hint"] = serde_json::json!(
+            "Call a matching tool with nyx__call_tool. For more matches, narrow the query; tools/list provides complete input schemas."
+        );
+        let matches = result["matches"].as_array_mut().expect("search matches");
+        if matches.len() > 1 {
+            matches.pop();
+        } else if matches
+            .first()
+            .is_some_and(|tool| tool["input_schema_omitted"] == true)
+        {
+            // Even the compact metadata failed the escaped wire budget (for
+            // example a corrupt legacy tool name). Always make progress.
+            matches.clear();
+        } else if let Some(tool) = matches.first_mut() {
+            // A single schema can exceed the entire budget. Do not fabricate a
+            // partial JSON Schema or pretend no tool matched.
+            tool.as_object_mut()
+                .expect("tool match")
+                .remove("inputSchema");
+            tool["input_schema_omitted"] = serde_json::json!(true);
+            if let Some(description) = tool["description"].as_str() {
+                tool["description"] =
+                    serde_json::json!(description.chars().take(512).collect::<String>());
+            }
+            // Names are normally bounded by service/endpoint validation. A
+            // corrupt legacy row must not make this loop unbounded either.
+            if tool["name"].as_str().is_some_and(|name| name.len() > 1024) {
+                matches.clear();
+            }
+        }
+        result["count"] = serde_json::json!(result["matches"].as_array().unwrap().len());
+    }
+}
+
 async fn handle_meta_search(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3241,51 +3304,42 @@ async fn handle_meta_search(
     // to invoke discovered tools, which auto-activates on first call)
     let search_result = mcp_service::search_all_tools(&services, query);
 
-    let mut results: Vec<serde_json::Value> = search_result
-        .matches
-        .iter()
-        .map(|t| {
-            let mut value = serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
-            });
-            if auth.chat.is_some()
-                && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)
-            {
-                value["chat_access"] = serde_json::json!(chat_access(auth, service));
-            }
-            value
-        })
-        .collect();
-
+    let mut candidates = search_result.matches;
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        let matcher = mcp_service::ToolSearch::new(query);
-        let mut tools: Vec<_> = Box::pin(crate::services::machine_access_service::definitions(
-            &state.db, chat,
-        ))
-        .await
-        .unwrap_or_default()
+        candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
+        candidates.push(crate::services::assistant_upload_service::definition());
+    }
+    // Native tools compete in the same ranking as service tools. Appending them
+    // after 25 full service schemas hid them past NyxAgent's result-text limit.
+    let matcher = mcp_service::ToolSearch::new(query);
+    let mut ranked: Vec<_> = candidates
         .into_iter()
-        .chain(std::iter::once(
-            crate::services::assistant_upload_service::definition(),
-        ))
         .filter_map(|tool| {
             matcher
                 .rank(&tool.name, &tool.description)
                 .map(|rank| (rank, tool))
         })
         .collect();
-        tools.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
-        results.extend(tools.into_iter().map(|(_, tool)| {
-            serde_json::json!({
+    ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+    let results: Vec<_> = ranked
+        .into_iter()
+        .take(mcp_service::MAX_SEARCH_RESULTS)
+        .map(|(_, tool)| {
+            let mut value = serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": tool.input_schema,
-                "hint": "Call this native tool directly by name.",
-            })
-        }));
-    }
+                "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
+            });
+            if auth.chat.is_some() {
+                if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
+                    value["chat_access"] = serde_json::json!(chat_access(auth, service));
+                } else {
+                    value["hint"] = serde_json::json!("Call this native tool directly by name.");
+                }
+            }
+            value
+        })
+        .collect();
     let mut response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
@@ -3296,7 +3350,11 @@ async fn handle_meta_search(
         response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
     }
 
-    let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
+    let text = if auth.chat.is_some() {
+        bounded_chat_search_result(response_json)
+    } else {
+        serde_json::to_string_pretty(&response_json).unwrap_or_default()
+    };
     tool_result(request_id, &text, false)
 }
 
