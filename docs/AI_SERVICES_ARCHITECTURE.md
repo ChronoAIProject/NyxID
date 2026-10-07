@@ -183,9 +183,11 @@ pills belong to individual connections: the shared connection table shows each
 authorized dense rank, while a collapsed group chip names its best-ranked
 connection from the complete group and expands that card. Filters hide rows
 without renumbering ranks; groups remain alphabetical and connection rows retain
-inventory order. The Reorder editor uses the complete inventory and preserves
-filters, saved views and the expanded card without writing service-view settings.
-Discovery preference breaks relevance ties; explicit execution uses the called
+inventory order. Inline Agent order controls use the complete service group and
+preserve filters, saved views and the expanded card without writing service-view settings.
+Within equal relevance, discovery preference refills only that catalog service's
+occupied slots; unrelated services retain their slots. The order is advisory.
+Explicit execution uses the called
 slug, pool priority or rotation, and the personal → organization → platform
 credential cascade. Preference does not change those decisions or cause retries.
 
@@ -927,26 +929,55 @@ rollups retain it in existing cost-partition metadata, preserving established
 bucket/replay identities during mixed-version deployment. These metadata additions
 do not change pricing, settlement, or the routing policy.
 
-## Service preference order
+## Agent discovery order
 
-The acting person's `service_preferences` document stores ordered `UserService`
-connection UUIDs, optimistic version and BSON timestamps. Slugs may be reused;
-catalog-source MCP fallbacks have no connection and cannot be ranked. The editor
-on `/keys` uses a sortable ranked/unranked divider, keyboard and touch handles,
-and Rank/Unrank controls, including with one connected service. Preference breaks
-relevance ties. The auto-connected display toggle never changes saved pills.
-A failed read blocks editing; a 404 hides it for older servers. Conflicts retain
-local edits and refetch the version before an explicit overwrite. A validation
-failure refreshes inventory before removing stale IDs. At most 200 services can
-be ranked. Caches are separated by acting identity.
+The acting person's flat `service_preferences` document stores connection UUIDs,
+version and BSON timestamps. Its position has meaning only within a catalog
+service group. Existing grouped cards keep normal display order; an expanded
+card or service overview provides inline drag handles, Move up/down, disabled-row
+positions and confirmed Reset to default. All group rows remain visible during
+editing even if filters change. No global editor replaces the page and editing
+does not write saved-view settings. A compact summary shows enabled/disabled
+counts and saved/default/unknown order beside the single Agent order action.
+The longer **How selection works** disclosure is collapsed by default on cards
+and overview; it contains scope, protocol, pool and gateway distinctions without
+repeating every connection prefix. Disclosure toggles preserve drafts, filters
+and navigation. Failed/loading/404 reads keep a short honest availability line,
+Retry when applicable, and known `/keys` pills visible while disabling entry.
+Production404 says “Saving agent order requires the backend update” and keeps
+unknown order honest; it refers to the absent preference route, never to Service
+Pools availability. The disclosure uses the same rotating chevron as Hide
+connections. Connection labels keep a usable minimum width in normal/editing
+headers; readiness wraps below when necessary and order pills remain beneath it. Conflicts preserve the
+draft and offer scoped Reload/Overwrite, bound to the original identity.
 
-Visibility is resolved before ranking, using existing read-only inventory,
-grants and scopes. Stale IDs stay inert without a write and exposed ranks are
-dense, so a scoped caller cannot infer hidden connections from gaps. Owner and
-guest chat keys use the owner's order restricted to authorized services.
-MCP ranks use eligible active discovered connections, so they can differ from
-the full `/keys` pills: if disabled UI Discovery #1 is skipped, active UI
-Discovery #2 becomes MCP `preference_rank: 1`.
-Org-owned keys retain legacy ordering because org users cannot author a human
-preference document. Preference is never consulted for explicit execution,
-retries, approvals, authority digests, platform grants, billing or catalog digests.
+| Choice | Behavior |
+|---|---|
+| Present preferred Anthropic alternatives to agents | Refill that catalog group's discovery slots; preference applies within equal search relevance |
+| Run a named tool or connection slug | Execute exactly the addressed connection |
+| Route/fail over across alternatives | Explicit service pool, addressed by its pool slug; its strategy is unchanged |
+| Resolve an implicit LLM provider/model without `pool:` | Existing active-row database choice within owner tiers; unchanged by Part A |
+
+Agent-key counts count access grants, while HTTP connection rows are alternatives
+with different tool-name prefixes. Non-HTTP rows keep saved positions but have
+no connected MCP discovery rank or tool prefix. Enabled does not mean verified or executable;
+discovery can include an unavailable credential with `executable: false`.
+Disabled stored rows show `Saved #p` and no discovery rank. Restricted callers
+see dense ranks over their permitted discovered connections: the owner's REST
+Discovery #2 and #4 can become MCP #1 and #2. A disabled Saved #1 is excluded
+from those MCP ranks. The selection disclosure explains this, advisory choice, relevance,
+exact names and explicit pools without promising that the model picks a row.
+
+Scoped saves merge only currently authorized IDs of the requested group, preserve
+all unrelated/hidden/stale IDs and their order, and append stored visible IDs
+omitted by a stale nonempty draft. Reset `[]` removes only authorized IDs in that
+group. Capacity is 200 IDs account-wide. Hidden IDs are removed only by the
+explicit confirmed human-only hidden DELETE, against the full authorized
+inventory; accessible custom singleton IDs and disabled rows are retained.
+GET exposes only authorized catalog groups, version and timestamp, with no counts.
+
+Visibility and caller scope precede ranking. Owner, relay and guest discovery
+apply the human subject's order after their live filters; org/service-account
+subjects normally have no human document. Preference is never consulted for
+execution, retries, approvals, authority digests, platform grants, billing, pools,
+catalog digests or the implicit gateway in Part A.

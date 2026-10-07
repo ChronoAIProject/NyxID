@@ -3228,14 +3228,100 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
         .unwrap();
     });
     let a = connected(&f.state.db, &f.owner, "alpha", &address).await;
+    let slack = connected(&f.state.db, &f.owner, "slack", "https://example.com").await;
     let b = connected(&f.state.db, &f.owner, "beta", "https://example.com").await;
     let hidden = connected(&f.state.db, &f.owner, "hidden", "https://example.com").await;
-    for id in [&a, &b] {
+    let catalog = uuid::Uuid::new_v4().to_string();
+    let group = format!("catalog:{catalog}");
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&a,&b,&hidden]}},
+            doc! {"$set":{"catalog_service_id":&catalog}},
+        )
+        .await
+        .unwrap();
+    let slack_catalog = uuid::Uuid::new_v4().to_string();
+    for catalog_id in [&catalog, &slack_catalog] {
+        let mut service = crate::test_utils::test_auto_connected_catalog_service();
+        service.id = catalog_id.clone();
+        service.slug = if catalog_id == &catalog {
+            "anthropic"
+        } else {
+            "slack"
+        }
+        .into();
+        service.requires_user_credential = true;
+        f.state
+            .db
+            .collection(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        f.state.db.collection::<bson::Document>("service_endpoints").insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(), "service_id":catalog_id,
+            "name":"request", "description":"Request service data", "method":"GET", "path":"/ok",
+            "risk":"read", "is_active":true, "created_at":now,"updated_at":now,
+        }).await.unwrap();
+    }
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&slack},
+            doc! {"$set":{"catalog_service_id":&slack_catalog}},
+        )
+        .await
+        .unwrap();
+    for (i, id) in [&a, &slack, &b, &hidden].iter().enumerate() {
+        f.state.db.collection::<bson::Document>("user_services").update_one(doc! {"_id":*id},doc! {"$set":{"created_at":bson::DateTime::from_millis(2000000000000_i64-i as i64*1000)}}).await.unwrap();
+    }
+    let revoked = crate::services::user_api_key_service::create_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        crate::services::user_api_key_service::CreateApiKeyParams {
+            label: "revoked fixture",
+            credential_type: "bearer",
+            credential: "fixture-only",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "revoked",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&hidden},
+            doc! {"$set":{"auth_method":"bearer","api_key_id":revoked.id}},
+        )
+        .await
+        .unwrap();
+    for id in [&a, &b, &slack] {
         let ask = service_gate(
             &f.state.db,
             &f.chat,
             id,
-            if id == &a { "alpha" } else { "beta" },
+            if id == &a {
+                "alpha"
+            } else if id == &b {
+                "beta"
+            } else {
+                "slack"
+            },
             "Service",
             false,
         )
@@ -3255,7 +3341,7 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     let auth = authenticate(&f).await;
     let call_args = json!({
         "tool_name":"alpha__request",
-        "arguments":{"method":"GET", "path":"/ok"}
+        "arguments":{}
     });
     let baseline = result(
         direct_call(&f, &auth, "nyx__call_tool", call_args.clone()).await,
@@ -3276,12 +3362,12 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     )
     .await
     .unwrap();
-    preferences::replace(
+    preferences::replace_group(
         &f.state.db,
         &f.owner,
-        std::slice::from_ref(&b),
+        &group,
+        &[b.clone(), hidden.clone()],
         0,
-        &[a.clone(), b.clone(), hidden.clone()].into_iter().collect(),
     )
     .await
     .unwrap();
@@ -3293,6 +3379,16 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     assert_eq!(listed["services"][0]["service_id"], b);
     assert_eq!(listed["services"][0]["preference_rank"], 1);
     assert!(listed.to_string().contains(&hidden));
+    assert_eq!(listed["services"][1]["service_id"], slack);
+    assert!(listed["services"][1]["preference_rank"].is_null());
+    let unavailable = listed["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["service_id"] == hidden)
+        .unwrap();
+    assert_eq!(unavailable["executable"], false);
+    assert_eq!(unavailable["preference_rank"], 2);
     let searched = result(
         direct_call(&f, &auth, "nyx__search_tools", json!({"query":"request"})).await,
         false,
@@ -3305,6 +3401,28 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
             .starts_with("beta__")
     );
     assert_eq!(searched["matches"][0]["preference_rank"], 1);
+    assert!(
+        searched["matches"][1]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("slack__")
+    );
+    assert!(
+        searched["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("executable").is_some())
+    );
+    assert_eq!(
+        searched["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"].as_str().unwrap().starts_with("hidden__"))
+            .unwrap()["executable"],
+        false
+    );
     assert!(
         searched["matches"]
             .as_array()
@@ -3377,12 +3495,12 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
         assert_eq!(event.event_data.as_ref().unwrap()["service_id"], a);
         assert_eq!(event.event_data.as_ref().unwrap()["via"], "nyx__call_tool");
     }
-    preferences::replace(
+    preferences::replace_group(
         &f.state.db,
         &f.owner,
+        &group,
         &[hidden.clone(), b.clone()],
         1,
-        &[a.clone(), b.clone(), hidden.clone()].into_iter().collect(),
     )
     .await
     .unwrap();

@@ -1,1282 +1,1127 @@
-# Service preference order for agent discovery
+# Per-service agent discovery order (inside the service group)
 
-Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: implemented and locally verified against `868ce0b7`, including release 0.66.0 and the latest frontend readability changes. All 28 acceptance criteria and every substantiated review finding are closed. §17 records the acceptance matrix; §19 records backend/CLI/Clippy validation; §20 records frontend/wizard validation; §21 records the final label-layout correction and its validation. Final remote CI and Opus 5.5's verdict are recorded on [PR #1796](https://github.com/ChronoAIProject/NyxID/pull/1796), bound to its published head. Earlier integration and validation history is retained below.
+Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: Part A
+implemented; all required local acceptance gates passed and recorded in §16.
+ROOT personally reviewed the final source and closed every substantiated finding.
+Fresh published-head CI and Opus 5.5 sign-off are tracked on PR #1796.
+Part B is a conditional proposal outside this delivery (§6).
 
-## 1. Problem and scope
+This revision supersedes the global "Reorder" editor approved on `e72036b7`
+(PR #1796); that version is at
+`git show e72036b7:docs/plans/service-tool-preference-order.md`. Its
+validations remain historical evidence for boundaries this revision does not
+change (model serialization, CAS mechanics, route rejection layers, test-only
+wrappers, the `/keys` detail read bound); every criterion marked *revised*
+below needs fresh evidence (§15). Base: `origin/main` `cac8ce77` (#1797 cloud
+OAuth providers) merged into branch HEAD `bac66b3f`; the UI baseline is the
+#1685 grouped service cards, unchanged by #1797. Nothing from this feature is
+deployed: production has no `/api/v1/service-preferences` route, and the
+production-backed frontend on port 4630 cannot persist an order until the
+backend ships. It has no preference emulation. At the user's explicit request,
+ROOT also runs a separate seeded sample API/Vite preview on port 4631, with
+temporary JSON persistence under `/tmp/nyxid-service-preference-mock-preview`.
+That preview changes neither repository source nor production data. Final
+real-route browser artifacts provide fresh layout evidence (§16).
 
-Agents discover NyxID service operations through `nyx__search_tools`,
-`nyx__list_connected_services` and `nyx__call_tool`
-(`backend/src/services/mcp_service.rs`, dispatched from
-`backend/src/handlers/mcp_transport.rs::handle_meta_search` /
-`handle_meta_list_connected`). Today `search_all_tools` ranks by
-`(matched words desc, words in name desc, loader order asc)` and truncates to 25;
-`list_connected_services` returns loader order. Loader order is `UserService`
-rows sorted `created_at` descending (`load_callable_user_services`) first, then
-platform (`DownstreamService`) rows. A person who connected
-both `api-twitter` and a Composio-style aggregator that also exposes tweet
-operations cannot tell NyxID which one agents should see first.
+## 1. The user's question, answered from the runtime
 
-This plan adds a **personal, user-controlled preference order over connected
-services**, edited by drag and drop on the AI Services page (`/keys`, External
-Services tab), and applied as a deterministic tiebreak inside NyxID's own
-discovery surfaces. It is discovery metadata only.
+A person's Anthropic card holds 30 connections (26 disabled) and 34 agent keys.
+They asked how an AI agent learns which tools exist, how it picks among several
+connections of one service, and how to set a preferred alternative.
 
-Out of scope, deliberately:
+**How agents learn tools (MCP).** `nyx__search_tools` (keyword query, 25
+results) and `nyx__list_connected_services` (one row per connection, with
+`executable`), then `nyx__call_tool` by tool name. Each connection is its own
+service for discovery: tools are named `<connection slug>__<operation>`
+(`llm-anthropic__messages_create`, `llm-anthropic-2__messages_create`), so four
+enabled Anthropic connections produce four copies of every Anthropic tool with
+identical descriptions. Search ranks by `(query words matched desc, words in
+the tool name desc, loader order asc)`; identical copies tie and fall to the
+**default discovery order**: the caller's personal connections first, then
+organization connections in membership order, each newest `created_at` first
+(`load_callable_user_services`), with an organization connection dropped when
+it shares a slug with a personal one, and with the caller's agent-key service
+and node scope applied. Disabled connections are never loaded. **Enabled
+connections whose credential is revoked, expired or missing are loaded for
+search** (`include_non_executable: true`) and carry `executable: false` in the
+listing; search matches today carry only `name`, `description`, `inputSchema`
+(and `chat_access` for chat keys). `tools/list` and `/api/v1/mcp/config`
+publish only executable operations and are id-sorted in the digest.
 
-- No execution effect. Preference never changes which service a `nyx__call_tool`
-  call hits (the tool name is `<slug>__<operation>` and binds the service), never
-  retries or substitutes another provider after a failed call, and never touches
-  proxy resolution, approvals, execution authority, platform grants or billing.
-- No cross-provider broker. NyxID cannot make an independent client (Claude Code
-  with its own Composio or browser tools, Cursor, OpenClaw) prefer a NyxID
-  service over tools NyxID does not serve. The guarantee is exactly: *within a
-  NyxID discovery response, preferred services sort first at equal relevance,
-  and every response row carries `preference_rank` so a client that wants to
-  honor it can.*
-- No org-level order. Preferences are per acting identity (see §2.2). An org
-  admin surface for org-wide ordering is a separate feature.
-- `tools/list`, `GET /api/v1/mcp/config` and the delegated exact-operation view
-  are **not reordered**. Their `catalog_digest` sorts by `service_id`, exact
-  approvals bind digests, and consumers map the catalog into their own types.
-  Changing their row order buys nothing and risks digest/evidence drift.
-- No change to execution routing defaults: service pools (strategy, member
-  `priority`, failover), the personal → organization → platform credential
-  cascade for shared slugs, agent-key credential overrides, and the *proposed*
-  "Connection order" in `docs/plans/service-route-resolution-flow.md` (not
-  implemented) are untouched. §2.5 states how the UI keeps them apart.
+**How an agent picks.** By naming a tool or slug; NyxID runs exactly that
+connection. There is no fallback between connections of one service unless the
+caller addresses a **service pool** slug (`/proxy/s/<pool>` or model
+`pool:<slug>`), whose strategy (round-robin, weighted, priority with failover)
+is the only deterministic execution routing that exists.
 
-## 2. Product semantics
+**Where NyxID picks on its own.** Implicit LLM gateway routes
+(`/api/v1/llm/{provider}/…` and the OpenAI-compatible gateway resolving a
+`model` without `pool:`) call `resolve_proxy_target_from_user_service(slug =
+None, catalog_service_id = Some)` → `lookup_user_service` →
+`user_service_service::find_by_catalog_service_id`, an **unsorted `find_one`
+over active rows** (database natural order), personal owner first, then
+organizations in `primary_org_id` order. The person has no control over which
+active Anthropic connection that returns. The group UI states this (§5.2); it
+is the subject of the Part B question (§6).
 
-### 2.1 Ranked, unranked, legacy
+**What Part A adds.** A per-service **agent discovery order**, set inside the
+expanded service card. It is advisory metadata for discovery: NyxID lists the
+preferred connection's tools first when same-service copies tie on relevance,
+shows the rank and executability to agents, and explains the rules inline. It
+never changes which connection runs a call the agent named, never retries or
+reroutes, never changes pools, and (Part A) never changes the implicit gateway
+choice.
 
-- A **preference order** is an ordered list of `UserService.id` values
-  (UUID v4 strings). After authorization and stale filtering, position `i` (1-based) is the service's dense `preference_rank`.
-- A visible service in the list is **ranked**; every other visible service is
-  **unranked**. Unranked services sort after all ranked ones in the existing
-  loader order, so a person who never saves an order sees exactly today's
-  behavior (**legacy default**: no document, empty list).
-- Ranking is total across the person's whole visible inventory: personal rows,
-  org-inherited rows, auto-connected rows and disabled rows share one list. The
-  editor lists that complete authorized inventory as one flat list, independent
-  of the catalog grouping and of the saved view filters, and keeps the service
-  name, slug and owner (person, organization, platform) on every item so
-  provenance stays visible.
+## 2. Scope decision
 
-### 2.2 Whose preference
-
-The document is keyed by the identity whose inventory a request runs under:
-`AuthUser.user_id` for REST and `McpAuthContext.user_id` for MCP. Consequences,
-stated so they are not rediscovered:
-
-REST preference API authorization is separate from MCP discovery authorization:
-
-| Caller | REST `GET /service-preferences` | REST `PUT /service-preferences` |
+| Need | Mechanism | Decided by |
 |---|---|---|
-| Human session / first-party JWT | authorized metadata | verified first-party human only |
-| Person/org-owned agent key | metadata within its live allowlist, excluding viewer-org rows | rejected |
-| Delegated token | metadata with exact `account:read` under existing GET policy | rejected |
-| OAuth application token | metadata under existing management GET policy | rejected |
-| Service account / relay | rejected | rejected |
+| Show agents my preferred Anthropic connection first | Part A: group-relative discovery order (advisory) | the person, per service group |
+| Always run Anthropic through X, fall back to Y | existing service pool (`priority`, failover), addressed by the pool slug | the person, via Service Pools (linked from the card) |
+| Which connection a named tool or slug uses | exact addressing; unchanged | the agent, by name |
+| Which connection `/llm/anthropic` uses | today: natural order; Part B (if confirmed): first connection in the saved order within the same owner tier, selected once, no retry | user answer pending |
 
-For requests that existing MCP authentication and proxy scopes authorize:
+Out of scope in all cases: ordering unrelated services relative to each other,
+org-level orders, automatic fallback or substitution after a failed call,
+changes to `tools/list`, `/mcp/config`, `catalog_digest`, approvals, execution
+authority, billing, pools, or named-target resolution. Independent clients with
+their own tools cannot be made to honor NyxID's order; the guarantee is the
+listing order plus explicit `preference_rank` / `executable` metadata.
 
-| Caller | MCP `user_id` | Discovery preference applied |
-|---|---|---|
-| Human session / first-party JWT | the person | the person's document |
-| Person-owned agent key (`nyxid_ag_`) | the owning person | the person's document after the key's service allowlist filter |
-| Assistant chat key, owner turn | the owner person | owner document over authorized metadata, including acknowledgement-required services |
-| Assistant chat key, guest turn | the owner person | owner document restricted to granted guest-visible services |
-| Org-owned agent key | the org user | normally legacy order: org users cannot author a human document |
-| Relay token | verified owner person | owner's order restricted to the relay's live service/node scope |
-| Delegated / OAuth application token | the verified MCP subject | subject's order when existing proxy scope authorizes MCP |
-| Service account | service-account subject ID | normally legacy order: no human preference document |
+## 3. Semantics (normative)
 
-Preference never widens or narrows permission. It is applied **after** every
-existing visibility, scope and node filter, by reordering an already-authorized
-list.
+### 3.1 Groups, listability, ranks
 
-### 2.3 Identity: connection IDs, not slugs
+- **Group key** `G(c)`: `catalog:<catalog_service_id>` for catalog-backed
+  connections, else `connection:<user_service_id>`; identical to the frontend
+  `groupServiceConnections` id, derivable server-side from
+  `McpToolSource::UserManaged.catalog_service_id` and `KeyView.catalog_service_id`.
+  A `connection:` group is an immutable singleton and is never orderable.
+- **Stored order**: the existing flat per-identity list
+  (`service_preferences.ordered`, `version`, CAS, `MAX_ORDERED_SERVICES = 200`
+  account-wide). Position has meaning only relative to other ids of the same
+  group.
+- **Listed** connection for a caller: loaded by that caller's discovery chain
+  (enabled, HTTP, authorized, inside agent-key and node scope). Listed does not
+  mean callable: `executable` is the separate flag computed from credential and
+  route state, and `/keys` metadata (`classifyConnection`) reports only
+  unavailable or unverified. UI text never says callable, working or verified.
+- **`preference_rank(c)`**: dense 1-based position of `c` among the listed
+  connections of `G(c)` that appear in the stored list, by stored order.
+  A catalog group whose caller-visible listed members number one still yields
+  rank 1 for that member when it is stored (a scoped agent key sees "#1").
+  `null` when `c` is not stored, not listed, or in a `connection:` singleton.
+  A disabled stored connection shows `null` and resumes its stored position
+  when re-enabled.
+- Unranked listed connections follow the ranked ones in default discovery
+  order.
 
-Entries store `UserService.id`. Slugs are rejected because a deleted row keeps
-its slug as a tombstone while a new active row may reuse it
-(`docs/AI_SERVICES_ARCHITECTURE.md`, "Two listings"). Platform-source services
-that have no `UserService` row (auto-connected `DownstreamService` fallbacks in
-MCP) cannot be ranked: they are not on `/keys`, and their `service_id` is a
-catalog id. They always sort as unranked. Platform-key *connections* that do
-have a `UserService` row (auto-provisioned rows) are ordinary entries.
+### 3.2 Discovery order: slot replacement, no comparator
 
-### 2.4 Stale entries
+Both discovery surfaces start from a list whose order is already fixed by
+today's code and **only refill the slots a group already occupies**. No sort
+key compares connections of different groups.
 
-A ranked service can be deleted, un-shared by its org, or filtered out by an
-agent key's allowlist after the order was saved. Rule: **stale ids are inert**.
-Readers intersect the stored list with the caller's already-authorized inventory
-and ignore the rest; the stored list is never returned raw. Disabled connections
-retain their rank in the management inventory/editor (§2.1) but are absent from
-MCP discovery under its existing active-service rules. No cascade write happens
-on delete/disable/membership change (no hot-path or cross-collection coupling).
-The next human `PUT` replaces the whole list, which prunes stale ids implicitly;
-the UI only ever shows ids it can resolve.
+**Listing** (`nyx__list_connected_services`). Let `L` be the loaded service
+list after every existing filter (today's output order). For each group `G`
+with two or more members in `L`: `S_G` = the ascending slot indices of `G`'s
+members in `L`; `M_G` = `G`'s members ordered by `(preference_rank asc with
+null last, position in L asc)`. Write `M_G[i]` into `L[S_G[i]]`. Every other
+slot is untouched. With an empty rank map `M_G` equals the original member
+sequence, so the output is byte-identical to today.
 
-### 2.5 Discovery preference versus execution defaults
+**Search** (`nyx__search_tools`). The service vector handed to search is the
+**original loader order, never the listing-permuted vector**: the rank-load
+helper (`order_discovery`) returns `(original services, ranks)` and the two
+surfaces permute independently. Pre-sorting services would change
+`candidate_index` and therefore which group's tools occupy which slot of a
+mixed-relevance bucket (A-low, Slack-high, A-high must not become A-high,
+Slack-high). Let `C` be today's relevance-sorted candidate list
+`(matched desc, in_name desc, candidate_index asc)` built from the original
+order. Partition `C` into contiguous buckets of identical `(matched,
+in_name)`. Within one bucket, for each group `G`: `S` = ascending slots of
+tools whose connection is in `G`; `T` = those tools re-sequenced by
+`(preference_rank of their connection asc, null last, candidate_index asc)`,
+so every tool of the rank-1 connection comes first in its original relative
+order, then rank 2, then unranked. Write `T[i]` into slot `S[i]`. Slots of
+other groups, other buckets and singleton groups never move; a tool never
+changes bucket. Truncate to `MAX_SEARCH_RESULTS = 25` **after** refilling, so
+a preferred connection's copies survive truncation first. With an empty rank
+map the output is byte-identical to today, which is what the `#[cfg(test)]`
+wrappers assert.
 
-The refreshed AI Services UI (#1685) shows several things that already decide
-*which connection runs a request*. Preference order decides none of them. The
-table is normative for wording in UI, docs and tool hints.
+**Metadata** (additive, from the loaded `McpToolService`, no extra reads):
+every listing row and search match carries `preference_rank` (group-relative
+or `null`); search matches additionally carry `executable` (listing rows
+already do). Tool descriptions, `tools/list`, `/mcp/config` unchanged; the
+search `hint` gains one sentence naming the two fields and stating that
+relevance comes first and that the field is advisory.
 
-| Mechanism | Where it is decided | What the UI shows | Effect of preference order |
-|---|---|---|---|
-| Exact addressing | `/proxy/s/{slug}`, `/proxy/{id}`, `nyx__call_tool` with `<slug>__<operation>` | Slug in the connection row, "Configure" link | none; the call names the connection |
-| Service pools | `ServicePool.strategy` (round-robin, weighted, priority), member `priority` (lower first), failover policy | `ServicePoolSummary`, `ServicePoolRoutingPanel`, row label `Priority n` | none; pools are addressed by their own slug |
-| Shared catalog slug cascade | proxy resolution: personal, then organization (`primary_org_id`, then earliest membership), then platform | DEV-only routing preview (`service-routing-preview.ts`, `personal < org < platform`) | none; proxy resolution never reads `service_preferences` |
-| Agent credential override | `AgentServiceBinding` per agent key | insight panels "overrides" | none; it changes the credential, not the listed order |
-| Proposed "Connection order" | `docs/plans/service-route-resolution-flow.md`, not implemented | nothing | not this feature; must not share its name |
+### 3.3 Projection semantics: `/keys` versus MCP
 
-UI rules that follow:
+The two surfaces derive ranks from different, equally authoritative
+inventories and the plan promises no equivalence between them:
 
-- The rank pill reads **`Discovery #n`** (aria-label `Discovery preference n`),
-  never `#n` or `Priority n`, because `ServiceConnectionTable` already prints
-  `Priority {member.priority}` for pool members in the same row.
-- The editor banner states that the order only changes how NyxID lists tools to
-  agents at equal relevance and names the three execution mechanisms it does not
-  change (slug called, pool routing, credential cascade).
-- The editor and pills never appear inside the pool routing panel, the pool
-  cards, or the routing preview's candidate ordering.
+- **REST (`/keys`, `/keys/{id}`)** ranks over that endpoint's authorized
+  inventory: the caller's active HTTP user services after service-scope and
+  organization-visibility filtering, as `list_keys_read_only_with_grants`
+  already computes it. It performs no node, operation-scope, guest or
+  provider-readiness evaluation and adds no discovery reads. A catalog group
+  whose caller-visible stored member is single still yields rank 1 there.
+- **MCP (`nyx__search_tools`, `nyx__list_connected_services`)** ranks over the
+  inventory the discovery chain actually loaded for that caller: after node
+  scope, operation scope, service allowlist and guest filtering. A restricted
+  agent key whose allowlist covers two of four stored Anthropic connections
+  therefore sees dense ranks 1 and 2 on them, while the owner's `/keys` pills
+  on the same rows may read `#2` and `#4`.
+- The UI pills are the owner's REST projection and say so: the explanation
+  panel (§5.2 item 4) states that a restricted agent's ranks are dense over
+  what that agent is allowed to see.
 
-## 3. Ranking rules (normative)
+### 3.4 Stale ids, scope, identity (unchanged from the accepted design)
 
-Let `rank(s)` be the 1-based position of `s.service_id` in the resolved order,
-or `u32::MAX` when unranked. Let `loader(s)` be the index of `s` in the loader
-output (today's "original order").
+Ids are `UserService` UUIDs, never slugs. Stale ids (deleted, disabled,
+un-shared, outside an agent key's allowlist) are inert, filtered at read time,
+never cascaded and never silently deleted by a group save (§4.2). Keyed by
+`AuthUser.user_id` / `McpAuthContext.user_id`: person-owned agent keys and chat
+keys use the owner's order after their own scope filter; org-owned agent keys
+and service accounts have no document and keep default order. The stored list
+is never returned raw. Preference is applied after every visibility, scope and
+node filter and is not read by `execute_tool`, proxy resolution, approvals,
+execution authority, pools, billing or (Part A) the LLM gateway.
 
-1. **Service order** (`nyx__list_connected_services`, and the service vector fed
-   to search): stable sort by `(rank(s), loader(s))`.
-2. **Tool search** (`nyx__search_tools`): candidates keep today's relevance keys
-   and gain preference as the third key:
-   `(matched desc, in_name desc, rank(service) asc, candidate_index asc)`.
-   Relevance wins over preference: a tool matching every query word from an
-   unranked service still outranks a partial match from rank 1. Preference only
-   decides ties, including the empty-query listing where every tool ties.
-3. **Result limit** stays `MAX_SEARCH_RESULTS = 25`, applied after the sort, so
-   at equal relevance ranked services' tools survive truncation first.
-4. **Determinism**: every key is a total order; two runs over the same loader
-   output and document produce the same list. Loader order itself is unchanged.
-5. Chat-only native tool extras appended in `handle_meta_search`
-   (`machine_access_service::definitions`, upload tool) are unaffected.
+## 4. Storage and API
 
-Implementation point (matches the code on this branch): the pure sort
-`mcp_service::order_services_by_preference(&mut [McpToolService], &HashMap<String, u32>)`
-is applied by `service_preference_service::order_discovery(db, user_id, services)`,
-which builds the visible set from user-managed `service_id`s, reads the
-document once, and returns `(services, ranks)`. `mcp_transport` keeps two
-loaders: `load_all_services_for_meta_tools` (unranked; unchanged apart from the
-guest-turn allowlist filter) and `load_preferred_services_for_meta_tools`,
-which wraps it with `order_discovery` and is the only caller for
-`nyx__search_tools` and `nyx__list_connected_services`. Search receives the
-rank map through `search_all_tools_ranked(services, query, ranks)` and the
-listing through `list_connected_services_ranked`; the empty-map wrappers
-`search_all_tools` and `list_connected_services` are `#[cfg(test)]` so the
-production binary has no unused entry points while existing tests compile
-unchanged.
+**Assessment.** The existing flat document with CAS stores group-relative
+orders unchanged; ranks derive per group at read time. The unreleased global
+full-list `PUT` is replaced (ROOT decision) by a group-scoped,
+server-authoritative merge, because a full-list client write can move or drop
+ids of other groups and the server cannot tell. No new collection, index,
+migration or subsystem.
 
-## 4. Data model
+### 4.1 `GET /api/v1/service-preferences` (grouped)
 
-New file `backend/src/models/service_preference.rs`:
-
-```rust
-pub const COLLECTION_NAME: &str = "service_preferences";
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ServicePreference {
-    #[serde(rename = "_id")]
-    pub user_id: String,                 // person or org user id
-    #[serde(default)]
-    pub ordered: Vec<String>,            // UserService ids, position = rank
-    #[serde(default)]
-    pub version: i64,                    // optimistic concurrency; first save writes 1
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub created_at: DateTime<Utc>,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub updated_at: DateTime<Utc>,
-}
-```
-
-- `_id` is the owner id, like `assistant_settings`. No secondary index, no
-  migration, no startup task. Absent document means legacy behavior.
-- No `skip_serializing` anywhere. No secrets, so derived `Debug` is fine. New timestamps are normalized to BSON milliseconds before returning a write response.
-- Bounds: at most 200 entries; each entry must be a canonical lowercase UUID v4; no duplicates. Constants and validation live in services. Request bodies are bounded at 16 KiB and reject unknown fields. Versions are integers from 0 through 2^53-2, safely incrementable in JavaScript.
-  200 is above any realistic `/keys` inventory and keeps the document under a
-  few KiB.
-
-## 5. Backend API
-
-### 5.1 `GET /api/v1/service-preferences`
-
-Dedicated GET route in the shared authenticated API, rejecting service accounts
-and relay tokens. Ordinary API keys and delegated exact `account:read` GETs
-retain authorized metadata access. Existing slug-based key routes are untouched.
-Missing documents return `ordered: []`, `version: 0`, `updated_at: null`.
-
-Response:
+Shared authenticated read class (SA and relay rejected; API keys and delegated
+`account:read` allowed). Returns stored ids filtered to the caller's
+authorized inventory, grouped, and nothing else:
 
 ```json
-{ "ordered": ["<user_service_id>", "..."], "version": 3, "updated_at": "2026-10-07T09:00:00Z" }
+{ "version": 3, "updated_at": "2026-10-07T09:00:00Z",
+  "groups": [ { "group": "catalog:<uuid>", "ordered": ["<user_service_id>", "..."] } ] }
 ```
 
-`ordered` is the stored list **filtered to the caller's visible inventory**.
-Read the preference document first; absent/empty orders return immediately.
-For saved IDs, reuse the detail-rank helper's bounded (at most 200) selected-ID
-source/membership/org-scope visibility check, API-key service scope and viewer-org
-filter, then projected endpoint existence. These are the same live visibility
-rules as `/keys`, without rendering or decrypting its full metadata. A restricted
-agent key cannot learn UUIDs outside its allowlist. `version` is the raw document
-version (0 when absent). No provisioning or OAuth reconciliation runs.
+Only groups with at least one authorized stored id appear; `connection:`
+singleton groups are intentionally omitted from the rendering (they carry no
+order) even when their id is stored and visible. A missing document gives
+`version: 0`, `updated_at: null`, `groups: []`. No stored counts, hidden
+counts or capacity fields are exposed on this read, which API keys and
+delegated readers share.
 
-### 5.2 `PUT /api/v1/service-preferences`
+### 4.2 `PUT /api/v1/service-preferences/groups/{group}`
 
-Dedicated PUT route with rejection middleware for delegated, API-key, service
-account and relay tokens on this route only. The handler additionally calls
-`login_client_context::require_first_party_human` using verified `AuthUser`;
-OAuth application tokens cannot write. Key updates and curation are unchanged.
+Human-only (delegated, API-key, SA, relay rejected at the route;
+`login_client_context::require_first_party_human` in the handler), 16 KiB body,
+unknown fields rejected.
 
-Request: `{ "ordered": ["<id>", ...], "expected_version": 3 }`.
+Body: `{ "ordered": ["<id>", ...], "expected_version": 3 }`. There is no
+`clear` flag: `ordered: []` is the explicit **reset to default** for this
+group and removes the group's currently authorized stored ids; a non-empty
+`ordered` sets the order.
 
-Validation (all `AppError::ValidationError`, HTTP 400, code of that variant):
-length > 200; any noncanonical or non-v4 UUID string; invalid or exhausted version; duplicates; any id not in the caller's
-visible inventory (the same live visibility rules as 5.1; PUT validates against
-the existing read-only full inventory; an id belonging to
-someone else and a nonexistent id produce the identical message, "unknown
-service id", so ownership is not probeable).
+Validation (400 `ValidationError`): `group` not `catalog:<uuid>` /
+`connection:<uuid>`; a `connection:` group; more than 200 ids in the request;
+catalog UUID not canonical lowercase RFC variant/version 1–8 (nil/max and unknown versions rejected); non-canonical or non-v4 connection UUID; duplicates; any id not in the caller's
+authorized inventory for `group` (one message, "unknown service id", for
+foreign, missing and wrong-group ids); `expected_version` outside
+`0..=2^53-2`.
 
-A no-op at the current version returns unchanged metadata and emits no audit.
-Both first-insert and later compare-and-swap races have exactly one winner.
+Merge (`replace_group`, service layer), with `O` the stored list:
 
-Persistence (service layer `service_preference_service::replace`):
+1. `version != expected_version` → 409 `Conflict` (1004).
+2. `A` = ids of `O` that resolve in the caller's authorized inventory with
+   `G == group`, in stored order (disabled rows are in that inventory; deleted,
+   un-shared and out-of-scope rows are not). `H` = every other id of `O`
+   (other groups, hidden or stale same-group ids, ids the caller cannot see).
+   `H` keeps its elements byte for byte and its relative order; nothing in `H`
+   is ever removed by this route.
+3. `N`: for a **non-empty** `ordered`, `N` = submitted ids followed by every
+   member of `A` the request omitted, in their previous relative order, so a
+   draft built from a stale inventory cannot drop a connection that was
+   granted or stored meanwhile. For `ordered: []`, `N = []` (intentional
+   reset of this group's currently authorized stored ids).
+4. Slot replacement: the first `min(|A|, |N|)` elements of `N` are written
+   into the slots `A` occupied in `O`, in ascending slot order. Remaining
+   elements of `N` (newly stored ids) are inserted immediately after the last
+   slot `A` occupied, or appended to the end when `A` is empty. When `N` is
+   empty, `A`'s slots are removed. `H` keeps its elements and relative order
+   in every case, and an already stored interleaved list resubmitted in its
+   current order reproduces `O` exactly.
+5. Capacity: if the merged length exceeds `MAX_ORDERED_SERVICES = 200` →
+   400 `ValidationError` "Agent order storage is full (200 connections across
+   all services). Reset the agent order of another service, or release
+   unavailable preferences for services you can no longer access, then try
+   again." No ids, counts or probes. A reset (`ordered: []`) never fails on
+   capacity because it only removes. **No automatic prune of any kind**: a
+   scoped save preserves all unrelated, stale and hidden ids exactly.
+6. Merged list identical to `O` → no-op: unchanged metadata, no version bump,
+   no audit. Otherwise persist with the existing insert-or-CAS (`version + 1`),
+   legacy-row upgrade and BSON-millisecond timestamps.
+7. Audit `service_preference_updated` with `{ group, count, version }` only.
+8. Respond with the §4.1 shape.
 
-- Read the current document and reject a mismatched version before considering
-  a no-op. Absent/empty no-ops keep the document absent and return null metadata.
-- `expected_version == 0` with no current row: `insert_one` of a fresh document with `version: 1`.
-  A duplicate-key error (document appeared concurrently) maps to
-  `AppError::Conflict`.
-- With a current row: `find_one_and_update` with filter
-  `{ _id, version: expected_version }`, update
-  `{ $set: { ordered, updated_at }, $inc: { version: 1 } }`, `ReturnDocument::After`.
-  No match means `AppError::Conflict` (HTTP 409, code 1004).
-  For an existing legacy row whose deserialized version is zero, the CAS filter
-  accepts either `version: 0` or an absent `version`; it upgrades the row while
-  retaining `created_at`. This differs from a first insert against no row.
-- Response: same shape as GET (filtered list, new `version`, `updated_at`).
-- Audit: `audit_service::log_actor_event` with event type
-  `service_preference_updated` and metadata `{ "count": n, "version": v }` only.
-  No service ids in audit (they are not secrets, but the event must stay small
-  and the list is reconstructible from the document).
-- No `ServiceChangeEvent`/history row: this is a person-level setting, not a
-  service mutation, and history readers expect per-service lineage.
+### 4.2a `DELETE /api/v1/service-preferences/hidden` (capacity recovery, accepted)
 
-### 5.3 `GET /api/v1/keys` and `GET /api/v1/keys/{id}`
+Human-only with exactly the scoped PUT's fences: delegated, API-key, SA and
+relay rejected at the route, `require_first_party_human` in the handler,
+16 KiB body with unknown fields rejected, body `{ "expected_version": n }`,
+CAS (409 code 1004 on mismatch), identity bound to `AuthUser.user_id`.
 
-`KeyResponse` gains `preference_rank: Option<u32>` (serialized always; `null`
-when unranked). List ranks reuse its authorized inventory and one preference read.
-Detail adds one preference read; absent/empty/unranked orders add no inventory work.
-For a ranked detail, visibility queries only saved IDs (<=200), reusing the shared
-membership/org scope and retired-catalog resolver, plus projected endpoint IDs.
-It does not render/decrypt other credentials or reload providers; one listing
-membership snapshot is shared across the selected personal/org walk. Each management read adds
-a preference point read; ranked detail additionally performs the bounded visibility work above; proxy, LLM gateway, MCP `tools/call`, approvals and
-billing paths read nothing new.
+Effect: removes from the stored list every id that is **not in the actor's
+current authorized inventory** (the same inventory the scoped PUT validates
+against, i.e. the caller's visible `/keys` rows including disabled rows and
+custom `connection:` singletons). It therefore releases lost-access
+organization ids and deleted ids, and retains every accessible id even when
+the grouped GET does not render it (custom singleton ids, disabled rows). The
+complement is computed against the inventory, never against the rendered
+`groups` array. It never reorders or removes a visible id, never alters any
+visible group, and has no execution effect. Identical list → no-op (no bump,
+no audit). Audit `service_preference_hidden_released` with `{ released_hidden: n,
+version }`, no ids. Response: the §4.1 grouped shape. No counts are returned
+or needed: the client offers the action from the capacity banner alone.
+CLI: `nyxid service preference release-hidden`. This is the only mechanism
+that removes ids the caller did not submit, and it is explicit, confirmed and
+not an editor.
 
-### 5.4 MCP meta-tools
+### 4.3 `GET /api/v1/keys`, `GET /api/v1/keys/{id}`
 
-- `nyx__list_connected_services` rows gain `"preference_rank": <n|null>` and
-  are sorted per §3. The tool description gains one sentence: "Rows are sorted
-  by the owner's preference order; `preference_rank` 1 is the most preferred."
-- `nyx__search_tools` matches gain `"preference_rank"` (the service's rank) and
-  the response `hint` gains: "At equal relevance, tools from the owner's
-  preferred services are listed first." Chat-key `chat_access` fields are
-  unchanged.
-- `nyx__discover_services` (not-yet-connected catalog) is unchanged.
+`KeyResponse.preference_rank` is the §3.1 group-relative dense rank (`null`
+for unranked, disabled, `connection:` singleton). `KeyResponse.preference_position`
+(additive, `null` unless the row's id is stored) is the row's 1-based position
+among the group's stored ids that the caller can see, including disabled rows;
+it backs the saved-position pill (§5.1). List: one document read over the
+request's own authorized inventory. Detail: the bounded `detail_rank` path
+restricted to the row's group (unchanged bound).
+Both preference GET and detail rank resolve only stored IDs through the shared
+live visibility helper, capped at 200; they do not render/decrypt the inventory
+or reload credentials/providers. Absent or empty orders stop after the preference
+document read. Saved orders add a selected-ID service read and live owner/source,
+platform-access and endpoint/catalog existence projections as applicable.
+A fresh Services page reads both `/keys` and `/service-preferences`, so it adds
+two preference-document lookups in aggregate. Empty/absent order adds no second
+inventory walk; saved GET adds only these bounded selected-ID reads.
 
-### 5.5 CLI
+### 4.4 CLI (contract updated with the API)
 
-`nyxid service list` adds a `Pref` column (rank or `-`) read from
-`preference_rank`. New `nyxid service preference show` prints the resolved order
-as a table (rank, slug, label, id) and `nyxid service preference set <ID_OR_SLUG>...`
-replaces the order: slugs are resolved against `/keys` preferring the active row
-(the CLI already does this in `api_key.rs` bind), the current `version` is read
-from GET and sent as `expected_version`, and a 409 prints "preference order
-changed elsewhere; re-run" and exits non-zero. Both support `--output json`.
+`nyxid service list` adds `Pref` (rank, `saved:p` for disabled stored rows, or
+`-`). `nyxid service preference show [--group <catalog-slug|group-key>]`
+prints groups with rank/position, slug, label, id and enabled state.
+`nyxid service preference set --group <…> <ID_OR_SLUG>...` resolves slugs via
+`/keys` preferring enabled rows, refuses mixed groups, reads `version` from
+GET, PUTs the scoped route, and exits non-zero on 409 with "preference order
+changed elsewhere; re-run" and on the capacity 400 with the server message.
+`nyxid service preference reset --group <…>` sends `ordered: []`.
+`nyxid service preference release-hidden` calls the DELETE after a `--yes`
+or interactive confirmation that explains restored access will require
+setting those preferences again. The superseded flat `set` is removed.
 
-## 6. Frontend
+## 5. UI: inside the service group only
 
-Baseline is the #1685 AI Services UI on `origin/main`: `pages/keys.tsx` renders
-`GroupedServiceCards` (one collapsed card per catalog group, expandable into a
-`ServiceConnectionTable`), `ServiceViewToolbar` (Organization/Service
-multiselects, search, Personal/All source toggle, Auto-connected toggle, active
-filter pills, `ServiceSavedViews` persisted through
-`PUT /users/me/preferences/services` into `profile_config.services_view`),
-`useServiceView` over the `useServiceCardView` zustand store, per-connection
-billing/usage insights (`useServiceInsights`, `GET /service-insights`), pool
-routing summaries (`useServiceRoutingPools`), table mode via `renderTable`, the
-`/keys/services/$groupId` overview page, and a DEV-only routing preview
-(`?view=routing`). All of that is preserved unchanged except for the additive
-pill and the editor entry described here. The former `KeyCardContent`,
-`ServiceTableRow`, `groupKeysBySource` and the page-level auto-connected
-`Switch` no longer exist and must not be referenced.
+Unchanged: the #1685 grid and collapsed card layout, `ServiceViewToolbar`
+(filters, search, Personal/All, Auto-connected, saved views), table view mode,
+insight/billing/pool panels, `/keys/services/$groupId`, page-level controls.
+No flat editor, no page-level Reorder button, no card replacement.
 
-Files: `pages/keys.tsx` (Reorder button, editor swap),
-`components/dashboard/grouped-service-cards.tsx` (collapsed-card rank chip),
-`components/dashboard/service-connection-table.tsx` (row pill),
-`components/dashboard/service-preference-editor.tsx` (editor),
-`hooks/use-service-preference.ts`, `schemas/service-preference.ts`,
-`types/keys.ts` (`preference_rank`). No change to `service-view-toolbar.tsx`,
-`service-saved-views.tsx`, `service-filter-multiselect.tsx`, `lib/service-view.ts`,
-`schemas/service-view.ts`, `stores/service-card-view-store.ts`,
-`hooks/use-service-view.ts`, insight/billing/pool components, `service-overview.tsx`
-or `key-detail.tsx`. `@dnd-kit/core` 6.3, `@dnd-kit/sortable` 10,
-`@dnd-kit/utilities` 3.2 are already dependencies; `analytics-canvas.tsx` and
-`sortable-panel.tsx` remain the sensor/keyboard/announcement precedent.
+### 5.1 Per-row pills (`ServiceConnectionTable`)
 
-### 6.1 Normal view: pills attached to connection IDs
+- Geometry keeps the `e72036b7` fix: the Connection / Slug cell's first line
+  (details chevron, icon, label link, readiness badge) is unchanged; pills
+  render on their own line directly below it, before the slug line, never
+  squeezed into the label line, with `flex-wrap` and `max-w-full` so long or
+  duplicate labels are never truncated by a pill.
+- **Discovery pill**: `Badge variant="accent"` reading `Discovery #n`,
+  `aria-label="Discovery preference n for <service>"`, from `preference_rank`.
+  The service name belongs to the row's catalog group, including in the mixed
+  table view. Omit a denominator: filtered rows cannot establish the complete
+  group's count. Enabled HTTP rows only.
+- **Saved-position pill**: for a disabled row whose id is stored,
+  `Badge variant="secondary"` reading `Saved #p`,
+  `aria-label="Saved order position p; disabled connections are not listed to
+  agents"`, from `preference_position`. An enabled non-HTTP row instead shows
+  `Saved #p · SSH` (or its actual protocol), with an accessible explanation that
+  it is outside connected MCP discovery. Moving it retains its saved position
+  without making it discoverable; it has no discovery rank or MCP tool prefix.
+- Both appear wherever the renderer is used (expanded card, table view mode,
+  overview page, DEV routing preview) and coexist with the pool `Priority n`
+  row and the readiness badge; the terms are distinct by design.
 
-- **Row pill** in `ServiceConnectionTable`: for a row whose `KeyInfo.preference_rank`
-  is non-null, render `<Badge variant="accent" aria-label="Discovery preference n">Discovery #n</Badge>`
-  in a wrapping metadata row below the existing connection-label/readiness
-  header, within the Connection / Slug cell. The pill must not consume the
-  label's horizontal space or overlap its text or icons. No new column.
-  The component reads `preference_rank` from
-  the row it already receives, so the pill appears everywhere this renderer is
-  used: table view mode (`renderTable`), an expanded group card, the
-  `/keys/services/$groupId` Connections tab, and the DEV routing preview.
-- **Collapsed-card chip** in `GroupCard` (`grouped-service-cards.tsx`): when any
-  connection in `group.connections` (the complete group, not the filtered
-  `matches`) has a rank, render a `Badge variant="accent"` button next to the
-  `n disabled` badge reading `Discovery #best` with
-  `aria-label="Discovery preference best · <connection label>"` and a `title`
-  listing every ranked connection in the group as `#n · label`. Activating it
-  expands the card (`onToggle`) so the per-row pills are visible. A group is a
-  catalog service, not a connection; the chip always names the connection it
-  summarizes.
-- Pills show the **dense authorized rank** from `/keys`, never a visible
-  position. Filters (Personal/All, Organization, Service, search, Auto-connected,
-  older state/type pills) hide rows but never change the text of a visible pill.
-- **No reordering of groups or rows.** Groups keep the upstream alphabetical
-  order and rows keep the `/keys` order inside each group; the rank is
-  cross-service, so the pill, not position, carries it. This keeps upstream
-  grouping tests and view transitions intact.
-- **Reorder button** (`ArrowUpDown`, `variant="outline"`, label `Reorder`) sits
-  in the tabs row beside `ViewToggle`, services tab only, hidden while the
-  routing preview is active or when the preference GET returned 404. Disabled
-  while keys or preference are loading or refetching (even with cached data),
-  on either read error, with zero authorized services, or while the editor is
-  open; `title` explains the reason.
+### 5.2 Compact summary and collapsed selection disclosure
 
-### 6.2 Reorder mode
+In the expanded card body, beside the billing / pool / agent-use / last-edit
+lines, for every group with two or more connections in its full inventory:
+`Preferred in discovery: <label> · k enabled · d disabled` when a rank exists, or
+`No agent order · default discovery order · k enabled · d disabled`. Counts
+use `is_active`; the summary does not claim that enabled rows are listed,
+callable, working or verified. While the preference GET is loading, failed or
+returned 404, preserve any preferred connection known from `/keys` metadata
+and add a muted availability suffix. Without known rank metadata, use
+`Loading agent order`, `Agent order could not be loaded`, or `Saved agent
+order unknown` (404) with the counts, never
+`No agent order` from a failed read. The summary and the single **Agent order** action stay visible in the expanded
+card and the overview Connections tab. Loading/error/404 availability is a
+short truthful line; 404 says **Saving agent order requires the backend
+update** and the disabled action retains the same reason (it does not describe
+Service Pools as unavailable), while read errors provide Retry beside the summary.
+**How selection works** is a native disclosure, collapsed by default on both
+surfaces. Its native marker is hidden and it uses the same lucide ChevronRight
+(size 3.5, gap 1.5, transition-transform, motion-reduce, 90-degree open rotation)
+as Hide connections, with no added toggle state; native keyboard semantics
+remain. Opening or closing it, including on production 404 or during a dirty
+draft, must not change the draft, filters, URL, saved-view state or send a write.
+Long explanation text and protocol/gateway/pool distinctions live only inside
+this disclosure. No full tool-prefix list is repeated above the rows. Content,
+from data already on the page:
 
-Entering reorder mode (state in `KeysPage`, not URL):
+1. Enabled HTTP alternatives have distinct tool prefixes based on their row
+   slug (`<slug>__…`); use row identity rather than an exhaustive prefix list.
+   Non-HTTP rows are identified by actual protocol without invented prefixes,
+   and their saved-position/discovery distinction is explained;
+   each connection is a separate copy of the same tools.
+2. Default order: "Without an agent order NyxID lists your own connections
+   before organization connections, newest first within each; an agent key's
+   allowed connections and nodes narrow what it sees."
+3. Preference rule: "Your agent order is advisory for discovery: when copies
+   tie on relevance, NyxID lists them in your order. A better keyword match
+   from another connection is listed above a preferred one."
+4. Health and scope rule: "Enabled HTTP connections can be listed even when their
+   credential is revoked, expired or missing; agents see `executable: false`
+   on those. Disabled connections are not listed. NyxID does not verify
+   providers here; row badges report unavailable or unverified only. The
+   numbers on these pills are your view; an agent key allowed to use only some
+   of these connections sees ranks 1, 2, … over the ones it may use, in the
+   same relative order."
+5. Explicit behavior: "Agents run exactly the tool or slug they name. Routing
+   and failover across these connections happen only through a service pool
+   you call by its slug" with the existing pool link or create link; for LLM
+   provider groups: "`/api/v1/llm/<provider>` and gateway models without
+   `pool:` use one active connection chosen by NyxID in database order, not by
+   this list" (Part B replaces this sentence if confirmed).
+6. Server state is visible outside the disclosure: after a preference GET
+   404, preserve known preferred metadata or say `Saved agent order unknown`,
+   and show `Saving agent order requires the backend update.` The disabled
+   action has the same matching reason. No fake save is
+   possible.
 
-- `ExternalServicesTab` renders `ServicePreferenceEditor` **instead of**
-  `GroupedServiceCards`. The sticky toolbar, saved views, filters, group cards,
-  table, insight and pool queries unmount; `CodexConnectionSection` and
-  `ArchivedServiceHistory` stay. Nothing writes to `useServiceCardView` or to
-  `PUT /users/me/preferences/services`; on exit `GroupedServiceCards` remounts
-  and the store restores the same filters and expanded card.
-- The editor's inventory is the complete authorized `/keys` list the tab already
-  holds (with `credential_source` joined from `/user-services` as today):
-  personal, organization (including viewer rows), auto-connected and disabled
-  connections, regardless of the filters that were active. The editor header
-  reads "Editing your complete inventory · N connections. Filters and saved
-  views are not applied here and are not changed."
-- One flat vertical sortable list in both view modes (roomier item spacing in
-  grid mode, compact in table mode). Each item shows `ServiceIcon`, label, slug,
-  the catalog service name, `ServiceOwnerAvatar` with `connectionSourceLabel`,
-  and `Auto-connected` / `Disabled` badges where applicable. The editor fetches
-  no insights, billing or pools.
-- Items are not links while reordering (no accidental navigation on touch); the
-  Connect Service CTA stays reachable in the header.
-- An instruction banner (info callout per DESIGN.md "Banners") reads: "Drag the
-  handle to set the order agents see first when tools tie on relevance.
-  Keyboard: focus a handle, press Space, use the arrow keys, press Space again.
-  Items below the divider are unranked. This does not choose which connection
-  runs a request: that is the slug the agent calls, pool priority or rotation,
-  and the personal → organization → platform credential cascade." Visible at
-  all times in reorder mode, not a tooltip.
-- A **divider item** with id `__unranked__` splits the list: everything above
-  it is ranked and shows a live `Discovery #n` pill; everything below is
-  unranked and shows a muted `Unranked` pill. The divider is itself sortable so dragging an
-  item across it ranks or unranks it, and dragging the divider moves the cut.
-  Each item also has `Rank`/`Unrank` buttons (move to the end of the ranked
-  zone / to the top of the unranked zone) so touch and keyboard users never
-  need a long drag.
-- Drag affordance: `GripVertical` handle button (`setActivatorNodeRef`,
-  `touch-none cursor-grab active:cursor-grabbing`, `aria-label="Drag <label>"`),
-  dragged item at `opacity-0.35`, drop target outlined with
-  `data-drop-target` like `sortable-panel.tsx`, `DragOverlay` for the card
-  ghost.
-- Sensors: `PointerSensor` with `activationConstraint: { distance: 6 }` (mouse
-  and touch; the handle is the activator), `KeyboardSensor` with
-  `sortableKeyboardCoordinates`. `accessibility.announcements` alone produce
-  "Picked up <label>, position n of m", "Moved to position n", "Dropped at n",
-  "Cancelled", using dnd-kit’s single live region, without duplicate announcements.
-- Save/Cancel bottom-right of the editor (DESIGN.md interaction rules). Save is
-  `variant="primary"` and disabled until dirty. The list is a single field
-  `ordered: string[]` of a `useAppForm` form with
-  `zodResolver(servicePreferenceRequestSchema)`; drag/button changes call
-  `setValue("ordered", next)` (default `shouldDirty: true` enables Save), reset
-  from server data uses `{ shouldDirty: false, shouldTouch: false }`.
-- Cancel discards local changes and leaves reorder mode. Leaving the tab or
-  toggling view mode while dirty asks "Discard unsaved order?" (plain confirm
-  dialog; no `beforeunload` handler).
-- Save/Cancel restore focus to Reorder once the closing inventory refetch finishes
-  and the button is available. Identity changes, navigation, or a later user
-  interaction cancel pending focus restoration.
+### 5.3 Collapsed card chip
 
-### 6.3 Save outcomes
+Next to the `n disabled` badge: `Preferred: <label>` when a rank-1 connection
+exists; activating it expands the card. Nothing otherwise.
 
-- Success: invalidate `["service-preference"]` and `["keys"]`, exit reorder
-  mode, toast "Preference order saved".
-- 400 validation (should not happen from the UI; stale id because a service was
-  deleted in another tab): banner "Some services are no longer available.
-  Refresh services before saving again." then refresh `/keys` successfully before the form drops ids absent from that refreshed inventory
-  and stays dirty for the user to re-save.
-- 409 conflict: banner "Your preference order changed in another tab" with two
-  actions: **Reload order** (refetch, reset form, stay in reorder mode) and
-  **Overwrite** (re-submit with the server's current `version`, obtained by a successful refetch (the generic 409 body has no version contract)).
-- Network/5xx: `ErrorBanner` with Retry; local order kept.
+### 5.4 Ordering mode (inline, one group at a time)
 
-### 6.4 Hooks and schema
+- Control: `Agent order` button (`ListOrdered`, `variant="ghost" size="sm"`) in
+  the expanded card footer between "Hide connections" and "Service details",
+  and beside the compact summary above the Connections table on
+  `/keys/services/$groupId`, with no duplicate action. Rendered for
+  every group whose **full inventory (enabled and disabled) has two or more
+  connections**, including the 30/26 case. States: enabled; disabled with
+  `title` "Loading agent order" while keys/preference load or refetch;
+  disabled with "Agent order could not be loaded · Retry" on read error
+  (Retry in the panel); disabled with "Saving agent order requires the backend update" after
+  GET 404; disabled while another group is being ordered. Hidden only in table
+  view mode (its rows mix groups).
+- `orderingGroupId` plus the draft live in `GroupedServiceCards` (and the
+  overview page). While set, the group's card stays mounted and expanded
+  regardless of filter changes, Personal/All switches or saved-view restores
+  (the card shows "Kept visible while ordering"), and its
+  `ServiceConnectionTable` receives `ordering` and renders **all** of the
+  group's connections with the note "Showing all N connections while
+  ordering; filters still apply to other services." Other cards, the toolbar,
+  saved views and the `useServiceCardView` store are untouched.
+- Rows become `useSortable` `<tr>`s in a `SortableContext`
+  (`verticalListSortingStrategy`); `PointerSensor` (`distance: 6`),
+  `KeyboardSensor` with `sortableKeyboardCoordinates`; dnd-kit
+  `accessibility.announcements` only. Each row gains, before the details
+  chevron: a `GripVertical` handle (`aria-label="Drag <label>"`,
+  `touch-none cursor-grab`) and `Move up` / `Move down` buttons
+  (`aria-label="Move <label> up"`). Live pills on the pill line: `Discovery #n`
+  for enabled rows, `Saved #p · disabled` for disabled rows. Detail/insight
+  toggles stay usable; row links are inert during ordering.
+- Disabled connections are part of the order, draggable (muted) and keep
+  their saved position; `Move disabled to end` collapses the 26-row tail;
+  `Reset to default` sends `ordered: []` after a confirm.
+- Save / Cancel row under the table, right-aligned; Save `variant="primary"`,
+  dirty-gated via `useAppForm` field `ordered: string[]` with
+  `zodResolver(servicePreferenceGroupRequestSchema)`; edits call `setValue`
+  (default `shouldDirty: true`), resets use `{ shouldDirty: false, shouldTouch: false }`.
+  Save sends the group's connection ids (enabled and disabled) in table order
+  with the current `version`; success invalidates `["service-preference"]` and
+  `["keys"]`, exits ordering, toasts "Agent order saved for <service>" and
+  returns focus to `Agent order`.
+- Recovery: 409 → in-card banner "This service's agent order changed in
+  another tab" with **Reload order** (refetch, reset this group's rows, stay
+  in ordering) and **Overwrite** (refetch version, re-submit). 400 unknown id
+  → refresh `/keys`, drop rows no longer present, stay dirty. 400 capacity →
+  in-card banner with the server message, a `Reset to default` shortcut for
+  this group, and **Release unavailable preferences** (§4.2a) whose confirm
+  states that preferences for services the person can no longer access will be
+  removed and must be set again if access is restored; on success the banner
+  offers **Retry save** with the refetched version; the draft is kept
+  throughout. The release action exists only in this banner inside the edited
+  card or overview table, never elsewhere. Network/5xx → `ErrorBanner` with
+  Retry, rows kept.
+  A `/keys` refetch during ordering (invalidation from another feature) keeps
+  the draft: new connections are appended with a "New" marker, removed ones
+  are dropped with a notice. A preference refetch during ordering never
+  resets the draft; only Reload does.
+- Guards: collapsing the card, starting ordering on another group, switching
+  view mode or tab, in-app navigation (TanStack `useBlocker`) and leaving the
+  overview page ask "Discard unsaved agent order?"; filter changes do not
+  prompt because the card stays mounted; identity change discards the draft
+  silently and exits ordering.
 
-- `useServicePreference()` query `["service-preference", identity]`, `staleTime: 0`,
-  `refetchOnMount: "always"` (matches `useKeys`).
-- `useSaveServicePreference()` mutation `PUT /service-preferences`; on 409 preserves the error and local edits for explicit refetch recovery; on success invalidates
-  as above.
-- `useDeleteKey`/`useUpdateKey` additionally invalidate `["service-preference"]`
-  so a deletion in the detail page refreshes resolved ranks on return.
-- `schemas/service-preference.ts`: `servicePreferenceResponseSchema`
-  (strict object, canonical lowercase RFC4122 UUID-v4 IDs, at most 200 unique IDs,
-  safe integer `version`, nullable string `updated_at`), `servicePreferenceRequestSchema`
-  (the same ordered-ID rules and `expected_version` from 0 through 2^53-2).
-  `KeyInfo` gains `preference_rank?: number | null`.
+### 5.5 Reuse
 
-### 6.5 States
+One renderer (`ServiceConnectionTable`) carries pills and ordering for the
+card and the overview page; `GroupCard` adds chip, summary line and footer
+control; one `service-agent-order-panel.tsx` serves both places;
+`useServicePreference()` (GET; 404 → `unavailable` sentinel) and
+`useSaveServiceGroupOrder()`; schemas in `schemas/service-preference.ts`;
+`KeyInfo.preference_rank` and `preference_position`.
 
-| State | Behavior |
-|---|---|
-| Loading keys | existing skeleton; Reorder disabled |
-| Keys error | existing `ErrorBanner`; Reorder disabled |
-| 0 services | upstream empty state; Reorder disabled |
-| 1 service | Editing enabled for ranking/unranking |
-| Preference query error | Ordinary editing/saving blocked; ErrorBanner with Retry; explicit conflict recovery remains callable and requires a successful fresh GET |
-| Inventory query error during editing | Inventory ErrorBanner with Retry; preserve the draft and block ordinary editing/saving |
-| Preference GET 404 | Reorder hidden for older-server compatibility; pills still render from `/keys` if present |
-| View mode switch | allowed when not dirty; confirm when dirty |
-| Active filters / saved view while editing | not applied to the editor, not modified; restored on exit |
-| Filters hiding a ranked row | row hidden, no renumbering; collapsed chip still summarizes the group's best rank |
-| Routing preview (`?view=routing`, DEV) | Reorder hidden; row pills still render through the shared table |
-| `/keys/services/$groupId` | row pills render; no editor there |
-| Org viewer rows (`allowed: false`) | rankable like any visible row (ranking is personal and discovery already shows them) |
-| Disabled services (`is_active: false`) | rankable; MCP never loads them, so the rank is inert until re-enabled |
-| Pool member rows (`Priority n`) | pill and pool label coexist; wording per §2.5 |
+## 6. Part B (conditional): implicit gateway routes follow the saved order
 
-## 7. Security and privacy review
+Pending the user's asynchronous answer. If **no**: §5.2 item 5 keeps the
+"database order" wording and nothing below is built. If **yes**: Part B is
+delivered in the same change set as Part A (not deferred to a later PR), with
+these fences:
 
-- Writes are human-only; GET follows the `/keys` auth class and filters to the
-  caller's visible inventory, so restricted agent keys, delegated readers and
-  OAuth readers cannot enumerate ids outside their scope.
-- Unknown and foreign ids are indistinguishable in PUT errors.
-- Documents contain only UUIDs, counts and timestamps. No names, slugs,
-  credentials or ciphertext. Audit carries counts and version only.
-- Preference is applied strictly after scope/visibility/node filtering and
-  never consulted by `execute_tool`, `proxy_service`, approvals, execution
-  authority, grants or billing. A deliberate `grep` acceptance criterion (AC-14)
-  guards this.
-- Rate limiting: global per-IP limiter applies; the dedicated PUT adds no new
-  limiter and is bounded by body size, entry count and verified human auth.
+- Applies only to implicit provider resolution: `/api/v1/llm/{provider}/…` and
+  gateway `model` resolution without a `pool:` alias. Named slugs,
+  `/proxy/{id}`, `nyx__call_tool`, `_nyxid_via`, pools, durable/exact-target
+  and delegated executions are unchanged.
+- Dedicated entry point, explicit context: `ProxyExecutionContext` gains
+  `implicit_provider_selection: Option<ImplicitProviderSelection>`; only the
+  two gateway call sites set it. `lookup_user_service` is unchanged for every
+  other caller; when the context is present and `slug = None`, it calls
+  `service_preference_service::select_implicit_provider_connection(db, owner_id, catalog_service_id, &saved_group_order)`,
+  which picks the first **enabled** row of that owner for the catalog id that
+  appears in the caller's saved order and otherwise returns exactly what
+  `find_by_catalog_service_id` returns today. The generic finder used by
+  credential probes, listing, auth and exact approval observe/redeem is not
+  modified.
+- Owner tiers preserved: personal rows are tried before organizations in
+  `primary_org_id` order; the order chooses only within one owner tier, so
+  `find_effective_service_owner` stays consistent.
+- Scope enforced at selection: actor identity, agent-key service allowlist,
+  node scope and owner access are applied to the candidate set before
+  selection, so a scoped key gets its first allowed row, never a 403 caused by
+  the order.
+- Selection, not retry: the row is selected once before admission; approval
+  target, execution-authority digest, audit `user_service_id` and billing
+  owner bind to that row; if its credential cannot be materialized or the
+  provider fails, the request fails as today with no second attempt.
+- UI: §5.2 item 5 becomes "`/api/v1/llm/<provider>` and gateway models
+  without `pool:` use the first enabled connection in this order among your
+  own connections, then your organizations'; without an order, NyxID's
+  default choice. No retry on another connection." The summary line adds
+  "· also first for implicit gateway calls".
+- Acceptance (Part B only): **AC-B1** named/exact targets unchanged with and
+  without an order; **AC-B2** implicit route selects the rank-1 enabled own
+  connection when two or more are enabled and today's row when none is
+  ranked; **AC-B3** an org-only rank never outranks a personal row;
+  **AC-B4** the selected id is bound in approval target, exact digest, audit
+  and billing owner; **AC-B5** `find_by_catalog_service_id` and its callers
+  are untouched (grep plus existing tests), and callers without the context
+  resolve as before; **AC-B6** a scoped agent key whose rank-1 row is outside
+  its allowlist gets its first allowed row; **AC-B7** a provider failure on
+  the selected row produces no second attempt (upstream hit count 1).
 
-## 8. Performance
+## 7. Files
 
-- Discovery meta-tools: +1 `find_one` by `_id` per call (already several
-  queries per call). `/keys` list: +1 `find_one`, reusing inventory. Preference
-  GET: one preference `find_one` only for absent/empty orders, with no inventory,
-  provider or credential reads. A saved order adds the shared live membership
-  snapshot, selected service-ID queries per personal/org owner (each at most 200),
-  bounded retired-catalog-ID projections where applicable, org scope/source reads
-  and one projected endpoint-existence query when selected services survive.
-  It never renders/decrypts keys or loads providers. Detail adds
-  one preference read and, only for a saved ranked connection, a bounded
-  selected-ID visibility walk and projected endpoints as described in §5.3. No new reads on
-  proxy, LLM, MCP `tools/call`, approvals or background sweeps.
-- No new index (primary key lookup), no migration, no startup work.
-- Page aggregate: a fresh `/keys` page reading both `/keys` and
-  `/service-preferences` adds two preference-document lookups. An absent/empty
-  order adds no second inventory walk; a saved preference GET adds only the
-  bounded selected-ID/source/endpoint visibility reads above. The existing hook
-  behavior is retained without a tab-only query gate.
+Backend: `services/service_preference_service.rs` (group key,
+`rank_map_by_group`, `position_map_by_group`, `grouped_visible`,
+`replace_group` with slot merge, reset and capacity, `release_hidden`; global
+`replace` removed), `services/mcp_service.rs` (slot refill for listing and
+search buckets; `executable` + `preference_rank` on matches),
+`handlers/mcp_transport.rs` (group map into `order_discovery`; hint),
+`handlers/service_preference.rs` (grouped GET, `put_group`, `delete_hidden`),
+`routes.rs` (scoped PUT and hidden DELETE replace the global PUT under the
+same rejection layers and body limit), `handlers/keys.rs` (`preference_rank`,
+`preference_position`), `api_docs.rs`, `cli/src/commands/service.rs`,
+`cli/src/cli.rs`.
 
-## 9. Documentation changes
+Frontend: `components/dashboard/service-connection-table.tsx` (pill line,
+ordering mode, Save/Cancel), `components/dashboard/grouped-service-cards.tsx`
+(chip, summary line, footer control, `orderingGroupId`, kept-mounted rule,
+guards), new `components/dashboard/service-agent-order-panel.tsx`,
+`pages/service-overview.tsx`, `hooks/use-service-preference.ts`,
+`schemas/service-preference.ts`, `types/keys.ts`. Removed:
+`components/dashboard/service-preference-editor.tsx` and its test, the
+`pages/keys.tsx` Reorder button and editor swap and their tests;
+`e2e/service-preference.spec.ts` rewritten for the in-card flow. Wizard:
+regenerate `cli/src/wizard/assets` and `bundle-meta/index.hash` if their
+producer inputs change (the frontend bundle is a producer) and keep the
+freshness test green.
 
-- `docs/API.md` "Unified Keys": document `GET`/`PUT /service-preferences`,
-  `preference_rank` on `/keys` rows, error mapping (400 / 409 code 1004), and
-  the inventory-filtering guarantee.
-- `docs/API_DISCOVERY.md` "Tool search semantics": add the third sort key, the
-  25-cap interaction, `preference_rank` on meta-tool rows, and the explicit
-  non-guarantee about independent clients.
-- `docs/AI_SERVICES_ARCHITECTURE.md`: new "Service preference order" section
-  (identity, stale rule, no-execution-effect, org-key limitation) plus one
-  paragraph under the upstream "Service cards and saved filter defaults"
-  section: the `Discovery #n` pill, the editor's independence from filters and
-  saved views, and the §2.5 distinction from pool `Priority n`, the credential
-  cascade and the proposed connection order.
-- `docs/chat/08-nyxagent-engine.md`: one sentence that chat-key discovery rows
-  carry `preference_rank` and follow the owner's order for guests too.
-- `CLAUDE.md` Rule 8: one bullet: "`service_preferences` is per acting identity,
-  discovery-only (`nyx__search_tools`/`nyx__list_connected_services`, `/keys`
-  `preference_rank`); never read on execution paths; `tools/list`/`/mcp/config`
-  unchanged."
-- CLI: `nyxid service --help` text; no separate CLI reference doc exists.
+## 8. Documentation
 
-## 10. Rollout and compatibility
+`docs/API.md` (minimal grouped GET, scoped PUT with `ordered: []` reset,
+slot-merge and append-omitted guarantees, capacity error, hidden DELETE
+semantics against the authorized inventory, `preference_rank` and
+`preference_position`, 400/409); `docs/API_DISCOVERY.md` "Tool search
+semantics" (slot refill within relevance buckets, `executable` +
+`preference_rank` on matches, non-executable listed connections,
+independent-client non-guarantee); `docs/AI_SERVICES_ARCHITECTURE.md`
+("Agent discovery order" subsection under "Service cards and saved filter
+defaults" with the §2 table and the implicit-gateway explanation);
+`docs/chat/08-nyxagent-engine.md` (one sentence); `CLAUDE.md` Rule 8 (one
+bullet). `docs/plans/service-tool-preference-review.md` is ROOT-owned.
 
-- Additive everywhere: new collection, new optional response fields
-  (`preference_rank`, meta-tool fields), new routes. Old frontends ignore the
-  field; old CLIs ignore the column. Old backend replicas during a rolling
-  deploy return `/keys` rows without `preference_rank` and 404 the new routes;
-  the frontend treats a 404 on GET as "no order" and hides the Reorder button
-  when the first GET 404s (feature detection, no flag). Rollback needs no data
-  action; the collection is inert for old binaries.
-- No release version bump solely for this feature. Regenerate the embedded CLI wizard only if its producer inputs change.
+## 9. Rollout and honesty constraints
 
-## 11. Tests and how to run them
+Additive fields and routes only. Against a server without the route, the UI
+shows known preferred metadata or `Saved agent order unknown`, enabled/disabled
+counts and `Saving agent order requires the backend update.`, the collapsed
+selection disclosure, and the Agent order control disabled with the same
+  reason; the unavailable endpoint is `/api/v1/service-preferences`, not Pools.
+  The production-backed preview has no preference mock, local persistence or
+  fabricated success toast. The separately authorized seeded sample preview
+  on 4631 is explicitly local sample data and uses temporary JSON persistence;
+  it never writes to production.
+No data migration (stored flat lists remain valid under the slot merge), no
+version bump solely for this feature, no flag.
 
-**Targeted checks:**
+## 10. Tests and commands
 
 ```bash
-source "$HOME/.cargo/env" 2>/dev/null
-cargo test -p nyxid service_preference            # pure + HTTP/MCP DB tests; set DB URI below
-cargo test -p nyxid search_all_tools
-cargo test -p nyxid-cli service_preference
-cd frontend && PATH=/opt/homebrew/bin:$PATH npm run test -- keys service-preference grouped-service-cards service-connection-table && npm run lint && npm run build
-cd frontend && PATH=/opt/homebrew/bin:$PATH npx playwright test e2e/service-preference.spec.ts --workers=1
+export NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27029/?replicaSet=nyxidPreferenceReview&directConnection=true'
+export CARGO_TARGET_DIR=/tmp/nyxid-service-preference-target CARGO_INCREMENTAL=0
+export CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0
+cargo test -p nyxid service_preference -j 1
+cargo test -p nyxid search_all_tools -j 1
+cargo test -p nyxid asking_for_an_agent_finds_agent_creation_first -j 1
+cargo test -p nyxid curation_router_scoped_discovery_history_and_route_confinement -j 1
+cargo test -p nyxid-cli --bin nyxid service_preference -j 1
+cargo test -p nyxid-cli --test service_preference -j 1
+cargo test -p nyxid-cli --test wizard_bundle_freshness -j 1
+cargo fmt --all -- --check
+cargo clippy -p nyxid -p nyxid-cli --all-targets -j 1 -- -D warnings
+# From frontend/; the temporary config only isolates happy-dom from live servers.
+NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts --maxWorkers=2
+npm run lint -- --no-warn-ignored
+npm run build
+npm run build:wizard
+npx playwright test e2e/service-preference.spec.ts e2e/wizard-scope.spec.ts --workers=1 --output=/tmp/nyxid-service-preference-inline-browser-complete-results
 ```
 
-The Playwright fixture must serve the upstream page's requests
-deterministically: `/api/v1/users/me` with `profile_config: { onboarding: { ai_services_completed_at: <timestamp> }, services_view: <saved filters> }`,
-`/api/v1/service-insights` → `{ "connections": [] }`, pool listings → empty,
-`/api/v1/catalog?include_all=true` → `{ "entries": [] }`, and it must record
-any `PUT /api/v1/users/me/preferences/services` so AC-18 can assert none
-happened.
+Docker is unavailable; the review instance above is the only database target
+and tests never skip silently. One Cargo build at a time, task-owned target
+`/tmp/nyxid-service-preference-target`, `CARGO_INCREMENTAL=0`, jobs 1. The
+Playwright fixture serves `/users/me` with `profile_config.services_view`,
+`/keys` with an Anthropic group of 30 connections (4 enabled, 26 disabled, two
+sharing the label "Anthropic", one org-owned, several stored ids among the
+disabled) plus one unrelated Slack group interleaved in `/keys` order,
+`/service-preferences` in grouped, 404 and 503 modes,
+`/service-preferences/groups/*` with CAS/409/400-unknown/400-capacity/503
+modes, `DELETE /service-preferences/hidden` with CAS/409/503 modes,
+`/service-insights` → `{connections: []}`, an explicit Priority-7 pool on the
+org connection (organization pool reads return empty to avoid duplicates),
+`/catalog?include_all=true`, and records any `PUT /users/me/preferences/services`.
 
-**MongoDB-dependent:** never silently skip for sign-off. Use the dedicated reachable
-replica set explicitly, `NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27127/?replicaSet=service-preference-rs&directConnection=true'`.
-Run one Cargo build at a time with task-owned target `/tmp/nyxid-service-preference-target`,
-`CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`, jobs 1.
-PM recovered disk space by removing authorized inactive task/build caches; local backend checks now use the task target above. Other active builds and all daemons are left untouched.
-No external processes are stopped/restarted or other projects’ artifacts deleted.
+## 11. Implementation tasks (ordered, Part A complete)
 
-Test fixtures to reuse: `test_utils::connect_test_database`,
-`test_utils::test_app_state`, `handlers/keys.rs` test helpers
-(`insert_user`, `insert_key_fixture`, `test_auth_user`),
-`services::assistant_authority_tests::{fixture, ordinary_key, connected}` with
-`mcp_chat_authority_tests::direct_call`, and `mcp_transport` unit helpers
-`api_key_auth`, `user_managed`, `platform`.
-
-## 12. Implementation checklist (code present; baseline checks in §17; latest integration checks in §19)
+All 14 Part A tasks below are implemented. §16 records their fresh acceptance
+execution evidence. Task 15 remains conditional on the user's Part B answer.
 
 Backend
 
-1. `models/service_preference.rs`: struct per §4 and `COLLECTION_NAME`; `mod`
-   entry in `models/mod.rs`; bson roundtrip and dated-legacy-defaults tests.
-2. `services/service_preference_service.rs` (actual signatures):
-   `MAX_ORDERED_SERVICES = 200`, `MAX_EXPECTED_VERSION = 2^53 - 2`,
-   `MAX_REQUEST_BYTES = 16 KiB`;
-   `get(db, user_id) -> AppResult<Option<ServicePreference>>`;
-   `resolve_visible(ordered: &[String], visible: &HashSet<String>) -> Vec<String>`
-   (visible-only, first occurrence wins);
-   `rank_map(ordered: &[String], visible) -> HashMap<String, u32>` (dense 1-based);
-   `filter_inventory(views: Vec<KeyView>, scope: Option<&[String]>, api_key: bool)`
-   and `visible_inventory(db, encryption_keys, user_id, scope, api_key)` over
-   `list_keys_read_only_with_grants` with live grants/providers for PUT validation;
-   `visible_ordered_ids(db, user_id, ordered, scope, api_key) -> HashSet<String>`
-   for bounded saved-ID GET/detail visibility without credential/provider loads;
-   `validate_order(ordered, expected_version, visible)`;
-   `replace(db, user_id, ordered, expected_version, visible) -> Replacement { preference, changed }`
-   (insert-or-CAS per §5.2, no-op detection);
-   `order_discovery(db, user_id, services) -> (services, ranks)`;
-   `detail_rank(db, user_id, service_id, scope, api_key) -> Option<u32>`
-   for the bounded `GET /keys/{id}` path (§5.3).
-3. `mcp_service.rs`: `order_services_by_preference(&mut [McpToolService], &ranks)`,
-   `search_all_tools_ranked(services, query, ranks)` with the third key,
-   `list_connected_services_ranked(services, query, ranks)` emitting
-   `preference_rank`; `search_all_tools` and `list_connected_services` are
-   `#[cfg(test)]` empty-map wrappers; updated meta-tool descriptions.
-4. `mcp_transport.rs`: `load_all_services_for_meta_tools` stays the unranked
-   loader (only change: guest-turn allowlist filtering);
-   `load_preferred_services_for_meta_tools` wraps it with `order_discovery` and
-   is called by `handle_meta_search` and `handle_meta_list_connected`, which
-   pass `ranks` to the ranked helpers, add `preference_rank` to search match
-   rows and the hint sentence. Execution (`nyx__call_tool`, `tools/list`,
-   `/mcp/config`) keeps the unranked operation catalog.
-5. `handlers/service_preference.rs`: `get` reads the document first and resolves
-   saved IDs through `visible_ordered_ids`; `put` uses `visible_inventory` for
-   validation. Dedicated DTOs use `resolve_visible`; `put` additionally runs
-   `login_client_context::require_first_party_human`, calls `replace`, and
-   emits the audit event only when `changed`; `utoipa` annotations.
-6. `routes.rs`: `service_preference_reads` (GET, merged into the shared
-   authenticated group with SA/relay rejection) and `service_preference_writes`
-   (PUT with delegated/API-key/SA/relay rejection and a
-   `MAX_REQUEST_BYTES` body limit), leaving key routes unchanged.
-7. `handlers/keys.rs`: `preference_rank` on `KeyResponse`; list ranks from
-   `rank_map` over the request's own authorized inventory, detail from
-   `detail_rank`; `KeyAuthorizationEvidenceResponse` unchanged. On the #1685
-   base, add the field beside `can_edit_configuration`/`oauth_app_source` in
-   both constructors (§18).
-8. CLI: `Pref` column in `service list`, `service preference show|set`.
-9. Docs per §9; compatibility per §10.
+1. `service_preference_service.rs`: `group_key`, `rank_map_by_group`
+   (REST projection, catalog singleton-visible → rank 1),
+   `position_map_by_group`, `grouped_visible` (minimal shape),
+   `replace_group` with the §4.2 partition, append-omitted rule, slot
+   replacement, `[]` reset, post-merge capacity check (no prune) and no-op on
+   the existing CAS and legacy-row logic; `release_hidden` computing the
+   complement of the authorized inventory (§4.2a); delete the global
+   `replace`; property-style merge tests (AC-30, AC-31).
+2. `mcp_service.rs`: `permute_listing_slots(services, ranks)` (returns a new
+   vector) and bucket-wise slot refill inside `search_all_tools_ranked`, both
+   consuming the **original** loader vector; `executable` + `preference_rank`
+   on matches; `#[cfg(test)]` wrappers kept; tests for interleaved groups,
+   mixed-relevance interleaving (A-low, Slack-high, A-high), multiple tools
+   per connection, 25-truncation, empty-map byte identity, non-executable
+   enabled rows.
+3. `mcp_transport.rs`: `order_discovery` returns `(original services, ranks)`
+   with ranks from the MCP projection (`McpToolSource::UserManaged.catalog_service_id`
+   over the loaded, filtered services); `handle_meta_search` passes the
+   original vector to search; `handle_meta_list_connected` applies the listing
+   permutation; hint sentence.
+4. `handlers/service_preference.rs`: grouped GET; `put_group` (path group
+   validation, group inventory, `replace_group`, conditional audit);
+   `delete_hidden` (first-party guard, CAS, conditional audit).
+5. `routes.rs`: replace the global PUT with the scoped PUT and the hidden
+   DELETE under the same rejection layers and body limit; `api_docs.rs`.
+6. `handlers/keys.rs`: `preference_rank` and `preference_position`;
+   `detail_rank` restricted to the row's group.
+7. CLI: `Pref` column, `preference show`, `preference set --group`,
+   `preference reset --group`, `preference release-hidden` (confirmation);
+   remove the flat `set`; tests incl. mocked 409, capacity 400 and release.
 
 Frontend
 
-10. `types/keys.ts` and `schemas/service-preference.ts` (+ `.test.ts`).
-11. `hooks/use-service-preference.ts` (query + mutation, 404 feature detection,
-    invalidations), plus the extra invalidation in `useDeleteKey`/`useUpdateKey`.
-12. `components/dashboard/service-preference-editor.tsx`: DnD list with divider,
-    handles, `Discovery #n` pills, Rank/Unrank buttons, announcements,
-    `useAppForm` field, Save/Cancel, conflict/validation/network banners,
-    complete-inventory header, §2.5 banner wording; items carry service name,
-    slug and `ServiceOwnerAvatar`; no insight/pool queries.
-13. `pages/keys.tsx` (on the #1685 version): Reorder button in the tabs row
-    beside `ViewToggle` (services tab, not in routing preview, hidden on GET
-    404), editor swap inside `ExternalServicesTab` in place of
-    `GroupedServiceCards`, dirty confirm on view/tab change; no writes to
-    `useServiceCardView` or saved views.
-13a. `components/dashboard/service-connection-table.tsx`: row pill in wrapping
-    metadata below the label/readiness header, from `KeyInfo.preference_rank`;
-    preserve the existing label's available width and prevent overlap.
-13b. `components/dashboard/grouped-service-cards.tsx`: collapsed-card chip from
-    `group.connections` that expands the card; no change to group or row order.
-14. Tests: `pages/keys.test.tsx` (on the upstream harness, with
-    `useServicePreference` mocked), `components/dashboard/service-preference-editor.test.tsx`,
-    pill tests for `ServiceConnectionTable` and `GroupCard`, and
-    `e2e/service-preference.spec.ts` updated for the grouped UI (§11 fixture).
+8. `schemas/service-preference.ts` (+ test) and `hooks/use-service-preference.ts`
+   (`unavailable` sentinel, `useSaveServiceGroupOrder` incl. `[]` reset and
+   its `release` mutation, invalidations from
+   `useDeleteKey`/`useUpdateKey`).
+9. `service-connection-table.tsx`: pill line below the label line
+   (`Discovery #n`, `Saved #p`); `ordering` prop with sortable rows, handle,
+   Move up/down, `Move disabled to end`, `Reset to default`, live pills,
+   Save/Cancel, in-card banners incl. the capacity banner with
+   **Release unavailable preferences** confirm and **Retry save**;
+   all-connections rendering; draft preservation across `/keys` refetch.
+10. `grouped-service-cards.tsx`: chip, summary line (enabled/disabled counts,
+    explicit order-saving backend status), footer control with the stated states and the
+    full-inventory ≥ 2 rule, `orderingGroupId`, kept-mounted-while-ordering,
+    guards (collapse, other group, view/tab, `useBlocker`, identity).
+11. `service-agent-order-panel.tsx` with §5.2 items 1–6 and pool link; mount
+    in the card and `service-overview.tsx`.
+12. **Source migration of the superseded UI**: delete
+    `service-preference-editor.tsx` (+ test), remove the `keys.tsx` Reorder
+    button, editor swap and their `keys.test.tsx` cases, drop the flat
+    `ordered` response schema; rewrite `e2e/service-preference.spec.ts` for
+    the in-card flow with the §10 fixture (30/26/duplicate labels, interleaved
+    unrelated group, prod-404 mode, 409/400/capacity/503 modes, release and
+    retry-save, refetch during ordering, navigation blocker).
+13. Regenerate the CLI wizard bundle if its producers changed; keep the
+    freshness test green.
+14. Docs per §8; record fresh evidence per §15.
 
-## 13. Acceptance criteria
+Part B (only if the user answers yes; same change set): 15. `ImplicitProviderSelection`
+context and `select_implicit_provider_connection`; gateway call sites;
+tests AC-B1..B7; §5.2 item 5 wording and summary suffix; docs.
 
-Each criterion names the test that proves it. Pure model/ranking/CLI tests need
-no database; the combined `service_preference` filter also selects DB tests.
+## 12. Acceptance criteria (Part A)
 
-- **AC-01** (local, `models/service_preference.rs`): a legacy document with `_id`, `created_at`, and `updated_at`
-  deserializes to `ordered = []`, `version = 0`; a full document round-trips
-  through BSON with `created_at`/`updated_at` as BSON dates.
-- **AC-02** (local, `service_preference_service` tests): `validate_order`
-  rejects 201 entries, a non-UUID entry, a duplicate, and an id outside the
-  visible set, each with `AppError::ValidationError`; the unknown-id message is
-  byte-identical for a foreign id and a random id.
-- **AC-03** (local, `mcp_service` tests): `order_services_by_preference` is a
-  stable sort: ranked services appear in rank order, unranked keep loader
-  order after them, platform-source services (catalog ids) are unranked, and a
-  rank for an id not in the list changes nothing.
-- **AC-04** (local): `search_all_tools_ranked` keeps `search_all_tools_matches_words_in_any_order_and_ranks_full_matches_first`
-  green and adds: at equal `(matched, in_name)` a rank-1 service's tool precedes
-  a rank-2 and an unranked one; a full match from an unranked service precedes a
-  partial match from rank 1; the empty query lists rank-1 tools first; with 40
-  tying tools across two services the 25 survivors are the ranked service's
-  tools first.
-- **AC-05** (local): `search_all_tools(services, query)` (empty rank map)
-  returns exactly what it returned before this change for the existing test
-  inputs; `assistant_account_tools::search_tests::asking_for_an_agent_finds_agent_creation_first`
-  stays green.
-- **AC-06** (local): `list_connected_services` rows carry `preference_rank`
-  (`1`, `2`, or `null`) and are ordered by §3 rule 1; `count` unchanged.
-- **AC-07** (DB, `handlers/service_preference` tests): `PUT` with
-  `expected_version: 0` creates `version 1`; a second `PUT` with
-  `expected_version: 1` yields `version 2`; a `PUT` with `expected_version: 1`
-  after that returns 409 with code 1004 and the document is unchanged; two
-  concurrent first `PUT`s produce exactly one 200 and one 409.
-- **AC-08** (DB): `GET` by a restricted agent key whose allowlist covers one of
-  three ranked services returns `ordered` with exactly that one id and the raw
-  `version`; the same GET as the human returns all three.
-- **AC-09** (DB): after the owner deletes a ranked service via
-  `DELETE /keys/{id}`, `GET` omits its id without any write to
-  `service_preferences` (assert `version` and `updated_at` unchanged), and
-  `/keys` rows for the remaining ranked services receive dense authorized ranks with no gaps.
-- **AC-10** (DB): `PUT` is rejected before the handler for API-key, service
-  account, delegated and relay tokens (401/403 per the existing rejection
-  layers); `GET` succeeds for an API key and for a delegated `account:read`
-  token.
-- **AC-11** (DB): `GET /keys` and `GET /keys/{id}` include `preference_rank`
-  equal to the dense authorized position for ranked services and `null` otherwise; a
-  command-monitoring run of `GET /keys` shows exactly one `find` on
-  `service_preferences`.
-- **AC-12** (DB, MCP transport via `assistant_authority_tests::fixture`): with
-  two connected services and a saved order placing the second first,
-  `nyx__search_tools` with a nonempty relevance-tie query (transport requires a query) lists the preferred service's
-  tools first and each match carries `preference_rank`;
-  `nyx__list_connected_services` returns them in preference order; a guest-turn
-  chat key sees the same order restricted to its allowed services.
-- **AC-13** (DB): `nyx__call_tool` on a tool from an unranked service behaves
-  identically with and without a saved order (same response and execution audit
-  event data/actor/target; each call has its own audit ID, timestamp and chain fields);
-  `GET /api/v1/mcp/config` `catalog_digest` and service order are identical
-  before and after saving an order.
-- **AC-14** (local, repo grep in the PR checklist):
-  `grep -rn "service_preference" backend/src/services/proxy_service.rs backend/src/services/execution_authority.rs backend/src/services/mcp_approval.rs backend/src/services/billing backend/src/handlers/service_insights.rs backend/src/services/service_insights_activity.rs`
-  returns nothing, and `execute_tool*` functions do not reference the
-  collection or rank map.
-- **AC-15** (DB): the audit log after a successful PUT contains one
-  `service_preference_updated` row whose `event_data` has only `count` and
-  `version`, and no service ids.
-- **AC-16** (local, CLI): `nyxid service list` renders the `Pref` column from
-  `preference_rank` (`-` when null); `service preference set` resolves slugs
-  preferring the active row and sends `expected_version` from the prior GET;
-  a mocked 409 exits non-zero with the "changed elsewhere" message.
-- **AC-17** (local, `keys.test.tsx` on the upstream harness, plus
-  `ServiceConnectionTable`/`GroupCard` pill tests): a ranked connection row
-  shows `Discovery #n` with `aria-label="Discovery preference n"` inside an
-  expanded group card, in table view mode, and on `/keys/services/$groupId`
-  (same renderer); a collapsed group card shows the `Discovery #best` chip
-  naming its best-ranked connection and expands the card when activated;
-  unranked rows and groups show neither; with Auto-connected hidden, a search,
-  an Organization/Service selection or Personal/All toggled, visible pill text
-  is unchanged and no row or group changes position relative to the upstream
-  order; a pool-member row shows both `Priority n` and `Discovery #n`.
-  At a 1440-pixel viewport, the rendered connection-label text retains usable
-  width and overlaps neither the discovery pill nor the readiness badge.
-  Tablet (1024 pixels) and mobile (390 pixels) retain visible rank metadata
-  without introducing page-wide horizontal overflow.
-- **AC-18** (local, `keys.test.tsx`): Reorder is disabled with no authorized
-  services, while loading or refetching, and on error, and hidden in the
-  routing preview and after a preference GET 404; clicking it replaces the
-  toolbar and grouped cards/table with the editor, whose item count equals the
-  full `/keys` length while a Personal-only view with auto-connected hidden and
-  a Service selection is active; items are not links; the banner contains the
-  §2.5 wording; after Save or Cancel the grouped view returns with the same
-  `useServiceCardView` filters and expanded card, and no request was made to
-  `PUT /users/me/preferences/services`.
-- **AC-19** (real-route Playwright with real sensors, plus editor button tests): dragging item C above item A
-  updates pills to C=`Discovery #1`, A=`Discovery #2`; moving an item below the divider makes it
-  `Unranked`; moving the divider up unranks everything below it; `Rank`/`Unrank`
-  buttons behave as §6.2; the single dnd-kit `aria-live` region receives the announcement
-  text.
-- **AC-20** (local, editor test): Save is disabled until a change, enabled after
-  a move, disabled again after Cancel resets; Save sends exactly the ids above
-  the divider in order plus the current `version` as `expected_version`.
-- **AC-21** (local, editor test): a 409 renders the conflict banner with
-  **Reload order** and **Overwrite**; Reload resets to the refetched order and
-  clears dirty; Overwrite re-submits with the server version. A network error
-  shows `ErrorBanner` with Retry and keeps the local order. A 404 on the initial
-  GET hides the Reorder button.
-- **AC-22** (local, `schemas/service-preference.test.ts`): request schema
-  rejects 201 ids, a non-UUID, duplicates and a negative `expected_version`;
-  response schema accepts `version: 0` with `ordered: []`.
-- **AC-23** (local): `npm run lint` passes with no `console.log`, no raw
-  `useForm`, and `npm run build` type-checks; `cargo clippy -p nyxid -p nyxid-cli --all-targets -- -D warnings` passes.
-- **AC-24** (docs review): the four docs in §9 and `CLAUDE.md` contain the new
-  sections; `docs/API_DISCOVERY.md` states the non-guarantee for independent
-  clients verbatim from §1; `docs/AI_SERVICES_ARCHITECTURE.md` carries the
-  §2.5 distinction next to the upstream service-card section.
+- **AC-01** (local): legacy document with `_id`, `created_at`, `updated_at`
+  deserializes to `ordered = []`, `version = 0`; BSON round-trip with dates.
+- **AC-02** (local, *revised*): `put_group` validation rejects 201 request
+  connection ids, non-canonical or non-v4 connection UUIDs, duplicates, bad
+  `expected_version`; catalog group UUIDs require canonical lowercase RFC
+  variant/version 1–8 and reject nil/max/unknown versions;
+  unknown body fields (including a `clear` field), malformed group key,
+  `connection:` group, foreign id, missing id and wrong-group id; the message
+  for the last three is byte-identical; `ordered: []` is accepted as the
+  reset.
+- **AC-03** (local, *revised*): `rank_map_by_group` yields dense per-group
+  ranks over listed ids only; disabled, deleted or out-of-scope stored ids
+  leave no gap; a catalog group with exactly one visible listed stored member
+  yields rank 1; `connection:` singletons yield `null`; `position_map_by_group`
+  counts disabled stored rows; listing slot refill changes only slots occupied
+  by groups with a stored rank and leaves every other slot byte-identical for
+  any stored list, including interleaved groups.
+- **AC-04** (local, *revised*): search slot refill keeps
+  `search_all_tools_matches_words_in_any_order_and_ranks_full_matches_first`
+  green; with Anthropic copies A1 A2 A3 interleaved with equally relevant
+  Slack tools (A1 S1 A2 S2 A3) and A3 ranked first, the output is A3 S1 A1 S2
+  A2 (Slack slots untouched); a connection contributing three tools keeps
+  their relative order while all three precede the rank-2 connection's tools;
+  a better match from an unranked connection stays in its higher bucket above
+  a preferred partial match; **adversarial mixed relevance**: loader order
+  A1 (low-relevance endpoint), Slack (high), A2 (high) with A2 ranked first
+  yields Slack, A2 in the high bucket and A1 in the low bucket exactly as
+  without ranks (no tool changes bucket, Slack keeps its slot), and the same
+  input through a pre-sorted service vector is shown to differ, which is why
+  the test feeds the original vector; with 30 tying copies the 25 survivors
+  begin with the preferred connection's copies; every match carries
+  `executable` and `preference_rank`; an enabled connection with a revoked
+  credential appears with `executable: false`.
+- **AC-05** (local, *revised*): with an empty rank map the serialized output
+  of existing search/list fields and their order is byte-identical to the legacy
+  fixture contract; new additive rank/executable metadata has its null/default
+  values. The `#[cfg(test)]` wrappers and existing expected-order fixtures assert this; the
+  assistant-account agent-creation search test stays green.
+- **AC-06** (local, *revised*): `list_connected_services_ranked` rows carry
+  group-relative `preference_rank` or `null` and `executable`, refilled per
+  §3.2; `count` unchanged; singleton and platform rows keep their slots.
+- **AC-07** (DB, *revised*): scoped PUT `expected_version: 0` → `version 1`;
+  second PUT `expected_version: 1` → `version 2`; PUT with `expected_version: 1`
+  afterwards → 409 code 1004, document unchanged; concurrent first saves and
+  concurrent later saves on two different groups each produce exactly one 200
+  and one 409, and the loser succeeds after Reload with both orders intact;
+  resubmitting a group's current order (interleaved with another group's ids)
+  is a no-op with no version bump and no audit.
+- **AC-08** (DB, *revised*): a restricted agent key allowlisted to one of
+  three stored Anthropic connections reads `groups` with exactly that id and
+  the raw `version`, with no count or capacity field present, and `/keys` shows
+  that row as `preference_rank: 1`; the human reads ranks 1..3; the same key
+  allowlisted to the second and fourth of four stored connections gets MCP
+  listing ranks 1 and 2 while the owner's `/keys` pills read 2 and 4 (§3.3).
+- **AC-09** (DB): deleting a stored connection removes it from GET without
+  any write to `service_preferences` and the rest renumber densely; disabling a
+  stored connection yields `preference_rank: null` with its `preference_position`
+  and dense ranks for the rest; re-enabling restores its relative position
+  with no preference write.
+- **AC-10** (DB, *revised*): scoped PUT and hidden DELETE are rejected before
+  the handler for API-key, SA, delegated and relay tokens and for OAuth
+  application tokens by the first-party guard; GET succeeds for API key and
+  delegated `account:read`, rejected for SA and relay.
+- **AC-11** (DB): `/keys` and `/keys/{id}` report group-relative rank and
+  position; a command-monitoring `GET /keys` shows exactly one `find` on
+  `service_preferences`; detail reads at most the stored ids restricted to the
+  row's group and loads no credentials or providers.
+- **AC-12** (DB, MCP via `assistant_authority_tests::fixture`, *revised*): two
+  Anthropic connections interleaved with one Slack connection in loader order;
+  saving the second Anthropic first makes `nyx__search_tools` (non-empty tying
+  query) emit its tools in the first Anthropic slot while the Slack tool keeps
+  its slot; listing shows ranks 1, 2, `null` with unchanged Slack slot; a
+  guest-turn chat key sees the same order restricted to its grants; an enabled
+  Anthropic connection with a revoked credential is listed with
+  `executable: false` and its rank.
+- **AC-13** (DB): `nyx__call_tool` on a named tool, `/proxy/s/<slug>`
+  resolution and `/api/v1/llm/<provider>` connection choice are identical with
+  and without a saved order (two enabled same-catalog connections; same
+  response and execution audit data/actor/target; per-call ids differ);
+  `/mcp/config` `catalog_digest` and service order byte-identical. (If Part B
+  is confirmed, the gateway clause is replaced by AC-B2 and AC-B7.)
+- **AC-14** (local, grep): no `service_preference` / `preference_rank` /
+  `preference_position` in `proxy_service.rs`, `execution_authority.rs`,
+  `mcp_approval.rs`, `services/billing`, `service_pool_service.rs`,
+  `llm_gateway_service.rs`, `handlers/llm_gateway.rs`,
+  `handlers/service_insights.rs`, `services/service_insights_activity.rs`;
+  `execute_tool*` never reference the collection or rank map. (Part B adds
+  exactly the dedicated selector and the two gateway call sites to the allowed
+  list.)
+- **AC-15** (DB, *revised*): one `service_preference_updated` audit per
+  changed scoped save with `event_data` exactly `{group, count, version}`,
+  one `service_preference_hidden_released` per changed release with exactly
+  `{released_hidden, version}`, none on no-op or rejected capacity, no
+  connection IDs anywhere in either audit; the scoped audit retains its
+  catalog group. Chain verification passes.
+- **AC-16** (local, CLI, *revised*): `Pref` column shows rank, `saved:p`, or
+  `-`; `preference show` lists groups; `preference set --group` resolves slugs
+  preferring enabled rows, refuses mixed groups, sends `expected_version` from
+  GET; `preference reset --group` sends `ordered: []`; `release-hidden`
+  requires confirmation and sends the DELETE with `expected_version`; mocked
+  409 and capacity 400 exit non-zero with the stated messages; the flat `set`
+  no longer exists.
+- **AC-17** (local, *revised*): pills render below the connection identity header with its existing
+  label/readiness metadata; the header wraps readiness when needed and
+  reserves a usable label span (at least 64px at the default text size) for
+  long/duplicate labels in both normal and editing rows; enabled HTTP stored rows show `Discovery #n` with the §5.1 aria
+  label; disabled stored rows show `Saved #p`; active non-HTTP stored rows show
+  their actual protocol's saved-position pill and no MCP prefix/discovery rank;
+  unstored and `connection:`
+  singleton rows show neither; a pool-member row shows `Priority n` plus its
+  pill; two rows labelled "Anthropic" are distinguished by slug and pill;
+  filters hide rows but never change visible pill text or any row/group
+  position; the collapsed chip reads `Preferred: <label>` only with a rank-1
+  connection and expands the card. Verified in the expanded card, table view
+  mode and `/keys/services/$groupId`.
+- **AC-18** (local, *revised*): the summary line reads `k enabled · d
+  disabled` from `is_active`, uses "default discovery order" (never "newest
+  first" alone, never listed/callable/working/verified), and appears for every
+  group with a full inventory ≥ 2; **How selection works** is collapsed by
+  default on card and overview and contains the §5.2 selection, scope, protocol,
+  pool and conditional gateway details. No exhaustive prefix list or repeated
+  open explanation appears above rows. Summary/status/Retry and one Agent order
+  action remain discoverable while loading, on read error and after a GET 404
+  (disabled with the stated reasons), including the 30/26 group. Disclosure
+  toggles on 404 and while dirty preserve draft/filters/URL and write nothing;
+  narrow-width layout contains horizontal scrolling to the table.
+- **AC-19** (real-route Playwright with real sensors, plus unit tests for
+  buttons, *revised*): in the expanded 30-connection card, mouse-dragging a
+  disabled stored row above an enabled one updates `Saved #p` and `Discovery
+  #n` pills consistently; keyboard dragging with Escape cancellation; touch
+  dragging at a 390px viewport with contained table scrolling and no document
+  horizontal overflow; Move up/down,
+  `Move disabled to end` and `Reset to default` (with confirm) behave as
+  §5.4; the single dnd-kit live region announces; the Slack card, toolbar,
+  store and saved view are unchanged throughout.
+- **AC-20** (local, *revised*): Save disabled until a change, enabled after a
+  move; Cancel exits ordering without writes and removes the editor/Save action.
+  Save sends exactly the group's connection ids
+  (enabled and disabled) in table order plus `version` to the scoped route,
+  nothing for another group; `Reset to default` sends exactly `ordered: []`
+  and `expected_version`.
+- **AC-21** (local, *revised*): 409 renders the in-card banner with **Reload
+  order** (resets this group only, clears dirty) and **Overwrite** (refetches
+  version, re-submits); 400 unknown id refreshes `/keys` and drops missing rows
+  while dirty; 400 capacity shows the server message with `Reset to default`
+  and **Release unavailable preferences** (confirm text names the consequence
+  for restored access; the DELETE is sent only after confirmation; success is
+  followed by **Retry save** with the refetched version) and keeps the draft;
+  the release action is absent everywhere outside this banner; network error
+  shows Retry and keeps rows; a
+  read failure prevents entering ordering; after a GET 404 the summary line,
+  panel server-state line and disabled control are visible, no PUT is ever
+  sent, and pills from `/keys` still render.
+- **AC-22** (local, *revised*): grouped response schema accepts exactly
+  `version: 0`, `updated_at: null`, `groups: []` and rejects unknown fields;
+  group request schema rejects 201 ids, non-UUID, duplicates, negative
+  `expected_version` and any extra field, and accepts `ordered: []`.
+- **AC-23** (local): `npm run lint` (no `console.log`, no raw `useForm`),
+  `npm run build`, `cargo clippy -p nyxid -p nyxid-cli --all-targets -- -D warnings`,
+  wizard freshness test.
+- **AC-24** (docs review, *revised*): §8 docs present; discovery doc states
+  the slot-refill rule, non-executable listing, advisory nature and the
+  independent-client non-guarantee; API doc states the merge guarantees and
+  capacity error; architecture doc carries the §2 table and the
+  implicit-gateway explanation.
+- **AC-25**: slug-based key reads, catalog-curation writes, key-update and
+  saved-view routes retain prior auth and behavior; OAuth application tokens
+  cannot write preferences.
+- **AC-26** (*revised*): scoped REST and MCP responses expose no hidden ids
+  and no rank gaps; stale read filtering performs no write; canonical id,
+  version, body-size, unknown-field, wrong-group, reset and no-op behavior pass
+  explicit tests; a scoped save for group A leaves every stored id outside
+  A's authorized set (other groups, hidden or stale same-group ids, ids
+  outside the caller's inventory) present, byte-identical and in the same
+  relative order, and never deletes any of them; normal saves and resets never
+  remove an ID outside the currently authorized target group. Only the
+  explicit hidden DELETE can release IDs outside the authorized inventory.
+- **AC-27** (*revised*): browser tests on the grouped UI prove the §5.4 flow
+  in the expanded card and on `/keys/services/$groupId`, pills in all three
+  surfaces, the chip, the prod-404 read-only state, conflict/unknown-id/
+  capacity/network recovery including the release confirmation and retry
+  save, draft survival across a `/keys` refetch, the
+  kept-mounted card under filter changes, guards on collapse/other
+  group/view/tab/navigation, focus return, and that saved view, filters, store
+  and other cards are unchanged (no `PUT /users/me/preferences/services`).
+- **AC-28** (*revised*): read failure cannot enable saving; a two-connection
+  group (one enabled, one disabled) can be ordered; the 30/26/duplicate-label
+  group renders, drags and saves; identity change discards the draft and exits
+  ordering; caches are identity-separated; stale inventory recovery has tests.
+- **AC-29** (DB, *revised*): grouped GET returns only groups with ≥ 1
+  authorized stored id and never a `connection:` group; stored ids the caller
+  cannot see never appear; the response carries no count or capacity field for
+  any caller class.
+- **AC-30** (local, property-style, *revised*): for random inventories,
+  stored lists (including stale, hidden and foreign ids interleaved) and
+  sequences of scoped saves and `[]` resets on distinct groups: `H` elements
+  and their relative order are preserved; no id changes group; resubmitting
+  the current order is the identity; for non-empty saves, omitted authorized
+  ids (including ones granted after the draft was built) are appended after
+  the submitted ones in their previous relative order, never dropped; newly
+  stored ids land right after the group's last slot; `[]` removes exactly the
+  group's currently authorized stored ids; a legacy flat list from `e72036b7`
+  yields the same same-group relative order before and after the first scoped
+  save.
+- **AC-31** (DB, new, capacity recovery): (a) with a stored list of 198 ids
+  including live ids the caller cannot see, a scoped save adding three new
+  ids returns the capacity 400 with the fixed-200 message and no ids, leaves
+  the document unchanged and writes no audit; a `[]` reset on any group
+  succeeds at capacity; a reorder without new ids succeeds at exactly 200;
+  (b) **all-hidden saturation**: a 200-id document consisting only of
+  lost-access organization ids and deleted ids; the human's first-party
+  `DELETE /service-preferences/hidden` with the current version empties it,
+  audits `released_hidden: 200`, and the previously failing scoped save then
+  succeeds; (c) **retention**: with a document mixing an accessible custom
+  `connection:` singleton id, an accessible disabled row id, visible catalog
+  group ids, a lost-access org id and a deleted id, the release removes
+  exactly the last two and keeps the first three in place and order, even
+  though the grouped GET renders neither the singleton nor any count;
+  (d) CAS: a stale `expected_version` → 409 and no change; identical list →
+  no-op, no bump, no audit; (e) first-party matrix: API-key, SA, delegated,
+  relay and OAuth application callers are rejected before any change;
+  (f) identity: the complement is computed for `AuthUser.user_id` only, and a
+  second person's document is untouched; (g) UI: the release action is
+  offered only in the capacity banner inside the edited card or overview
+  table, requires confirmation with the restored-access consequence, and is
+  followed by a successful **Retry save** of the kept draft.
 
-## 14. Tradeoffs recorded
+## 13. Decisions
 
-- **Relevance over preference.** Chosen so a precise query never loses its best
-  match to a preferred-but-irrelevant service. The cost is that preference is
-  invisible for queries with a single clear winner, which is the desired
-  behavior.
-- **No cascade on delete.** Stale ids stay in the document and are filtered on
-  read. This avoids touching the delete/disable/membership paths and any
-  cross-collection transaction. The cost is one extra `find_one` per read
-  instead of zero, and dense ranks computed after each caller’s authorization; UI-only auto-connected hiding does not renumber ranks.
-- **Per-identity, not per-org.** Keeps ownership simple and human-only. Org
-  agent keys get legacy order; the plan records this and leaves an org surface
-  to a later feature.
-- **Catalog order untouched.** `tools/list` and `/mcp/config` keep their
-  digest-sorted contract. A client that wants preference in those surfaces reads
-  `preference_rank` from `/keys` or the meta-tools.
-- **Divider as a sortable item.** One container keeps the dnd-kit wiring simple
-  and gives keyboard users a single linear order; the Rank/Unrank buttons cover
-  users who cannot or do not want to drag.
-- **Pills, not repositioning, in the grouped UI.** The rank is cross-service
-  while the page groups by catalog service and sorts groups alphabetically, so
-  moving rows would mirror the agent order only partially while breaking the
-  upstream grouping and view-transition behavior. The pill carries the exact
-  dense rank instead.
-- **Editor replaces the grouped region.** Hiding the toolbar while editing
-  avoids two conflicting notions of "what is shown" (saved filters versus the
-  complete inventory) and guarantees the saved view and store are never
-  mutated by a reorder. The cost is that filters cannot be used to find an item
-  inside the editor; the list is bounded (at most 200 ranked, inventory-sized)
-  and items carry service name, slug and owner.
-- **`Discovery #n` wording.** One extra word on the pill prevents it from being
-  read as pool `Priority n` or as a default execution connection, which the
-  same table rows also display.
-- **Protocol limitation.** MCP has no server-to-client "prefer this tool" field.
-  Ordering and `preference_rank` are the strongest signals the protocol allows;
-  honoring them is the client's choice.
+Decided by ROOT (no further approval needed): disabled connections remain
+draggable and keep their saved position with a distinct `Saved #p` pill; the
+unreleased global `PUT` is replaced by the scoped contract and the CLI
+contracts updated accordingly; wording uses "enabled/disabled" counts and
+"default discovery order", never listed/callable/working/verified.
 
-## 15. Handoff
+Part A is authorized by ROOT for implementation against this architecture and
+the normative corrections above; it proceeds independently of Part B.
 
-Plan file: `docs/plans/service-tool-preference-order.md`. Design: a personal
-`service_preferences` document keyed by acting identity, holding ordered
-`UserService` ids with optimistic versioning; applied as a deterministic
-tiebreak after relevance in `nyx__search_tools` and as the primary order in
-`nyx__list_connected_services`, surfaced as `preference_rank` on `/keys` and
-meta-tool rows, edited by an accessible dnd-kit list with a ranked/unranked
-divider that replaces the grouped region while editing, and `Discovery #n`
-pills on connection rows and collapsed group cards of the #1685 AI Services
-UI; no execution, approval, billing, routing-default or catalog-digest effect.
-28 acceptance criteria, including all PM corrections in §16 and the UI
-revisions in §18.
+Decided by ROOT on capacity recovery (part of Part A, no user approval
+needed): the explicit human-only `DELETE /service-preferences/hidden` is
+accepted with the scoped PUT's fences; the automatic dead-id prune is
+rejected, so scoped saves preserve all unrelated, stale and hidden ids
+exactly; the grouped GET stays minimal (`groups`, `version`, `updated_at`)
+with no counts or capacity fields; there is no `clear` flag, `ordered: []` is
+the reset, and non-empty saves append omitted now-authorized members before
+the slot merge.
 
-## 16. PM review corrections before implementation
+Pending for the user: **Part B** (§6). If yes, it ships in the same change
+set.
 
-The coordinating agent reviewed this plan before implementation. These corrections
-supersede the affected clauses above. The implementer must incorporate them into
-the normative sections and acceptance checklist so the final plan is coherent.
+## 14. Handoff
 
-1. Use `GET/PUT /api/v1/service-preferences`, a dedicated route that does not
-   consume a slug under `/keys/{id}`. Existing UUID and slug-based key routes retain their
-   behavior. Put write rejection middleware on the new route only. Do not change
-   the auth classes of unrelated key-update or catalog-curation routes. The PUT
-   handler also calls the existing verified
-   `login_client_context::require_first_party_human` guard. GET rejects service
-   accounts and relay tokens; ordinary API keys and delegated `account:read`
-   readers retain authorized metadata access.
-2. Missing documents produce `ordered: []`, `version: 0`, `updated_at: null`.
-   The stored model requires BSON dates. AC-01's minimal legacy fixture includes
-   `_id`, `created_at`, and `updated_at`, with only `ordered` and `version` absent.
-   Validate canonical UUID v4 strings, duplicates, and a nonnegative version that
-   can safely increment and round-trip through JavaScript. Bound the request body
-   and reject unknown fields. Keep constants and business validation in services.
-3. Service visibility and rank calculation belong in the service layer. Reuse the
-   existing read-only inventory resolver, current grants, and providers without
-   reconciliation or provisioning. Apply authorization before preference. Exposed
-   ranks are dense positions among the caller's authorized ranked services, so
-   hidden or deleted entries disclose no cardinality through rank gaps. The web
-   auto-connected toggle does not change ranks; the full authorized inventory is
-   the rank basis. No preference write is needed to prune a stale read.
-4. Both concurrent first saves and concurrent later saves have one winner. A no-op
-   at the current version does not bump version or create an audit event. The audit
-   service appends through its existing chain path. The unchanged catalog and
-   explicit execution-target behavior must be proved by real handler/MCP tests,
-   not solely by searching source text.
-5. A preference read failure blocks editing and offers Retry. It must never seed
-   an empty order and allow an accidental overwrite. A 404 disables editing for
-   compatibility with older servers. Conflict recovery refetches the current
-   version before an explicit overwrite; the existing generic 409 body does not
-   promise a version field. Keep local edits until the user chooses a recovery.
-   Refresh inventory before removing stale IDs after a validation error.
-6. A single connected service can be ranked or unranked; enable editing with one
-   service. Show a clear empty state with none. Explain that preference breaks
-   relevance ties. Preserve focus, unsaved changes, identity-separated caches,
-   useful labels, and bounded selection behavior at the 200-service limit.
-7. Avoid duplicate screen-reader announcements. Real Playwright tests must drive
-   mouse dragging, touch interaction, keyboard dragging and cancellation on the
-   actual `/keys` route, including grid/table modes, order pills, persistence on
-   reload, save failure, conflict recovery, and a narrow mobile viewport without
-   horizontal overflow. Mocking dnd-kit callbacks alone is insufficient.
-8. This backend is a binary crate: remove unsupported `--lib` test commands.
-   Run database-dependent tests with an explicit reachable
-   `NYXID_TEST_DATABASE_URL` so missing infrastructure cannot silently pass. Use
-   targeted checks plus required PR CI checks. Do not bump release versions solely
-   for this feature. Maintain any generated CLI wizard artifact required by CI.
+Plan file: `docs/plans/service-tool-preference-order.md`. Part A: group-relative,
+advisory agent discovery order stored in the existing per-identity document
+with CAS and an account-wide 200 cap, written only through a group-scoped
+server-authoritative slot merge that preserves every other id byte for byte and
+in relative order. Non-empty saves retain omitted authorized group members;
+a `[]` reset clears the group's currently authorized stored ids. The explicit,
+confirmed, first-party release removes only ids outside the actor's current
+authorized inventory. Resubmission is a no-op, and resets remain available
+at capacity;
+ranks derived per catalog group after authorization with explicit REST versus
+MCP projections; discovery applies slot refill inside today's loader list and
+inside identical-relevance search buckets built from the original vector, so
+unrelated services never move and empty preferences are byte-identical; `executable` and `preference_rank` added
+to MCP discovery rows; UI entirely inside the expanded service card and the
+per-service overview (pill line below the readable wrapping label/readiness header, summary line,
+compact honest server-state line and collapsed-by-default selection disclosure, inline
+drag/keyboard ordering with Save/Cancel, reset and in-banner capacity
+recovery), leaving the #1685 grid,
+toolbar, filters, saved views, insights and pools unchanged. Part B is
+specified conditionally with a dedicated gateway entry point and fences.
+14 completed Part A tasks plus one conditional Part B task, 31 Part A acceptance
+criteria plus 7 conditional Part B criteria.
 
-Additional acceptance criteria:
+## 15. Evidence policy
 
-- **AC-25:** existing slug-based key reads and catalog-curation writes retain their
-  prior auth and routing behavior. OAuth application tokens cannot modify preferences.
-- **AC-26:** scoped REST and MCP responses expose no hidden IDs or rank gaps.
-  Stale read filtering performs no write. Canonical ID, version, body-size, unknown
-  field, and no-op behavior pass explicit tests.
-- **AC-27:** real browser tests on the grouped UI prove mouse, touch, and
-  keyboard reordering, cancellation, persistence, pills in an expanded group
-  card, in table mode and on `/keys/services/$groupId`, the collapsed chip,
-  failure/conflict recovery, mobile layout, focus, unsaved-change handling, and
-  that the saved view and active filters survive an edit unchanged (no
-  `PUT /users/me/preferences/services`, same filter pills after exit).
-- **AC-28:** preference read failure cannot enable saving an empty replacement;
-  one-service ranking, the 200-service bound, cache identity changes, and stale
-  inventory recovery have tests.
-
-The final implementation handoff includes an AC-01 through AC-28 evidence matrix,
-exact check commands and outcomes, and every resolved review finding.
-
-## 17. AC implementation and check evidence
-
-The matrix records successful implementation and local validation. §19 lists
-backend/CLI/Clippy commands and results on the `566ca5f9` integration committed
-as `0390ad00`; §20 supersedes frontend/wizard evidence with final `868ce0b7`
-integration results. Backend/CLI Rust source is unchanged between these bases.
-All local gates passed. Remote CI and Opus's final verdict are separate gates,
-recorded on the PR; no remote pass is inferred from local checks. Earlier-base
-results are retained below as historical evidence.
-
-- [x] AC-01: `models/service_preference.rs::service_preference_bson_dates_and_legacy_defaults`: BSON dates and dated legacy defaults passed in the merged 8-test backend feature run.
-- [x] AC-02: `service_preference_validation_and_dense_visibility`: 201 IDs, canonical UUID-v4/variant, duplicate, safe-version and unknown-ID parity assertions passed in the merged 8-test backend feature run.
-- [x] AC-03: `mcp_service::tests::service_preference_stable_order_relevance_cap_and_legacy`: stable dense preference order, inert stale/platform IDs; passed in the merged 8-test backend feature run.
-- [x] AC-04: The same pure MCP regression covers ties, relevance priority, empty query and the 25-result cap; passed in the merged 8-test backend feature run.
-- [x] AC-05: Empty-map compatibility assertion passed in the feature test; all 5 existing `search_all_tools` regressions and `asking_for_an_agent_finds_agent_creation_first` passed from the fresh merged test binary. No ignored tests.
-- [x] AC-06: Pure MCP regression checks connected-service count and rank/null fields; passed in the merged 8-test backend feature run.
-- [x] AC-07: `service_preference_http_cas_noop_legacy_and_chain`: both first-insert/later CAS races, no-op equality, BSON timestamp equality and missing-version legacy upgrade; passed against the dedicated replica set through mounted HTTP middleware/auth.
-- [x] AC-08: `service_preference_http_scopes_stale_slug_config_and_validation`: verified scoped API-key GET preserves raw version and exposes only one ranked ID; passed in the merged 8-test backend feature run.
-- [x] AC-09: The same HTTP test deletes through `/keys/{id}`, compares the untouched stored preference document and dense surviving detail rank; passed in the merged 8-test backend feature run.
-- [x] AC-10: Mounted HTTP test exercises API-key, service-account, relay, delegated and OAuth identities on GET/PUT; passed in the merged 8-test backend feature run.
-- [x] AC-11: `service_preference_command_monitoring_bounds_detail_and_single_listing_read`: one preference find per endpoint, absent/empty preference GET with zero inventory reads, page aggregate two preference reads, saved GET/detail selected-ID bound at 200, endpoint projection and no credential/provider metadata loads; passed in the merged 8-test backend feature run.
-- [x] AC-12: `service_preference_discovery_guest_dense_and_explicit_target_unchanged` passed: real MCP search/list, native null metadata and scoped/guest/relay dense filtering.
-- [x] AC-13: Real MCP regression passed the same unranked named tool through `nyx__call_tool` before/after preference: exactly two upstream effects and identical audit event type/data/actor/target/count. Mounted HTTP test passed full `/mcp/config` equality; MCP passed byte-identical `tools/list`. The first tools/list snapshot follows baseline execution; the audit comparison selects `mcp_tool_call` rows independently of initial activation/request audits.
-- [x] AC-14: Fresh `rg` returned no preference/rank references in proxy, execution authority, approvals, billing, `handlers/service_insights.rs` or `services/service_insights_activity.rs`. Source review confirms only search/connected metadata calls use the preferred loader; execution keeps the operation catalog.
-- [x] AC-15: HTTP CAS test checks exactly two changed-write audits across both races/no-op, count/version-only event data and successful chain verification; passed in the merged 8-test backend feature run.
-- [x] AC-16: CLI unit checks passed 2/2 (0.01s): active slug/display and prior GET-version→PUT/typed409. Fresh merged process integration passed 2/2 (1.52s): precise table `1`/`-` rank cells, show/table/JSON equality, active slug and actual nonzero409 exit. Parser splits outer `│` and internal `┆`; a missing row prints the rendered table. No timeout increase or weakened assertion.
-- [x] AC-17: Merged full suite passed (4,741 tests): shared table/overview pills follow links and precede readiness; Gamma→Alpha API order is unchanged. Real grouped browser scenario passed: chip derives hidden Beta from complete group, names it, lists all ranks in title and expands; org/service/search/Personal filters retain dense pill text, pool row shows independent Priority 7, overview and DEV use the shared renderer.
-- [x] AC-18: Fresh merged grouped browser scenario passed: full three-item inventory under Personal/service/search/auto-hidden filters, toolbar unmounted, no form links, saved filter text and expanded card restored after both Save and Cancel, no service-view PUT. Page tests cover loading/refetch entry gates; browser covers empty/404 and hidden DEV entry.
-- [x] AC-19: PM's merged 14-scenario real-route browser run passed, including mouse/touch dragging, keyboard movement/Escape, the divider, Rank/Unrank and live rank updates. The keyboard test waits for actual Escape layout animation and the sensor render frame before the next lift; all movement/announcement assertions remain.
-- [x] AC-20: Fresh merged browser tests pass dirty-gated Save, Cancel, exact ordered IDs/version payload, grid/table transitions and Save/Cancel focus after a delayed closing inventory GET.
-- [x] AC-21: Fresh merged real-route browser tests pass network retry with edits retained, actual 409→Overwrite→successful persistence, Reload resets dirty, recovery after ordinary preference refetch failure, and initial-404 compatibility.
-- [x] AC-22: Request/response schema checks passed in the merged full frontend suite; canonical RFC4122 UUID-v4, duplicate/201 bound, safe version, unknown-field and missing-document/null timestamp cases.
-- [x] AC-23: Fresh merged frontend passed 463 files/4,741 tests (168.33s), production build and lint passed (0 errors/29 unchanged unrelated warnings, no feature warnings), browser 14/14 passed (36.1s), and regenerated wizard freshness passed 1/1 (0.04s). The 201-row regression retains its default 5-second timeout. Fresh local all-target Clippy with `-D warnings` passed on Rust 1.94.1 (4m15s), log `/tmp/service-preference-merge-566ca5f9-clippy.log`; remote Rust 1.98.1 CI is recorded on the PR at its published head.
-- [x] AC-24: API/OpenAPI, discovery, service-card architecture, NyxAgent and CLAUDE reviewed against revised UI. Docs distinguish Discovery from pool Priority/cascade, preserve normal order, state independent-client limits and one relevance/name/preference/stable contract. REST auth and MCP identity application are separate (including scoped relay order). Upstream release 0.66.0 is retained with no feature-specific bump. Guest Internal exclusion and active-MCP versus full-UI rank examples are documented.
-- [x] AC-25: Mounted HTTP test passed the original `preference-order` slug read and OAuth preference-write rejection. Existing `curation_router_scoped_discovery_history_and_route_confinement` passed against the dedicated replica set (1.45s), preserving curation auth/routing.
-- [x] AC-26: Fresh merged backend feature run passed scoped/guest/relay HTTP/MCP privacy and live org revocation: no hidden IDs or rank gaps, unchanged stale storage, canonical IDs/version/body/unknown-field/no-op checks.
-- [x] AC-27: PM's fresh merged browser run passed 14/14 in 36.1s on merged 0.66 source: mouse/touch/keyboard/Escape, grouped/table/overview/DEV pills, complete-group chip, preserved filters/expanded card/no saved-view write, stale400, late legacy-org provenance enrichment and refreshed provenance, identity switch, delayed exit focus and desktop/mobile screenshots. Log: `/tmp/nyxid-service-preference-066-browser.log`.
-- [x] AC-28: Merged full frontend suite and fresh browser cases prove 200 bound, fail-closed cached reads, 404, one-service rank/unrank, separate identity caches/late mutation rejection, deferred recovery identity switch, inventory-failure retry and actual400 inventory-first recovery. New metadata-only enrichment regression preserves draft IDs/version when source arrives late and when a legacy inventory is refreshed.
+Historical evidence from `e72036b7` stands for unchanged boundaries: AC-01
+model tests, the CAS/no-op/legacy-row mechanics reused by `replace_group`
+(re-run anyway as part of AC-07), route rejection layers (AC-10, AC-25), the
+`/keys` detail read bound (AC-11), and the `#[cfg(test)]` wrapper arrangement.
+Every criterion marked *revised*, every new criterion (AC-29 to AC-31), and
+every UI criterion requires fresh execution against the §10 commands and the
+MongoDB 8.0.17 review instance, recorded with command and outcome before
+sign-off. The §16 matrix checks criteria only from actual passing execution
+and the stated source/document review; historical evidence alone does not
+complete a revised criterion.
 
 
-Passing baseline check commands on the prior rebased source (`35af1701`):
+## 16. Part A implementation and fresh review evidence
 
-- `NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts --maxWorkers=2`: PM's final recheck passed 458 files / 4,694 tests (183.97s), log `/tmp/nyxid-service-preference-integrated-full-recheck.log`. Isolated happy-dom origin is the only temporary config override. This supersedes the earlier 4,693-test pass and the subsequent concurrent run's 201-row timeout.
-- The same command with `src/pages/keys.test.tsx src/pages/service-overview.test.tsx src/schemas/service-preference.test.ts src/hooks/use-service-preference.test.tsx src/components/dashboard/service-preference-editor.test.tsx src/components/dashboard/service-routing-preview.test.tsx src/components/dashboard/service-pool-routing-panel.test.tsx src/hooks/use-service-view.test.tsx src/lib/service-view.test.ts`: 99 passed (12.09s), log `/tmp/service-preference-integrated-targeted.log`.
-- `npx playwright test e2e/service-preference.spec.ts --workers=1`: PM's final run passed 14/14 (39.8s), log `/tmp/nyxid-service-preference-integrated-browser.log`. This supersedes the earlier keyboard-timing failure and includes legacy provenance race/recovery.
-- After the singular-copy correction, `npx playwright test e2e/service-preference.spec.ts --workers=1 --grep 'read failure fails closed'`: 1/1 passed (5.1s), including the exact `1 connection` header, read Retry, one-service unranking/persistence, 404 and empty state. Log `/tmp/service-preference-singular-browser.log`; ESLint on the two changed files passes with no warnings/errors. The full frontend/browser evidence above remains applicable to this copy-only delta.
-- The isolated Vitest command targeting `src/components/dashboard/service-preference-editor.test.tsx`: 3/3 passed (3.46s), then the verbose run passed again (3.14s; boundary test 572ms) after row-scoped queries and mock reset, with the normal 5-second timeout. PM's final full recheck also passed this file (2.26s execution). ESLint on this changed test file passes with no warnings/errors.
-- `npm run build`: PM's fresh production run passed, including TypeScript, shipped app/prerender/credential-accept bundles and mock-footprint assertion. The wizard uses the separate freshness gate below.
-- `npm run lint -- --no-warn-ignored`: exit0, no errors, 29 existing unrelated warnings; no changed-feature warnings. Log `/tmp/service-preference-integrated-lint.log`.
-- `cargo fmt --all` and `git diff --check`: passed. Static boundary scan includes both new service-insights files and returns no matches.
-- `cargo clippy -p nyxid -p nyxid-cli --all-targets -j 1 -- -D warnings`: final run passed, exit0 (5m38s), log `/tmp/service-preference-final-clippy.log`, local Rust 1.94.1. The earlier E0283 collection type and CI 1.98.1 single-clone lint are corrected without suppressions. CI's Rust 1.98.1 recheck is scheduled for PM's next push; no remote pass is inferred.
-- `cargo test -p nyxid-cli --bin nyxid service_preference -j 1 -- --test-threads=1`: 2/2 passed (0.01s; build 2m43s), log `/tmp/service-preference-final-cli-unit.log`. The first process integration run passed the real 409/nonzero-exit scenario and failed only the table separator assumption. `/tmp/service-preference-cli-table-diagnostic.log` captures the actual correct rank cells and `┆` delimiters.
-- `cargo test -p nyxid-cli --test service_preference -j 1 -- --test-threads=1`: corrected final run passed 2/2 (1.99s), log `/tmp/service-preference-final-cli-integration.log`, including actual CLI table/show/JSON and real409 exit; no ignored tests.
-- `cargo test -p nyxid-cli --test wizard_bundle_freshness -j 1`: 1/1 passed (0.06s), log `/tmp/service-preference-final-wizard-freshness.log`; no ignored tests.
-- `cargo test -p nyxid --bin nyxid-server service_preference -j 1 -- --test-threads=1`: final run passed 8/8 with zero ignored tests (3.15s; build 12m34s), log `/tmp/service-preference-integrated-backend-recheck.log`. DB URI and bounded task-target/debug/incremental environment from §11 are set explicitly. The superseded first attempt passed 7 and failed the MCP fixture (3.67s), log `/tmp/service-preference-integrated-backend-tests.log`: its nested `nyx__call_tool` wrapper was corrected to one direct dispatch, and the unmatched `proxy` query was replaced with the actual generic operation name `request`. All original execution/effect/audit and ranking assertions now pass.
-- While that fixture-only rebuild ran, the successfully compiled rebased binary `/tmp/nyxid-service-preference-target/debug/deps/nyxid_server-c7db09510f7e99fe` was invoked directly, with the explicit §11 DB URI and `--test-threads=1`, for unchanged existing regressions: `search_all_tools` (5 passed, 0.06s), `asking_for_an_agent_finds_agent_creation_first` (1 passed, 0.06s), and `curation_router_scoped_discovery_history_and_route_confinement` (1 passed, 2.00s). No second Cargo build or skipped DB test. Logs: `/tmp/service-preference-search-tests.log`, `/tmp/service-preference-agent-search-tests.log`, `/tmp/service-preference-curation-tests.log`.
-- PM independently ran the same curation regression against the explicit isolated Mongo URI and compiled binary: 1 passed (2.04s), log `/tmp/nyxid-service-preference-curation-regression.log`.
-- The same direct binary/DB invocation passed neighboring assistant regressions: `chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypassing_denial` (1 passed, 2.65s), `guest_access_follows_spec_markers` (1 passed, 1.71s), and `chat_discovery_does_not_write_request_audits_but_execution_refusals_do` (1 passed, 2.34s). Logs: `/tmp/service-preference-assistant-discovery-tests.log`, `/tmp/service-preference-guest-scope-tests.log`, `/tmp/service-preference-assistant-audit-tests.log`.
+The global editor has been removed. Part A uses the existing grouped/table/
+overview architecture, scoped CAS writes and same-group discovery-slot refill.
+The user's latest screenshot review replaces the open repeated explanation
+with the §5.2 compact summary and collapsed **How selection works** disclosure.
+The card keeps its single Agent order header action; overview places its single
+action alongside the compact summary. Production source is frozen for ROOT's
+independent UI/source review. ROOT owns publication and the separate review
+record; Part B remains unimplemented pending the user's answer.
 
-Checkpoint `abc2cfde` rebased from `ffcd1c59` onto `f3dc2be9`, producing `d32f6111`. PM committed/pushed the integrated source as `caed88dfa5e449af062b77d2fd264b3c05e4d1b1` and opened draft PR [#1796](https://github.com/ChronoAIProject/NyxID/pull/1796) for remote CI; this is not sign-off. PM owns the review record and publication; the implementer performs no commit/push/PR actions. Browser screenshots use Playwright output paths and attachments; PM retained reviewed copies at `/tmp/nyxid-service-preference-review/integrated-*.png`.
+The final authority correction is narrowly opt-in in `api-client.ts`: guards
+run after DEV module loading, before fetch, after fetch before 401/session side
+effects, and after JSON parsing. Preference GET/save/release and the keys list
+bind captured dashboard or installed Mode A authority. The Mode A identity is
+a generation token with no secret in query keys; its real local shim works with
+an empty dashboard AuthStore. Catalog group validation now agrees across REST,
+CLI and Zod: canonical lowercase RFC variant, recognized UUID versions 1–8,
+including seeded v5 and created v4 groups; nil/max and version 9 are rejected.
+Ordered connection UUIDs remain v4.
 
-### Implementation findings reconciled
+Local Rust validation uses Rust 1.94.1. All Rust runs use MongoDB 8.0.17 at
+`mongodb://127.0.0.1:27029/?replicaSet=nyxidPreferenceReview&directConnection=true`,
+`NYXID_TEST_DATABASE_URL`, target `/tmp/nyxid-service-preference-target`,
+`CARGO_INCREMENTAL=0`, `CARGO_PROFILE_TEST_DEBUG=0`,
+`CARGO_PROFILE_DEV_DEBUG=0`, and `-j 1`. No DB test skips, Docker replacement,
+external daemon changes or other-task cache deletions were used. Frontend full
+runs use the isolated happy-dom URL 4629; real-route browser tests use 4611.
+The production-backed review server 4630 is preserved and has no preference
+emulation or feature writes. ROOT's separately user-authorized seeded preview
+on 4631 uses only temporary sample API/Vite configuration and JSON persistence
+in `/tmp/nyxid-service-preference-mock-preview`; both servers are preserved.
 
-- Owner chat discovery intentionally includes acknowledgement-required services
-  (`mcp_chat_authority_tests` existing listing assertions). Owner tests retain that
-  contract; scoped ordinary keys and guest discovery prove hidden-ID/dense-rank
-  filtering. Guest filtering affects metadata only; grant/approval/execution gates
-  are unchanged.
-- `search_all_tools` and the unranked connected-list wrapper are now test-only
-  compatibility helpers in this binary crate; production uses ranked helpers.
-- First saves use BSON millisecond precision so PUT, GET and no-op timestamps agree.
-- The search doc comment belongs to production `search_all_tools_ranked`; the sorter documents its stable ranked/unranked order separately.
-- CLI table integration splits the preset's outer `│` and internal `┆` characters, verified against actual CLI output, and retains precise `1`/`-` last-column assertions plus table/show/JSON cases. A missing row includes the full rendered fixture table.
-- Rust 1.98.1 CI's `cloned_ref_to_slice_refs` fixture finding is corrected with `std::slice::from_ref(&b)`; no lint suppression or production behavior change.
-- Editor grid/table modes share one vertical list with roomier/compact spacing;
-  after #1685 the saved pills live on `ServiceConnectionTable` rows and the
-  `GroupCard` chip (§6.1), not on the deleted card/row components.
-- Empty onboarding fixture objects trigger the real first-run takeover. The API
-  fixture supplies `ai_services_completed_at` so the real services route is
-  available without introducing a test-only product flow.
-- Editor metadata uses the tab's same source join on initial data, every refresh,
-  and rendering. Late provenance enriches metadata only; it never resets draft
-  IDs or the optimistic version.
-- Keyboard browser input waits for actual Escape layout animations to settle
-  and the activation render frame before issuing the next movement. Assertions
-  still require the real sensor, destination, one live region and persisted rank.
+Passing executions on the Part A source:
 
-## 18. Upstream integration delta (`origin/main` `f3dc2be9`)
-
-Commits since the plan baseline `ffcd1c59`: #1790 (26 fixed-endpoint OAuth
-connectors), #1792 (pool accounting by billing request), granular display
-controls and Studio breadcrumbs, #1791 (LinkedIn OAuth), #1794 (MCP
-registration / consented grants), #1685 (AI Services refresh). Only #1685
-changes this plan's surface. The discovery-only backend design and the
-semantics of AC-01..AC-28 are unchanged; the deltas below are what the
-implementer must rebase onto.
-
-Backend (expected merge points, no design change):
-
-- `handlers/keys.rs`: `KeyResponse` gained `can_edit_configuration` and
-  `oauth_app_source`; add `preference_rank` beside them in
-  `key_response_from_view` and `key_response_from_result`.
-- `handlers/mcp_transport.rs`: `McpAuthContext` gained `oauth_client_id` and
-  `api_key_credential_id` (also in the `api_key_auth` test helper), and
-  `mcp_exec_context` now carries request attribution for service insights. The
-  preferred loader for search/list-connected is independent of both; keep the
-  execution path on the unchanged operation catalog.
-- `routes.rs`: upstream added `/me/preferences/services` (PUT) and
-  `/service-insights` (GET); mount `/service-preferences` beside them per §5.
-- New upstream `GET /service-insights` reads connection metadata only and must
-  not consult `service_preferences` (covered by AC-14's grep; add
-  `backend/src/handlers/service_insights.rs` and
-  `backend/src/services/service_insights_activity.rs` to that grep list).
-
-Frontend (re-implement on the upstream files rather than merging the old
-`keys.tsx`; the upstream rewrite deleted every pre-#1685 render path this branch
-touched):
-
-| Pre-#1685 integration point on this branch | Upstream replacement | Action |
+| Gate | Exact command / outcome | Log |
 |---|---|---|
-| `KeyCardContent` badge row pill | `GroupCard` collapsed chip + `ServiceConnectionTable` row pill | move (§6.1) |
-| `ServiceTableRow` Name cell pill | `ServiceConnectionTable` Connection / Slug cell | move (§6.1) |
-| `groupKeysBySource(...sort by preference_rank)` | `groupServiceConnections` + `matchingConnections`, alphabetical groups | drop the sort; pills only |
-| page-level `showAutoConnected` `Switch` forced on in reorder mode | toolbar `Auto-connected` toggle inside `ServiceViewToolbar`, part of saved filters | do not touch; editor uses the complete inventory and unmounts the toolbar |
-| `ExternalServicesTab` flat grid/table | `GroupedServiceCards` with `renderTable` | swap in the editor in place of `GroupedServiceCards` while editing |
-| `keys.test.tsx` (pre-#1685 mocks) | upstream harness with `QueryClientProvider`, `use-pools`, `use-service-routing-pools`, `use-orgs` mocks | re-add preference tests on the upstream file; add a `use-service-preference` mock |
-| `types/keys.ts` `preference_rank` | upstream added `can_edit_configuration`, `oauth_client_id`, `connection_id`, `oauth_app_source` | keep additive field |
-| e2e fixture (`/keys`, `/user-services`, `/nodes`, `/orgs`, `/catalog`) | page also requests `/service-insights`, pools, `/catalog?include_all=true`, saved view in `/users/me` | extend fixture per §11 |
+| Final backend feature/DB including UUID boundaries | `cargo test -p nyxid service_preference -j 1`: 14 passed, zero failed/ignored, 3.18s after 8m35s compile | `/tmp/nyxid-service-preference-inline-backend-uuid.log` |
+| Neighboring discovery search | `cargo test -p nyxid search_all_tools -j 1`: 5 passed, zero failed/ignored, 0.01s after 10m10s compile | `/tmp/nyxid-service-preference-inline-final-neighbor-search.log` |
+| Named assistant-account search | `/tmp/nyxid-service-preference-target/debug/deps/nyxid_server-a548fe5994bb0fe3 asking_for_an_agent_finds_agent_creation_first`: 1 passed, zero failed/ignored, 0.01s | `/tmp/nyxid-service-preference-inline-final-neighbor-agent.log` |
+| Neighboring curation confinement | `/tmp/nyxid-service-preference-target/debug/deps/nyxid_server-a548fe5994bb0fe3 curation_router_scoped_discovery_history_and_route_confinement`: 1 passed, zero failed/ignored, 1.81s against the explicit MongoDB URI | `/tmp/nyxid-service-preference-inline-final-curation.log` |
+| CLI targets compiled together | `cargo test -p nyxid-cli --bin nyxid --test service_preference --test wizard_bundle_freshness --no-run -j 1 --message-format=json`: exit0, 2m53s | `/tmp/nyxid-service-preference-inline-final-cli-compile.log`, compiler artifacts in `/tmp/nyxid-service-preference-inline-final-cli-compile.jsonl` |
+| CLI preference unit tests | `/tmp/nyxid-service-preference-target/debug/deps/nyxid-002d4b25df51439a service_preference`: 3 passed, zero failed/ignored, 0.01s | `/tmp/nyxid-service-preference-inline-final-cli-unit.log` |
+| CLI real subprocess integration | `/tmp/nyxid-service-preference-target/debug/deps/service_preference-bdaeb69b7981a5b3`: 4 passed, zero failed/ignored, 1.90s | `/tmp/nyxid-service-preference-inline-final-cli-integration.log` |
+| Rebuilt wizard source closure freshness | `/tmp/nyxid-service-preference-target/debug/deps/wizard_bundle_freshness-41d9c8f58e4486a5`: 1 passed, zero failed/ignored, 0.06s | `/tmp/nyxid-service-preference-inline-final-wizard-freshness.log` |
+| Rust formatting | `cargo fmt --all -- --check`: exit0, no formatting differences | `/tmp/nyxid-service-preference-inline-final-fmt.log` |
+| Final backend/CLI all-target Clippy | `cargo clippy -p nyxid -p nyxid-cli --all-targets -j 1 -- -D warnings`: exit0, no errors/warnings, 5m15s after the test-only helper correction | `/tmp/nyxid-service-preference-inline-final-clippy-recheck.log` |
+| Focused final UI/schema/authority | `NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts src/hooks/service-order-transport.test.tsx src/hooks/use-service-group-order.test.tsx src/hooks/use-service-preference.test.tsx src/hooks/use-keys-identity.test.tsx src/hooks/use-keys.test.tsx src/components/cli-wizard/access-scope-mode-a.test.tsx src/lib/api-client.test.ts src/schemas/service-preference.test.ts src/pages/keys.test.tsx src/pages/service-overview.test.tsx`: 10 files, 99 tests passed, 6.10s | `/tmp/nyxid-service-preference-transport-disclosure-unit-recheck.log` |
+| ROOT independent real transport | `service-order-transport.test.tsx` + `api-client.test.ts`: 27 tests/2 files passed, 1.76s, exit0 | `/tmp/nyxid-service-preference-group-pm-transport.log` |
+| Final real browser and built standalone wizard | `npx playwright test e2e/service-preference.spec.ts e2e/wizard-scope.spec.ts --workers=1 --output=/tmp/nyxid-service-preference-inline-final-browser-results`: 21/21 passed, 1.7m; normal/edit labels ≥64px at390/1024/1440, same chevron/native disclosure and specific404 message | `/tmp/nyxid-service-preference-inline-final-browser.log` |
+| ROOT independent final browser | Same 21 card/overview/recovery/geometry/wizard scenarios: 21/21 passed, 55.6s | `/tmp/nyxid-service-preference-group-pm-final-browser.log` |
+| Final wizard regeneration | `npm run build:wizard`: exit0; 171-file producer manifest, hash prefix `6a459342b100` | `/tmp/nyxid-service-preference-inline-final-wizard-build.log` |
+| Final lint | `npm run lint -- --no-warn-ignored`: exit0, zero errors, same 29 unrelated baseline warnings, none in feature files | `/tmp/nyxid-service-preference-inline-final-lint.log` |
+| Final full frontend after source freeze | `NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts --maxWorkers=2`: 466 files, 4773 tests passed, 190.34s, exit0 | `/tmp/nyxid-service-preference-inline-final-full.log` |
+| Final production build | `npm run build`: exit0; TypeScript/app, legal prerender, credential-accept and mock-footprint checks passed | `/tmp/nyxid-service-preference-inline-final-build.log` |
+| Final chevron/readability focused unit pass | `NODE_ENV=test npx vitest run --config /tmp/nyxid-service-preference-vitest.config.mts src/hooks/use-service-group-order.test.tsx src/pages/keys.test.tsx src/pages/service-overview.test.tsx src/pages/nyxbot-onboarding.test.tsx src/schemas/service-preference.test.ts`: 5 files, 113 tests passed, 6.53s | `/tmp/nyxid-service-preference-chevron-readable-unit.log` |
 
-Preserved upstream behavior that the integration must not alter: default
-`source: "personal"` and `show_auto_connected: false` filters, Organization and
-Service multiselects, search-on-submit, filter pills and Clear filters, saved
-default views and their 404 compatibility note, alphabetical group order,
-single expanded card with view transitions, sticky toolbar measurements,
-insight/billing/usage panels, pool summaries and routing panel,
-`/keys/services/$groupId`, key-detail tabs, `?view=routing` DEV preview,
-`?pool`/`?org` deep links to Service Pools, and the Connect Service CTA
-placement (toolbar when keys exist, header otherwise).
+The initial focused disclosure run failed only because the provider explanation
+asserted visibility before opening the newly collapsed disclosure; the regression
+now opens it and continues to verify null inference/nonstandard catalog metadata.
+The real transport test's Mode A assertion was corrected to the shim's actual
+URL/options fetch signature, preserving the local-CSRF and zero-old-fetch proof.
+The earlier full Part A run passed 465 files/4765 tests before the transport
+correction. The next full run found one stale mocked `/keys` call signature in
+onboarding; both mount/Back assertions now include the opt-in authority guard.
+The normal-row geometry correction reserves label width and wraps readiness;
+focused card/overview browser proof uses 64px actual label spans, duplicate/long
+labels and no bounding-box overlap at 390/1024/1440. The final full/build/browser
+gates above passed after the last chevron and specific404-copy changes. The
+neighboring discovery/assistant/curation, CLI, wizard freshness and final
+package Clippy gates also passed. CLI fixtures were
+reconciled to the scoped route and grouped response, retaining exact
+body/rank/conflict assertions.
 
-Root-owned review document `docs/plans/service-tool-preference-review.md` is
-not modified by this revision.
+The worktree's existing backend/CLI build scripts watch package-local Git
+paths that are absent here, causing repeated Cargo invocations to rebuild
+the main test crate. After the final search compile, the assistant and
+curation regressions ran against that exact freshly compiled backend binary.
+The CLI unit, subprocess and freshness targets were compiled together once;
+the compiler-artifact JSON identified the actual test executables recorded
+above. These are direct test executions, not additional Cargo invocations.
 
-## 19. Release 0.66 integration (`566ca5f9`, #1795; committed as `0390ad00`)
+The first final Clippy execution exited 101 after 7m9s with one `dead_code`
+error: `order_services_by_preference` was called only by regression tests but
+still compiled into the production binary. It is now a private `#[cfg(test)]`
+helper, matching the other test wrappers, with no suppression or runtime change.
+The test code and all production discovery/execution behavior are unchanged;
+the final all-target Clippy recheck passed after compiling both production and
+test variants. Formatting passed again after this correction. The frontend
+source, bundle and successful frontend/browser checks are unaffected.
+Failure log: `/tmp/nyxid-service-preference-inline-final-clippy.log`;
+recheck log: `/tmp/nyxid-service-preference-inline-final-clippy-recheck.log`.
 
-PM requested `git merge --no-commit origin/main` on the already published branch
-at `35af1701`, preserving its plan-only working diff and the PM-owned review
-record. After all local gates passed, PM committed the merge and corrections as
-`0390ad001d23c1b18fcfe7de997f84382de58d6c`; it was not pushed at the start of §20.
-PM owns publication, renewed CI and final review of draft PR
-[#1796](https://github.com/ChronoAIProject/NyxID/pull/1796).
-The results below establish the backend/CLI/Clippy evidence used in §17. The
-later frontend-only integration supersedes UI evidence in §20.
+Acceptance implementation/test evidence (all 31 Part A criteria have local
+evidence; this does not close ROOT's separate review findings or grant Opus
+sign-off):
 
-Actual conflicts were limited to `handlers/mod.rs`, `models/mod.rs`, the generated
-wizard `assets/index.html`, and `bundle-meta/index.hash`. Both preference and
-upstream concurrency module declarations are retained. The wizard is regenerated
-from the merged frontend source instead of choosing either generated side.
-The original plan-only working changes are retained. The PM review record was
-byte-identical at the merge boundary; subsequent PM-owned review updates are
-preserved, and the implementer has not edited that file.
+- [x] **AC-01** — `service_preference_bson_dates_and_legacy_defaults` passes BSON date round-trip, missing ordered/version defaults.
+- [x] **AC-02** — mounted HTTP scopes/validation, backend canonical/dense unit and strict schemas pass all auth/body/ID/version/group fences and reset. Frontend/backend/CLI nil/max/version9 and versions1–8 boundaries pass.
+- [x] **AC-03** — `service_preference_validation_and_dense_visibility` and MCP stable-order/slot tests pass dense group ranks, disabled-inclusive saved positions, custom singleton exclusion and interleaved slot preservation.
+- [x] **AC-04** — feature slot/mixed-relevance/multiple-operation/cap/empty-map regressions and all 5 neighboring `search_all_tools` tests passed, including full-match relevance precedence.
+- [x] **AC-05** — `service_preference_stable_order_relevance_cap_and_legacy` and paired MCP fixture assert legacy fields/order unchanged with empty maps; only documented additive metadata differs. The named `asking_for_an_agent_finds_agent_creation_first` regression also executed and passed.
+- [x] **AC-06** — `service_preference_stable_order_relevance_cap_and_legacy`, `service_preference_slots_interleaving_multiple_operations_and_mixed_relevance`, and the mounted MCP fixture pass `list_connected_services_ranked` group-relative rank/null and executable metadata, same-group slot refill, unchanged count, and unchanged singleton/platform slots.
+- [x] **AC-07** — first-insert/current-version races plus `service_preference_distinct_group_cas_retry_preserves_both_orders` pass loser409 → reload/retry and both final group orders, logical interleaved no-op and legacy missing-version upgrade.
+- [x] **AC-08** — scoped HTTP/MCP fixtures pass singleton rank1 and fully scoped guest/relay dense ranks without hidden IDs or count fields.
+- [x] **AC-09** — live-org/stale fixture passes deletion, disabling/re-enabling, stored-position retention and no preference writes on reads.
+- [x] **AC-10** — real mounted HTTP middleware/auth fixture rejects agent/API-key, SA, relay, delegated and OAuth preference writes; supported metadata GET policies preserved.
+- [x] **AC-11** — command-monitoring fixture passes exactly one preference read on `/keys`, no absent/empty GET inventory walk, bounded saved GET/detail selected-ID/source/endpoint reads and no provider/credential rendering.
+- [x] **AC-12** — paired MCP fixture passes original loader slots, unrelated Slack slots, guest pre-rank visibility, dense ranks and listed non-executable revoked credentials.
+- [x] **AC-13** — actual named MCP call fixture compares response, downstream hits and execution audit actor/target/count before/after preferences; mounted slug-proxy and both implicit LLM routes fixture proves identical target/body/audit and exactly six upstream effects. Config/catalog digest/tools-list stay equal; Part B behavior remains unchanged.
+- [x] **AC-14** — static `rg` boundary check returns no matches in proxy/execution-authority/approval/billing/pool/LLM/insights files; inspected `execute_tool*` code has no preference reads. Preference loaders are confined to REST metadata and MCP discovery.
+- [x] **AC-15** — real DB fixture verifies exact scoped audit `{group,count,version}`, hidden-release `{released_hidden,version}`, no connection IDs, no extra audits on rejected/no-op writes and valid chained append path.
+- [x] **AC-16** — 3 CLI unit and 4 real subprocess tests pass grouped show/table/JSON, slug/group resolution, strict scoped body/version,409/capacity errors, reset, confirmed release and rejection of flat set. Reversed saved-order output derives current HTTP ranks; active SSH does not inflate ranks and disabled rows retain saved positions.
+- [x] **AC-17** — real browser covers below-header Discovery/Saved pills, pool Priority, duplicate/long labels, usable ≥64px normal/editing label width at390/1024/1440 with readiness/pill non-overlap, contained tablet/mobile table overflow, filtered stable ranks, collapsed chip and actual overview/table renderer. Hook/table test covers HTTP versus SSH saved-position semantics.
+- [x] **AC-18** — real browser card/overview disclosure scenarios pass collapsed defaults, production404 reason/status, known pills, dirty draft/URL/filter preservation and narrow layout. Hook tests cover loading/error honesty and null-inference provider explanation without invented URLs.
+- [x] **AC-19** — actual mouse/touch/keyboard sensors pass pickup/move/drop, Escape rollback, single live region, disabled-to-end, confirmed default reset and unrelated Slack/toolbar preservation.
+- [x] **AC-20** — browser fixtures assert dirty gating, exact scoped request body/order/version, disabled rows included, reset `ordered:[]`, Cancel and no saved-view writes.
+- [x] **AC-21** — browser passes successful409 Overwrite/Reload, actual400 stale-ID refresh + failed inventory read/Retry, network retry, capacity confirmation/cancel/release/refetched-version Retry save and production404 no-write behavior.
+- [x] **AC-22** — strict grouped/request/release schema tests pass absent response, unknown fields, duplicates, versions,201 IDs and reset shape; >200 local/retry/overwrite errors remain visible without uncaught Zod errors.
+- [x] **AC-23** — final full frontend/production build/lint/wizard regeneration, rebuilt-source wizard freshness and Rust formatting pass. Final backend/CLI all-target Clippy passes with `-D warnings`, exit0, no suppression. Remote CI/final review remains ROOT-owned.
+- [x] **AC-24** — API/discovery/architecture/chat/CLAUDE docs match scoped merge, relevance-slot/advisory semantics, executable metadata, restricted ranks, protocol distinctions, explicit pools and unchanged implicit gateway. §5.2 incorporates the user's compact disclosure correction.
+- [x] **AC-25** — mounted HTTP scopes/slug/config fixture preserves route confinement and OAuth write rejection; dedicated `curation_router_scoped_discovery_history_and_route_confinement` execution also passed against the explicit isolated database.
+- [x] **AC-26** — live visibility/property/HTTP fixtures pass hidden/stale/unrelated relative-order preservation, scope-dense responses, reset/no-op and strict body/auth errors. Only explicit hidden release removes unauthorized IDs.
+- [x] **AC-27** — browser proves kept-mounted filtered group/full metadata and pool Priority, collapse/other-card/view/tab/navigation guard, overview row History guard, delayed focus restoration, late provenance, entire inventory disappearance/Cancel and no saved-view write.
+- [x] **AC-28** — hooks plus actual transport tests pass deferred recovery, deferred MutationCache.onMutate, identity-state reset, actor-keyed caches, retry/transport/late401/JSON fences and Mode A authority replacement. Browser passes30/26 duplicate-label edit/save and one-enabled/one-disabled eligibility.
+- [x] **AC-29** — HTTP scoped GET fixture returns only visible catalog groups, never custom singleton groups or hidden/count/capacity metadata.
+- [x] **AC-30** — deterministic varied-inventory/property sequences pass distinct-group saves/reset, foreign/hidden/stale relative order, no-op identity, regained-scope omitted append and inserted-ID slot placement without copying the production merge into the test.
+- [x] **AC-31** — real DB capacity/release fixture passes fixed200 generic errors/no audit, clear-at-capacity, all-hidden release200 audit, custom/disabled visible retention, second actor unchanged, CAS/no-op/body/auth fences. Browser passes explicit confirmation cancellation and successful retained-draft Retry save.
 
-MCP transport/service merged automatically and were inspected against upstream:
-
-- Both discovery catalog construction sites retain async
-  `assistant_account_tools::virtual_service_for(&state.db, chat).await`, including
-  upstream skill-authoring flag, role and failure behavior. Guest service and
-  platform allowlist filtering still precedes dense preference ranking.
-- Only search and list-connected call the preferred loader. `tools/list`, config,
-  operation discovery and explicit execution retain their existing catalogs and
-  execution gates; native search rows remain explicitly unranked.
-- Upstream's verified `caller_token`, `scope`, resource claims, acting identity,
-  delegation restriction projection and scheduled-key route admission are
-  retained. Preference does not replace or alter the new execution context.
-- Direct/node delegation and credential-owner parity, concurrency admission,
-  typed 429/Retry-After and response-body lease lifetimes remain upstream's
-  implementations. Preference adds no execution retry or provider substitution.
-- Release 0.66.0 version changes are retained from upstream; this feature adds no
-  separate version bump. No preference UI source needed a conflict resolution.
-
-Fresh checks on this merged source (one Cargo build at a time, `-j 1`, explicit
-§11 replica-set URI, task target `/tmp/nyxid-service-preference-target`, both debug
-profiles 0 and incremental disabled):
-
-- [x] `npm --prefix frontend run build:wizard`: exit0; TypeScript and wizard
-  production build passed, regenerated 168-file source closure and embedded
-  assets/hash. Log `/tmp/service-preference-merge-566ca5f9-wizard-build.log`.
-- [x] Conflict-marker scan: no markers or unmerged paths. `cargo fmt --all`
-  applied module-order formatting; `cargo fmt --all -- --check` and staged/working
-  `git diff --check` pass. The exact
-  `service_preferences|preference_rank` execution-boundary scan has no matches;
-  unrelated existing HTTP `preference-applied` headers are not feature reads.
-- [x] `cargo test -p nyxid --bin nyxid-server service_preference -j 1 --
-  --test-threads=1`: 8 passed, 0 failed/ignored (3.21s; compile 6m09s), log
-  `/tmp/service-preference-merge-566ca5f9-backend-feature.log`. Includes the new
-  mounted GET command-monitoring assertions and all CAS/auth/privacy/audit/MCP
-  execution invariants. Fresh binary: `nyxid_server-a548fe5994bb0fe3`.
-- [x] Neighboring search, assistant guest/discovery/audit and curation regressions:
-  10 passed, 0 failed/ignored, using the fresh merged binary and explicit DB URI.
-- [x] Upstream MCP delegation/proxy parity, async skill-authoring discovery,
-  concurrency and org-agent revocation: 17 passed, 0 failed/ignored, from the same
-  merged binary. Exact filter/results table below.
-- [x] `cargo test -p nyxid-cli --bin nyxid service_preference -j 1 --
-  --test-threads=1`: 2/2 passed (0.01s; compile 32.26s), log
-  `/tmp/service-preference-merge-566ca5f9-cli-unit.log`.
-- [x] `cargo test -p nyxid-cli --test service_preference -j 1 --
-  --test-threads=1`: 2/2 passed (1.52s; compile 21.98s), log
-  `/tmp/service-preference-merge-566ca5f9-cli-integration.log`; exact saved-rank
-  table/show/JSON and actual nonzero409 exit retained.
-- [x] `cargo test -p nyxid-cli --test wizard_bundle_freshness -j 1`: 1/1 passed
-  (0.06s; compile 21.09s), log
-  `/tmp/service-preference-merge-566ca5f9-wizard-freshness.log`.
-- [x] `cargo clippy -p nyxid -p nyxid-cli --all-targets -j 1 -- -D warnings`:
-  exit0, no warnings/errors (4m15s), local Rust 1.94.1, log
-  `/tmp/service-preference-merge-566ca5f9-clippy.log`.
-- [x] PM-owned full isolated frontend suite: 461 files / 4,723 tests passed
-  (168.67s), exit0, log `/tmp/nyxid-service-preference-066-full-frontend.log`.
-  This is fresh merged-0.66 evidence, including the final alias/dead-branch cleanup.
-- [x] PM-owned browser: 14/14 passed (37.3s), log
-  `/tmp/nyxid-service-preference-066-browser.log`. Fresh desktop/mobile artifacts
-  visually reviewed at `/tmp/nyxid-service-preference-review/066-*.png`.
-- [x] PM-owned production build: exit0, log
-  `/tmp/nyxid-service-preference-066-build.log`.
-- [x] PM-owned lint: exit0, zero errors/feature warnings and the same 29 unrelated
-  baseline warnings, log `/tmp/nyxid-service-preference-066-lint.log`.
-- [ ] Renewed remote CI after PM's merge commit/push; no remote pass is inferred.
-
-Opus preliminary findings on `35af1701` are incorporated before Rust compilation:
-
-- Preference GET reads its document first and uses the extracted
-  `visible_ordered_ids` helper shared with detail rank. Absent/empty orders and
-  scope-excluded saved IDs return before inventory reads. The command-monitoring
-  test now asserts mounted GET's exact one-read/zero-inventory behavior, raw
-  empty-document metadata, 200-ID saved visibility bound, endpoint projection
-  and no provider/credential metadata reads. All assertions passed in the fresh
-  eight-test backend feature run above.
-- Guest connected search/list's granted UserManaged/Platform-only behavior and
-  exclusion of Internal catalog entries are explicit in chat 08 and 09; native
-  virtual tools retain their separate guest authorization.
-- API discovery and AI Services architecture explain active MCP versus full UI
-  rank bases, including disabled UI #1 causing active UI #2 to become MCP #1.
-- Normative text corrects the user-before-platform loader order, shipped stale
-  400 banner, latest integration status and obsolete #1685 rerun statement.
-  §5.1/§8 document the bounded GET work rather than a full metadata inventory walk.
-- `keys.tsx` drops the uncalled compact/icon branch and redundant inventory alias.
-  The optional tab-only query gate was not added, preserving existing query,
-  focus, compatibility and identity behavior. Focused isolated Vitest passed
-  3 files/33 tests (4.62s), log
-  `/tmp/service-preference-merge-566ca5f9-frontend-targeted.log`.
-
-PM committed the validated source and wizard as `0390ad00`. PM inspected the merged MCP,
-shared GET visibility helper, docs and UI cleanup. The eight-test feature run,
-all neighboring/upstream backend filters, CLI/wizard/Clippy and all fresh frontend
-gates have passed. All AC-01..AC-28 now have current local evidence. There are no
-known unresolved implementation findings; PM's final sign-off and renewed remote
-CI remain separate gates.
-
-After these checks, PM fetched frontend-only `868ce0b7d01a6193ad7a6cff77147bd5163bac9a`
-(76-file readability change, no Rust source). It was held until PM committed the
-0.66 integration. Its separately authorized merge and fresh UI evidence are now
-tracked in §20; completed backend evidence remains applicable while Rust source
-is unchanged.
-
-The first Cargo invocation built the merged test binary successfully. A later
-cached Cargo invocation retriggered the build scripts because their relative
-`.git` watch paths are absent in this linked worktree. The redundant task-owned
-compile was stopped; no source changed after the successful build. Remaining
-backend regressions were run directly as
-`/tmp/nyxid-service-preference-target/debug/deps/nyxid_server-a548fe5994bb0fe3 <filter> --test-threads=1`,
-with the same explicit §11 DB/task-target environment. No old-base binary or
-zero-test result is counted.
-
-| Fresh merged backend filter | Passed | Test time | Log suffix under `/tmp/service-preference-merge-566ca5f9-` |
-|---|---:|---:|---|
-| `search_all_tools` | 5 | 0.00s | `search.log` |
-| `asking_for_an_agent_finds_agent_creation_first` | 1 | 0.01s | `agent-search.log` |
-| `curation_router_scoped_discovery_history_and_route_confinement` | 1 | 1.45s | `curation.log` |
-| `chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypassing_denial` | 1 | 1.55s | `assistant-discovery.log` |
-| `guest_access_follows_spec_markers` | 1 | 1.55s | `guest-scope.log` |
-| `chat_discovery_does_not_write_request_audits_but_execution_refusals_do` | 1 | 1.44s | `assistant-audit.log` |
-| `mcp_delegation_` | 6 | 1.92s | `mcp-delegation.log` |
-| `mcp_proxy_` | 4 | 3.12s | `mcp-proxy-parity.log` |
-| `skill_authoring_discovery_tests` | 2 | 0.59s | `skill-discovery.log` |
-| `handlers::mcp_transport::tests::service_concurrency_` | 2 | 0.35s | `mcp-concurrency.log` |
-| `handlers::proxy::proxy_resolution_integration_tests::service_concurrency_` | 2 | 1.16s | `proxy-concurrency.log` |
-| `org_agent_mcp_tests` | 1 | 1.34s | `org-agent-mcp.log` |
-
-## 20. Frontend readability integration (`868ce0b7`)
-
-PM authorized `git merge --no-commit origin/main` from committed integration head
-`0390ad001d23c1b18fcfe7de997f84382de58d6c` onto fetched
-`868ce0b7d01a6193ad7a6cff77147bd5163bac9a`. PM inspected the merged source and
-completed fresh full frontend/browser/build/lint checks before committing and
-publishing the integration. The PM review record is preserved and is not edited
-by the implementer.
-
-The only conflicts were generated `cli/src/wizard/assets/index.html` and
-`cli/src/wizard/bundle-meta/index.hash`; both are resolved by regeneration from merged source.
-Grouped cards, the shared connection table, keys page and architecture docs
-merged automatically and were inspected against upstream. Preserve upstream
-`text-primary-text`/control-height readability tokens, pool strategy icons,
-wrapping and billing/usage changes. Discovery pills remain beside the connection
-link, the collapsed chip still derives from complete `group.connections`, and
-the editor retains its inventory/filter/identity/recovery/focus behavior.
-
-The editor's information icon explicitly adopts `text-primary-text` to follow
-the upstream readability contract. AC-12's text now says "a nonempty" query.
-No backend/CLI Rust source, execution semantics or preference visibility logic
-changed. The completed §19 backend/CLI/Clippy evidence is retained without a
-repeat backend build. Only wizard freshness is affected by the rebuilt embedding.
-
-Fresh evidence on this frontend merge:
-
-- [x] `npm --prefix frontend run build:wizard`: exit0; TypeScript and wizard
-  production build passed, merged embedded assets and 168-file source closure
-  regenerated. Closure hash prefix `c960ab3c6057`; log
-  `/tmp/service-preference-merge-868ce0b7-wizard-build.log`.
-- [x] No unmerged paths or conflict markers. Staged/working `git diff --check`
-  passed. `git diff 0390ad00 --name-only -- backend cli ':!cli/src/wizard'`
-  has no output: backend/CLI Rust source and manifests are unchanged. PM review
-  record was byte-identical to its pre-merge backup at this verification boundary;
-  subsequent PM-owned updates remain preserved.
-- [x] `cargo test -p nyxid-cli --test wizard_bundle_freshness -j 1`: 1 passed,
-  0 failed/ignored (0.04s; focused CLI rebuild 26.71s), log
-  `/tmp/service-preference-merge-868ce0b7-wizard-freshness.log`. Uses the §11
-  explicit DB URI/task target/debug=0/incremental=0 environment and checks the
-  rebuilt merged 168-file source closure.
-- [x] PM-owned full isolated frontend suite: 463 files / 4,741 tests passed in
-  168.33s. Log `/tmp/nyxid-service-preference-868-full-frontend.log`; the same
-  origin-only temporary config described in §17 preserves the repository setup.
-- [x] Real-route browser suite: all 14 scenarios passed in 36.1s, including
-  actual mouse/touch/keyboard input, persistence, complete-group/table/overview
-  pills, preserved views, delayed focus, conflict/stale recovery and account
-  switching. Log `/tmp/nyxid-service-preference-868-browser.log`. PM inspected
-  fresh desktop and 390-pixel mobile screenshots under
-  `/tmp/nyxid-service-preference-review/868-*.png`; labels wrap without overflow.
-- [x] Production build and lint passed, with zero lint errors/feature warnings
-  and the same 29 unrelated baseline warnings. Logs
-  `/tmp/nyxid-service-preference-868-{build,lint}.log`.
-- [x] PM personally inspected the final source diff and all validation logs;
-  every substantiated plan, implementation and preliminary Opus finding is closed.
-
-PM publishes this integration on PR #1796. Required remote CI and Opus's final
-review are recorded there against the published head, so their final verdict does
-not require another source or evidence-only commit.
-
-Source/wizard are complete and ready for PM's review. PM inspected the merged UI
-and accepted preservation of upstream readability/service-table/pool behavior,
-preference pills/editor and the information-icon token correction. All fresh
-frontend/browser/build/lint checks passed. No frontend source edits remain. The focused CLI wizard
-freshness check passed; backend regressions, CLI preference tests and Clippy are
-not repeated because Rust source is unchanged and the only CLI delta is the
-regenerated embedding. No known unresolved source findings remain. The fresh
-§20 UI results supersede §19's UI baseline; backend evidence remains applicable.
-
-## 21. Follow-up normal-page comparison and label spacing
-
-The PM freshly verified that current main `868ce0b7` is included in the branch
-and rendered main and the PR with identical sample data. The normal External
-Services page retains main's grouped cards, filters, connection table, billing
-and routing presentation. Editor screenshots must be identified as the Reorder
-editing state.
-
-The inline rank pill could consume all horizontal space for the connection-label
-text. Task 13a and §6.1 now place it in metadata below the existing label/readiness
-header. AC-17 additionally requires usable rendered label width, no badge overlap
-at 1440 pixels, and visible rank metadata with contained table scrolling at
-1024/390 pixels. The new browser regression measures the actual label span rather
-than its icon-bearing link. Shared-renderer unit tests assert rank text in the
-correct connection cell; the saved-view scenario checks semantic filter values
-and absence of writes.
-
-- [x] PM directly reviewed the source and all follow-up test corrections.
-- [x] Focused frontend: 3 files, 60 tests passed in 4.53 seconds.
-- [x] Real-route browser suite: 15/15 passed in 38.8 seconds, including the expanded
-  grouped-table geometry and narrow-table containment regression.
-- [x] Production build passed; changed-file ESLint has zero errors/warnings;
-  whitespace checks passed.
-- [x] Main/PR visual comparison: 2/2 passed in 6.7 seconds; PM inspected the
-  corrected collapsed and expanded screenshots with identical sample data.
-
-The follow-up changes no Rust source or wizard dependency, so the existing
-backend/CLI proof remains applicable. The PM records the revised head's required
-CI and Opus plan/PR sign-off in PR #1796. Full evidence and the temporary,
-production OAuth-backed local review setup are in the PM review record.
+Desktop/mobile editor and compact404 screenshots are Playwright output artifacts,
+not hardcoded product paths:
+`/tmp/nyxid-service-preference-inline-final-browser-results/` contains
+`inline-desktop.png`, `inline-mobile.png`, `compact-card-mobile.png`, and
+`compact-overview-mobile.png`. ROOT independently inspects final visual/source
+behavior before publication.

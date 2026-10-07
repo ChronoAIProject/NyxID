@@ -3182,31 +3182,58 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
-#### Service preference order
+#### Agent discovery order per service group
 
-`GET /api/v1/service-preferences` returns `{ "ordered": ["<UserService UUID>"],
-"version": 3, "updated_at": "<RFC3339>" }`. Missing documents return an empty
-order, version 0 and a null timestamp. Reads use read-only inventory, current
-platform grants, org scopes and agent allowlists. Hidden, deleted and inaccessible
-IDs are omitted; `preference_rank` on `GET /keys` and `GET /keys/{id_or_slug}` is
-a dense, 1-based position among authorized ranked connections, or null.
-Service accounts and relay tokens cannot read this route. General API keys and
-delegated exact `account:read` GETs may read authorized metadata.
+`GET /api/v1/service-preferences` returns only `{ "groups": [{ "group":
+"catalog:<catalog UUID>", "ordered": ["<UserService UUID>"] }], "version": 3,
+"updated_at": "<RFC3339>" }`. A missing document returns `groups: []`, version 0
+and a null timestamp. IDs are filtered through live owner, organization and
+service-scope visibility before grouping. Custom `connection:` singleton groups
+are omitted. No stored, hidden or capacity counts are returned. General API keys
+and delegated exact `account:read` GETs may read authorized metadata; service
+accounts and relay tokens cannot read this route.
 
-`PUT /api/v1/service-preferences` accepts only `{ "ordered": [...],
-"expected_version": 3 }` from a verified first-party human session/access token.
-API keys, delegated tokens, service accounts, relay and OAuth application tokens
-cannot write. IDs must be canonical lowercase UUID v4 strings, unique, visible
-and at most 200. The request limit is 16 KiB; unknown fields are rejected.
-Expected versions range from 0 through 9007199254740990. Validation returns
-400; a stale version or insert/CAS race returns 409 (`Conflict`, code 1004).
-The client refetches before explicitly overwriting. A no-op at the current version
-preserves the version/timestamp and emits no audit. Changed saves increment the
-version and append a chained `service_preference_updated` audit containing only
-count and version. Read filtering does not prune the stored document.
-Preference affects discovery only; it never changes an explicit target, retries
-execution, grants, approval or authority digests, billing or `/mcp/config`.
-Existing key slug routes and catalog-curation authorization remain unchanged.
+`PUT /api/v1/service-preferences/groups/{group}` accepts only `{ "ordered": [...],
+"expected_version": 3 }`. `group` must be `catalog:<canonical lowercase RFC-variant UUID>` with a recognized version (1–8, including the existing v4/v5 catalogs); nil/max and unknown versions are rejected;
+connection IDs must be canonical lowercase RFC4122 UUID v4 strings, unique,
+authorized members of that group and at most 200. `ordered: []` explicitly resets
+this group's currently authorized order to default. A nonempty submission appends
+any stored, currently authorized group IDs omitted by a stale draft in their
+previous relative order. The server replaces only this group's visible occupied
+slots; additional IDs follow its last slot. All unrelated, hidden and stale IDs
+and their relative order remain unchanged. A logically identical group order is a
+no-op even when its stored IDs are interleaved with other groups.
+
+The resulting account document may contain at most 200 IDs across all services.
+Capacity returns an actionable generic 400: reset another service or explicitly
+release unavailable preferences. It reveals no hidden IDs or counts. Resets work
+at capacity. No save or read automatically prunes storage.
+
+`DELETE /api/v1/service-preferences/hidden` accepts only `{ "expected_version": 3 }`
+and explicitly releases stored IDs outside the actor's current authorized
+inventory, including deleted or lost-access organization connections. Accessible
+custom singleton IDs and disabled rows are retained, as are every visible group's
+relative order. If access returns, released orders must be set again. The CLI and
+inline capacity banner require explicit confirmation before this action.
+
+Both writes require a verified first-party human session/access token. API keys,
+delegated tokens, service accounts, relay and OAuth application tokens cannot
+write. Both enforce 16 KiB bodies, reject unknown fields and accept expected
+versions 0 through 9007199254740990. Invalid input returns 400; stale versions or
+insert/CAS races return 409 (`Conflict`, code 1004). Changed writes increment the
+version with BSON-millisecond timestamps and chained audits: scoped saves include
+only `{group, count, version}`; releases include only `{released_hidden, version}`.
+No-op writes retain metadata and produce no audit.
+
+`GET /keys` and `GET /keys/{id_or_slug}` add `preference_rank`, a dense 1-based rank
+within the authorized active HTTP catalog group, and `preference_position`, the
+saved position among authorized stored group IDs including disabled rows. Both
+are null for custom singleton groups; disabled rows have a null discovery rank.
+The UI shows `Discovery #n` and `Saved #p · disabled` separately. Restricted MCP
+callers see dense ranks over their own fully scoped discovery inventory, which
+can differ from the owner's REST pills. Preference never changes named execution,
+retries, pools, grants, approvals, authority digests, billing or `/mcp/config`.
+Part A also leaves implicit LLM gateway connection selection unchanged.
 
 
 The unified keys API auto-provisions UserEndpoint + UserApiKey + UserService records from a single request. This is the primary entry point for users connecting external services.

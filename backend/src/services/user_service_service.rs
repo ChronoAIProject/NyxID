@@ -469,7 +469,7 @@ async fn list_user_services_inner(
     user_id: &str,
     include_disabled: bool,
 ) -> AppResult<Vec<UserService>> {
-    list_user_services_selected(db, user_id, include_disabled, None).await
+    list_user_services_selected(db, user_id, include_disabled, None, None).await
 }
 
 async fn list_user_services_selected(
@@ -477,10 +477,14 @@ async fn list_user_services_selected(
     user_id: &str,
     include_disabled: bool,
     selected: Option<&[String]>,
+    catalog_service_id: Option<&str>,
 ) -> AppResult<Vec<UserService>> {
     let mut filter = doc! { "user_id": user_id };
     if let Some(ids) = selected {
         filter.insert("_id", doc! { "$in": ids });
+    }
+    if let Some(id) = catalog_service_id {
+        filter.insert("catalog_service_id", id);
     }
     if !include_disabled {
         filter.insert("is_active", true);
@@ -651,8 +655,39 @@ pub(crate) async fn list_user_services_with_sources_selected(
     memberships: &[crate::models::org_membership::OrgMembership],
     selected: Option<&[String]>,
 ) -> AppResult<Vec<UserServiceWithSource>> {
+    list_user_services_with_sources_selected_in_group(
+        db,
+        user_id,
+        include_scope_denied,
+        include_disabled,
+        memberships,
+        ServiceSelection {
+            ids: selected,
+            catalog_service_id: None,
+        },
+    )
+    .await
+}
+
+pub(crate) struct ServiceSelection<'a> {
+    pub ids: Option<&'a [String]>,
+    pub catalog_service_id: Option<&'a str>,
+}
+
+pub(crate) async fn list_user_services_with_sources_selected_in_group(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_scope_denied: bool,
+    include_disabled: bool,
+    memberships: &[crate::models::org_membership::OrgMembership],
+    selection: ServiceSelection<'_>,
+) -> AppResult<Vec<UserServiceWithSource>> {
+    let ServiceSelection {
+        ids: selected,
+        catalog_service_id,
+    } = selection;
     let mut out: Vec<UserServiceWithSource> =
-        list_user_services_selected(db, user_id, include_disabled, selected)
+        list_user_services_selected(db, user_id, include_disabled, selected, catalog_service_id)
             .await?
             .into_iter()
             .map(|s| UserServiceWithSource {
@@ -686,8 +721,14 @@ pub(crate) async fn list_user_services_with_sources_selected(
             meta
         };
 
-        let org_services =
-            list_user_services_selected(db, &m.org_user_id, include_disabled, selected).await?;
+        let org_services = list_user_services_selected(
+            db,
+            &m.org_user_id,
+            include_disabled,
+            selected,
+            catalog_service_id,
+        )
+        .await?;
         for svc in org_services {
             // The normal listing drops services outside the effective member
             // scope because its response contains endpoint, key, and auth

@@ -1372,8 +1372,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_service_account_tokens));
     let service_preference_writes = Router::new()
         .route(
-            "/service-preferences",
-            put(handlers::service_preference::put),
+            "/service-preferences/groups/{group}",
+            put(handlers::service_preference::put_group),
+        )
+        .route(
+            "/service-preferences/hidden",
+            delete(handlers::service_preference::release_hidden),
         )
         .layer(axum::extract::DefaultBodyLimit::max(
             crate::services::service_preference_service::MAX_REQUEST_BYTES,

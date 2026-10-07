@@ -4189,33 +4189,38 @@ mod branch_tests {
 
     #[tokio::test]
     async fn service_preference_set_sends_version_and_reports_conflict() {
+        const CATALOG: &str = "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa";
+        const GROUP: &str = "catalog:aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa";
+        const ACTIVE: &str = "11111111-1111-4111-8111-111111111111";
+        const OLD: &str = "22222222-2222-4222-8222-222222222222";
         for status in [200, 409] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/api/v1/service-preferences"))
                 .respond_with(
                     ResponseTemplate::new(200).set_body_json(
-                        serde_json::json!({"ordered":[],"version":7,"updated_at":null}),
+                        serde_json::json!({"groups":[],"version":7,"updated_at":null}),
                     ),
                 )
                 .expect(1)
                 .mount(&server)
                 .await;
             Mock::given(method("GET")).and(path("/api/v1/keys"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys":[{"id":"old","slug":"same","is_active":false},{"id":"active","slug":"same","is_active":true}]}))).expect(1).mount(&server).await;
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys":[{"id":OLD,"catalog_service_id":CATALOG,"slug":"same","is_active":false},{"id":ACTIVE,"catalog_service_id":CATALOG,"slug":"same","is_active":true}]}))).expect(1).mount(&server).await;
             Mock::given(method("PUT"))
-                .and(path("/api/v1/service-preferences"))
-                .and(body_partial_json(
-                    serde_json::json!({"ordered":["active"],"expected_version":7}),
+                .and(path(format!("/api/v1/service-preferences/groups/{GROUP}")))
+                .and(body_json(
+                    serde_json::json!({"ordered":[ACTIVE],"expected_version":7}),
                 ))
                 .respond_with(ResponseTemplate::new(status).set_body_json(
-                    serde_json::json!({"ordered":["active"],"version":8,"updated_at":null}),
+                    serde_json::json!({"groups":[{"group":GROUP,"ordered":[ACTIVE]}],"version":8,"updated_at":null}),
                 ))
                 .expect(1)
                 .mount(&server)
                 .await;
             let result = run(ServiceCommands::Preference {
                 command: ServicePreferenceCommands::Set {
+                    group: GROUP.into(),
                     services: vec!["same".into()],
                     auth: mock_auth(server.uri()),
                 },
@@ -4653,6 +4658,11 @@ pub(crate) fn credential_binding(service: &Value) -> &str {
 }
 
 fn display_preference(service: &Value) -> String {
+    if service["is_active"] == false
+        && let Some(position) = service["preference_position"].as_u64()
+    {
+        return format!("saved:{position}");
+    }
     service["preference_rank"]
         .as_u64()
         .map_or_else(|| "-".into(), |rank| rank.to_string())
@@ -4679,9 +4689,37 @@ fn resolve_preference_ids(items: &[Value], requested: &[String]) -> Result<Vec<S
 }
 
 async fn run_service_preference(command: ServicePreferenceCommands) -> Result<()> {
-    let (auth, requested) = match command {
-        ServicePreferenceCommands::Show { auth } => (auth, None),
-        ServicePreferenceCommands::Set { auth, services } => (auth, Some(services)),
+    let (auth, change, release) = match command {
+        ServicePreferenceCommands::Show { auth, group } => {
+            (auth, group.map(|group| (group, None)), false)
+        }
+        ServicePreferenceCommands::Set {
+            auth,
+            group,
+            services,
+        } => (auth, Some((group, Some(services))), false),
+        ServicePreferenceCommands::Reset { auth, group } => {
+            (auth, Some((group, Some(vec![]))), false)
+        }
+        ServicePreferenceCommands::ReleaseHidden { auth, yes } => {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!(
+                        "Use --yes to confirm releasing unavailable preferences. Orders must be set again if access returns."
+                    );
+                }
+                eprint!(
+                    "Release unavailable preferences? Orders must be set again if access returns. [y/N] "
+                );
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    bail!("Release cancelled");
+                }
+            }
+            (auth, None, true)
+        }
     };
     let mut api = ApiClient::from_auth_checked(&auth).await?;
     let current: Value = api.get("/service-preferences").await?;
@@ -4689,43 +4727,94 @@ async fn run_service_preference(command: ServicePreferenceCommands) -> Result<()
     let items = inventory["keys"]
         .as_array()
         .context("Invalid service inventory")?;
-    let result = if let Some(requested) = requested {
-        let ids = resolve_preference_ids(items, &requested)?;
-        let body = serde_json::json!({ "ordered": ids, "expected_version": current["version"].as_i64().context("Invalid preference version")? });
-        match api.put::<Value, _>("/service-preferences", &body).await {
-            Ok(result) => result,
-            Err(error)
-                if error
-                    .downcast_ref::<crate::api::ApiError>()
-                    .is_some_and(|error| error.status() == reqwest::StatusCode::CONFLICT) =>
-            {
-                bail!("preference order changed elsewhere; re-run")
-            }
-            Err(error) => return Err(error),
+    let version = current["version"]
+        .as_i64()
+        .context("Invalid preference version")?;
+    let result = if let Some((group, requested)) = change {
+        let group = resolve_preference_group(items, &group)?;
+        let catalog = validate_preference_group(&group)?;
+        let group_items: Vec<_> = items
+            .iter()
+            .filter(|row| row["catalog_service_id"].as_str() == Some(catalog))
+            .cloned()
+            .collect();
+        if requested.is_none() {
+            let mut selected = current.clone();
+            selected["groups"] = Value::Array(
+                current["groups"]
+                    .as_array()
+                    .context("Invalid preference groups")?
+                    .iter()
+                    .filter(|row| row["group"] == group)
+                    .cloned()
+                    .collect(),
+            );
+            return print_preference(&auth.output, &selected, items);
         }
+        let ids = resolve_preference_ids(&group_items, &requested.unwrap())?;
+        let body = serde_json::json!({"ordered": ids, "expected_version": version});
+        preference_write_result(
+            api.put::<Value, _>(&format!("/service-preferences/groups/{group}"), &body)
+                .await,
+        )?
+    } else if release {
+        preference_write_result(
+            api.delete_with_body::<Value, _>(
+                "/service-preferences/hidden",
+                &serde_json::json!({"expected_version": version}),
+            )
+            .await,
+        )?
     } else {
         current
     };
-    match auth.output {
+    print_preference(&auth.output, &result, items)
+}
+
+fn print_preference(output: &OutputFormat, result: &Value, items: &[Value]) -> Result<()> {
+    match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
         OutputFormat::Table => {
             let mut table = Table::new();
-            table
-                .load_preset(UTF8_FULL_CONDENSED)
-                .set_header(["Rank", "Slug", "Label", "ID"]);
-            for (index, id) in result["ordered"]
+            table.load_preset(UTF8_FULL_CONDENSED).set_header([
+                "Group",
+                "Position",
+                "Discovery",
+                "Slug",
+                "Label",
+                "ID",
+                "Enabled",
+            ]);
+            for group in result["groups"]
                 .as_array()
-                .context("Invalid preference order")?
-                .iter()
-                .enumerate()
+                .context("Invalid preference groups")?
             {
-                if let Some(row) = items.iter().find(|row| row["id"] == *id) {
-                    table.add_row([
-                        (index + 1).to_string(),
-                        row["slug"].as_str().unwrap_or("-").into(),
-                        row["label"].as_str().unwrap_or("-").into(),
-                        id.as_str().unwrap_or("-").into(),
-                    ]);
+                let mut discovery_rank = 0;
+                for (index, id) in group["ordered"]
+                    .as_array()
+                    .context("Invalid group order")?
+                    .iter()
+                    .enumerate()
+                {
+                    if let Some(row) = items.iter().find(|row| row["id"] == *id) {
+                        let discovery = if row["is_active"] == false {
+                            format!("saved:{}", index + 1)
+                        } else if row["is_active"] == true && row["service_type"] == "http" {
+                            discovery_rank += 1;
+                            discovery_rank.to_string()
+                        } else {
+                            "-".to_string()
+                        };
+                        table.add_row([
+                            group["group"].as_str().unwrap_or("-").to_string(),
+                            (index + 1).to_string(),
+                            discovery,
+                            row["slug"].as_str().unwrap_or("-").into(),
+                            row["label"].as_str().unwrap_or("-").into(),
+                            id.as_str().unwrap_or("-").into(),
+                            row["is_active"].as_bool().unwrap_or(false).to_string(),
+                        ]);
+                    }
                 }
             }
             eprintln!("{table}");
@@ -4734,9 +4823,75 @@ async fn run_service_preference(command: ServicePreferenceCommands) -> Result<()
     Ok(())
 }
 
+fn resolve_preference_group(items: &[Value], value: &str) -> Result<String> {
+    if value.starts_with("catalog:") {
+        return Ok(value.to_string());
+    }
+    let mut catalogs: Vec<_> = items
+        .iter()
+        .filter(|row| row["catalog_service_slug"].as_str() == Some(value))
+        .filter_map(|row| row["catalog_service_id"].as_str())
+        .collect();
+    catalogs.sort_unstable();
+    catalogs.dedup();
+    if catalogs.len() != 1 {
+        bail!("Unknown or ambiguous catalog group '{value}'; use catalog:<UUID>");
+    }
+    Ok(format!("catalog:{}", catalogs[0]))
+}
+
+fn validate_preference_group(group: &str) -> Result<&str> {
+    let catalog = group
+        .strip_prefix("catalog:")
+        .context("Use --group catalog:<UUID>")?;
+    let uuid = uuid::Uuid::parse_str(catalog).context("Use a canonical catalog group UUID")?;
+    if uuid.to_string() != catalog
+        || uuid.get_variant() != uuid::Variant::RFC4122
+        || !(1..=8).contains(&uuid.get_version_num())
+    {
+        bail!("Use a canonical RFC-variant catalog UUID with version 1–8");
+    }
+    Ok(catalog)
+}
+
+fn preference_write_result(result: Result<Value>) -> Result<Value> {
+    match result {
+        Err(error)
+            if error
+                .downcast_ref::<crate::api::ApiError>()
+                .is_some_and(|error| error.status() == reqwest::StatusCode::CONFLICT) =>
+        {
+            bail!("preference order changed elsewhere; re-run")
+        }
+        result => result,
+    }
+}
+
 #[cfg(test)]
 mod service_preference_tests {
     use super::*;
+    #[test]
+    fn service_preference_catalog_uuid_contract() {
+        for id in [
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "aaaaaaaa-aaaa-9aaa-8aaa-aaaaaaaaaaaa",
+            "aaaaaaaa-aaaa-4aaa-1aaa-aaaaaaaaaaaa",
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        ] {
+            assert!(
+                validate_preference_group(&format!("catalog:{id}")).is_err(),
+                "{id}"
+            );
+        }
+        for version in 1..=8 {
+            let id = format!("aaaaaaaa-aaaa-{version}aaa-8aaa-aaaaaaaaaaaa");
+            assert_eq!(
+                validate_preference_group(&format!("catalog:{id}")).unwrap(),
+                id
+            );
+        }
+    }
     #[test]
     fn service_preference_resolves_active_slug_and_displays_rank() {
         let items = vec![

@@ -3249,6 +3249,8 @@ async fn handle_meta_search(
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": webhook_tool_schema(auth, &t.input_schema),
+                "executable": mcp_service::resolve_tool_call(&t.name, &services)
+                    .is_some_and(|(service, _)| service.executable),
                 "preference_rank": mcp_service::resolve_tool_call(&t.name, &services)
                     .and_then(|(service, _)| ranks.get(&service.service_id).copied()),
             });
@@ -3286,6 +3288,7 @@ async fn handle_meta_search(
                 "inputSchema": tool.input_schema,
                 "hint": "Call this native tool directly by name.",
                 "preference_rank": null,
+                "executable": true,
             })
         }));
     }
@@ -3293,7 +3296,7 @@ async fn handle_meta_search(
         "matches": results,
         "count": results.len(),
         "hint": "Use nyx__call_tool to invoke any of these tools by name. \
-            Pass the tool name and arguments as shown in the match results. At equal relevance, tools from the owner's preferred services are listed first.",
+            Pass the tool name and arguments as shown in the match results. At equal relevance, connections of the same service follow the owner's agent order in their original slots. preference_rank is relative to that service; executable reports current credential and routing availability.",
     });
     if auth.chat.is_some() {
         response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);

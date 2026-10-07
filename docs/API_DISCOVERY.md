@@ -318,42 +318,52 @@ and `/api/v1/mcp/config` for the whole user.
 
 ### Tool search semantics
 
-Personal service preference adds the third search key: matched words descending,
-words in name descending, authorized `preference_rank` ascending, then loader
-order. Relevance wins; the 25-result cap applies after this ordering. Search
-matches and connected-service rows carry `preference_rank` (1-based or null);
-connected services sort by preference first. Ranks are dense after visibility,
-including scoped/guest filtering. Platform-source catalog fallbacks are unranked.
-Ranks use eligible active discovered connections and can differ from `/keys`:
-if disabled UI Discovery #1 is skipped, active UI Discovery #2 becomes MCP
-`preference_rank: 1`.
-`GET/PUT /api/v1/service-preferences` edits the personal connection-ID order;
-`tools/list`, `/mcp/config`, catalog digests and explicit execution are unchanged.
-REST preference GET/PUT reject relay and service-account tokens. MCP discovery
-still applies the verified relay owner's order after its live allowlist/node
-filters; service-account subjects normally have no human document and retain
-legacy order. Delegated and OAuth tokens cannot write preferences; their metadata
-GET follows management policy, and MCP applies the subject's order only when
-existing proxy scopes authorize that MCP request.
+Personal agent order applies within an immutable catalog group, preserving
+slots occupied by unrelated services. `nyx__list_connected_services` starts from
+the caller's original loader vector and refills each group's existing slots with
+its ranked connections first, then unranked connections in their original order.
+Custom singleton connections and platform/internal catalog entries keep their
+slots and have `preference_rank: null`.
 
-NyxID cannot make an independent client (Claude Code with its own Composio or
-browser tools, Cursor, OpenClaw) prefer a NyxID service over tools NyxID does not
-serve. The guarantee is exactly: within a NyxID discovery response, preferred
-services sort first at equal relevance, and every response row carries
-`preference_rank` so a client that wants to honor it can.
+`nyx__search_tools` splits its nonempty query on non-alphanumeric characters and
+matches words as case-insensitive substrings of the qualified tool name
+(`<connection-slug>__<operation>`), service name and description. Relevance sorts
+by matched words descending, words in the name descending, then original loader
+candidate order. Within each equal-relevance bucket, only slots occupied by the
+same catalog group are refilled by connection preference; operations of each
+connection keep their relative order. Search always consumes the original loader
+vector, never the listing permutation. The 25-result cap is applied last. Better
+matches remain above preferred partial matches. With no ranks, existing search
+and listing order is preserved. Word order is irrelevant and concatenated names
+such as `getentitystate` match "entity state". The pure helper also accepts an
+empty query using the same slot rule; the transport requires a nonempty query.
 
+Every search match and listing row carries `preference_rank` (dense within the
+caller's discovered catalog group, or null) and `executable`. Enabled rows with
+revoked, expired or missing credentials may appear with `executable: false`;
+disabled rows are not loaded. Native machine/upload search extras carry
+`preference_rank: null`, `executable: true`, and preserve their existing append
+and cap semantics. Ranks do not verify downstream providers or grant execution.
 
-`nyx__search_tools` splits the query on non-alphanumeric characters and matches
-each word as a case-insensitive substring of the qualified tool name
-(`<slug>__<operation>`), the service name and the description. Tools containing
-every word rank first, then partial matches; ties use words in name, dense
-service preference and stable loader order, capped at 25 after sorting. Word
-order is irrelevant, so "skill search" and "search skills" both find
-`ornn-api__searchskills`, and concatenated operation names such as
-`getentitystate` match "entity state". The pure search helper accepts an empty query and orders its first 25 tools by
-preference. The MCP transport requires a nonempty query. Unrankable native
-machine/upload search extras carry `preference_rank: null` and retain their
-existing append and cap behavior.
+Ranks derive after all existing membership, allowlist, node, operation and guest
+filters. For example, a disabled saved position 1 appears as `Saved #1` in the
+owner's UI; a restricted key seeing only the owner's Discovery #2 and #4 sees MCP
+ranks 1 and 2, in the same relative order. Guest connected search/list includes
+only granted UserManaged/Platform connections and drops Internal catalog entries;
+native `nyxid` virtual tools retain their separate guest authorization.
+
+The minimal grouped GET and human-only scoped PUT/hidden DELETE are documented
+in [API.md](API.md#agent-discovery-order-per-service-group). Relay REST reads and
+writes are rejected; scoped MCP applies the verified relay owner's order.
+Service-account subjects normally have no human document and retain default
+order. Delegated/OAuth metadata GET follows management policy; they cannot write,
+and MCP order applies only when existing proxy scopes authorize the request.
+
+This is advisory ordering for NyxID responses. Independent clients may use their
+own tools and choose another connection. Named tools and slugs execute exactly
+the addressed connection; explicit service pools keep their own routing rules.
+`tools/list`, `/mcp/config`, catalog digests, approvals, authority and billing are
+unchanged. Implicit LLM gateway selection is unchanged by Part A.
 
 ### Image tool results
 

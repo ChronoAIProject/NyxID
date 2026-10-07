@@ -1,6 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useCatalog,
@@ -45,13 +47,16 @@ beforeEach(() => {
 
 describe("query hooks unwrap their list envelopes", () => {
   it("useKeys returns the `keys` array from /keys", async () => {
+    useAuthStore.setState({ user: { id: "signed-in-person" } as User });
     mockGet.mockResolvedValue({ keys: [{ id: "k1" }] });
     const { result } = renderHook(() => useKeys(), {
       wrapper: wrapperFactory(),
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(mockGet).toHaveBeenCalledWith("/keys");
+    expect(mockGet).toHaveBeenCalledWith("/keys", {
+      authorityGuard: expect.any(Function),
+    });
     expect(result.current.data).toEqual([{ id: "k1" }]);
   });
 

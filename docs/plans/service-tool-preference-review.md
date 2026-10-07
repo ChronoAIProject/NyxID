@@ -33,6 +33,136 @@ This record tracks the delivery and review of user-controlled AI service prefere
 
 ## Review status
 
+The user clarified that connection choice and reordering must appear inside
+each actual service group, such as the expanded Anthropic connection table.
+The global editor does not satisfy that requirement. The revised inline
+implementation is complete and PR #1796 remains draft through final validation
+and review. Fable completed the revised plan; ROOT authorized Part A with
+31 acceptance criteria and personally reviewed the revised source and behavior.
+All 31 Part A acceptance criteria have passing local evidence, and ROOT has
+closed every substantiated finding below. The final all-target Clippy recheck
+also passed. Fresh CI and Opus 5.5 review of the published revision are tracked
+on PR #1796; old checks and approval for `e72036b7` do not satisfy these gates.
+
+## Revised scope: PM plan review
+
+The PM fetched main again and integrated `cac8ce77` (#1797) in `bac66b3f`.
+The only conflicts were the generated CLI wizard HTML/hash; main's artifacts
+are an interim baseline and the final frontend must regenerate them.
+
+Part A places discovery controls in the existing per-service connection table.
+The user's separate question about using that order for implicit LLM gateway
+selection is pending; implementation of the confirmed UI/discovery work does
+not depend on that answer. No mock preference persistence is active on the
+production-backed frontend at port 4630.
+
+| PM finding | Required correction | Status |
+|---|---|---|
+| Group-anchor sorting relocates unrelated interleaved services, including with an empty order. | Permute only each group's occupied slots, within identical relevance buckets for search; test interleaving and result truncation. | Closed: pure/MCP slot and relevance/cap regressions pass; original loader vector preserved |
+| Putting pills beside label/readiness would reintroduce the reviewed text squeeze. | Keep the existing label/readiness geometry; place preference metadata below it. | Closed: final renderer/source and geometry tests place pills below readable identities |
+| Removing a group and reinserting a block cannot preserve unrelated absolute positions; it also risks false no-op changes. | Define a deterministic merge with preservation of hidden IDs and unrelated relative order, and prove interleaved no-op behavior. | Closed: deterministic varied merge sequences and real DB CAS/no-op tests preserve hidden/unrelated relative order |
+| A bounded request can exceed the account-wide storage bound after a preserving merge. | Enforce the 200-ID resulting-list limit without disclosing or deleting hidden IDs. | Closed: real capacity/hidden-release fixture and browser recovery checks enforce the resulting 200-ID bound |
+| UI active counts cannot establish caller discovery or provider executability. | Say enabled/default discovery order; expose execution metadata separately. | Closed: honest enabled/readiness wording and caller-specific rank/executable tests pass |
+| Singleton/rank and active-only edit rules contradict scoped callers and disabled-heavy groups. | Immutable custom singleton has no rank; scoped catalog member may rank first; allow editing the complete disabled-inclusive group. | Closed: dense singleton/custom-exclusion fixtures and real full30/26 editor checks pass |
+| Dirty guards can run after a filter has already hidden the editor. | Guard before mutation or keep the edited group mounted; verify navigation, refetch and identity races. | Closed: real filters/router/tabs/History and identity-race checks retain or safely close the draft |
+| A generic implicit finder change can affect approval reads and omit execution scopes. | If runtime ordering is requested, use an explicit execution entry point/context, preserving owner tiers and exact-authority fences. | Conditional Part B contract specified; unchanged runtime verified for the authorized Part A scope |
+
+The PM also required explicit capacity recovery: normal scoped saves never
+prune hidden or stale IDs; a confirmed first-party hidden-release operation
+removes only IDs outside the current authorized inventory. Shared GET responses
+expose no hidden counts. Accessible custom and disabled entries remain intact.
+This is included in Part A acceptance criterion AC-31.
+
+## Revised scope: direct implementation review
+
+The PM reviews source directly while Sol implements; these findings require
+correction and fresh regression evidence before the revised PR can be ready.
+
+| PM finding | Required correction | Status |
+|---|---|---|
+| Abandoned asynchronous recovery can leave the new identity permanently busy. | Fence and reset operation state on identity changes; prove the new identity can navigate and edit after the abandoned read. | Closed: deferred recovery hook and real account-switch browser tests; new identity state resets |
+| Draft member enrichment neither appends new rows nor removes deleted or inaccessible rows after a successful inventory refetch. | Reconcile successful inventory snapshots without resetting local order, version or dirty state; preserve failed-read drafts. | Closed: successful-refetch add/remove hook and browser checks preserve draft/version; failed reads retain rows |
+| Existing early inventory-error returns unmount the inline card and its recovery controls. | Keep the cached edited card visible with Retry and blocked saves on card and overview surfaces. | Closed: real card/overview read-error recovery scenarios keep editor mounted and saves blocked |
+| Filter wrappers discard drafts instead of keeping the edited group mounted under the final plan. | Keep the full edited group expanded and mounted when filters hide it, while filters continue to affect other cards. | Closed: real filtered-group browser checks retain the full edited group without view writes |
+| A tab handler and the navigation blocker can confirm the same dirty draft twice. | Use one confirmation per action with cancellation preserving both draft and URL. | Closed: real tab/router/overview History tests confirm once and preserve draft/URL on cancellation |
+| Loading or failed preference reads claim no order is saved. | Preserve known key metadata; otherwise show a loading or unavailable state. | Closed: loading/error hook assertions and production-404 disclosure browser checks preserve known pills |
+| A 201-row group exceeds the client schema bound and can make Save silently reject. | Expose an actionable limit or supported bounded selection, and verify the boundary. | Closed: 201-row local limit, reset and retry/overwrite boundary tests show actionable validation |
+| The full editing table derives pool metadata from filtered rows. | Keep pool associations and row identity readable for every row shown while ordering. | Closed: real filtered full-group metadata test retains explicit pool Priority and provenance |
+| TanStack can replace pending mutation options after account switching, and a late invalidation can refetch an old actor's cache using new authentication. | Bind actors in mutation variables and read query keys, prevent old-actor refetches, and verify deferred save/release plus late success across identity switching. | Closed: deferred MutationCache actor tests and real transport tests prevent cross-actor writes/refetches |
+| CLI save output combines the new group order with discovery ranks fetched before the save. | Project ranks from the returned order or refresh metadata; verify reversing two ranked rows in an actual subprocess. | Closed: personally reviewed returned-order projection; all four actual CLI subprocess tests pass, including reversed ranks and disabled positions |
+| Retry and conflict-overwrite bypass form validation and can throw after successful inventory growth exceeds 200 IDs. | Validate every save path safely, preserve the draft, and render the same actionable local limit message. | Closed: safeParse guards all save paths; growth/Retry/Overwrite tests preserve the draft and display limit |
+| CLI rank projection includes active non-HTTP connections that REST discovery excludes. | Derive CLI discovery ranks over active HTTP rows and keep disabled saved positions separate. | Closed: personally reviewed active-HTTP projection; final CLI integration includes non-HTTP rows and verifies they do not consume discovery ranks |
+| The newly added inventory recovery can retry an old actor's key query under a new account's authentication. | Bind the list query to its actor and reject mismatched retries before transport; prove late A failure cannot fetch B's inventory into A's cache. | Closed: actor-keyed query retries and real DEV transport race tests reject mismatched authority |
+| Initial browser assertions depend on a transient pickup announcement and finish before normal read retries settle. | Verify durable drag activation and the single live region; await bounded read failure before asserting recovery, with real sensors and retries retained. | Closed: independent final browser suite passes 21/21 with real sensors and settled read failures |
+| Static merge cases and partial execution checks do not establish every final acceptance criterion. | Add meaningful varied merge sequences, later CAS loser recovery, hidden-release audit/isolation assertions, and paired slug-proxy and implicit-gateway execution evidence. | Closed: canonical final backend run passes 14/14, including varied merge, CAS retry, hidden audit/isolation and paired executions |
+| The overview row's History callback bypasses the tab guard and hides a dirty editor. | Guard before changing either the selected history row or tab; prove cancellation preserves the draft and acceptance confirms once. | Closed: real overview History cancellation/acceptance scenarios pass one confirmation and draft retention |
+| Requiring a dashboard identity for every inventory query disables Services selection in the authenticated standalone CLI wizard. | Preserve the wizard's explicit local authority without weakening actor fences; verify the real inventory hook and Mode A transport with an empty dashboard auth store, then regenerate the bundle. | Closed: real Mode A shim/empty AuthStore transport and built wizard browser tests pass; regenerated bundle freshness test passes |
+| The explanation prints HTTP tool prefixes for enabled non-HTTP connections even though they receive no discovery rank. | Present actual HTTP discovery alternatives and accurately describe unsupported protocol rows; verify catalog SSH or mixed-protocol behavior without changing execution. | Closed: HTTP/SSH renderer regression and collapsed protocol explanation pass; source states actual protocols |
+| A successful refetch removing the entire accessible inventory returns the empty state and unmounts the active editor. | Retain the edited group and Cancel action until the draft closes; verify an empty inventory, not only an empty group with unrelated rows remaining. | Closed: real entire-inventory-empty browser scenario retains editor and Cancel |
+| The search tool description and an earlier architecture paragraph still describe global preference sorting and a Reorder editor. | Align agent-facing descriptions and architecture documentation with equal-relevance same-group slot permutation and the inline full-group connection table. | Closed: personally inspected agent-facing search description and architecture/API/discovery/chat docs |
+| In DEV, the real API client awaits its mock module between the hook's identity check and fetch, so the production-backed preview has an unfenced transport gap. | Bind the opted-in preference and inventory requests at the actual fetch boundary and after module loading; prove old-actor requests never reach transport under the replacement authority, and late old 401s do not clear the new account. | Closed: real api-client tests cover asynchronous DEV import, actual fetch boundary, replacement authority, late401 and lateJSON |
+| Frontend and backend canonical catalog-group validation disagree on special and unknown-version UUIDs. | Align the frontend, backend and CLI contract while preserving existing v4/v5 catalog groups; verify nil, max and unknown-version boundaries. | Closed: personally inspected matching RFC UUID1–8 validators; final backend/frontend and CLI canonical boundary tests pass |
+| The user's production-preview screenshot shows a repeated wall of explanations above the connections and an unavailable action that is hard to understand. | Keep a compact summary and discoverable Agent order action beside the connection table; collapse the detailed explanation behind How selection works, with a concise truthful server state and no simulated production saves. Verify card, overview, dirty-draft and production-404 disclosure behavior. | Closed: independent card/overview 404 and dirty-draft disclosure scenarios pass compact/collapsed flow |
+| The independent compact mobile screenshots show normal row labels reduced to a single letter by readiness badges. | Reserve a useful label width and wrap readiness when necessary in normal and editing rows, with pills below the label and no overlaps; measure normal production-404 and editing layouts at mobile, tablet and desktop widths. | Closed: independently inspected final normal/editing mobile screenshots; actual label spans >=64px and no overlaps at390/1024/1440 |
+| The user requests the existing Hide connections chevron and interprets the Agent order availability message as Service Pools being unavailable. | Reuse the same chevron geometry/rotation for How selection works and make the backend requirement specific to saving agent order, preserving readable counts, honest unknown state and existing pool availability. | Closed: same lucide ChevronRight geometry/rotation, targeted saving-backend message; independent final browser and visual checks pass |
+| Final Clippy detects a production helper used only by regression tests. | Make the helper private and compile it only in tests, preserving the production discovery path without suppressions. | Closed: ROOT inspected both references and the cfg(test) correction; all-target Clippy compiles production/test variants and exits zero with no warnings |
+
+The revised tests use the isolated MongoDB 8.0.17 replica set at
+`127.0.0.1:27029`, replica-set name `nyxidPreferenceReview`. Earlier evidence
+below remains historical evidence for unchanged boundaries; every revised
+acceptance criterion requires fresh evidence.
+
+## Revised scope: independent final validation and sample preview
+
+ROOT ran the final real-route Playwright suite on port 4644 with two workers and
+no retries: 21/21 scenarios passed in 55.6 seconds, including actual gestures,
+inline recovery/guards, readable identities, compact disclosure and the built
+standalone Mode A wizard. ROOT inspected the final desktop and mobile screenshots;
+normal and editing labels remain readable and the chevron matches Hide connections.
+Log: `/tmp/nyxid-service-preference-group-pm-final-browser.log`.
+
+ROOT's final `npm run build` exited zero, including TypeScript, production app,
+legal prerender, credential acceptance and mock-footprint checks.
+Log: `/tmp/nyxid-service-preference-group-pm-final-build.log`.
+The final full frontend run passed 466 files / 4,773 tests in 190.34 seconds;
+ROOT inspected `/tmp/nyxid-service-preference-inline-final-full.log`.
+The final backend UUID recheck executed all 14 feature tests against the isolated
+MongoDB replica set, with zero failures or ignored tests (3.18 seconds), including
+CAS races, scoped merge, privacy/audit and exact execution invariance.
+Log: `/tmp/nyxid-service-preference-inline-backend-uuid.log`.
+All five neighboring `search_all_tools` tests passed. The assistant agent-creation search
+regression and neighboring curation route-confinement test also passed.
+Three CLI unit tests and four actual CLI subprocess tests passed; the latter
+exercise grouped reads/saves/reset/release, current output ranks, HTTP-only
+discovery projection, confirmation,409 and capacity400 exits. The regenerated
+wizard freshness test passed. ROOT inspected the final logs:
+`/tmp/nyxid-service-preference-inline-final-cli-unit.log`,
+`/tmp/nyxid-service-preference-inline-final-cli-integration.log`, and
+`/tmp/nyxid-service-preference-inline-final-wizard-freshness.log`.
+The all-target backend/CLI Clippy recheck exited zero after the test-only helper
+correction (5m15s, no warnings), as recorded in
+`/tmp/nyxid-service-preference-inline-final-clippy-recheck.log`.
+Final lint has zero errors and the same 29 unrelated baseline warnings; none are
+introduced by the feature.
+
+The user explicitly authorized a seeded mock preview after reviewing the
+production-backend limitation. ROOT created a separate temporary Vite/API fixture
+at `http://127.0.0.1:4631/keys`, clearly marked LOCAL SAMPLE DATA. It serves
+30 Anthropic connections (4 enabled / 26 disabled), 34 sample agent-key grants,
+four Google Workspace connections and a separate explicit priority pool.
+Sample preferences persist to a local JSON file and never reach production.
+The production-backed server at port 4630 and its OAuth bridge remain intact.
+
+ROOT drove the actual sample server with Playwright, without API interception:
+mouse drag, keyboard reorder, numbered pills, Save, reload persistence, Cancel,
+service-scoped reset, overview and mobile checks passed. The restored seed is
+available via the banner. No production API or service execution requests were
+made; only the local origin and the app's existing Google Fonts assets appeared.
+Fixture, instructions, screenshots and evidence live outside the repository in
+`/tmp/nyxid-service-preference-mock-preview/`; its `smoke.log` records the pass.
+
+The following records the completed review of the previous scope:
+
 Fable 5.1 delivered 14 implementation tasks and 24 acceptance criteria. PM review
 added four criteria and required corrections to routing, auth, privacy, model
 defaults, concurrency, error recovery, accessibility, and validation commands.
@@ -427,3 +557,34 @@ gate hides Reorder there. The setup introduces no repository source changes.
 Only the existing Sol and Opus heca sessions are reused for this follow-up.
 The PM owns publication; final required CI and Opus sign-off bind the revised
 published head in the PR body.
+
+## Within-service revision requested by the user
+
+The user's Anthropic card has 30 connections, 26 disabled connections and
+34 agent keys with access. Agent key count is not a connection count. The
+requested interaction belongs in that service's existing card and connection
+table, with clear per-connection order and an explanation of how an agent
+selects a tool. A separate global list is insufficient.
+
+The PM disabled the temporary local ordering emulation after the user rejected
+that review flow. Port 4630 continues to use the production metadata/OAuth
+bridge, whose production backend does not yet implement preference writes.
+No emulated order is delivered to production. The actual branch implementation
+must remain honest about unavailable saves on an older backend.
+
+Open revision gates:
+
+| Finding | Required correction | Status |
+| --- | --- | --- |
+| Reorder replaces all service cards with one global list. | Put handles, local order pills and Save/Cancel inside the existing service card's connection table; keep its metadata and surrounding groups visible. | Plan in progress |
+| Full replacement cannot safely preserve preferences omitted from a scoped read. | Server-authoritative group writes must retain unrelated and currently inaccessible stored entries, with CAS and no-op behavior. | Plan in progress |
+| Discovery ranks and sorting currently cross service groups. | Derive dense ranks within each immutable service group and preserve relevance and unrelated group ordering with a transitive deterministic algorithm. | Plan in progress |
+| The group does not explain how discovery, named execution and pools select connections. | Display a concise explanation in the actual group, including agent-key scope, disabled/unavailable state, explicit connection slugs and pool routing. | Plan in progress |
+| The implicit provider gateway chooses an active connection without saved priority. | Document the current selector and separately decide whether the user's order must govern that route. The PM asked the user for this runtime-scope choice. | User clarification pending |
+| Production 404 makes all preference controls disappear in the local frontend. | Preserve visible explanatory group UI and an honest unavailable-save state on older backends; do not simulate successful production persistence. | Plan in progress |
+| Earlier source sign-off covers the rejected global editor. | Repeat PM review, relevant validation and Opus sign-off on the final revised SHA and plan. | Pending implementation |
+
+Only the original Fable, Sol and Opus heca sessions are reused. Sol completed
+a read-only architecture review and awaits the PM-reviewed plan. The PM
+prepared a dedicated MongoDB 8.0.17 replica set on loopback port 27029 for
+revision tests; it contains no production data or credentials.

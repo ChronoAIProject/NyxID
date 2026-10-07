@@ -1,4 +1,6 @@
 import { Link } from "@tanstack/react-router";
+import type { ServiceGroupOrder } from "@/hooks/use-service-group-order";
+import { ServiceAgentOrderPanel } from "./service-agent-order-panel";
 import {
   useId,
   useLayoutEffect,
@@ -7,7 +9,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ChevronRight, Clock3, History } from "lucide-react";
+import { ChevronRight, Clock3, History, ListOrdered } from "lucide-react";
 import { useServiceView } from "@/hooks/use-service-view";
 import { useServiceCardTransition } from "@/hooks/use-service-card-transition";
 import { ServiceViewToolbar } from "./service-view-toolbar";
@@ -66,7 +68,9 @@ function GroupCard({
   routing,
   allConnections,
   catalog,
+  agentOrder,
 }: {
+  readonly agentOrder?: ServiceGroupOrder;
   readonly catalog?: CatalogEntry;
   readonly routing: ServiceRoutingPools;
   readonly allConnections: readonly KeyInfo[];
@@ -81,6 +85,20 @@ function GroupCard({
 }) {
   const identity = useAuthStore((state) => state.user?.id);
   const preferred = preferredConnection(group.connections);
+  const ordering = agentOrder?.groupId === group.id ? agentOrder : undefined;
+  const isOrdering = Boolean(ordering);
+  const orderButton = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (!agentOrder || agentOrder.focusGroup !== group.id || agentOrder.reason)
+      return;
+    const frame = requestAnimationFrame(() => {
+      if (orderButton.current && !orderButton.current.disabled) {
+        orderButton.current.focus();
+        agentOrder.clearFocus();
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [agentOrder, group.id]);
   const [routingOpen, setRoutingOpen] = useState(false);
   const [requestedPanel, setRequestedPanel] = useState<{
     id: string;
@@ -90,7 +108,9 @@ function GroupCard({
   const [routeId, setRouteId] = useState<string | null>(null);
   const pools = routing.pools.filter((pool) =>
     pool.members.some((member) =>
-      connections.some((key) => key.id === member.user_service_id),
+      (ordering ? group.connections : connections).some(
+        (key) => key.id === member.user_service_id,
+      ),
     ),
   );
   const selectedPool = pools.find((pool) => pool.id === routeId) ?? pools[0];
@@ -99,7 +119,7 @@ function GroupCard({
   const cardRef = useRef<HTMLElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const headerOffset = useRef(0);
-  const connectionIds = connections
+  const connectionIds = (ordering ? ordering.connections : connections)
     .map((connection) => connection.id)
     .join(",");
   const [headerStuck, setHeaderStuck] = useState(false);
@@ -149,6 +169,7 @@ function GroupCard({
     expanded,
     filtersRef,
     connectionIds,
+    isOrdering,
     routingOpen,
     selectedPool?.id,
     requestedPanel?.version,
@@ -309,6 +330,9 @@ function GroupCard({
           className={cn(
             "relative flex flex-col bg-card",
             expanded ? "rounded-t-xl shadow-sm" : "h-72 rounded-xl",
+            // The stuck cover hides the card's side borders; redraw them on
+            // the header so its edges line up with the body's borders below.
+            expanded && headerStuck && "outline outline-border",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
@@ -342,12 +366,12 @@ function GroupCard({
                   {count === 1 ? "connection" : "connections"}
                 </p>
               </div>
-              {!expanded && preferred?.preference_rank != null && (
+              {!expanded && preferred?.preference_rank === 1 && (
                 <button
                   type="button"
                   onClick={() => onToggle(cardRef.current)}
                   className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                  aria-label={`Discovery preference ${preferred.preference_rank} · ${preferred.label}`}
+                  aria-label={`Preferred: ${preferred.label}`}
                   title={group.connections
                     .filter((connection) => connection.preference_rank != null)
                     .map(
@@ -356,9 +380,7 @@ function GroupCard({
                     )
                     .join("\n")}
                 >
-                  <Badge variant="accent">
-                    Discovery #{preferred.preference_rank}
-                  </Badge>
+                  <Badge variant="accent">Preferred: {preferred.label}</Badge>
                 </button>
               )}
               {disabled > 0 && (
@@ -495,6 +517,26 @@ function GroupCard({
                 ? "Hide connections"
                 : `View ${matchingCount} ${matchingCount === 1 ? "connection" : "connections"}`}
             </Button>
+            {expanded &&
+              agentOrder &&
+              group.id.startsWith("catalog:") &&
+              group.connections.length >= 2 && (
+                <Button
+                  ref={orderButton}
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={Boolean(agentOrder.reason)}
+                  title={
+                    agentOrder.reason ??
+                    "Set agent discovery order within this service"
+                  }
+                  onClick={() => agentOrder.start(group)}
+                >
+                  <ListOrdered className="size-3.5" aria-hidden="true" />
+                  Agent order
+                </Button>
+              )}
             <div className="flex items-center gap-2 pr-2">
               {matchingCount < count && (
                 <span className="text-11 text-muted-foreground">
@@ -520,7 +562,19 @@ function GroupCard({
       >
         {expanded && (
           <div className="border-t border-border bg-background/30">
-            {routingOpen ? (
+            {ordering && (
+              <p className="p-3 text-11 text-muted-foreground">
+                Kept visible while ordering
+              </p>
+            )}
+            {agentOrder && (
+              <ServiceAgentOrderPanel
+                group={group}
+                order={agentOrder}
+                hasPool={pools.length > 0}
+              />
+            )}
+            {routingOpen && !ordering ? (
               <>
                 <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
                   {pools.map((pool) => (
@@ -578,7 +632,18 @@ function GroupCard({
               <ServiceConnectionTable
                 key={requestedPanel?.version ?? 0}
                 initialPanel={requestedPanel}
-                connections={connections}
+                connections={
+                  ordering
+                    ? ordering.connections.map((key) => ({
+                        ...key,
+                        credential_source:
+                          group.connections.find((item) => item.id === key.id)
+                            ?.credential_source ?? key.credential_source,
+                      }))
+                    : connections
+                }
+                ordering={ordering}
+                savedOrder={agentOrder?.savedOrder(group.id)}
                 insights={insights}
                 serviceName={group.name}
                 renderActions={renderConnectionActions}
@@ -603,8 +668,10 @@ export function GroupedServiceCards({
   renderConnectionActions,
   actions,
   renderTable,
+  agentOrder,
 }: {
   readonly keys: readonly KeyInfo[];
+  readonly agentOrder?: ServiceGroupOrder;
   readonly catalog?: readonly CatalogEntry[];
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
   readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
@@ -671,9 +738,17 @@ export function GroupedServiceCards({
   }, [view.accountId]);
   const { filters, expanded } = view;
   const groups = groupServiceConnections(keys, catalog);
+  if (
+    agentOrder?.editingGroup &&
+    !groups.some((group) => group.id === agentOrder.editingGroup?.id)
+  )
+    groups.push(agentOrder.editingGroup);
   const visible = groups
     .map((group) => ({ group, matches: matchingConnections(group, filters) }))
-    .filter(({ matches }) => matches.length > 0);
+    .filter(
+      ({ group, matches }) =>
+        matches.length > 0 || agentOrder?.groupId === group.id,
+    );
   const matchingKeys = visible.flatMap(({ matches }) => matches);
   const insights = useServiceInsights(renderTable ? [] : keys);
   const routing = useServiceRoutingPools(keys, !renderTable);
@@ -698,7 +773,10 @@ export function GroupedServiceCards({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => animateCards(() => view.setExpanded([]))}
+            onClick={() => {
+              if (!agentOrder || agentOrder.guard())
+                animateCards(() => view.setExpanded([]));
+            }}
           >
             Collapse
           </Button>
@@ -713,14 +791,19 @@ export function GroupedServiceCards({
               <GroupCard
                 key={group.id}
                 group={group}
-                expanded={expanded.includes(group.id)}
+                agentOrder={agentOrder}
+                expanded={
+                  expanded.includes(group.id) ||
+                  agentOrder?.groupId === group.id
+                }
                 insights={insights}
                 routing={routing}
                 allConnections={keys}
                 catalog={catalog?.find((entry) => entry.slug === group.slug)}
                 connections={matches}
                 search={filters.search}
-                onToggle={(card) =>
+                onToggle={(card) => {
+                  if (agentOrder && !agentOrder.guard()) return;
                   animateCards(
                     () =>
                       view.setExpanded(
@@ -728,8 +811,8 @@ export function GroupedServiceCards({
                       ),
                     expanded.includes(group.id) ? undefined : card,
                     filtersRef.current,
-                  )
-                }
+                  );
+                }}
                 renderConnectionActions={renderConnectionActions}
                 filtersRef={filtersRef}
               />

@@ -1,4 +1,22 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  DndContext,
+  PointerSensor,
+  KeyboardSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import type { ServiceGroupOrder } from "@/hooks/use-service-group-order";
+import { ServiceOrderRow, ServiceOrderHandle } from "./service-order-rows";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowUpRight,
@@ -171,6 +189,8 @@ export function ServiceConnectionTable({
   catalog,
   pools = [],
   onViewPool,
+  ordering,
+  savedOrder = [],
 }: {
   readonly connections: readonly KeyInfo[];
   readonly serviceName: string;
@@ -181,6 +201,8 @@ export function ServiceConnectionTable({
   readonly catalog?: CatalogEntry;
   readonly pools?: readonly ServicePool[];
   readonly onViewPool?: (poolId: string) => void;
+  readonly ordering?: ServiceGroupOrder;
+  readonly savedOrder?: readonly string[];
 }) {
   const [open, setOpen] = useState<{
     id: string;
@@ -193,7 +215,45 @@ export function ServiceConnectionTable({
       current?.id === id && current.view === view ? null : { id, view },
     );
 
-  return (
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+  const root = useRef<HTMLDivElement>(null);
+  const focusNeeded = useRef(false);
+  useEffect(() => {
+    if (!ordering) {
+      focusNeeded.current = false;
+      return;
+    }
+    if (focusNeeded.current || ordering.blocked || ordering.busy) return;
+    const frame = requestAnimationFrame(() => {
+      root.current
+        ?.querySelector<HTMLButtonElement>('button[aria-label^="Drag "]')
+        ?.focus();
+      focusNeeded.current = true;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [ordering]);
+  const rankedIds = ordering?.ordered ?? savedOrder;
+  const activeRanks = new Map<string, number>();
+  for (const id of rankedIds) {
+    if (
+      connections.some(
+        (key) => key.id === id && key.is_active && key.service_type === "http",
+      )
+    )
+      activeRanks.set(id, activeRanks.size + 1);
+  }
+  const ids = connections.map((key) => key.id);
+  const move = (id: string, direction: number) => {
+    const index = ids.indexOf(id);
+    if (ordering && index + direction >= 0 && index + direction < ids.length)
+      ordering.update(arrayMove(ids, index, index + direction));
+  };
+  const table = (
     <TooltipProvider delayDuration={200}>
       <Table
         aria-label={`${serviceName} connections`}
@@ -220,7 +280,8 @@ export function ServiceConnectionTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {connections.map((key) => {
+          {connections.map((key, rowIndex) => {
+            const http = key.service_type === "http";
             const insight = insights.connections.get(key.id);
             const billing = insight?.billing;
             const billingCategory =
@@ -276,8 +337,12 @@ export function ServiceConnectionTable({
               .join(" · ");
             return (
               <Fragment key={key.id}>
-                <TableRow
-                  data-service-connection-row={key.id}
+                <ServiceOrderRow
+                  id={key.id}
+                  ordering={Boolean(ordering)}
+                  blocked={Boolean(
+                    ordering && (ordering.busy || ordering.blocked),
+                  )}
                   className={cn(
                     "[&>td]:align-top [&>td]:py-3",
                     // The opened panel continues this entry, so no rule between them.
@@ -285,7 +350,13 @@ export function ServiceConnectionTable({
                   )}
                 >
                   <TableCell>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {ordering && (
+                        <ServiceOrderHandle
+                          label={`${key.label} (${key.slug})`}
+                          disabled={ordering.busy || ordering.blocked}
+                        />
+                      )}
                       <button
                         type="button"
                         className="flex size-5 shrink-0 items-center justify-center rounded-sm hover:bg-accent hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring"
@@ -306,15 +377,25 @@ export function ServiceConnectionTable({
                       <Link
                         to="/keys/$keyId"
                         params={{ keyId: key.id }}
+                        onClick={
+                          ordering
+                            ? (event) => event.preventDefault()
+                            : undefined
+                        }
+                        tabIndex={ordering ? -1 : undefined}
+                        aria-disabled={ordering ? true : undefined}
                         aria-label={`View ${key.label} connection details (${owner})`}
-                        className="inline-flex min-w-0 items-center gap-1 rounded-sm font-medium hover:text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                        className="inline-flex min-w-28 flex-1 items-center gap-1 rounded-sm font-medium hover:text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <ServiceIcon
                           slug={key.catalog_service_slug ?? key.slug}
                           iconUrl={key.icon_url}
                           size="xs"
                         />
-                        <span className="truncate" title={key.label}>
+                        <span
+                          className="min-w-16 flex-1 truncate"
+                          title={key.label}
+                        >
                           {key.label}
                         </span>
                         <ArrowUpRight
@@ -333,15 +414,74 @@ export function ServiceConnectionTable({
                         {readiness.reason}
                       </Badge>
                     </div>
-                    {key.preference_rank != null && (
+                    {(ordering
+                      ? activeRanks.has(key.id)
+                      : http &&
+                        key.is_active &&
+                        key.preference_rank != null) && (
                       <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
                         <Badge
                           className="shrink-0"
                           variant="accent"
-                          aria-label={`Discovery preference ${key.preference_rank}`}
+                          aria-label={`Discovery preference ${ordering ? activeRanks.get(key.id) : key.preference_rank} for ${key.catalog_service_name ?? serviceName}`}
                         >
-                          Discovery #{key.preference_rank}
+                          Discovery #
+                          {ordering
+                            ? activeRanks.get(key.id)
+                            : key.preference_rank}
                         </Badge>
+                      </div>
+                    )}
+                    {(!key.is_active || !http) &&
+                      (ordering
+                        ? rankedIds.includes(key.id)
+                        : key.preference_position != null) && (
+                        <Badge
+                          className="mt-1"
+                          variant="secondary"
+                          aria-label={`Saved order position ${ordering ? rankedIds.indexOf(key.id) + 1 : key.preference_position}; ${key.is_active ? `${key.service_type.toUpperCase()} connections are not part of connected MCP discovery` : "disabled connections are not listed to agents"}`}
+                        >
+                          Saved #
+                          {ordering
+                            ? rankedIds.indexOf(key.id) + 1
+                            : key.preference_position}{" "}
+                          ·{" "}
+                          {key.is_active
+                            ? key.service_type.toUpperCase()
+                            : "disabled"}
+                        </Badge>
+                      )}
+                    {ordering?.newIds.includes(key.id) && (
+                      <Badge variant="info">New</Badge>
+                    )}
+                    {ordering && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Move ${key.label} (${key.slug}) up`}
+                          disabled={
+                            ordering.busy || ordering.blocked || rowIndex === 0
+                          }
+                          onClick={() => move(key.id, -1)}
+                        >
+                          Move up
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Move ${key.label} (${key.slug}) down`}
+                          disabled={
+                            ordering.busy ||
+                            ordering.blocked ||
+                            rowIndex === ids.length - 1
+                          }
+                          onClick={() => move(key.id, 1)}
+                        >
+                          Move down
+                        </Button>
                       </div>
                     )}
                     <p className="mt-1 flex min-w-0 items-center gap-1 text-11 text-muted-foreground">
@@ -652,7 +792,7 @@ export function ServiceConnectionTable({
                       </button>
                     </p>
                   </TableCell>
-                </TableRow>
+                </ServiceOrderRow>
                 {expanded && (
                   <TableRow
                     id={panelId}
@@ -694,5 +834,185 @@ export function ServiceConnectionTable({
         </TableBody>
       </Table>
     </TooltipProvider>
+  );
+  if (!ordering) return table;
+  const blocked = ordering.busy || ordering.blocked;
+  return (
+    <div ref={root} className="min-w-0">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border/50 p-3 text-12">
+        <p className="flex-1 text-muted-foreground">
+          Showing all {connections.length} connections while ordering; filters
+          still apply to other services. Drag a handle, or press Space and use
+          arrow keys; Escape cancels a drag.
+        </p>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={blocked}
+          onClick={ordering.moveDisabled}
+        >
+          Move disabled to end
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={blocked}
+          onClick={ordering.reset}
+        >
+          Reset to default
+        </Button>
+      </div>
+      {ordering.validationError && (
+        <p role="alert" className="p-3 text-12 text-destructive">
+          At most 200 connections can have a saved agent order across all
+          services. Reset this group to default, or reduce the group before
+          saving.
+        </p>
+      )}
+      {ordering.message && (
+        <p role="status" className="p-3 text-12 text-muted-foreground">
+          {ordering.message}
+        </p>
+      )}
+      {ordering.message.includes("Retry save when ready") && (
+        <Button
+          type="button"
+          variant="outline"
+          disabled={blocked}
+          onClick={() => void ordering.retrySave()}
+        >
+          Retry save
+        </Button>
+      )}
+      {ordering.failure === "conflict" && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-2 p-3 text-12"
+        >
+          <p>Agent order changed in another tab.</p>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={ordering.busy}
+            onClick={() => void ordering.recover(false)}
+          >
+            Reload order
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={ordering.busy}
+            onClick={() => void ordering.recover(true)}
+          >
+            Overwrite
+          </Button>
+        </div>
+      )}
+      {ordering.failure === "stale" && (
+        <ErrorBanner
+          message="Some connections are no longer available. Refresh connections before saving again."
+          onRetry={() => void ordering.refreshStale()}
+        />
+      )}
+      {ordering.readError && (
+        <ErrorBanner
+          message="Could not refresh connections or agent order. Your edits are kept."
+          onRetry={() => void ordering.retryRead()}
+        />
+      )}
+      {ordering.failure === "network" && (
+        <ErrorBanner
+          message="Could not save agent order. Your edits are kept."
+          onRetry={() => void ordering.retrySave()}
+        />
+      )}
+      {ordering.failure === "capacity" && (
+        <div role="alert" className="space-y-2 p-3 text-12">
+          <p>
+            Agent order storage is full (200 connections across all services).
+            Reset the agent order of another service, or release unavailable
+            preferences for services you can no longer access, then try again.
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={ordering.busy}
+            onClick={() => void ordering.releaseHidden()}
+          >
+            Release unavailable preferences
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={ordering.busy}
+            onClick={ordering.reset}
+          >
+            Reset to default
+          </Button>
+        </div>
+      )}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        accessibility={{
+          announcements: {
+            onDragStart: ({ active }) =>
+              `Picked up ${connections.find((key) => key.id === active.id)?.label}, position ${ids.indexOf(String(active.id)) + 1} of ${ids.length}`,
+            onDragOver: ({ active, over }) =>
+              over && active.id !== over.id
+                ? `Moved to position ${ids.indexOf(String(over.id)) + 1}`
+                : undefined,
+            onDragEnd: ({ over }) =>
+              over
+                ? `Dropped at position ${ids.indexOf(String(over.id)) + 1}`
+                : "Cancelled",
+            onDragCancel: () => "Cancelled",
+          },
+        }}
+        onDragEnd={({ active, over }) => {
+          if (over && active.id !== over.id)
+            ordering.update(
+              arrayMove(
+                ids,
+                ids.indexOf(String(active.id)),
+                ids.indexOf(String(over.id)),
+              ),
+            );
+        }}
+      >
+        <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+          {table}
+        </SortableContext>
+      </DndContext>
+      <form
+        aria-label={`Agent order for ${serviceName}`}
+        onSubmit={(event) => void ordering.save(event)}
+        className="flex justify-end gap-2 border-t border-border/50 p-3"
+      >
+        <Button
+          type="button"
+          variant="outline"
+          disabled={ordering.busy}
+          onClick={ordering.cancel}
+        >
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          variant="primary"
+          isLoading={ordering.busy}
+          disabled={
+            blocked ||
+            !ordering.dirty ||
+            ordering.failure === "stale" ||
+            ordering.failure === "capacity"
+          }
+        >
+          Save
+        </Button>
+      </form>
+    </div>
   );
 }

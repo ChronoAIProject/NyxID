@@ -1,17 +1,11 @@
-import { useServicePreference } from "@/hooks/use-service-preference";
-import { ServicePreferenceEditor } from "@/components/dashboard/service-preference-editor";
-import { useAuthStore } from "@/stores/auth-store";
+import {
+  useServiceGroupOrder,
+  type ServiceGroupOrder,
+} from "@/hooks/use-service-group-order";
+import { useBlocker } from "@tanstack/react-router";
 import { ServiceConnectionTable } from "@/components/dashboard/service-connection-table";
 import { ArchivedServiceHistory } from "@/components/dashboard/service-history";
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys, useCatalog } from "@/hooks/use-keys";
 import { GroupedServiceCards } from "@/components/dashboard/grouped-service-cards";
@@ -25,13 +19,7 @@ import { Button, ButtonIcon } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  KeySquare,
-  Terminal,
-  RefreshCw,
-  Shield,
-  ArrowUpDown,
-} from "lucide-react";
+import { KeySquare, Terminal, RefreshCw, Shield } from "lucide-react";
 import { MagicKeyIcon } from "@/components/icons/empty-state";
 import {
   ViewToggle,
@@ -141,18 +129,12 @@ function LoadingSkeleton() {
 }
 
 function ExternalServicesTab({
-  editor,
+  agentOrder,
   onAdd,
   onReconnect,
   viewMode,
 }: {
-  readonly editor?: {
-    readonly inventory: readonly KeyInfo[];
-    readonly render: (
-      inventory: readonly KeyInfo[],
-      enrichInventory: (inventory: readonly KeyInfo[]) => readonly KeyInfo[],
-    ) => ReactNode;
-  };
+  readonly agentOrder: ServiceGroupOrder;
   readonly onAdd: () => void;
   readonly onReconnect: (keyInfo: KeyInfo) => void;
   readonly viewMode: ViewMode;
@@ -180,10 +162,9 @@ function ExternalServicesTab({
         keyInfo.credential_source ?? sourceById.get(keyInfo.id),
     }));
 
-  if (editor) return editor.render(joinSources(editor.inventory), joinSources);
   if (isLoading) return <LoadingSkeleton />;
 
-  if (error) {
+  if (error && !agentOrder.groupId) {
     return (
       <ErrorBanner
         message="Failed to load services. Please try again."
@@ -192,42 +173,52 @@ function ExternalServicesTab({
     );
   }
 
-  if (!keys?.length) return <ServicesEmptyState onAdd={onAdd} />;
+  if (!agentOrder.groupId && !(keys ?? agentOrder.inventory)?.length)
+    return <ServicesEmptyState onAdd={onAdd} />;
 
   return (
-    <GroupedServiceCards
-      keys={joinSources(keys)}
-      catalog={catalog}
-      actions={(compact) => (
-        <AddCtaButton
-          label="Connect Service"
-          onClick={onAdd}
-          compact={compact}
-          compactLabel="Connect"
+    <>
+      {error && (
+        <ErrorBanner
+          message="Failed to refresh services. Your edits are kept."
+          onRetry={refetch}
         />
       )}
-      renderTable={
-        viewMode === "table"
-          ? (filteredKeys) => (
-              <div className="overflow-hidden rounded-xl border border-border bg-card">
-                <ServiceConnectionTable
-                  connections={filteredKeys}
-                  serviceName="All services"
-                  renderActions={(key) => (
-                    <ConnectionReconnect
-                      connection={key}
-                      onReconnect={onReconnect}
-                    />
-                  )}
-                />
-              </div>
-            )
-          : undefined
-      }
-      renderConnectionActions={(keyInfo) => (
-        <ConnectionReconnect connection={keyInfo} onReconnect={onReconnect} />
-      )}
-    />
+      <GroupedServiceCards
+        agentOrder={agentOrder}
+        keys={joinSources(keys ?? agentOrder.inventory)}
+        catalog={catalog}
+        actions={(compact) => (
+          <AddCtaButton
+            label="Connect Service"
+            onClick={onAdd}
+            compact={compact}
+            compactLabel="Connect"
+          />
+        )}
+        renderTable={
+          viewMode === "table"
+            ? (filteredKeys) => (
+                <div className="overflow-hidden rounded-xl border border-border bg-card">
+                  <ServiceConnectionTable
+                    connections={filteredKeys}
+                    serviceName="All services"
+                    renderActions={(key) => (
+                      <ConnectionReconnect
+                        connection={key}
+                        onReconnect={onReconnect}
+                      />
+                    )}
+                  />
+                </div>
+              )
+            : undefined
+        }
+        renderConnectionActions={(keyInfo) => (
+          <ConnectionReconnect connection={keyInfo} onReconnect={onReconnect} />
+        )}
+      />
+    </>
   );
 }
 
@@ -340,48 +331,16 @@ export function KeysPage() {
   const [initialSetupServiceId, setInitialSetupServiceId] = useState<
     string | null
   >(null);
-  const identity = useAuthStore((state) => state.user?.id);
-  const preference = useServicePreference();
-  const [editorSnapshot, setEditorSnapshot] = useState<{
-    preference: NonNullable<ReturnType<typeof useServicePreference>["data"]>;
-    inventory: readonly KeyInfo[];
-  } | null>(null);
-  const [editingIdentity, setEditingIdentity] = useState<string | null>(null);
-  const editing =
-    editingIdentity !== null &&
-    editingIdentity === identity &&
-    tab === "services" &&
-    !previewActive;
-  const [preferenceDirty, setPreferenceDirty] = useState(false);
-  const [restoreFocusIdentity, setRestoreFocusIdentity] = useState<
-    string | null
-  >(null);
-  const [previousIdentity, setPreviousIdentity] = useState(identity);
-  if (previousIdentity !== identity) {
-    setPreviousIdentity(identity);
-    setEditingIdentity(null);
-    setEditorSnapshot(null);
-    setPreferenceDirty(false);
-    setRestoreFocusIdentity(null);
-  }
-  const reorderButton = useRef<HTMLButtonElement>(null);
-  function closeEditor(restoreFocus = true) {
-    setEditingIdentity(null);
-    setPreferenceDirty(false);
-    setRestoreFocusIdentity(
-      restoreFocus && editing && identity ? identity : null,
-    );
-  }
-  function discardOrder() {
-    return (
-      !editing || !preferenceDirty || window.confirm("Discard unsaved order?")
-    );
-  }
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
   // Shared query with ExternalServicesTab; only decides header CTA placement.
   const inventory = useKeys();
   const pageKeys = inventory.data;
+  const agentOrder = useServiceGroupOrder(pageKeys ?? []);
+  useBlocker({
+    shouldBlockFn: () => !agentOrder.guard(),
+    enableBeforeUnload: agentOrder.dirty,
+  });
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(
     null,
   );
@@ -456,84 +415,7 @@ export function KeysPage() {
     }
   }
 
-  const orderReadPending =
-    preference.isLoading ||
-    inventory.isLoading ||
-    preference.isFetching ||
-    inventory.isFetching;
-  const reorderUnavailable =
-    editing ||
-    orderReadPending ||
-    inventory.isError ||
-    preference.isError ||
-    !preference.data ||
-    !pageKeys?.length;
-
-  useEffect(() => {
-    if (
-      !restoreFocusIdentity ||
-      restoreFocusIdentity !== identity ||
-      tab !== "services" ||
-      editing ||
-      reorderUnavailable
-    )
-      return;
-    const frame = requestAnimationFrame(() => {
-      const target = reorderButton.current;
-      if (target && !target.disabled) {
-        target.focus();
-        setRestoreFocusIdentity(null);
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [restoreFocusIdentity, identity, tab, editing, reorderUnavailable]);
-
-  useEffect(() => {
-    if (!restoreFocusIdentity) return;
-    const cancel = () => setRestoreFocusIdentity(null);
-    document.addEventListener("pointerdown", cancel);
-    document.addEventListener("keydown", cancel);
-    document.addEventListener("wheel", cancel, { passive: true });
-    return () => {
-      document.removeEventListener("pointerdown", cancel);
-      document.removeEventListener("keydown", cancel);
-      document.removeEventListener("wheel", cancel);
-    };
-  }, [restoreFocusIdentity]);
-
-  const reorderAction = () =>
-    preference.data !== null && !previewActive ? (
-      <Button
-        ref={reorderButton}
-        variant="outline"
-        aria-label="Reorder"
-        title={
-          editing
-            ? "Order editor is open"
-            : preference.isError || inventory.isError
-              ? "Retry the failed read to edit the order"
-              : orderReadPending
-                ? "Loading services and preference order"
-                : !pageKeys?.length
-                  ? "Connect a service to set an order"
-                  : "Set the order agents see at equal relevance"
-        }
-        disabled={reorderUnavailable}
-        onClick={() => {
-          if (identity && preference.data && pageKeys) {
-            setEditorSnapshot({ preference: preference.data, inventory: pageKeys });
-            setEditingIdentity(identity);
-          }
-        }}
-      >
-        <ArrowUpDown className="h-4 w-4" />
-        Reorder
-      </Button>
-    ) : null;
-
   function setTab(value: string) {
-    if (!discardOrder()) return;
-    closeEditor(false);
     void navigate({
       to: "/keys",
       search: { tab: value, ...(previewActive ? { view: "routing" } : {}) },
@@ -549,14 +431,7 @@ export function KeysPage() {
         actions={
           import.meta.env.DEV && !previewActive ? (
             <Button variant="outline" asChild>
-              <Link
-                to="/keys"
-                search={{ view: "routing" }}
-                onClick={(event) => {
-                  if (!discardOrder()) event.preventDefault();
-                  else closeEditor(false);
-                }}
-              >
+              <Link to="/keys" search={{ view: "routing" }}>
                 Routing preview
               </Link>
             </Button>
@@ -564,7 +439,11 @@ export function KeysPage() {
         }
       />
 
-      <Tabs value={tab} onValueChange={setTab}>
+      <Tabs
+        value={tab}
+        onValueChange={setTab}
+        activationMode={agentOrder.dirty ? "manual" : "automatic"}
+      >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
           <TabsList className="min-w-0">
             <TabsTrigger value="services">External Services</TabsTrigger>
@@ -572,7 +451,6 @@ export function KeysPage() {
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
           <div className="flex flex-wrap items-center justify-between gap-3 sm:pb-1">
-            {tab === "services" && reorderAction()}
             {tab !== "pools" && !(tab === "services" && previewActive) && (
               <ViewToggle
                 viewMode={
@@ -580,8 +458,7 @@ export function KeysPage() {
                 }
                 onViewModeChange={(mode) => {
                   if (tab === "services") {
-                    if (!discardOrder()) return;
-                    closeEditor(false);
+                    if (!agentOrder.guard()) return;
                     setServicesViewMode(mode);
                   } else setAgentKeysViewMode(mode);
                 }}
@@ -591,7 +468,7 @@ export function KeysPage() {
                 the empty state has no toolbar, so the header button stays. */}
             {(tab === "nyxid" ||
               tab === "pools" ||
-              (tab === "services" && (editing || !pageKeys?.length))) && (
+              (tab === "services" && !pageKeys?.length)) && (
               <AddButton
                 tab={tab}
                 onAddService={() => setAddServiceOpen(true)}
@@ -604,18 +481,6 @@ export function KeysPage() {
 
         <TabsContent value="services" className="mt-6">
           <CodexConnectionSection />
-          {preference.isError && (
-            <ErrorBanner
-              message="Could not load preference order. Editing is unavailable."
-              onRetry={() => void preference.refetch()}
-            />
-          )}
-          {editing && inventory.isError && (
-            <ErrorBanner
-              message="Could not load services. Your preference edits are kept."
-              onRetry={() => void inventory.refetch()}
-            />
-          )}
           {previewActive && RoutingPreview ? (
             <Suspense fallback={<Skeleton className="h-96 w-full" />}>
               <RoutingPreview
@@ -640,45 +505,7 @@ export function KeysPage() {
             </Suspense>
           ) : (
             <ExternalServicesTab
-              key={editing ? "order" : "browse"}
-              editor={
-                editing && editorSnapshot
-                  ? {
-                      inventory: editorSnapshot.inventory,
-                      render: (joinedInventory, joinSources) => (
-                        <ServicePreferenceEditor
-                          key={identity}
-                          preference={editorSnapshot.preference}
-                          inventory={joinedInventory}
-                          enrichInventory={joinSources}
-                          viewMode={servicesViewMode}
-                          blocked={
-                            preference.isError ||
-                            inventory.isError ||
-                            inventory.isFetching ||
-                            preference.isFetching
-                          }
-                          onClose={closeEditor}
-                          onDirtyChange={setPreferenceDirty}
-                          reloadPreference={async () => {
-                            const result = await preference.refetch();
-                            if (result.isError || !result.data)
-                              throw new Error(
-                                "Could not load preference order",
-                              );
-                            return result.data;
-                          }}
-                          refreshInventory={async () => {
-                            const result = await inventory.refetch();
-                            if (result.isError || !result.data)
-                              throw new Error("Could not load services");
-                            return joinSources(result.data);
-                          }}
-                        />
-                      ),
-                    }
-                  : undefined
-              }
+              agentOrder={agentOrder}
               onAdd={() => setAddServiceOpen(true)}
               onReconnect={(keyInfo) => {
                 setReconnectKey(keyInfo);

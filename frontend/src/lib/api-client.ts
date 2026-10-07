@@ -26,6 +26,8 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
+  /** Opt-in fence for requests bound to a captured account or local CLI session. */
+  readonly authorityGuard?: () => void;
   readonly apiBaseUrl?: string;
   readonly credentials?: RequestCredentials;
   readonly method?: string;
@@ -126,6 +128,7 @@ export async function apiClient<T>(
 ): Promise<T> {
   if (import.meta.env.DEV) {
     const { isMockMode, getMockResponse } = await import("./mock-data");
+    options.authorityGuard?.();
     if (isMockMode()) {
       const mock = getMockResponse(
         endpoint,
@@ -137,8 +140,11 @@ export async function apiClient<T>(
   }
 
   const response = await apiFetch(endpoint, options);
+  options.authorityGuard?.();
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  const body = (await response.json()) as T;
+  options.authorityGuard?.();
+  return body;
 }
 
 /** Authenticated transport shared by JSON and streaming API requests. */
@@ -147,10 +153,13 @@ export async function apiFetch(
   options: RequestOptions = {},
 ): Promise<Response> {
   const actorId = options.creditsDenial ? currentCreditsActor() : null;
+  options.authorityGuard?.();
   const response = await fetch(
     apiUrl(endpoint, options.apiBaseUrl),
     buildFetchConfig(options),
   );
+  // A late response belongs to its original authority, including any 401.
+  options.authorityGuard?.();
   try {
     options.onResponse?.(response);
   } catch {
@@ -167,6 +176,7 @@ export async function apiFetch(
 
   if (!response.ok) {
     const errorBody = await parseErrorResponse(response);
+    options.authorityGuard?.();
     redirectToConsentIfRequired(errorBody);
     reportCreditsDenialHttp(
       options.creditsDenial,
@@ -181,16 +191,23 @@ export async function apiFetch(
 }
 
 export const api = {
-  get<T>(endpoint: string): Promise<T> {
-    return apiClient<T>(endpoint);
+  get<T>(
+    endpoint: string,
+    options?: Pick<RequestOptions, "authorityGuard">,
+  ): Promise<T> {
+    return apiClient<T>(endpoint, options);
   },
 
   post<T>(endpoint: string, body?: unknown): Promise<T> {
     return apiClient<T>(endpoint, { method: "POST", body });
   },
 
-  put<T>(endpoint: string, body?: unknown): Promise<T> {
-    return apiClient<T>(endpoint, { method: "PUT", body });
+  put<T>(
+    endpoint: string,
+    body?: unknown,
+    options?: Pick<RequestOptions, "authorityGuard">,
+  ): Promise<T> {
+    return apiClient<T>(endpoint, { ...options, method: "PUT", body });
   },
 
   patch<T>(

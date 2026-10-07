@@ -48,6 +48,7 @@ const { mockNavigate, mockPoolOwner, state } = vi.hoisted(() => ({
 }));
 
 vi.mock("@tanstack/react-router", () => ({
+  useBlocker: vi.fn(),
   Link: ({
     children,
     to,
@@ -83,8 +84,14 @@ vi.mock("@/hooks/use-keys", () => ({
 }));
 
 vi.mock("@/hooks/use-service-preference", () => ({
+  SERVICE_ORDER_UNAVAILABLE: "unavailable",
+  useSaveServiceGroupOrder: () => ({
+    save: vi.fn(),
+    release: vi.fn(),
+    isPending: false,
+  }),
   useServicePreference: () => ({
-    data: { ordered: [], version: 0, updated_at: null },
+    data: { groups: [], version: 0, updated_at: null },
     isLoading: false,
     isFetching: state.preferenceFetching,
     isError: false,
@@ -267,25 +274,33 @@ describe("KeysPage", () => {
 
   it.each(["keysFetching", "preferenceFetching"] as const)(
     "blocks entry from cached data during %s and enables entry once refreshed",
-    (pending) => {
-      state.keys = [makeKey()];
+    async (pending) => {
+      state.keys = [makeKey(), makeKey({ id: "second" })];
       state[pending] = true;
       const { rerender } = render(<KeysPage />);
-      const reorder = screen.getByRole("button", { name: "Reorder" });
-      expect(reorder).toBeDisabled();
-      expect(reorder).toHaveAttribute(
-        "title",
-        "Loading services and preference order",
+      await userEvent.click(
+        screen.getByRole("button", { name: /^Expand .+ connections$/ }),
       );
+      const reorder = screen.getByRole("button", { name: "Agent order" });
+      expect(reorder).toBeDisabled();
+      expect(reorder).toHaveAttribute("title", "Loading agent order");
       state[pending] = false;
       rerender(<KeysPage />);
       expect(reorder).toBeEnabled();
     },
   );
 
+  it("keeps accessible ranks scoped to the actual row service in a mixed table", async () => {
+    state.keys = [makeKey({id:"alpha",label:"Alpha",preference_rank:2}),makeKey({id:"slack",label:"Slack",catalog_service_id:"slack",catalog_service_name:"Slack",catalog_service_slug:"api-slack",preference_rank:1}),makeKey({id:"disabled",is_active:false,preference_rank:null,preference_position:4})];
+    render(<KeysPage />);
+    await userEvent.click(screen.getByRole("button",{name:/table view/i}));
+    expect(screen.getByLabelText("Discovery preference 2 for OpenAI")).toHaveTextContent("Discovery #2");
+    expect(screen.getByLabelText("Discovery preference 1 for Slack")).toHaveTextContent("Discovery #1");
+    expect(screen.getByLabelText("Saved order position 4; disabled connections are not listed to agents")).toHaveTextContent("Saved #4");
+  });
   it("shows connection preference pills in grouped and standalone tables without renumbering hidden rows", async () => {
     state.keys = [
-      makeKey({ id: "gamma", label: "Gamma", preference_rank: 3 }),
+      makeKey({ id: "gamma", label: "Gamma", preference_rank: 3, preference_position: 3 }),
       makeKey({ id: "alpha", label: "Alpha", preference_rank: 2 }),
       makeKey({
         id: "auto",
@@ -312,20 +327,20 @@ describe("KeysPage", () => {
     ];
     render(<KeysPage />);
     const chip = screen.getByRole("button", {
-      name: "Discovery preference 1 · Auto",
+      name: "Preferred: Auto",
     });
-    expect(chip).toHaveTextContent("Discovery #1");
+    expect(chip).toHaveTextContent("Preferred: Auto");
     expect(chip).toHaveAttribute("title", "#3 · Gamma\n#2 · Alpha\n#1 · Auto");
     expect(
-      screen.queryByLabelText("Discovery preference 1"),
+      screen.queryByLabelText(/^Discovery preference 1 for/),
     ).not.toBeInTheDocument();
     await userEvent.click(chip);
-    expect(screen.getByLabelText("Discovery preference 2")).toHaveTextContent(
-      "#2",
-    );
-    expect(screen.getByLabelText("Discovery preference 3")).toHaveTextContent(
-      "#3",
-    );
+    expect(
+      screen.getByLabelText(/^Discovery preference 2 for/),
+    ).toHaveTextContent("#2");
+    expect(
+      screen.getByLabelText(/^Discovery preference 3 for/),
+    ).toHaveTextContent("#3");
     const alpha = screen.getByRole("link", {
       name: "View Alpha connection details (Personal)",
     });
@@ -340,16 +355,16 @@ describe("KeysPage", () => {
     ).toBeVisible();
     const alphaCell = within(alpha.closest("td")!);
     expect(
-      alphaCell.getByLabelText("Discovery preference 2"),
+      alphaCell.getByLabelText(/^Discovery preference 2 for/),
     ).toHaveTextContent("Discovery #2");
     expect(alphaCell.getByText("Credential check needed")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /table view/i }));
-    expect(screen.getByLabelText("Discovery preference 2")).toHaveTextContent(
-      "#2",
-    );
-    expect(screen.getByLabelText("Discovery preference 3")).toHaveTextContent(
-      "#3",
-    );
+    expect(
+      screen.getByLabelText(/^Discovery preference 2 for/),
+    ).toHaveTextContent("#2");
+    expect(
+      screen.getByLabelText(/^Discovery preference 3 for/),
+    ).toHaveTextContent("#3");
     expect(
       screen
         .getByRole("link", { name: "View Gamma connection details (Personal)" })
