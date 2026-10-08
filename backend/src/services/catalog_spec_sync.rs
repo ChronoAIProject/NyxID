@@ -632,9 +632,10 @@ mod tests {
             .await
             .unwrap();
         sync_spec_backed_service_endpoints(&db).await.unwrap();
-        let tool_rows = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
-            .await
-            .unwrap();
+        let tool_rows =
+            crate::services::service_endpoint_service::list_all_endpoints(&db, &service.id)
+                .await
+                .unwrap();
         assert_eq!(tool_rows.len(), 2);
         let added = tool_rows
             .iter()
@@ -654,9 +655,10 @@ mod tests {
         assert_eq!(retained.publication, after[0].publication);
         assert_eq!(retained.operation_generation, after[0].operation_generation);
         sync_spec_backed_service_endpoints(&db).await.unwrap();
-        let repeated = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
-            .await
-            .unwrap();
+        let repeated =
+            crate::services::service_endpoint_service::list_all_endpoints(&db, &service.id)
+                .await
+                .unwrap();
         assert_eq!(repeated.len(), 2);
         assert!(repeated.iter().all(|row| row.operation_generation == 1));
     }
