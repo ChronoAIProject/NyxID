@@ -299,7 +299,7 @@ export function NyxBotHome({
     .filter((agent) => agent.status !== "destroyed")
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
-    <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto px-4 sm:px-6">
+    <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6">
       {/* Same column as the composer below it: its 758px rail, side padding and 30px gutter. */}
       <div
         className="mx-auto flex w-full max-w-[758px] flex-col gap-8 pl-[30px] pt-8 sm:pl-[54px] sm:pr-6"

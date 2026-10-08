@@ -645,7 +645,7 @@ function DraftedChatComposer({
         className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
       />
       <div
-        className="mx-auto w-full max-w-[758px] px-4 pt-2 sm:px-6"
+        className="mx-auto w-full max-w-[758px] px-3 pt-2 sm:px-6"
         style={{ paddingBottom: "max(1rem, var(--sab))" }}
       >
         {controls}
@@ -682,7 +682,7 @@ function DraftedChatComposer({
               if (!locked && !disabled && !sending) onFiles(Array.from(event.clipboardData.files));
             }
           }}
-          className={cn("relative ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
+          className={cn("relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
         >
           {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium">Drop files to attach</div>}
           {attachments}
@@ -734,8 +734,9 @@ function DraftedChatComposer({
           ) : null}
           <span
             ref={textMeasureRef}
+            data-composer-text-measure
             aria-hidden
-            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-13 leading-relaxed"
+            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
           >
             {content}
           </span>
@@ -785,7 +786,7 @@ function DraftedChatComposer({
                      ? (activePlaceholder ?? "Steer active task...")
                      : (placeholder ?? "Message NyxID Assistant...")
               }
-              className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+              className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
             />
             <div
               aria-hidden
