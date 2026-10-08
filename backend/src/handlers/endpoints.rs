@@ -713,6 +713,7 @@ pub async fn change_publication(
         &[endpoint_id],
         body.state,
         &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
     )
     .await?;
     Ok(Json(endpoint_to_response(rows.remove(0))))
@@ -739,6 +740,7 @@ pub async fn change_publication_bulk(
         &ids,
         body.state,
         &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
     )
     .await?;
     Ok(Json(EndpointListResponse {

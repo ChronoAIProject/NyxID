@@ -20,33 +20,29 @@ pub fn require_published_operation(
     method: &str,
     path: &CanonicalPath,
 ) -> AppResult<()> {
-    let matched = endpoints
-        .iter()
-        .filter(|endpoint| {
-            proxy_authorization::rule_matches(
-                &ProxyOperationRule {
-                    method: endpoint.method.clone(),
-                    path_template: endpoint.path.clone(),
-                    ..Default::default()
-                },
-                method,
-                path,
-            )
-        })
-        .max_by_key(|endpoint| {
-            endpoint
-                .path
-                .split('/')
-                .filter(|segment| !segment.contains('{'))
-                .count()
-        });
-    if matched.is_some_and(|endpoint| {
-        endpoint.publication == PublicationState::Published && endpoint.is_active
+    let mut winning_specificity = None;
+    let mut published = false;
+    for endpoint in endpoints.iter().filter(|endpoint| {
+        proxy_authorization::rule_matches(
+            &ProxyOperationRule {
+                method: endpoint.method.clone(),
+                path_template: endpoint.path.clone(),
+                ..Default::default()
+            },
+            method,
+            path,
+        )
     }) {
-        Ok(())
-    } else {
-        Err(AppError::ToolOperationNotPublished)
+        let specificity = endpoint.path.split('/').filter(|segment| !segment.contains('{')).count();
+        let callable = endpoint.publication == PublicationState::Published && endpoint.is_active;
+        match winning_specificity {
+            None => { winning_specificity = Some(specificity); published = callable; }
+            Some(winner) if specificity > winner => { winning_specificity = Some(specificity); published = callable; }
+            Some(winner) if specificity == winner => published &= callable,
+            _ => {}
+        }
     }
+    if published { Ok(()) } else { Err(AppError::ToolOperationNotPublished) }
 }
 
 pub async fn gate(
@@ -100,16 +96,23 @@ pub async fn change_publication(
     endpoint_ids: &[String],
     state: PublicationState,
     actor: &AuditActor,
+    audit_key: &[u8],
 ) -> AppResult<Vec<ServiceEndpoint>> {
     if endpoint_ids.is_empty() || endpoint_ids.len() > 200 {
         return Err(AppError::ValidationError(
             "Select between 1 and 200 operations".into(),
         ));
     }
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async |session| {
+        let result: AppResult<Vec<ServiceEndpoint>> = async {
     let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
     let endpoints: Vec<ServiceEndpoint> = coll
         .find(doc! {"service_id": service_id, "_id": {"$in": endpoint_ids}})
+        .sort(doc! {"_id": 1})
+        .session(&mut *session)
         .await?
+        .stream(&mut *session)
         .try_collect()
         .await?;
     if endpoints.len() != endpoint_ids.len() {
@@ -127,11 +130,14 @@ pub async fn change_publication(
             "publication": {"$literal": state_bson}, "is_active": state == PublicationState::Published,
             "operation_generation": {"$add": [{"$ifNull": ["$operation_generation", 1_i64]}, 1_i64]},
             "updated_at": bson::DateTime::from_chrono(chrono::Utc::now())
-        }}]).return_document(mongodb::options::ReturnDocument::After).await?.ok_or_else(|| AppError::Conflict("Endpoint changed during publication".into()))?;
-        audit_service::log_actor_event(db.clone(), actor, "catalog_endpoint_publication_changed", Some(serde_json::json!({"service_id":service_id,"endpoint_id":endpoint.id,"from":endpoint.publication,"to":state,"actor":actor.user_id}))).await?;
+        }}]).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Endpoint changed during publication".into()))?;
+        audit_service::log_actor_event_in_session(db, session, audit_key, actor, "catalog_endpoint_publication_changed", serde_json::json!({"service_id":service_id,"endpoint_id":endpoint.id,"from":endpoint.publication,"to":state,"actor":actor.user_id})).await?;
         result.push(updated);
     }
     Ok(result)
+        }.await;
+        super::api_key_mutation_service::transaction_result(result)
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn ids_by_name(
@@ -239,6 +245,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn equally_specific_unpublished_rows_fail_closed_in_both_orders() {
+        let path = CanonicalPath::from_rest_decoded("/items/42").unwrap();
+        for state in [PublicationState::Draft, PublicationState::Paused, PublicationState::Published] {
+            let mut blocked = endpoint("blocked", "/items/{id}", state);
+            blocked.is_active = false;
+            let published = endpoint("published", "/items/{id}", PublicationState::Published);
+            for rows in [[published.clone(), blocked.clone()], [blocked.clone(), published.clone()]] {
+                assert!(matches!(require_published_operation(&rows, "GET", &path), Err(AppError::ToolOperationNotPublished)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_publication_failure_rolls_back_rows_generations_and_audit() {
+        let Some(db) = crate::test_utils::connect_test_database("tool_publication_atomic").await else { return; };
+        let mut rows = [endpoint("first", "/first", PublicationState::Draft), endpoint("second", "/second", PublicationState::Draft)];
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows[1].operation_generation = i64::MAX;
+        db.collection::<ServiceEndpoint>(COLLECTION_NAME).insert_many(&rows).await.unwrap();
+        let actor = AuditActor { user_id: uuid::Uuid::new_v4().to_string(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None };
+        let ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+        assert!(matches!(change_publication(&db, "tool", &ids, PublicationState::Published, &actor, &[7; 32]).await, Err(AppError::Conflict(_))));
+        let first = db.collection::<ServiceEndpoint>(COLLECTION_NAME).find_one(doc! {"_id": &rows[0].id}).await.unwrap().unwrap();
+        assert_eq!(first.publication, PublicationState::Draft);
+        assert!(!first.is_active);
+        assert_eq!(first.operation_generation, 1);
+        assert_eq!(db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).count_documents(doc! {}).await.unwrap(), 0);
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn transitions_advance_generation_and_audit_without_reactivating_drafts() {
         let Some(db) = crate::test_utils::connect_test_database("tool_publication").await else {
@@ -267,7 +304,7 @@ mod tests {
         .enumerate()
         {
             let changed =
-                change_publication(&db, &row.service_id, &[row.id.clone()], state, &actor)
+                change_publication(&db, &row.service_id, &[row.id.clone()], state, &actor, &[7; 32])
                     .await
                     .unwrap();
             assert_eq!(changed[0].publication, state);
