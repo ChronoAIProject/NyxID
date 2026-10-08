@@ -5764,6 +5764,7 @@ pub async fn seed_default_services(
     //
     // Affected users re-add via `api-google-cloud --oauth ...`.
     cleanup_legacy_gcp_sa_data(db, &service_col, &provider_col, &req_col).await?;
+    super::tool_seed_service::seed(db).await?;
 
     Ok(())
 }

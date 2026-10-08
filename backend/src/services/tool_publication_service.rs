@@ -27,6 +27,7 @@ pub fn require_published_operation(
                 &ProxyOperationRule {
                     method: endpoint.method.clone(),
                     path_template: endpoint.path.clone(),
+                    ..Default::default()
                 },
                 method,
                 path,

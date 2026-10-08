@@ -12174,3 +12174,44 @@ mod tests {
         }
     }
 }
+
+pub async fn unpublished_tool(
+    db: &mongodb::Database,
+    tool_name: &str,
+    services: &[McpToolService],
+) -> AppResult<bool> {
+    let Some((slug, name)) = tool_name.split_once("__") else {
+        return Ok(false);
+    };
+    let Some(service) = services.iter().find(|s| s.service_slug == slug) else {
+        return Ok(false);
+    };
+    let catalog_id = match &service.source {
+        McpToolSource::Platform {
+            downstream_service_id,
+        } => Some(downstream_service_id.as_str()),
+        McpToolSource::UserManaged {
+            catalog_service_id, ..
+        } => catalog_service_id.as_deref(),
+        _ => None,
+    };
+    let Some(id) = catalog_id else {
+        return Ok(false);
+    };
+    if db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id":id,"offering_kind":"tool"})
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let endpoint = db
+        .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+        .find_one(doc! {"service_id":id,"name":name})
+        .await?;
+    Ok(endpoint.is_some_and(|e| {
+        !e.is_active
+            || e.publication != crate::models::service_endpoint::PublicationState::Published
+    }))
+}

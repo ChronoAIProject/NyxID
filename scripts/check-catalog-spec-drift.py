@@ -6,6 +6,8 @@ upstream spec, verify each overlay operation (method + path) still exists
 upstream. Exits non-zero when an operation has disappeared upstream so the
 scheduled CI job turns red and a human updates the overlay.
 
+TinyFish search/fetch overlays are hand-curated; no published upstream spec is available.
+
 Only providers that publish a machine-readable spec are checked; the rest
 (Telegram, Lark/Feishu, Reddit, Spotify, Twitch, Facebook, Microsoft
 Graph*, GitHub*) either publish nothing fetchable or something too large

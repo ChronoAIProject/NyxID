@@ -2083,32 +2083,11 @@ async fn dispatch_service_tool(
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
         Some(pair) => pair,
         None => {
-            if let Some((slug, name)) = tool_name.split_once("__")
-                && services.iter().any(|service| service.service_slug == slug)
+            if mcp_service::unpublished_tool(&state.db, tool_name, &services)
+                .await
+                .unwrap_or(false)
             {
-                let catalog = state
-                    .db
-                    .collection::<crate::models::downstream_service::DownstreamService>(
-                        crate::models::downstream_service::COLLECTION_NAME,
-                    )
-                    .find_one(doc! {"slug": slug, "offering_kind": "tool"})
-                    .await;
-                if let Ok(Some(catalog)) = catalog {
-                    let endpoint = state
-                        .db
-                        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
-                            crate::models::service_endpoint::COLLECTION_NAME,
-                        )
-                        .find_one(doc! {"service_id": &catalog.id, "name": name})
-                        .await;
-                    if let Ok(Some(endpoint)) = endpoint
-                        && (endpoint.publication
-                            != crate::models::service_endpoint::PublicationState::Published
-                            || !endpoint.is_active)
-                    {
-                        return tool_result(request_id, &serde_json::json!({"error":"tool_operation_not_published","error_code":12600,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
-                    }
-                }
+                return tool_result(request.id.clone(), &serde_json::json!({"error":"tool_operation_not_published","error_code":12600,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
             }
             if mcp_service::inactive_workspace_tool(tool_name, &services) {
                 return tool_result(
@@ -2962,6 +2941,12 @@ async fn handle_meta_call_tool(
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
         Some(pair) => pair,
         None => {
+            if mcp_service::unpublished_tool(&state.db, tool_name, &services)
+                .await
+                .unwrap_or(false)
+            {
+                return tool_result(request_id, &serde_json::json!({"error":"tool_operation_not_published","error_code":12600,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
+            }
             if mcp_service::inactive_workspace_tool(tool_name, &services) {
                 return tool_result(
                     request_id,

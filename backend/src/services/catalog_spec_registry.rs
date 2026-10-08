@@ -164,6 +164,14 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/twilio.openapi.json"),
     ),
     (
+        "tinyfish-search",
+        include_str!("../../specs/catalog/tinyfish-search.openapi.json"),
+    ),
+    (
+        "tinyfish-fetch",
+        include_str!("../../specs/catalog/tinyfish-fetch.openapi.json"),
+    ),
+    (
         "twitter",
         include_str!("../../specs/catalog/twitter.openapi.json"),
     ),
@@ -171,6 +179,9 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("tools-x", "twitter"),
+    ("tools-tinyfish-search", "tinyfish-search"),
+    ("tools-tinyfish-fetch", "tinyfish-fetch"),
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
     ("api-notion", "notion"),
