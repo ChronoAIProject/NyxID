@@ -654,6 +654,13 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::services::regenerate_oidc_secret),
         )
         .route(
+            "/{service_id}/spec-overlay",
+            get(handlers::catalog_spec_overlays::get)
+                .put(handlers::catalog_spec_overlays::put)
+                .delete(handlers::catalog_spec_overlays::delete)
+                .layer(DefaultBodyLimit::max(1024 * 1024 + 4096)),
+        )
+        .route(
             "/{service_id}/publication",
             post(handlers::endpoints::change_publication_bulk),
         )
@@ -1795,6 +1802,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/runtime-config",
             get(handlers::runtime_config::get_runtime_config),
+        )
+        .route(
+            "/catalog-specs/service/{service_id}/openapi.json",
+            get(handlers::catalog_spec_overlays::hosted),
         )
         .route(
             "/catalog-specs/{spec_key}/openapi.json",

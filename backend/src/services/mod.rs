@@ -285,3 +285,5 @@ pub mod utility_inference_service;
 pub mod tool_topics;
 
 pub mod tool_publication_service;
+
+pub mod catalog_spec_overlay_service;

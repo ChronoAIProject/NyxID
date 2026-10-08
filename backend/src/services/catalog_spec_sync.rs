@@ -46,7 +46,11 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
             continue;
         }
 
-        let inputs = match hosted_endpoint_inputs(&service) {
+        let inputs = match super::catalog_spec_overlay_service::get(db, &service.id).await? {
+            Some(overlay) => destination_endpoint_inputs(&service, &overlay.document),
+            None => hosted_endpoint_inputs(&service),
+        };
+        let inputs = match inputs {
             Ok(inputs) => inputs,
             Err(error) => {
                 // Embedded specs are validated by unit tests; reaching this
@@ -93,7 +97,7 @@ pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppRe
         .find(doc! {
             "is_active": true,
             "service_type": "http",
-            "service_category": { "$ne": "internal" },
+            "$or": [{"service_category": {"$ne": "internal"}}, {"offering_kind": "tool"}],
             "openapi_spec_url": { "$type": "string", "$ne": "" },
         })
         .await?
@@ -203,7 +207,8 @@ pub fn should_auto_sync_service_endpoints(service: &DownstreamService) -> bool {
     !crate::services::retired_service_service::is_retired(service)
         && service.is_active
         && service.service_type == "http"
-        && service.service_category != "internal"
+        && (service.service_category != "internal"
+            || service.offering_kind == crate::models::downstream_service::OfferingKind::Tool)
         && service
             .openapi_spec_url
             .as_deref()
@@ -236,7 +241,7 @@ fn hosted_endpoint_inputs(service: &DownstreamService) -> AppResult<Vec<Endpoint
     destination_endpoint_inputs(service, &spec)
 }
 
-fn destination_endpoint_inputs(
+pub(crate) fn destination_endpoint_inputs(
     service: &DownstreamService,
     spec: &serde_json::Value,
 ) -> AppResult<Vec<EndpointInput>> {

@@ -425,11 +425,16 @@ pub async fn discover_endpoints(
     require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
 
-    let api_spec_url = service.openapi_spec_url.ok_or_else(|| {
-        AppError::BadRequest("Service has no openapi_spec_url configured".to_string())
-    })?;
-
-    let parsed = openapi_parser::parse_openapi_spec(&state.http_client, &api_spec_url).await?;
+    let parsed = if let Some(overlay) =
+        crate::services::catalog_spec_overlay_service::get(&state.db, &service_id).await?
+    {
+        openapi_parser::parse_openapi_spec_value(&overlay.document)?
+    } else {
+        let api_spec_url = service.openapi_spec_url.as_ref().ok_or_else(|| {
+            AppError::BadRequest("Service has no openapi_spec_url configured".into())
+        })?;
+        openapi_parser::parse_openapi_spec(&state.http_client, api_spec_url).await?
+    };
 
     for endpoint in &parsed {
         if let Some(content_type) = endpoint.request_content_type.as_deref() {

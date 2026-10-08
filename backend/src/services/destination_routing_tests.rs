@@ -417,9 +417,6 @@ async fn workspace_old_binary_upsert_preserves_top_level_target_while_replacing_
     let old: old_writer::model::ServiceEndpoint =
         bson::from_document(bson::to_document(&row).unwrap()).unwrap();
     let input = old_writer::EndpointInput {
-        data_scope: None,
-        cost_class: None,
-        execution: Default::default(),
         name: old.name,
         description: Some("force old writer update".into()),
         method: old.method,
