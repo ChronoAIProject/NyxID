@@ -107,6 +107,7 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 /// the Drive, Calendar, and Gmail read/send scopes before offering it in production.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
+        "stripe" => Some(&[]),
         "posthog" | "posthog-eu" => Some(POSTHOG_DEFAULT_SCOPES),
         "ifttt-mcp" => Some(&["mcp"]),
         "railway" => Some(&[

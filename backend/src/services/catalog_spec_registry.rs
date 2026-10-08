@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "stripe",
+        include_str!("../../specs/catalog/stripe.openapi.json"),
+    ),
+    (
         "chrono-sandbox",
         include_str!("../../specs/catalog/chrono-sandbox.openapi.json"),
     ),
@@ -191,6 +195,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
     ("api-notion", "notion"),
+    ("api-stripe", "stripe"),
     ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),

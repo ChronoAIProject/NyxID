@@ -74,6 +74,20 @@ struct ManagedOAuthProviderSeed {
 
 const MANAGED_OAUTH_PROVIDER_SEEDS: &[ManagedOAuthProviderSeed] = &[
     ManagedOAuthProviderSeed {
+        slug: "stripe",
+        name: "Stripe",
+        description: "Stripe account access through Stripe Apps OAuth",
+        authorization_url: "https://marketplace.stripe.com/oauth/v2/authorize",
+        token_url: "https://api.stripe.com/v1/oauth/token",
+        documentation_url: "https://docs.stripe.com/stripe-apps/api-authentication/oauth",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
         slug: "airtable",
         name: "Airtable",
         description: "Airtable account access via OAuth 2.0",
@@ -3257,7 +3271,7 @@ pub async fn seed_default_providers(
             token_endpoint_auth_method: seed.token_endpoint_auth_method.to_string(),
             token_request_encoding: seed.token_request_encoding.map(str::to_string),
             oauth_request_headers: HashMap::new(),
-            supports_oauth_scopes: true,
+            supports_oauth_scopes: seed.slug != "stripe",
             extra_auth_params: seed.extra_auth_params.map(|params| {
                 params
                     .iter()
@@ -5071,6 +5085,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "stripe",
+        service_slug: "api-stripe",
+        service_name: "Stripe",
+        base_url: "https://api.stripe.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Read Stripe customers, invoices, payments, and subscriptions through a connected Stripe account.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://stripe.com"),
+        auth_notes: Some(
+            "Configure the Stripe App client ID and developer secret API key as the OAuth client secret. Permissions are defined in the Stripe App manifest, not OAuth scopes.",
+        ),
+        known_limitations: Some(
+            "Public OAuth install links require a published Stripe App. Use the matching test/live developer key and install URL. Disconnect removes local credentials; uninstall the app in Stripe to revoke upstream access.",
+        ),
     },
     managed_oauth_service_seed!(
         "airtable",
@@ -9493,6 +9530,39 @@ mod tests {
                 seed.service_slug
             );
         }
+    }
+
+    #[test]
+    fn stripe_seed_uses_stripe_apps_oauth_and_curated_read_operations() {
+        let provider = MANAGED_OAUTH_PROVIDER_SEEDS
+            .iter()
+            .find(|seed| seed.slug == "stripe")
+            .unwrap();
+        assert_eq!(
+            provider.authorization_url,
+            "https://marketplace.stripe.com/oauth/v2/authorize"
+        );
+        assert_eq!(provider.token_url, "https://api.stripe.com/v1/oauth/token");
+        assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+        assert_eq!(provider.default_scopes, None);
+        assert!(!provider.supports_pkce);
+        let service = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-stripe")
+            .unwrap();
+        assert_eq!(service.base_url, "https://api.stripe.com");
+        assert!(service.requires_user_credential);
+        let spec = crate::services::catalog_spec_registry::spec_for_slug("api-stripe").unwrap();
+        let paths = spec["paths"].as_object().unwrap();
+        assert_eq!(paths.len(), 8);
+        for item in paths.values() {
+            assert_eq!(item.as_object().unwrap().len(), 1);
+            assert_eq!(item["get"]["x-aevatar-tool"]["readOnly"], true);
+        }
+        assert_eq!(
+            crate::services::scope_catalog::platform_scope_allowlist("stripe"),
+            Some(&[][..])
+        );
     }
 
     #[test]
