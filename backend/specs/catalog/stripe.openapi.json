@@ -28,9 +28,8 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 10
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
             }
           },
           {
@@ -136,9 +135,8 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 10
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
             }
           },
           {
@@ -259,9 +257,8 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 10
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
             }
           },
           {
@@ -367,9 +364,8 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 10
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
             }
           },
           {
