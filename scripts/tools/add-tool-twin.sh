@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   printf '%s\n' 'Usage: add-tool-twin.sh --source <slug> --slug <tools-slug> --supplier <name> [--topic <slug>]... --publish <operation>... [--credential-env <variable>]'
@@ -61,6 +62,7 @@ if [[ "$metadata" == changed ]]; then
   "$cli" "${args[@]}" --output json > "$work_dir/updated.json"
   printf 'Updated metadata for %s\n' "$tool_slug"
 fi
+credential_changed=no
 if [[ -n "$credential_env" ]]; then
   configured=$(python3 - "$work_dir/service.json" <<'PY'
 import json,sys
@@ -69,6 +71,7 @@ PY
 )
   if [[ "$configured" == no ]]; then
     "$cli" service update --catalog-admin "$tool_slug" --credential-env "$credential_env" --output json > "$work_dir/credential.json"
+    credential_changed=yes
     printf 'Configured credential for %s\n' "$tool_slug"
   fi
 fi
@@ -97,6 +100,6 @@ for action in pause publish; do
     changed=yes
   fi
 done
-if [[ "$exists" == yes && "$metadata" == same && "$changed" == no ]]; then
+if [[ "$exists" == yes && "$metadata" == same && "$changed" == no && "$credential_changed" == no ]]; then
   printf '%s unchanged (no-op)\n' "$tool_slug"
 fi
