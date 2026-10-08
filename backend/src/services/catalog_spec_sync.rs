@@ -78,9 +78,9 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
 /// operations) until someone manually called
 /// `POST /services/{id}/discover-endpoints`. This sweep closes that gap for
 /// every active HTTP catalog service with a spec URL and **zero** endpoint
-/// rows. Services with any existing rows (active or soft-deleted) are left
-/// alone -- discovery already ran there, and re-running it automatically
-/// could resurrect rows an admin deliberately removed.
+/// rows. Non-tool services with existing rows are left alone. Tools also
+/// receive additive spec updates: existing publication is preserved, new
+/// operations start as drafts, and rows absent from the spec are retained.
 ///
 /// Spec fetches go through the hardened `fetch_spec_json` path (SSRF
 /// checks, size limit, cache), so spec URLs on private/internal hosts are
@@ -107,7 +107,7 @@ pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppRe
 }
 
 /// Fire-and-forget wrapper for the admin create/update handlers: re-reads
-/// the service and runs the zero-row-guarded discovery in the background so
+/// the service and syncs Tool specs or discovers empty legacy services so
 /// a slow or unreachable spec URL never delays the HTTP response.
 pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
     tokio::spawn(async move {
@@ -130,7 +130,7 @@ pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
     });
 }
 
-/// Zero-row-guarded discovery for one service. Logs and returns on any
+/// Additive Tool sync or zero-row-guarded legacy discovery. Logs and returns on any
 /// failure instead of erroring so callers (startup sweep, admin handlers)
 /// are never blocked by a broken spec URL.
 async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &DownstreamService) {
@@ -154,8 +154,9 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
             return;
         }
     };
-    if existing_rows > 0 {
-        return; // Discovery already ran (or rows were curated); leave alone.
+    let is_tool = service.offering_kind == crate::models::downstream_service::OfferingKind::Tool;
+    if existing_rows > 0 && !is_tool {
+        return; // Legacy discovery leaves existing curated services alone.
     }
 
     let spec = match crate::services::api_docs_service::fetch_spec_json(spec_url).await {
@@ -171,7 +172,11 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
         }
     };
 
-    let inputs = match endpoint_inputs_from_spec(&spec) {
+    let inputs = match if is_tool {
+        destination_endpoint_inputs(service, &spec)
+    } else {
+        endpoint_inputs_from_spec(&spec)
+    } {
         Ok(inputs) if !inputs.is_empty() => inputs,
         Ok(_) => {
             tracing::warn!(slug = %service.slug, "Spec endpoint sync: spec contained no operations");
@@ -528,7 +533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spec_backed_sweep_discovers_admin_service_endpoints_once() {
+    async fn spec_backed_sweep_preserves_legacy_rows_and_additively_syncs_tools() {
         let Some(db) = crate::test_utils::connect_test_database("catalog_spec_url_sweep").await
         else {
             eprintln!("skipping: no MongoDB");
@@ -616,6 +621,44 @@ mod tests {
             after[0].name, "list_widgets",
             "existing rows must not be replaced"
         );
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"_id": &service.id},
+                doc! {"$set": {
+                    "offering_kind": "tool", "service_category": "internal"
+                }},
+            )
+            .await
+            .unwrap();
+        sync_spec_backed_service_endpoints(&db).await.unwrap();
+        let tool_rows = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+            .await
+            .unwrap();
+        assert_eq!(tool_rows.len(), 2);
+        let added = tool_rows
+            .iter()
+            .find(|row| row.name == "list_gadgets")
+            .unwrap();
+        assert_eq!(
+            added.publication,
+            crate::models::service_endpoint::PublicationState::Draft
+        );
+        assert!(!added.is_active);
+        assert_eq!(added.operation_generation, 1);
+        let retained = tool_rows
+            .iter()
+            .find(|row| row.name == "list_widgets")
+            .unwrap();
+        assert_eq!(retained.id, after[0].id);
+        assert_eq!(retained.publication, after[0].publication);
+        assert_eq!(retained.operation_generation, after[0].operation_generation);
+        sync_spec_backed_service_endpoints(&db).await.unwrap();
+        let repeated = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+            .await
+            .unwrap();
+        assert_eq!(repeated.len(), 2);
+        assert!(repeated.iter().all(|row| row.operation_generation == 1));
     }
 
     #[tokio::test]
