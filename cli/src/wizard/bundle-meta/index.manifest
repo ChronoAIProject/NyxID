@@ -142,6 +142,7 @@ frontend/src/hooks/use-theme.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/assistant/connect-watch.ts
 frontend/src/lib/assistant/identity.ts
+frontend/src/lib/assistant/shell-routes.ts
 frontend/src/lib/credits-denial.ts
 frontend/src/lib/form-errors.ts
 frontend/src/lib/navigation.ts
