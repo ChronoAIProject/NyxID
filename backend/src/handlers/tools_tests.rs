@@ -10,6 +10,7 @@ use serde_json::json;
 #[tokio::test]
 async fn tool_publication_gates_all_discovery_and_proxy() {
     let mut f = fixture("tools_end_to_end", false).await;
+    f.human_token = proxy_token(&f.state, &f.owner);
     f.service.offering_kind = OfferingKind::Tool;
     f.service.service_category = "internal".into();
     f.service.auth_method = "none".into();
@@ -135,6 +136,7 @@ async fn mcp_request(
 #[tokio::test]
 async fn tool_twins_copy_contracts_as_drafts_without_mutating_source_or_copying_secrets() {
     let mut f = fixture("tool_twins", false).await;
+    f.human_token = proxy_token(&f.state, &f.owner);
     f.service.auth_method = "header".into();
     f.service.auth_key_name = "xi-api-key".into();
     f.service.provider_config_id = Some("source-provider".into());
@@ -257,4 +259,19 @@ async fn tool_twins_copy_contracts_as_drafts_without_mutating_source_or_copying_
         assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
     }
     f.state.db.drop().await.unwrap();
+}
+
+fn proxy_token(state: &crate::AppState, owner: &str) -> String {
+    crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &uuid::Uuid::parse_str(owner).unwrap(),
+        "openid profile proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap()
 }
