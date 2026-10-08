@@ -107,6 +107,7 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 /// the Drive, Calendar, and Gmail read/send scopes before offering it in production.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
+        "posthog" | "posthog-eu" => Some(POSTHOG_DEFAULT_SCOPES),
         "ifttt-mcp" => Some(&["mcp"]),
         "railway" => Some(&[
             "openid",
@@ -175,6 +176,7 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
             "Discover and use IFTTT tools, including Applet creation and actions.",
             true,
         )],
+        "posthog" | "posthog-eu" => POSTHOG,
         "twitter" => TWITTER,
         "google" => GOOGLE,
         "google-cloud" => GOOGLE_CLOUD,
@@ -1076,6 +1078,66 @@ const LARK: &[(&str, &str, &str, bool)] = &[
         "sheets:spreadsheet",
         "Sheets (read/write)",
         "Read and edit spreadsheets.",
+        true,
+    ),
+];
+
+/// Read-only analytics permissions for the managed PostHog client.
+pub const POSTHOG_DEFAULT_SCOPES: &[&str] = &[
+    "project:read",
+    "insight:read",
+    "dashboard:read",
+    "feature_flag:read",
+    "query:read",
+];
+
+const POSTHOG: &[(&str, &str, &str, bool)] = &[
+    (
+        "project:read",
+        "Read projects",
+        "List accessible PostHog projects.",
+        false,
+    ),
+    (
+        "insight:read",
+        "Read insights",
+        "Read saved analytics insights.",
+        false,
+    ),
+    (
+        "dashboard:read",
+        "Read dashboards",
+        "Read dashboards and their insights.",
+        false,
+    ),
+    (
+        "feature_flag:read",
+        "Read feature flags",
+        "Read feature flag configuration.",
+        false,
+    ),
+    (
+        "query:read",
+        "Query analytics",
+        "Run read-only analytics queries.",
+        false,
+    ),
+    (
+        "insight:write",
+        "Manage insights",
+        "Create and update insights with your own OAuth client.",
+        true,
+    ),
+    (
+        "dashboard:write",
+        "Manage dashboards",
+        "Create and update dashboards with your own OAuth client.",
+        true,
+    ),
+    (
+        "feature_flag:write",
+        "Manage feature flags",
+        "Change feature flags with your own OAuth client.",
         true,
     ),
 ];
