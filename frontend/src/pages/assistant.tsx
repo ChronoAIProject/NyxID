@@ -1,3 +1,4 @@
+import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AutomationsPage } from "@/pages/automations";
 import { MachinesPage } from "@/pages/machines";
 import { MachineSetupPage, MachinePairPage } from "@/pages/machine-setup";
@@ -175,17 +176,17 @@ function AssistantWorkspacePage({
   );
 
   function createNewChat() {
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: { draft: true } as never,
-    });
+    }));
   }
 
   function selectConversation(conversationId: string) {
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: { c: conversationId } as never,
-    });
+    }));
   }
 
   async function deleteConversation(conversationId: string) {
@@ -248,7 +249,7 @@ function AssistantWorkspacePage({
 function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
   const navigate = useNavigate();
   function openAssistant(search: { c?: string } = {}) {
-    void navigate({ to: "/assistant" as never, search: search as never });
+    void navigateWithBuildUpdate(() => navigate({ to: "/assistant" as never, search: search as never }));
   }
   return (
     <AssistantShell

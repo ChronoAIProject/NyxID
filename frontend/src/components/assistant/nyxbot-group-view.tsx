@@ -1,3 +1,4 @@
+import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { MachineToolCard } from "./machine-tool-card";
 import {
   Fragment,
@@ -456,10 +457,10 @@ export function NyxAgentGroupPage({
   }, []);
 
   function goTo(search: { c?: string } = {}) {
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
-    });
+    }));
   }
 
   const mentions = (group?.members ?? [])

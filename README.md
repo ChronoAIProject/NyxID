@@ -82,6 +82,10 @@ vendor retirement](docs/SERVICE_CONFIGURATION.md).
 
 ## See It in Action
 
+The web app checks for frontend updates every ten minutes. Assistant updates
+apply on safe chat or view switches; updates still pending after two hours show
+a refresh reminder. See [deployment behavior](docs/DEPLOYMENT.md#frontend).
+
 The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 
 1. **Add a service** in the web console — paste your OpenAI (or Anthropic, GitHub, etc.) key once; NyxID stores it encrypted.

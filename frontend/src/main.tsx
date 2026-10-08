@@ -13,6 +13,7 @@ import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
+import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
@@ -157,6 +158,7 @@ function Root() {
   return (
     <>
       <RouterProvider router={router} />
+      <BuildUpdateBanner ready={ready} queryClient={queryClient} />
       {!agentKeyLogin && <ConsentBanner />}
     </>
   );
