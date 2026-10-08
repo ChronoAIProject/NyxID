@@ -10,6 +10,41 @@ pub enum EndpointRisk {
     Write,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DataScope {
+    Public,
+    Account,
+    OwnedResource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CostClass {
+    Free,
+    Metered,
+    ResourceBacked,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionKind {
+    #[default]
+    HttpOperation,
+    JobStart,
+    JobPoll,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationState {
+    Draft,
+    Validated,
+    #[default]
+    Published,
+    Paused,
+}
+
 fn default_request_body_required() -> bool {
     true
 }
@@ -36,6 +71,14 @@ pub struct OperationResponseContract {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
+    #[serde(default)]
+    pub data_scope: Option<DataScope>,
+    #[serde(default)]
+    pub cost_class: Option<CostClass>,
+    #[serde(default)]
+    pub execution: ExecutionKind,
+    #[serde(default)]
+    pub publication: PublicationState,
     #[serde(rename = "_id")]
     pub id: String,
     pub service_id: String,
@@ -93,6 +136,10 @@ mod tests {
 
     fn make_endpoint() -> ServiceEndpoint {
         ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -142,12 +189,20 @@ mod tests {
     fn legacy_document_defaults_response_contract_to_unknown() {
         let endpoint = make_endpoint();
         let mut doc = bson::to_document(&endpoint).expect("serialize");
+        doc.remove("data_scope");
+        doc.remove("cost_class");
+        doc.remove("execution");
+        doc.remove("publication");
         doc.remove("response");
         doc.remove("risk");
         doc.remove("supports_idempotency_key");
         doc.remove("operation_generation");
 
         let restored: ServiceEndpoint = bson::from_document(doc).expect("deserialize legacy row");
+        assert_eq!(restored.publication, PublicationState::Published);
+        assert_eq!(restored.execution, ExecutionKind::HttpOperation);
+        assert_eq!(restored.data_scope, None);
+        assert_eq!(restored.cost_class, None);
         assert!(restored.response.content_types.is_empty());
         assert_eq!(restored.response.binary_artifact, None);
         assert_eq!(restored.risk, None);

@@ -19,6 +19,10 @@ use super::services_helpers::{fetch_service, require_admin_or_creator, require_h
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEndpointRequest {
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
+
     pub target_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
@@ -36,6 +40,10 @@ pub struct CreateEndpointRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateEndpointRequest {
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
+
     #[serde(
         default,
         deserialize_with = "crate::models::nullable_field::deserialize"
@@ -82,6 +90,11 @@ pub struct UpdateEndpointRequest {
 
 #[derive(Debug, Serialize)]
 pub struct EndpointResponse {
+    pub publication: crate::models::service_endpoint::PublicationState,
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: crate::models::service_endpoint::ExecutionKind,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_id: Option<String>,
     pub id: String,
@@ -176,6 +189,10 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
     let request_body_required = e.effective_request_body_required();
 
     EndpointResponse {
+        publication: e.publication,
+        data_scope: e.data_scope,
+        cost_class: e.cost_class,
+        execution: e.execution,
         target_id: e.target_id,
         id: e.id,
         service_id: e.service_id,
@@ -261,6 +278,9 @@ pub async fn create_endpoint(
     }
 
     let input = EndpointInput {
+        data_scope: body.data_scope,
+        cost_class: body.cost_class,
+        execution: body.execution.unwrap_or_default(),
         target_id: body.target_id,
         request_body_required: body
             .request_body_required
@@ -320,6 +340,9 @@ pub async fn update_endpoint(
     }
 
     let updates = EndpointUpdate {
+        data_scope: body.data_scope,
+        cost_class: body.cost_class,
+        execution: body.execution,
         target_id: body.target_id,
         name: body.name,
         description: body.description,
@@ -404,6 +427,9 @@ pub async fn discover_endpoints(
     let inputs: Vec<EndpointInput> = parsed
         .into_iter()
         .map(|p| EndpointInput {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
             target_id: None,
             name: p.name,
             description: p.description,
@@ -505,6 +531,10 @@ mod tests {
     #[test]
     fn endpoint_to_response_uses_effective_request_body_required() {
         let endpoint = ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -549,6 +579,9 @@ mod tests {
             &db,
             &other_service_id,
             EndpointInput {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
                 target_id: None,
                 name: "other_endpoint".to_string(),
                 description: None,
@@ -573,6 +606,9 @@ mod tests {
             test_auth_user(&owner_id),
             Path((route_service.id.clone(), endpoint.id.clone())),
             Json(UpdateEndpointRequest {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
                 target_id: None,
                 name: None,
                 description: None,

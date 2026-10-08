@@ -37,6 +37,11 @@ use super::services_helpers::{
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateServiceRequest {
+    pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
+    pub topics: Option<Vec<String>>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
     pub provider_config_id: Option<String>,
@@ -52,6 +57,7 @@ pub struct CreateServiceRequest {
     pub credential: Option<String>,
     /// "provider", "connection", or "internal". Defaults to "connection".
     pub service_category: Option<String>,
+    pub openapi_spec_url: Option<String>,
     /// "public" or "private". Defaults to "public" for HTTP, "private" for SSH.
     pub visibility: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
@@ -145,6 +151,11 @@ pub struct SshServiceConfigResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
+    pub topics: Vec<String>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
     pub provider_config_id: Option<String>,
@@ -401,6 +412,11 @@ impl std::ops::DerefMut for BillingUpdate {
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdateServiceRequest {
+    pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
+    pub topics: Option<Vec<String>>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_targets: Option<std::collections::BTreeMap<String, String>>,
     pub name: Option<String>,
@@ -1452,7 +1468,15 @@ async fn create_service_inner(
         body.destination_targets.clone(),
         proxy_operation_policy.as_ref(),
     )?;
+    let openapi_spec_url = body.openapi_spec_url.clone().or(openapi_spec_url);
+    if let Some(url) = &openapi_spec_url {
+        validate_optional_spec_url(url)?;
+    }
     let new_service = DownstreamService {
+        offering_kind: body.offering_kind.unwrap_or_default(),
+        topics: body.topics.clone().unwrap_or_default(),
+        supplier: body.supplier.clone(),
+        import_source: body.import_source.clone(),
         git_http: None,
         destination_targets,
         owner_user_id: None,
@@ -1517,6 +1541,7 @@ async fn create_service_inner(
         created_at: now,
         updated_at: now,
     };
+    crate::services::tool_topics::validate_tool_service(&new_service)?;
     crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
@@ -1937,7 +1962,51 @@ async fn update_service_inner(
             ));
         }
     }
+    let mut proposed = service.clone();
+    if let Some(kind) = body.offering_kind {
+        proposed.offering_kind = kind;
+    }
+    if let Some(topics) = &body.topics {
+        proposed.topics = topics.clone();
+    }
+    if let Some(supplier) = &body.supplier {
+        proposed.supplier = Some(supplier.clone());
+    }
+    if let Some(source) = &body.import_source {
+        proposed.import_source = Some(source.clone());
+    }
+    if body
+        .credential
+        .as_ref()
+        .is_some_and(|c| !c.trim().is_empty())
+    {
+        proposed.credential_encrypted = vec![1];
+    }
+    if let Some(config) = &body.platform_key {
+        proposed.platform_key = Some(config.clone());
+    }
+    crate::services::tool_topics::validate_tool_service(&proposed)?;
     let mut set_doc = doc! {};
+    if body.offering_kind.is_some() {
+        set_doc.insert(
+            "offering_kind",
+            bson::to_bson(&proposed.offering_kind)
+                .map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
+    if body.topics.is_some() {
+        set_doc.insert("topics", &proposed.topics);
+    }
+    if body.supplier.is_some() {
+        set_doc.insert("supplier", &proposed.supplier);
+    }
+    if body.import_source.is_some() {
+        set_doc.insert(
+            "import_source",
+            bson::to_bson(&proposed.import_source)
+                .map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
     if let Some(credential) = body
         .credential
         .as_ref()
@@ -3431,6 +3500,11 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            offering_kind: None,
+            topics: None,
+            supplier: None,
+            import_source: None,
+            openapi_spec_url: None,
             destination_targets: Default::default(),
             recommended_skill_refs: None,
             skills_request_id: None,

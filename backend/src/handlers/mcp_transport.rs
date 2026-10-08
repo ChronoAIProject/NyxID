@@ -5188,6 +5188,10 @@ mod tests {
         let now = chrono::Utc::now();
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),
@@ -5217,6 +5221,10 @@ mod tests {
             .expect("insert blocked MCP endpoint");
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),

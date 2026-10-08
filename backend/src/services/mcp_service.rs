@@ -7454,6 +7454,10 @@ mod tests {
     #[test]
     fn catalog_rows_carry_their_overlay_destructive_markers() {
         let row = |name: &str, method: &str, path: &str| ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             target_id: None,
             id: format!("ep-{name}"),
             service_id: "svc".to_string(),
@@ -7828,6 +7832,10 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: connected_id.clone(),
@@ -8038,6 +8046,10 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: platform_id.clone(),
@@ -8233,6 +8245,10 @@ mod tests {
         // Template row that would publish `template_op` without an override.
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: catalog_id.clone(),
@@ -8349,6 +8365,10 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: catalog_id.clone(),
@@ -11985,6 +12005,10 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
                 destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,

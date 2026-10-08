@@ -338,6 +338,9 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
         validate_response_contract(&endpoint.response)?;
 
         inputs.push(EndpointInput {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
             target_id: None,
             name: endpoint.name,
             description: endpoint.description,

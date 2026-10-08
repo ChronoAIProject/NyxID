@@ -281,3 +281,5 @@ pub mod voice;
 mod machine_access_tests;
 
 pub mod utility_inference_service;
+
+pub mod tool_topics;

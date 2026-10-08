@@ -1551,6 +1551,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::orgs::cancel_invite),
         );
 
+    let tools_routes = Router::new().route("/topics", get(handlers::catalog::tool_topics));
     let catalog_routes = Router::new()
         .route("/", get(handlers::catalog::list_catalog))
         .route("/{slug}", get(handlers::catalog::get_catalog_entry))
@@ -1944,6 +1945,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         // Shared relay/delegated layers apply; exact account:read GETs retain
         // their existing delegated exception.
         .nest("/catalog", catalog_routes)
+        .nest("/tools", tools_routes)
         // Like authenticate_mcp: sessions, proxy-scoped access tokens, general
         // API keys (including chat keys), and non-Curation service accounts.
         // AuthUser rejects scheduled keys and Curation SAs; the handler checks

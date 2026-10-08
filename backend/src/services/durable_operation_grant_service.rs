@@ -192,6 +192,10 @@ async fn load_active_published_endpoint(
     };
     let now = Utc::now();
     Ok(Some(ServiceEndpoint {
+        data_scope: None,
+        cost_class: None,
+        execution: Default::default(),
+        publication: Default::default(),
         target_id: endpoint.target_id,
         id: endpoint.endpoint_id,
         service_id: user_service_id.to_string(),
@@ -1535,6 +1539,10 @@ mod tests {
     fn endpoint() -> ServiceEndpoint {
         let now = Utc::now();
         ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             target_id: None,
             id: Uuid::new_v4().to_string(),
             service_id: Uuid::new_v4().to_string(),

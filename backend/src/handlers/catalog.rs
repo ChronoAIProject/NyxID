@@ -23,6 +23,11 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogEntryResponse {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
+    pub topics: Vec<String>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+
     pub slug: String,
     pub resource_uri: String,
     pub name: String,
@@ -316,6 +321,10 @@ pub(crate) fn catalog_entry_response(
     let resource_uri = oauth_resource_service::user_service_resource_uri(config, &entry.slug);
 
     CatalogEntryResponse {
+        offering_kind: entry.offering_kind.clone(),
+        topics: entry.topics.clone(),
+        supplier: entry.supplier.clone(),
+        import_source: entry.import_source.clone(),
         slug: entry.slug,
         resource_uri,
         name: entry.name,
@@ -613,3 +622,22 @@ mod tests;
 #[cfg(test)]
 #[path = "catalog_routes_tests.rs"]
 mod catalog_routes_tests;
+
+/// Controlled topic vocabulary shared by Tools clients.
+pub async fn tool_topics() -> Json<Vec<ToolTopicResponse>> {
+    Json(
+        crate::services::tool_topics::TOOL_TOPICS
+            .iter()
+            .map(|(slug, label)| ToolTopicResponse {
+                slug: (*slug).into(),
+                label: (*label).into(),
+            })
+            .collect(),
+    )
+}
+
+#[derive(Serialize)]
+pub struct ToolTopicResponse {
+    pub slug: String,
+    pub label: String,
+}

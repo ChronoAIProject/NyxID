@@ -12,6 +12,10 @@ use crate::services::content_type::normalize_content_type;
 /// Input for creating or upserting a single endpoint.
 #[derive(Clone)]
 pub struct EndpointInput {
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: crate::models::service_endpoint::ExecutionKind,
+
     pub name: String,
     pub description: Option<String>,
     pub method: String,
@@ -29,6 +33,10 @@ pub struct EndpointInput {
 
 /// Fields that can be updated on an existing endpoint.
 pub struct EndpointUpdate {
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
+
     pub name: Option<String>,
     pub description: Option<Option<String>>,
     pub method: Option<String>,
@@ -168,6 +176,24 @@ pub async fn list_endpoints(
     Ok(endpoints)
 }
 
+pub async fn initial_publication(
+    db: &mongodb::Database,
+    service_id: &str,
+) -> AppResult<crate::models::service_endpoint::PublicationState> {
+    use crate::models::downstream_service::{COLLECTION_NAME, DownstreamService, OfferingKind};
+    let service = db
+        .collection::<DownstreamService>(COLLECTION_NAME)
+        .find_one(doc! {"_id": service_id})
+        .await?;
+    Ok(
+        if service.is_some_and(|s| s.offering_kind == OfferingKind::Tool) {
+            crate::models::service_endpoint::PublicationState::Draft
+        } else {
+            crate::models::service_endpoint::PublicationState::Published
+        },
+    )
+}
+
 /// Create a new endpoint for a service.
 pub async fn create_endpoint(
     db: &mongodb::Database,
@@ -178,7 +204,12 @@ pub async fn create_endpoint(
     let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
     let now = Utc::now();
 
+    let publication = initial_publication(db, service_id).await?;
     let endpoint = ServiceEndpoint {
+        data_scope: input.data_scope,
+        cost_class: input.cost_class,
+        execution: input.execution,
+        publication,
         target_id: input.target_id.clone(),
         id: Uuid::new_v4().to_string(),
         service_id: service_id.to_string(),
@@ -194,7 +225,7 @@ pub async fn create_endpoint(
         response: normalize_response(input.response),
         risk: input.risk,
         supports_idempotency_key: input.supports_idempotency_key,
-        is_active: true,
+        is_active: publication == crate::models::service_endpoint::PublicationState::Published,
         operation_generation: 1,
         created_at: now,
         updated_at: now,
@@ -223,6 +254,24 @@ pub async fn update_endpoint(
     }
     let mut set_doc = bson::Document::new();
 
+    if let Some(value) = updates.data_scope {
+        set_doc.insert(
+            "data_scope",
+            bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
+    if let Some(value) = updates.cost_class {
+        set_doc.insert(
+            "cost_class",
+            bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
+    if let Some(value) = updates.execution {
+        set_doc.insert(
+            "execution",
+            bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
     if let Some(name) = updates.name
         && existing.name != name
     {
@@ -392,6 +441,8 @@ pub async fn bulk_upsert_endpoints(
 ) -> AppResult<Vec<ServiceEndpoint>> {
     let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
     let now = Utc::now();
+    let tool = initial_publication(db, service_id).await?
+        == crate::models::service_endpoint::PublicationState::Draft;
 
     let mut result_endpoints: Vec<ServiceEndpoint> = Vec::with_capacity(inputs.len());
     let mut upserted_names: Vec<String> = Vec::with_capacity(inputs.len());
@@ -405,7 +456,11 @@ pub async fn bulk_upsert_endpoints(
                 service_id,
                 input,
                 now,
-                EndpointSyncActivation::ForceActive,
+                if tool {
+                    EndpointSyncActivation::PreserveExisting
+                } else {
+                    EndpointSyncActivation::ForceActive
+                },
             )
             .await?,
         );
@@ -414,39 +469,41 @@ pub async fn bulk_upsert_endpoints(
     // Soft-delete endpoints for this service that were not in the authoritative
     // input. `$nin: []` intentionally matches every active endpoint, so an
     // empty discovered contract revokes all previously published operations.
-    coll.update_many(
-        doc! {
-            "service_id": service_id,
-            "name": { "$nin": &upserted_names },
-            "is_active": true,
-        },
-        vec![doc! { "$set": {
-            "is_active": false,
-            "updated_at": bson::DateTime::from_chrono(now),
-            "operation_generation": {
-                "$switch": {
-                    "branches": [
-                        {
-                            "case": { "$eq": [
-                                { "$type": "$operation_generation" },
-                                "missing",
-                            ]},
-                            "then": 2_i64,
-                        },
-                        {
-                            "case": { "$and": [
-                                { "$isNumber": "$operation_generation" },
-                                { "$gt": ["$operation_generation", 0] },
-                            ]},
-                            "then": { "$add": ["$operation_generation", 1_i64] },
-                        },
-                    ],
-                    "default": "$operation_generation",
-                }
+    if !tool {
+        coll.update_many(
+            doc! {
+                "service_id": service_id,
+                "name": { "$nin": &upserted_names },
+                "is_active": true,
             },
-        }}],
-    )
-    .await?;
+            vec![doc! { "$set": {
+                "is_active": false,
+                "updated_at": bson::DateTime::from_chrono(now),
+                "operation_generation": {
+                    "$switch": {
+                        "branches": [
+                            {
+                                "case": { "$eq": [
+                                    { "$type": "$operation_generation" },
+                                    "missing",
+                                ]},
+                                "then": 2_i64,
+                            },
+                            {
+                                "case": { "$and": [
+                                    { "$isNumber": "$operation_generation" },
+                                    { "$gt": ["$operation_generation", 0] },
+                                ]},
+                                "then": { "$add": ["$operation_generation", 1_i64] },
+                            },
+                        ],
+                        "default": "$operation_generation",
+                    }
+                },
+            }}],
+        )
+        .await?;
+    }
 
     Ok(result_endpoints)
 }
@@ -637,7 +694,13 @@ async fn insert_endpoint_or_reconcile(
 ) -> AppResult<ServiceEndpoint> {
     let retry_input = input.clone();
     // Create new endpoint
+    let db = coll.client().database(&coll.namespace().db);
+    let publication = initial_publication(&db, service_id).await?;
     let endpoint = ServiceEndpoint {
+        data_scope: input.data_scope,
+        cost_class: input.cost_class,
+        execution: input.execution,
+        publication,
         target_id: input.target_id.clone(),
         id: Uuid::new_v4().to_string(),
         service_id: service_id.to_string(),
@@ -653,7 +716,7 @@ async fn insert_endpoint_or_reconcile(
         response: normalize_response(input.response),
         risk: input.risk,
         supports_idempotency_key: input.supports_idempotency_key,
-        is_active: true,
+        is_active: publication == crate::models::service_endpoint::PublicationState::Published,
         operation_generation: 1,
         created_at: now,
         updated_at: now,
@@ -694,6 +757,61 @@ async fn insert_endpoint_or_reconcile(
 mod tests {
     use super::*;
     use crate::test_utils::*;
+
+    #[tokio::test]
+    async fn tool_inserts_are_drafts_and_discovery_preserves_publication() {
+        let Some(db) = connect_test_database("tool_endpoint_defaults").await else {
+            return;
+        };
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .unwrap();
+        let created = create_endpoint(&db, &service.id, make_input("manual", "GET", "/manual"))
+            .await
+            .unwrap();
+        assert_eq!(
+            created.publication,
+            crate::models::service_endpoint::PublicationState::Draft
+        );
+        assert!(!created.is_active);
+        let inputs = vec![make_input("discovered", "GET", "/discovered")];
+        let discovered = bulk_upsert_endpoints(&db, &service.id, inputs.clone())
+            .await
+            .unwrap();
+        assert!(!discovered[0].is_active);
+        assert_eq!(
+            discovered[0].publication,
+            crate::models::service_endpoint::PublicationState::Draft
+        );
+        db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &discovered[0].id},
+                doc! {"$set": {"publication": "paused"}},
+            )
+            .await
+            .unwrap();
+        let repeated = bulk_upsert_endpoints(&db, &service.id, inputs)
+            .await
+            .unwrap();
+        assert_eq!(
+            repeated[0].publication,
+            crate::models::service_endpoint::PublicationState::Paused
+        );
+        assert!(!repeated[0].is_active);
+        assert!(
+            db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .find_one(doc! {"_id": &created.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn endpoint_duplicate_insert_reconciles_only_a_confirmed_competing_identity_once() {
@@ -851,6 +969,9 @@ mod tests {
 
     fn make_input(name: &str, method: &str, path: &str) -> EndpointInput {
         EndpointInput {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
             target_id: None,
             name: name.to_string(),
             description: Some(format!("{name} endpoint")),
@@ -869,6 +990,9 @@ mod tests {
 
     fn empty_update() -> EndpointUpdate {
         EndpointUpdate {
+            data_scope: None,
+            cost_class: None,
+            execution: None,
             target_id: None,
             name: None,
             description: None,
@@ -1171,6 +1295,9 @@ mod tests {
             &service_id,
             &ep.id,
             EndpointUpdate {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
                 target_id: None,
                 name: Some("ep1_renamed".to_string()),
                 description: None,
@@ -1213,6 +1340,9 @@ mod tests {
             "service-alpha",
             "nonexistent-id",
             EndpointUpdate {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
                 target_id: None,
                 name: Some("x".to_string()),
                 description: None,
@@ -1254,6 +1384,9 @@ mod tests {
             &owner_service_id,
             &endpoint.id,
             EndpointUpdate {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
                 target_id: None,
                 name: None,
                 description: None,
