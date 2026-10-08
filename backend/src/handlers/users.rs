@@ -625,7 +625,7 @@ mod tests {
         assert!(other.profile_config.service_views.is_none());
         let mut legacy_update = service_view_request();
         legacy_update.search = "$literal search".into();
-        save_services_view(
+        let legacy_response = save_services_view(
             State(state.clone()),
             test_auth_user(&user_id),
             Json(legacy_update),
@@ -633,6 +633,7 @@ mod tests {
         .await
         .unwrap()
         .0;
+        assert_eq!(legacy_response.search, "$literal search");
         let updated = db
             .collection::<User>(USERS)
             .find_one(doc! { "_id": &user_id })
