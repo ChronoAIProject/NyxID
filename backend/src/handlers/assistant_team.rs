@@ -197,7 +197,7 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
     let result: AppResult<()> = async {
         let (row, org_access) = match Box::pin(engine::get_authorized(&state.db, owner, id)).await {
             Ok(authorized) => authorized,
-            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+            Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => {
                 return crate::services::org_group_service::drop_ineligible_events(
                     &state.db, owner, id,
                 )
@@ -352,7 +352,11 @@ pub(crate) async fn after_turn(
         super::nyxbot::late_delivery::settled(state, event_id).await;
     }
     let owner = row.user_id.as_str();
-    if let Some(run_id) = turn.trigger_run_id.as_deref() {
+    if let Some(run_id) = turn.trigger_run_id.as_deref()
+        && !crate::services::async_service_operation::pending_run(&state.db, run_id)
+            .await
+            .unwrap_or(true)
+    {
         super::trigger_scheduler::settled(state, row, run_id, text, error.map(|e| e.code)).await;
     }
     // Every reply of a hidden group member thread belongs to the group,
@@ -1306,7 +1310,7 @@ async fn dispatch_operation_scopes(
                     json!({"agent_id":updated.id,"service_id":service,"revision":updated.operation_scope_revisions.get(service)}),
                     false,
                 ),
-                Err(AppError::Forbidden(_)) if !confirmed => {
+                Err(error) if error.is_forbidden() && !confirmed => {
                     let summary = Box::pin(
                         crate::services::agent_operation_scope_service::selection_summary(
                             db,
@@ -1507,7 +1511,7 @@ async fn dispatch_permission_decisions(
             .await
             {
                 Ok(row) => row,
-                Err(AppError::Forbidden(_)) if !confirmed => {
+                Err(error) if error.is_forbidden() && !confirmed => {
                     let pending = db.collection::<AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
                         .find_one(mongodb::bson::doc!{"_id":request_id,"user_id":owner,"kind":"operations","decider":"orchestrator","status":"pending"}).await?
                         .ok_or_else(|| AppError::NotFound("Operation request not found".into()))?;
@@ -2676,6 +2680,7 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());

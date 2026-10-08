@@ -197,7 +197,25 @@ pub fn base_prompt(
                 }
             }
             prompt.push_str(&super::assistant_team_service::memory_note(agent));
-            if !agent.machine_node_ids.is_empty() {
+            // NyxBot's implicit reachability is snapshotted in machine_access,
+            // not the specialist machine picker. Reuse the loaded policy; this
+            // is guidance only, and machine_list/execution recheck live access.
+            let use_machines = if agent.is_nyxbot() {
+                agent.machine_access.as_ref().is_some_and(|policy| {
+                    policy.version == 2
+                        && policy.assignments.values().any(|assignment| {
+                            matches!(assignment.mode.as_str(), "shared_legacy" | "separated")
+                                && assignment.capabilities.valid()
+                                && (assignment.capabilities.shell
+                                    || assignment.capabilities.files
+                                    || assignment.capabilities.browser
+                                    || assignment.capabilities.computer)
+                        })
+                })
+            } else {
+                !agent.machine_node_ids.is_empty()
+            };
+            if use_machines {
                 prompt.push_str("\n\n");
                 prompt.push_str(super::machine_tools::USE_INSTRUCTIONS);
             }
@@ -709,6 +727,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::async_service_operation::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
     // Retire legacy per-person keys before lifting the unique owner index.
@@ -801,6 +820,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::nyxbot_channel::COLLECTION_NAME,
             doc! {"user_id": 1, "channel_bot_id": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+            doc! {"channel_bot_id": 1, "route_api_key_id": 1, "status": 1},
             false,
         ),
         (
@@ -996,6 +1020,21 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .build(),
         )
         .await?;
+    db.collection::<bson::Document>(MESSAGES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"conversation_id": 1, "steering.client_request_id": 1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"steering.client_request_id": {"$type": "string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // One hidden member thread per agent and group.
     db.collection::<bson::Document>(CONVERSATIONS)
         .create_index(
@@ -1146,6 +1185,24 @@ pub async fn list(
     });
     Ok(rows)
 }
+/// Steering is part of its original turn, never a previous-message anchor.
+pub async fn previous_user_message(
+    db: &Database,
+    owner: &str,
+    id: &str,
+    before: Option<i64>,
+) -> AppResult<Option<AssistantMessage>> {
+    let mut filter = doc! {"user_id": owner, "conversation_id": id, "role": "user", "steering": bson::Bson::Null, "execution_pending": {"$ne": true}};
+    if let Some(before) = before {
+        filter.insert("seq", doc! {"$lt": before});
+    }
+    Ok(db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(filter)
+        .sort(doc! {"seq": -1})
+        .await?)
+}
+
 pub async fn messages(
     db: &Database,
     user_id: &str,
@@ -1457,13 +1514,14 @@ pub async fn begin_turn_with_voice(
                     Vec::new()
                 } else {
                     super::channel_thread_follow_service::filter_events(db,user_id,&id,
-                        std::mem::take(&mut row.pending_events),session).await?
+                        super::async_service_operation::select_events(&mut row, start.origin),session).await?
                 };
                 if start.origin == TurnOrigin::Event && events.is_empty() {
                     return Err(AppError::Conflict("No eligible pending events".into()));
                 }
                 if start.origin == TurnOrigin::Event
                     && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
+                    && !events.iter().any(|e| e.kind == super::async_service_operation::EVENT_KIND)
                 {
                     // A queued owner request retains its own authority even
                     // when the preceding turn's guest is no longer eligible.
@@ -1560,6 +1618,7 @@ pub async fn begin_turn_with_voice(
                 if let Some(lost) = row.active_turn.take() {
                     row.message_count += 1;
                     let message = AssistantMessage {
+                        steering: None,
                         voice: None,
                         execution_pending: false,
                         id: Uuid::new_v4().to_string(),
@@ -1599,6 +1658,7 @@ pub async fn begin_turn_with_voice(
                     .as_ref().filter(|_| !hidden_voice)
                     .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
+                    running_response: None,
                     channel_event_id: start.channel_event_id.clone(),
                     initiating_message_seq: Some(input_seq),
                     voice_request_id: voice_request_id.clone(),
@@ -1641,6 +1701,7 @@ pub async fn begin_turn_with_voice(
                         db, session, event_id, &row.user_id, &row.id, turn_id,
                     ).await?;
                 }
+                Box::pin(super::async_service_operation::bind_in_session(db, &mut row, session)).await?;
                 // Chats whose queued messages this turn answers get its reply
                 // too, unless it already goes there.
                 let answered_here = match start.origin {
@@ -1720,6 +1781,7 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
+                    steering: None,
                     voice: None,
                     execution_pending: false,
                     id: if hidden_voice { Uuid::new_v4().to_string() } else { message_id.clone() },
@@ -1849,12 +1911,12 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let existing = get(db, user_id, id).await?;
     let Some(existing_turn) = existing.active_turn.as_ref() else {
-        return Ok(());
+        return super::async_service_operation::cancel(db, user_id, id).await;
     };
     // Rows written before heartbeat support retain the old lease boundary: an
     // already-expired legacy fence is reclaimed by the next send instead.
     if existing_turn.heartbeat_at.is_none() && live_turn(&existing, now).is_none() {
-        return Ok(());
+        return super::async_service_operation::cancel(db, user_id, id).await;
     }
     let expected_turn_id = existing_turn.turn_id.clone();
     let row = db
@@ -1869,6 +1931,9 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
         )
         .return_document(ReturnDocument::After)
         .await?;
+    // Fence new submissions before cancelling existing watches. A reserve
+    // racing this update writes the same conversation inside its transaction.
+    super::async_service_operation::cancel(db, user_id, id).await?;
     let Some(row) = row else {
         // A concurrent settlement, delete, or new turn won the exact fence.
         return Ok(());
@@ -2097,7 +2162,9 @@ async fn finish_turn_inner(
                     .as_ref()
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
+                super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
+                    let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
                     let update = if error.is_some() {
                         vec![doc! {"$set": {
                             "state": "cancelled",
@@ -2108,8 +2175,9 @@ async fn finish_turn_inner(
                             "state": {"$cond":[
                                 {"$gt":[{"$size":{"$ifNull":["$pending_acknowledgement_ids",[]]}},0]},
                                 "awaiting_confirmation",
-                                "completed",
+                                if async_pending { "claimed" } else { "completed" },
                             ]},
+                            "async_operation_pending": async_pending,
                         }}]
                     };
                     db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
@@ -2147,6 +2215,7 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    steering: None,
                     voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
@@ -2681,6 +2750,7 @@ pub async fn delete(
                         Err(error) => return Err(error),
                     }
                     for collection in [
+                        crate::models::async_service_operation::COLLECTION_NAME,
                         crate::models::assistant_voice::REQUESTS,
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
@@ -2734,8 +2804,13 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
     let mut recap = Vec::new();
     for message in history.iter().rev().take(20) {
         let prefix = format!(
-            "\n{}{}: ",
+            "\n{}{}{}: ",
             message.role,
+            message
+                .steering
+                .as_ref()
+                .map(|steer| format!(" (steering, {})", steer.outcome))
+                .unwrap_or_default(),
             if message.status == "failed" {
                 " (partial, failed)"
             } else {
@@ -2925,6 +3000,7 @@ pub struct ResponseStream {
     sequence: Option<u64>,
     pub text: String,
     pub terminal: Option<TurnResult>,
+    pub created: Option<crate::models::assistant_conversation::RunningResponse>,
 }
 impl ResponseStream {
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), TurnError> {
@@ -2982,7 +3058,10 @@ impl ResponseStream {
             .ok_or_else(|| TurnError::new("invalid_stream"))?;
         if !matches!(
             kind,
-            "response.output_text.delta" | "response.completed" | "response.failed"
+            "response.created"
+                | "response.output_text.delta"
+                | "response.completed"
+                | "response.failed"
         ) {
             return Ok(());
         }
@@ -2993,7 +3072,25 @@ impl ResponseStream {
             return Err(TurnError::new("invalid_stream"));
         }
         self.sequence = Some(sequence);
-        if kind == "response.output_text.delta" {
+        if kind == "response.created" {
+            let response = &event["response"];
+            let session = response["conversation"]["id"]
+                .as_str()
+                .filter(|id| prefixed_hex(id, "conv_"))
+                .ok_or_else(|| TurnError::new("invalid_stream"))?;
+            let id = response["id"]
+                .as_str()
+                .filter(|id| {
+                    id.strip_prefix(&format!("resp_{}_", &session[5..]))
+                        .is_some_and(|suffix| prefixed_hex(suffix, ""))
+                })
+                .ok_or_else(|| TurnError::new("invalid_stream"))?;
+            self.created = Some(crate::models::assistant_conversation::RunningResponse {
+                credential_api_key_id: String::new(),
+                response_id: id.to_owned(),
+                session_id: session.to_owned(),
+            });
+        } else if kind == "response.output_text.delta" {
             let delta = event["delta"]
                 .as_str()
                 .ok_or_else(|| TurnError::new("invalid_stream"))?;

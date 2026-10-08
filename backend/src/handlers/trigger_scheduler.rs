@@ -91,6 +91,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             )
             .await;
         }
+        if crate::services::async_service_operation::pending_run(&state.db, &run.id).await? {
+            return schedules::reschedule(&state.db, job, Some(Utc::now() + Duration::seconds(30)))
+                .await;
+        }
         if let (Some(thread), Some(turn)) = (&run.thread_id, &run.turn_id) {
             let row = match engine::get(&state.db, &run.user_id, thread).await {
                 Ok(row) => row,
@@ -270,7 +274,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     };
     match engine::require_enabled(&state.db, &run.user_id).await {
         Ok(()) => {}
-        Err(AppError::Forbidden(_) | AppError::NotFound(_)) => {
+        Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => {
             schedules::pause_target(&state.db, &trigger, "assistant_disabled").await?;
             return schedules::finish_claimed(
                 &state.db,
@@ -410,7 +414,9 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     };
     let limit = super::assistant_team::team_pool_limit(state, &run.user_id).await
         + u32::from(agent.is_nyxbot());
-    match super::assistant_team::start_server_turn(
+    // Turn admission includes several MongoDB transactions. Keep its future
+    // on the heap so scheduler frames leave room for BSON deserialization.
+    match Box::pin(super::assistant_team::start_server_turn(
         state,
         &run.user_id,
         start,
@@ -418,7 +424,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             owner: &run.user_id,
             limit,
         },
-    )
+    ))
     .await
     {
         Ok(super::assistant_team::Started::Turn { .. }) => {
@@ -962,6 +968,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        steering: None,
                         voice: None,
                         execution_pending: false,
                         id: message_id,

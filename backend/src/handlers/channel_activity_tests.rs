@@ -381,6 +381,7 @@ async fn typed_x_notifications_are_durable_gated_signed_deduplicated_and_never_r
         auth.auth_method = AuthMethod::ApiKey;
         auth.api_key_id = Some(agent.clone());
         let reply = AsyncReplyRequest {
+            thread_reply: false,
             message_id: body["message_id"].as_str().unwrap().into(),
             reply: AsyncReplyBody {
                 text: Some("must not send".into()),

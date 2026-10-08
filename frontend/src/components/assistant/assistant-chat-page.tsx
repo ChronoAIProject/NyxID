@@ -47,7 +47,7 @@ import { useNyxAgentAssistantChat } from "@/hooks/use-assistant-nyxagent";
 import { Button } from "@/components/ui/button";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
-import { UploadComposer } from "@/components/assistant/upload-composer";
+import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
 import {
@@ -794,7 +794,8 @@ function NyxAgentThreadPage() {
           </div>
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
-          <UploadComposer
+          <NyxAgentComposer
+            conversation={chat.conversation}
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
             onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {
               if (selection.current !== selectedId) return;

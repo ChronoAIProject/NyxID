@@ -265,7 +265,14 @@ pub async fn cancel(
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<()> {
     super::login_client_context::require_first_party_human(&auth)?;
-    voice::cancel(&state.db, &auth.user_id.to_string(), &id, &rid).await
+    let user = auth.user_id.to_string();
+    let request = voice::get(&state.db, &user, &id, &rid).await?;
+    voice::cancel(&state.db, &user, &id, &rid).await?;
+    super::mcp_transport::async_operations::drain_cancellations(&state, &user, &id).await?;
+    if let Some(task) = request.task_conversation_id {
+        super::mcp_transport::async_operations::drain_cancellations(&state, &user, &task).await?;
+    }
+    Ok(())
 }
 
 /// The normal owner limiter, turn fence and egress policy apply to queued speech.
@@ -345,7 +352,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 Some(super::assistant_nyxagent::SERVER_TURN_POLICY),permit,Some(&request.id))).await?;
             Ok(())
         }).await;
-        if matches!(result, Err(AppError::NotFound(_) | AppError::Forbidden(_)))
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is_forbidden() || matches!(error, AppError::NotFound(_)))
             || request.expires_at <= chrono::Utc::now()
         {
             state

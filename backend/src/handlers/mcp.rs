@@ -323,6 +323,7 @@ mod tests {
             service_category: "user_service".to_string(),
             recommended_skills: Vec::new(),
             endpoints: vec![McpToolEndpoint {
+                async_operation: None,
                 target_id: None,
                 endpoint_id: "endpoint-1".to_string(),
                 name: "get_item".to_string(),

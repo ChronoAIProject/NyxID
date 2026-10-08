@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 /// network errors add safe stage/hint details while other errors are unchanged. The caller prints the returned
 /// string with `eprintln!`, which supplies the trailing newline on stderr.
 pub fn render_error(err: &anyhow::Error, json: bool) -> String {
+    let guidance = err
+        .downcast_ref::<crate::api::ApiError>()
+        .and_then(crate::credential_guidance::for_error);
     let diagnostic = crate::net_diagnostics::Diagnostic::from_anyhow(err);
     let message = if diagnostic.is_some() {
         err.chain()
@@ -21,10 +24,15 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
     };
 
     if !json {
-        return match diagnostic {
+        let mut rendered = match diagnostic {
             Some(diagnostic) => format!("Error: {message}\n{}", diagnostic.text()),
             None => format!("Error: {message}"),
         };
+        if let Some(text) = guidance.as_ref().and_then(crate::credential_guidance::text) {
+            rendered.push('\n');
+            rendered.push_str(&text);
+        }
+        return rendered;
     }
 
     if let Some(reauth) = err.downcast_ref::<crate::auth::ReauthRequired>() {
@@ -74,6 +82,9 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
 
     if let Some(diagnostic) = diagnostic {
         payload["diagnostic"] = serde_json::to_value(diagnostic).expect("diagnostic serializes");
+    }
+    if let Some(guidance) = guidance {
+        payload["guidance"] = guidance;
     }
     serde_json::to_string(&payload).unwrap_or_else(|_| {
         "{\"error\":\"cli_error\",\"message\":\"failed to render error\"}".to_owned()

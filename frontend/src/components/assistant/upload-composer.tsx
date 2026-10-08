@@ -145,7 +145,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       {...props}
       onVoice={onVoice ? () => { void openVoice(); } : undefined}
       hasAttachments={files.some((file) => file.item)}
-      uploadBlocked={files.some((file) => !file.item)}
+      uploadBlocked={files.some((file) => !file.item) || Boolean(props.active && files.length)}
       onFiles={(items) => void add(items)}
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
@@ -246,23 +246,34 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       onSend={async (text) => {
         const items = [...pending.current.values()];
         if (items.some((file) => !file.item)) return;
-        await onSend(
-          text,
-          items.length
-            ? {
-                attachmentIds: items.map((file) => file.item!.id),
-                conversationId:
-                  scope.kind === "conversations"
-                    ? resolved.current.id
-                    : undefined,
-              }
-            : undefined,
-        );
+        // The original send may await the entire streamed reply. Detach its
+        // files now so text guidance cannot reattach them or be blocked by them.
+        for (const file of items) pending.current.delete(file.key);
+        refresh();
+        try {
+          await onSend(
+            text,
+            items.length
+              ? {
+                  attachmentIds: items.map((file) => file.item!.id),
+                  conversationId:
+                    scope.kind === "conversations"
+                      ? resolved.current.id
+                      : undefined,
+                }
+              : undefined,
+          );
+        } catch (error) {
+          for (const file of items) {
+            if (alive.current) pending.current.set(file.key, file);
+            else if (file.preview) URL.revokeObjectURL(file.preview);
+          }
+          refresh();
+          throw error;
+        }
         for (const file of items) {
           if (file.preview) URL.revokeObjectURL(file.preview);
-          pending.current.delete(file.key);
         }
-        refresh();
       }}
     />
   );

@@ -90,7 +90,7 @@ async fn service_account(f: &Fixture, owner: &str) -> (String, HeaderMap) {
     (sa.id, headers)
 }
 
-async fn node_responder(f: &Fixture, calls: usize) -> tokio::task::JoinHandle<()> {
+pub(super) async fn node_responder(f: &Fixture, calls: usize) -> tokio::task::JoinHandle<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     register_test_node_connection(&f.state, &f.node, tx).await;
     let captured = f.headers.clone();

@@ -10,6 +10,8 @@ import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/c
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import {
   nyxAgentAcknowledgementSchema,
+  nyxAgentSteeringSchema,
+  nyxAgentCapabilitiesSchema,
   nyxAgentConversationSchema,
   nyxAgentHistorySchema,
   nyxAgentIndexSchema,
@@ -275,7 +277,9 @@ export class NyxAgentTransport {
       page.conversation = { ...page.conversation, title: optimisticTitle, title_source: "user" };
     }
     const live = this.live.get(id);
-    if (live) live.conversation = { ...live.conversation, title: page.conversation.title, title_source: page.conversation.title_source };
+    if (live) live.conversation = { ...live.conversation, title: page.conversation.title, title_source: page.conversation.title_source,
+      ...(page.conversation.active_turn?.turn_id === live.conversation.active_turn?.turn_id ? { active_turn: page.conversation.active_turn } : {}),
+    };
     const existing = this.histories.get(id);
     // Preserve older pages during the running-turn poll and deduplicate by seq.
     const merged = new Map((existing?.messages ?? []).map((message) => [message.seq, message]));
@@ -300,6 +304,28 @@ export class NyxAgentTransport {
     const live = this.live.get(id);
     if (live) live.conversation = { ...live.conversation, title, title_source: source };
     this.changed();
+  }
+
+  async capabilities(id: string) {
+    const generation = this.identity();
+    const result = nyxAgentCapabilitiesSchema.parse(await assistantJson(`${path(id)}/capabilities`));
+    this.current(generation);
+    return result;
+  }
+
+  async steer(id: string, text: string, turnId: string, clientRequestId: string) {
+    const generation = this.identity();
+    try {
+      const result = nyxAgentSteeringSchema.parse(await assistantJson(`${path(id)}/steer`, {
+        method: "POST", body: { text, turn_id: turnId, clientRequestId },
+      }));
+      this.current(generation);
+      return result;
+    } finally {
+      // Receipt and response metadata arrive through the same history path as
+      // another tab's guidance. A refresh failure cannot change acceptance.
+      if (generation === this.generation) await this.history(id).catch(() => undefined);
+    }
   }
 
   async rename(id: string, title: string) {
@@ -413,6 +439,7 @@ export class NyxAgentTransport {
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
         via: message.via,
+        steering: message.steering,
       };
     });
     // The live turn's tool activity arrives through the polled history metadata,
@@ -427,21 +454,35 @@ export class NyxAgentTransport {
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
     );
     if (live) {
-      const settledRoles = new Map(
-        (history?.messages ?? []).map((message) => [message.id, message.role]),
+      const settledMessages = new Map(
+        (history?.messages ?? []).map((message) => [message.id, message]),
       );
       messages = live.state.messages.map((message) => {
         const streaming =
           message.role === "assistant" && message === live.state.messages.at(-1);
         return {
           id: message.id,
-          role: settledRoles.get(message.id) ?? message.role,
+          role: settledMessages.get(message.id)?.role ?? message.role,
+          steering: settledMessages.get(message.id)?.steering,
+          via: settledMessages.get(message.id)?.via,
+          turnId: settledMessages.get(message.id)?.turn_id,
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? "streaming" : "complete",
           ...(streaming ? liveActivity : settledImages.get(message.id)),
         };
       });
+    }
+    if (live) {
+      for (const message of history?.messages ?? []) {
+        if (!message.steering || messages.some((m) => m.id === message.id)) continue;
+        const position = messages.findIndex((m) => m.status === "streaming");
+        messages.splice(position < 0 ? messages.length : position, 0, {
+          id: message.id, role: message.role, content: message.text,
+          timestamp: Date.parse(message.created_at), status: "complete",
+          turnId: message.turn_id, steering: message.steering,
+        });
+      }
     }
     const running = Boolean(live || conversation?.active_turn);
     if (running && messages.at(-1)?.role !== "assistant") {
@@ -499,7 +540,7 @@ export class NyxAgentTransport {
       conversationId: id,
       title: conversation?.title ?? "New chat",
       messages,
-      expectedTurnCount: messages.filter((message) => message.role === "user").length,
+      expectedTurnCount: messages.filter((message) => message.role === "user" && !message.steering).length,
       status: running
         ? "streaming"
         : tail?.error_code === "cancelled"
@@ -655,7 +696,7 @@ export class NyxAgentTransport {
                 turn.conversation = refreshed.conversation;
                 const user = [...refreshed.messages]
                   .reverse()
-                  .find((message) => message.role === "user");
+                  .find((message) => message.role === "user" && !message.steering);
                 if (user) {
                   // Optimistic timestamps may predate a reset performed during admission.
                   turn.state = {

@@ -703,6 +703,7 @@ async fn request_tracked_with_machine_context(
                 let mut initiating_filter = doc! {
                     "conversation_id": &conversation.id, "user_id": &chat.user_id,
                     "role": {"$in": ["user", "orchestrator"]},
+                    "steering": bson::Bson::Null,
                     "execution_pending": {"$ne": true},
                 };
                 if let Some(seq) = conversation.active_turn.as_ref().and_then(|t| t.initiating_message_seq) {

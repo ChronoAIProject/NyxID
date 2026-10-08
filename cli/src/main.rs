@@ -6,6 +6,7 @@ mod browser;
 mod cli;
 mod clipboard;
 mod commands;
+mod credential_guidance;
 mod error_format;
 mod net_diagnostics;
 pub mod node;

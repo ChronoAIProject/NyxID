@@ -65,7 +65,11 @@ pub(crate) fn capabilities(
     on: bool,
     group: bool,
 ) -> ThreadCapabilities {
-    if !on || !group || row.transport != "direct" || row.status != "active" {
+    if !on
+        || !group
+        || !crate::services::channel_thread_service::gateway::supports(row)
+        || row.status != "active"
+    {
         return ThreadCapabilities::default();
     }
     crate::services::channel_adapters::resolve_adapter(&row.platform, &state.token_exchange_cache)
@@ -124,6 +128,12 @@ pub(crate) async fn stop(
         // Stopping a channel follow also stops its NyxAgent turn. The durable
         // conversation fence makes this safe across replicas.
         engine::request_stop(&state.db, owner, conversation_id).await?;
+        crate::handlers::mcp_transport::async_operations::cancel_conversation(
+            state,
+            owner,
+            conversation_id,
+        )
+        .await?;
         crate::handlers::machine_cancel::conversation(state, owner, conversation_id).await?;
     }
     hide_reservations(state, owner, std::slice::from_mut(&mut child)).await?;

@@ -50,6 +50,9 @@ use crate::telemetry::{
 
 #[derive(Debug, Deserialize)]
 pub struct AsyncReplyRequest {
+    /// Explicitly request the original admitted thread; absent preserves legacy sends.
+    #[serde(default)]
+    pub thread_reply: bool,
     pub message_id: String,
     pub reply: AsyncReplyBody,
 }
@@ -1269,6 +1272,18 @@ pub async fn async_reply(
     deliver_async_reply(&state, &headers, context, body, adapter.as_ref()).await
 }
 
+/// POST /api/v1/channel-relay/thread-reply. A distinct endpoint prevents an
+/// older replica from ignoring the target extension and sending to the parent.
+pub async fn async_thread_reply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: OptionalAuthUser,
+    Json(mut body): Json<AsyncReplyRequest>,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    body.thread_reply = true;
+    Box::pin(async_reply(State(state), headers, auth, Json(body))).await
+}
+
 async fn deliver_async_reply(
     state: &AppState,
     headers: &HeaderMap,
@@ -1363,6 +1378,52 @@ async fn deliver_async_reply(
         &bot,
         Some(&attributed_api_key_id),
     );
+    if body.thread_reply {
+        let credentials = crate::services::channel_platform::BotCredentials {
+            billing: billing.as_ref(),
+            token: &bot_token,
+            platform_bot_id: Some(&bot.platform_bot_id),
+            platform_secrets: platform_secrets.as_ref(),
+        };
+        let target = crate::services::channel_thread_service::gateway::reply_target(
+            &state.db,
+            adapter,
+            &bot,
+            &credentials,
+            &original,
+        )
+        .await?
+        .ok_or_else(|| AppError::Conflict("thread_target_unavailable".into()))?;
+        let outcome = crate::services::channel_thread_service::delivery::send_reply(
+            &state.db,
+            adapter,
+            &bot,
+            &credentials,
+            &target,
+            &outbound,
+        )
+        .await?;
+        if let Some(error) = outcome.error {
+            return Err(error);
+        }
+        let id = outcome
+            .message_ids
+            .last()
+            .ok_or_else(|| AppError::Conflict("thread_target_unavailable".into()))?;
+        let stored = state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(
+                doc! {"channel_bot_id":&bot.id,"user_id":&bot.user_id,"direction":"outbound",
+                "reply_to_message_id":&original.id,"platform_message_id":id},
+            )
+            .await?
+            .ok_or_else(|| AppError::Conflict("thread_target_unavailable".into()))?;
+        return Ok(Json(AsyncReplyResponse {
+            message_id: stored.id,
+            platform_message_id: Some(id.clone()),
+        }));
+    }
     let send_result = adapter
         .send_bound_reply_outcome(
             &state.db,
@@ -1680,6 +1741,7 @@ pub async fn fetch_attachment(
         })?;
         crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth).await?;
         let body = AsyncReplyRequest {
+            thread_reply: false,
             message_id,
             reply: AsyncReplyBody {
                 text: None,
@@ -2391,6 +2453,7 @@ mod tests {
             validated_bot: Some(fixture.bot.clone()),
         };
         let request = AsyncReplyRequest {
+            thread_reply: false,
             message_id: fixture.message.id.clone(),
             reply: body(Some(&"t".repeat(4097)), None),
         };
@@ -2651,10 +2714,11 @@ mod tests {
         ] {
             let mut denied = auth.clone();
             denied.auth_method = method;
-            assert!(matches!(
-                resolve_initiated_context(&fixture.state, &denied, "missing").await,
-                Err(AppError::Forbidden(_))
-            ));
+            assert!(
+                resolve_initiated_context(&fixture.state, &denied, "missing")
+                    .await
+                    .is_err_and(|error| error.is_forbidden())
+            );
         }
         let mut wrong = auth.clone();
         wrong.api_key_id = Some(Uuid::new_v4().to_string());
@@ -2794,10 +2858,11 @@ mod tests {
                 .unwrap();
         }
         auth.oauth_client_id = Some("external-app".into());
-        assert!(matches!(
-            resolve_initiated_context(&fixture.state, &auth, &fixture.conversation.id).await,
-            Err(AppError::Forbidden(_))
-        ));
+        assert!(
+            resolve_initiated_context(&fixture.state, &auth, &fixture.conversation.id)
+                .await
+                .is_err_and(|error| error.is_forbidden())
+        );
         let mut mismatch = fixture.bot.clone();
         mismatch.user_id = Uuid::new_v4().to_string();
         assert!(matches!(
@@ -3449,6 +3514,7 @@ mod tests {
 
     fn reply_request(message_id: &str) -> AsyncReplyRequest {
         AsyncReplyRequest {
+            thread_reply: false,
             message_id: message_id.to_string(),
             reply: body(Some("hello"), None),
         }
@@ -4928,6 +4994,7 @@ mod tests {
                 &HeaderMap::new(),
                 context,
                 AsyncReplyRequest {
+                    thread_reply: false,
                     message_id: fixture.message.id.clone(),
                     reply: body(Some("reply"), None),
                 },
@@ -4982,6 +5049,7 @@ mod tests {
             Err(AppError::Conflict(_))
         ));
         let body = AsyncReplyRequest {
+            thread_reply: false,
             message_id: fixture.message.id.clone(),
             reply: media_body(),
         };
@@ -5117,6 +5185,7 @@ mod tests {
                 .unwrap()
         );
         let body = AsyncReplyRequest {
+            thread_reply: false,
             message_id: fixture.message.id.clone(),
             reply: media_body(),
         };

@@ -623,15 +623,15 @@ pub async fn remove_member_with_revision(
 /// Only read-only member resolution uses this classification. Approval outcomes
 /// and request-wide authentication never enter candidate filtering.
 pub fn member_unavailable(error: &AppError) -> bool {
-    matches!(
-        error,
-        AppError::NotFound(_)
-            | AppError::OrgRoleInsufficient(_)
-            | AppError::ApiKeyScopeForbidden(_)
-            | AppError::Forbidden(_)
-            | AppError::RequiredServiceNotConnected { .. }
-            | AppError::CredentialUnavailable(_)
-    )
+    error.is_forbidden()
+        || matches!(
+            error,
+            AppError::NotFound(_)
+                | AppError::OrgRoleInsufficient(_)
+                | AppError::ApiKeyScopeForbidden(_)
+                | AppError::RequiredServiceNotConnected { .. }
+                | AppError::CredentialUnavailable(_)
+        )
 }
 
 pub async fn resolve_member(
