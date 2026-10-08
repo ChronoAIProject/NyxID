@@ -172,6 +172,8 @@ async fn tool_twins_copy_contracts_as_drafts_without_mutating_source_or_copying_
         assert_eq!(twin["auth_key_name"], "xi-api-key");
         assert_eq!(twin["custom_user_agent"], "NyxID tools");
         assert_eq!(twin["import_source"]["kind"], "catalog_twin");
+        let imported_at = chrono::DateTime::parse_from_rfc3339(twin["import_source"]["imported_at"].as_str().unwrap()).unwrap();
+        assert!((chrono::Utc::now() - imported_at.with_timezone(&chrono::Utc)).num_seconds().abs() < 60);
         assert_eq!(twin["import_source"]["reference"], f.service.slug);
         let (status, error) = request(
             &f.state,

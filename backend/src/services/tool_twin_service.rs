@@ -71,7 +71,7 @@ pub async fn prepare_create(db: &Database, mut body: Value) -> AppResult<Value> 
         "auth_notes":source.auth_notes, "known_limitations":source.known_limitations,
         "required_permissions":source.required_permissions, "description":source.description,
         "platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]},
-        "import_source":{"kind":"catalog_twin","reference":source.slug,"version":source.updated_at.to_rfc3339()}
+        "import_source":{"kind":"catalog_twin","reference":source.slug,"version":source.updated_at.to_rfc3339(),"imported_at":chrono::Utc::now().to_rfc3339()}
     });
     let target = body
         .as_object_mut()
