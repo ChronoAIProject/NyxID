@@ -24,6 +24,9 @@ COPY cli/resources/machine-container/seccomp.json /build/cli/resources/machine-c
 # env vars needed for telemetry. Rotation = edit .env.production,
 # restart backend, done.
 
+ARG NYXID_GIT_HASH
+ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
+
 RUN npm run build
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────

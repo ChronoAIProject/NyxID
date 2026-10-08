@@ -101,6 +101,19 @@ server {
     location /health {
         proxy_pass ${BACKEND_URL};
         proxy_set_header Host $host;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy $nyxid_referrer_policy always;
+    }
+
+    location = /build-version.json {
+        add_header Cache-Control "no-store" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy $nyxid_referrer_policy always;
+        try_files $uri =404;
     }
 
     # Cache hashed static assets for 1 year
