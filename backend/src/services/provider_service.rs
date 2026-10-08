@@ -9561,7 +9561,7 @@ mod tests {
         }
         assert_eq!(
             crate::services::scope_catalog::platform_scope_allowlist("stripe"),
-            Some(&[][..])
+            None
         );
     }
 

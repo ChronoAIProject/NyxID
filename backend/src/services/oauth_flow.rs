@@ -82,6 +82,17 @@ pub fn encode_oauth_request(
     }
 }
 
+pub fn is_stripe_apps(provider: &ProviderConfig) -> bool {
+    provider.slug == "stripe"
+        && provider.authorization_url.as_deref().is_some_and(|url| {
+            reqwest::Url::parse(url).is_ok_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str() == Some("marketplace.stripe.com")
+                    && url.path() == "/oauth/v2/authorize"
+            })
+        })
+}
+
 pub fn token_request(
     provider: &ProviderConfig,
     token_url: &str,
@@ -89,7 +100,7 @@ pub fn token_request(
 ) -> AppResult<reqwest::RequestBuilder> {
     let mut params = params.to_vec();
     apply_token_resource(provider, &mut params);
-    if provider.slug == "stripe" {
+    if is_stripe_apps(provider) {
         params.retain(|(name, _)| {
             !matches!(
                 name.as_str(),
@@ -113,7 +124,7 @@ pub fn authenticate_token_request(
     client_id: &str,
     client_secret: Option<&str>,
 ) -> AppResult<reqwest::RequestBuilder> {
-    if provider.slug == "stripe" {
+    if is_stripe_apps(provider) {
         let secret = client_secret
             .filter(|secret| !secret.is_empty())
             .ok_or_else(|| {
@@ -132,7 +143,7 @@ pub fn authenticate_token_request(
 pub fn token_expires_in(provider: &ProviderConfig, payload: &serde_json::Value) -> Option<i64> {
     payload["expires_in"]
         .as_i64()
-        .or_else(|| (provider.slug == "stripe").then_some(3600))
+        .or_else(|| is_stripe_apps(provider).then_some(3600))
 }
 
 fn apply_token_resource(provider: &ProviderConfig, params: &mut Vec<(String, String)>) {
@@ -422,6 +433,8 @@ mod tests {
     fn stripe_token_request_uses_developer_key_and_only_grant_parameters() {
         let mut provider = test_provider();
         provider.slug = "stripe".into();
+        provider.authorization_url =
+            Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
         provider.token_endpoint_auth_method = "client_secret_basic".into();
         let params = vec![
             ("grant_type".into(), "authorization_code".into()),
@@ -475,10 +488,47 @@ mod tests {
         let mut provider = test_provider();
         assert_eq!(token_expires_in(&provider, &serde_json::json!({})), None);
         provider.slug = "stripe".into();
+        provider.authorization_url =
+            Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
         assert_eq!(
             token_expires_in(&provider, &serde_json::json!({})),
             Some(3600)
         );
+        assert_eq!(
+            token_expires_in(&provider, &serde_json::json!({"expires_in": 1800})),
+            Some(1800)
+        );
+    }
+
+    #[test]
+    fn existing_stripe_connect_preserves_generic_oauth_contract() {
+        let mut provider = test_provider();
+        provider.slug = "stripe".into();
+        provider.authorization_url = Some("https://connect.stripe.com/oauth/authorize".into());
+        assert!(!is_stripe_apps(&provider));
+        let params = vec![
+            ("redirect_uri".into(), "https://nyx.example/callback".into()),
+            ("client_id".into(), "client".into()),
+            ("code_verifier".into(), "verifier".into()),
+        ];
+        let request = authenticate_token_request(
+            &provider,
+            token_request(&provider, "https://example.com/token", &params).unwrap(),
+            "client",
+            Some("secret"),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Basic Y2xpZW50OnNlY3JldA=="
+        );
+        let body = String::from_utf8_lossy(request.body().unwrap().as_bytes().unwrap());
+        for field in ["redirect_uri", "client_id", "code_verifier"] {
+            assert!(body.contains(field));
+        }
+        assert_eq!(token_expires_in(&provider, &serde_json::json!({})), None);
         assert_eq!(
             token_expires_in(&provider, &serde_json::json!({"expires_in": 1800})),
             Some(1800)

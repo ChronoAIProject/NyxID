@@ -954,7 +954,7 @@ pub async fn initiate_oauth_connect(
         urlencoding::encode(&state_id),
     );
 
-    if provider.slug == "stripe" {
+    if oauth_flow::is_stripe_apps(&provider) {
         auth_url = auth_url.replace("&response_type=code", "");
     }
 
@@ -4275,9 +4275,11 @@ mod tests {
                     .and(path("/token"))
                     .and(header("authorization", basic))
                     .and(header("content-type", "application/x-www-form-urlencoded"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "access_token": "connected-access", "refresh_token": "connected-refresh"
-                    })))
+                    .respond_with(ResponseTemplate::new(200).set_body_json({
+                        let mut payload = serde_json::json!({"access_token": "connected-access", "refresh_token": "connected-refresh"});
+                        if slug != "stripe" { payload["expires_in"] = serde_json::json!(3600); }
+                        payload
+                    }))
                     .expect(1)
                     .mount(&server)
                     .await;
@@ -4328,9 +4330,11 @@ mod tests {
                     .and(path("/token"))
                     .and(header("authorization", basic))
                     .and(header("content-type", "application/x-www-form-urlencoded"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "access_token": "refreshed-access", "refresh_token": "rotated-refresh"
-                    })))
+                    .respond_with(ResponseTemplate::new(200).set_body_json({
+                        let mut payload = serde_json::json!({"access_token": "refreshed-access", "refresh_token": "rotated-refresh"});
+                        if slug != "stripe" { payload["expires_in"] = serde_json::json!(3600); }
+                        payload
+                    }))
                     .expect(1)
                     .mount(&server)
                     .await;
@@ -4409,6 +4413,10 @@ mod tests {
                 Some(enc.encrypt(b"client-secret").await.unwrap()),
             );
             provider.slug = slug.into();
+            if slug == "stripe" {
+                provider.authorization_url =
+                    Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+            }
             if basic {
                 provider.token_endpoint_auth_method = "client_secret_basic".into();
             }
