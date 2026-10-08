@@ -283,7 +283,7 @@ pub async fn refresh_oauth_token(
     let response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Token refresh request failed".into()))?;
 
     if !response.status().is_success() {
         let now = Utc::now();

@@ -1925,7 +1925,7 @@ pub async fn handle_oauth_callback(
     let token_response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("OAuth token exchange failed: {e}")))?;
+        .map_err(|_| AppError::Internal("OAuth token exchange failed".into()))?;
 
     let status = token_response.status();
     // Read the body once as text so we can both (a) parse provider-shaped
@@ -2586,7 +2586,7 @@ async fn refresh_user_api_key_under_lease(
     let response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Token refresh request failed".into()))?;
 
     if !response.status().is_success() {
         let status = response.status();
