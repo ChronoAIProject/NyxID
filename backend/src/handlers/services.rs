@@ -1706,7 +1706,11 @@ pub async fn delete_service(
 ) -> AppResult<Json<DeleteServiceResponse>> {
     // CR-4: Use shared require_admin_or_creator helper instead of inline check
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     let now = Utc::now();
     state
@@ -1873,7 +1877,13 @@ async fn update_service_inner(
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
-    require_admin(&state, &auth_user).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool)
+    {
+        require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     if body.destination_targets.is_some() {
         require_admin(&state, &auth_user).await?;

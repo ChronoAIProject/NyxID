@@ -125,9 +125,6 @@ pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<
 }
 
 pub async fn is_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<bool> {
-    if auth_user.auth_method == crate::mw::auth::AuthMethod::ServiceAccount {
-        return Ok(false);
-    }
     let user_id = auth_user.user_id.to_string();
 
     let user_model = state

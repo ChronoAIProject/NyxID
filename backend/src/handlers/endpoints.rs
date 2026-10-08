@@ -13,7 +13,7 @@ use crate::services::service_endpoint_service::{
 };
 use crate::services::{openapi_parser, service_endpoint_service};
 
-use super::services_helpers::{fetch_service, require_http_service};
+use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
 
 // --- Request / Response types ---
 
@@ -280,7 +280,11 @@ pub async fn create_endpoint(
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    super::services_helpers::require_admin(&state, &auth_user).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     validate_endpoint_name(&body.name)?;
     validate_method(&body.method)?;
@@ -336,7 +340,11 @@ pub async fn update_endpoint(
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    super::services_helpers::require_admin(&state, &auth_user).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
         && body.is_active.is_some()
@@ -404,7 +412,11 @@ pub async fn delete_endpoint(
 ) -> AppResult<Json<DeleteEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    super::services_helpers::require_admin(&state, &auth_user).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
 
@@ -431,7 +443,11 @@ pub async fn discover_endpoints(
 ) -> AppResult<Json<DiscoverEndpointsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    super::services_helpers::require_admin(&state, &auth_user).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     let api_spec_url = service
         .openapi_spec_url
