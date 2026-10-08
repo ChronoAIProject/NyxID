@@ -1,3 +1,4 @@
+import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
@@ -165,25 +166,25 @@ export function AssistantChatPage() {
 
   function selectConversation(conversationId: string) {
     setComposerFocusRequest((value) => value + 1);
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: {
         c: conversationId,
         ...(fixtureMode ? { mock: 1 } : {}),
       } as never,
-    });
+    }));
   }
 
   function createNewChat() {
     setComposerFocusRequest((value) => value + 1);
     chat.newChat();
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: {
         draft: true,
         ...(fixtureMode ? { mock: 1 } : {}),
       } as never,
-    });
+    }));
   }
 
   async function deleteConversation(conversationId: string) {
@@ -367,18 +368,18 @@ export function DirectAssistantChatPage() {
 
   function selectConversation(conversationId: string) {
     setComposerFocusRequest((value) => value + 1);
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: { c: conversationId } as never,
-    });
+    }));
   }
 
   function createNewChat() {
     setComposerFocusRequest((value) => value + 1);
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: { draft: true } as never,
-    });
+    }));
   }
 
   async function deleteConversation(conversationId: string) {
@@ -580,10 +581,10 @@ function NyxAgentThreadPage() {
   ]);
 
   function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
-    void navigate({
+    void navigateWithBuildUpdate(() => navigate({
       to: "/assistant" as never,
       search: { ...next, ...(search.mock ? { mock: 1 } : {}) } as never,
-    });
+    }));
   }
 
   /**

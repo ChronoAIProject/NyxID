@@ -8,6 +8,7 @@ import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
+import { buildVersion } from "./scripts/build-version"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
@@ -239,12 +240,14 @@ function docsSync(): Plugin {
 // reload, while a reload landing on the SAME build stops instead of looping.
 // `SOURCE_COMMIT` lets a build pipeline pin it to a commit; otherwise the config
 // evaluation time is enough, since a new evaluation means a new build.
-const BUILD_ID = process.env.SOURCE_COMMIT || Date.now().toString(36)
+const SOURCE_COMMIT = process.env.SOURCE_COMMIT || process.env.NYXID_GIT_HASH || null
+const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
 
 export default defineConfig({
   plugins: [
     ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
     telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),
+    buildVersion(BUILD_ID, SOURCE_COMMIT),
   ],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),

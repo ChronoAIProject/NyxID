@@ -8,7 +8,7 @@ NyxID's AI Services system lets users manage external API credentials, SSH servi
 
 ---
 
-## Service cards and saved filter defaults
+## Service cards and saved views
 
 The External Services grid groups catalog-backed connections by `catalog_service_id`.
 Custom connections remain separate by ID. Each group starts collapsed with a
@@ -42,16 +42,19 @@ and pills. Platform sources use the NyxID icon.
 
 The toolbar keeps Organization, Service, and search as its filtering controls;
 the additional Filters menu has been removed. Search applies on submit or blur.
-Older saved source, service-state, type, and auto-connected criteria remain visible
-as removable pills so they cannot silently hide connections. Active criteria can
+Non-default scope, service-state, type, and hidden auto-connected criteria appear
+as removable pills so they cannot silently hide connections. Display controls label
+the current scope and whether auto-connected entries are Included or Hidden.
+Clear filters restores all accessible services, including auto-connected entries. Active criteria can
 also be cleared together. In sticky mode Connect Service becomes **+ Connect** and
 Personal/All services becomes its active view icon, with accessible labels and
 hover tooltips. The preview refresh button is removed. Returning to the normal position restores their text. Explicit
 12px toolbar padding and a 10px gap separate controls from the selected pills;
 pills retain their own 6px gaps and fit within two rows before scrolling.
-These controls apply to both the grid and table. Personal is the default service scope: a group is included when it has
-a personal connection, and its accessible organization and platform counterparts
-remain visible. Groups with no personal connection are available in All services.
+These controls apply to both the grid and table. All services is the default scope,
+including organization-only and platform-only groups. Personal is an optional
+preset: a group is included when it has a personal connection, and its accessible
+organization and platform counterparts remain visible.
 All states/types and auto-connected services are included by default.
 Source options come from the current connection list. Enabled/disabled
 uses `UserService.is_active`; it does not assert credential health or readiness.
@@ -212,10 +215,11 @@ account, eligible allowances fund usage before credit grants and then wallet
 credits. This funding order does not select another connection or payer; local
 NyxID billing failures remain terminal. See [Service pools](SERVICE_POOLS.md).
 
-**Save as default** writes the current filters to the authenticated user's
-`users.profile_config.services_view` embedded blob. Search text is included.
-**Restore default** discards draft filters. **Clear filters** shows everything for
-this visit; saving afterward makes that the account default. Card expansion is
+The **Saved views** menu saves named filter combinations and lets the user choose
+a default. Saving/updating is contained in that menu, with no toolbar Update default
+button. Explicitly saved defaults still take precedence on a fresh visit. Search
+text is included in each view. Restoring a saved view discards draft filters. **Clear filters** shows everything for
+this visit; save a view and mark it as default to reopen that selection. Card expansion is
 session presentation state and is never persisted to the account. Draft filters
 survive detail-page navigation, but reset on sign-out/account change or reload.
 
@@ -245,6 +249,27 @@ routing, service access, or connection priority.
 Older backends omit `services_view`; filtering remains available, but account
 saving is disabled until the supporting backend is deployed. The UI never falls
 back to browser storage while claiming the preference was saved to the account.
+
+### Named service views
+
+`profile_config.service_views` contains up to 20 private named views and a nullable
+`default_id`. Each view has a unique `id`, a trimmed name of 1–100 Unicode
+characters, and `filters` using the existing service-filter contract.
+`PUT /api/v1/users/me/preferences/service-views` replaces this workspace with
+`{ "views": [{ "id": "...", "name": "Team services", "filters": { ... } }], "default_id": "..." }`.
+The server validates all filters and the default reference before atomically
+saving the workspace and its default filters in `services_view`, preserving all
+other profile settings. With no saved default, a fresh visit shows all accessible services, including
+auto-connected entries. Deleting the default clears the default reference without changing the
+current draft filters.
+
+The Saved views menu creates named views, restores their filters, updates the
+selected view with current filters, chooses or removes a default with its star,
+and confirms deletion. Saving a new view does not change the default. Existing
+single defaults appear as “My default” and are carried into the workspace on the
+first named-view save. Views store filters only; card expansion and grid/table
+layout retain their existing behavior. Servers without `service_views` keep
+restoration available but disable named-view writes.
 
 ## System Components
 

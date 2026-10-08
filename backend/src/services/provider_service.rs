@@ -2897,6 +2897,67 @@ pub async fn seed_default_providers(
     }
 
     // 26. Notion (OAuth2)
+    for (slug, name, host) in [
+        ("posthog", "PostHog (US)", "https://us.posthog.com"),
+        ("posthog-eu", "PostHog (EU)", "https://eu.posthog.com"),
+    ] {
+        if slug_exists!(slug) {
+            continue;
+        }
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            name: name.to_string(),
+            description: Some("PostHog analytics API access via OAuth 2.0.".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(format!("{host}/oauth/authorize/")),
+            token_url: Some(format!("{host}/oauth/token/")),
+            revocation_url: Some(format!("{host}/oauth/revoke/")),
+            revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
+                style: "rfc7009".to_string(),
+                url: format!("{host}/oauth/revoke/"),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
+            default_scopes: Some(
+                crate::services::scope_catalog::POSTHOG_DEFAULT_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_string())
+                    .collect(),
+            ),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://posthog.com/docs/api/oauth".to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: Some("form".to_string()),
+            oauth_request_headers: HashMap::new(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug, "Seeded default PostHog provider");
+        seeded_count += 1;
+    }
+
     // Capabilities and page access are chosen in Notion, not via scopes.
     // OAuth uses JSON + Basic auth and rotates refresh tokens. Notion does
     // not document expires_in; persist it only when actually returned.
@@ -4460,6 +4521,52 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "posthog",
+        service_slug: "api-posthog",
+        service_name: "PostHog (US)",
+        base_url: "https://us.posthog.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Access PostHog projects, insights, dashboards, feature flags, and analytics queries.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://posthog.com"),
+        auth_notes: Some(
+            "Connect with a registered PostHog OAuth client in the matching cloud region. Default scopes are read-only; additional permissions require reauthorization.",
+        ),
+        known_limitations: Some(
+            "Use the region where your PostHog account lives. Access is limited to the projects and scopes granted during consent. This connector accesses the private API, not event ingestion.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "posthog-eu",
+        service_slug: "api-posthog-eu",
+        service_name: "PostHog (EU)",
+        base_url: "https://eu.posthog.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Access PostHog projects, insights, dashboards, feature flags, and analytics queries.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://posthog.com"),
+        auth_notes: Some(
+            "Connect with a registered PostHog OAuth client in the matching cloud region. Default scopes are read-only; additional permissions require reauthorization.",
+        ),
+        known_limitations: Some(
+            "Use the region where your PostHog account lives. Access is limited to the projects and scopes granted during consent. This connector accesses the private API, not event ingestion.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "notion",
@@ -7866,6 +7973,97 @@ mod tests {
             "Notion accepts multipart uploads through api.notion.com"
         );
         assert!(!streaming);
+    }
+
+    #[test]
+    fn posthog_catalog_regions_and_managed_scopes_match() {
+        for (provider_slug, service_slug, host) in [
+            ("posthog", "api-posthog", "https://us.posthog.com"),
+            ("posthog-eu", "api-posthog-eu", "https://eu.posthog.com"),
+        ] {
+            let seed = DEFAULT_SERVICE_SEEDS
+                .iter()
+                .find(|seed| seed.service_slug == service_slug)
+                .unwrap();
+            assert_eq!(seed.provider_slug, provider_slug);
+            assert_eq!(seed.base_url, host);
+            assert_eq!(seed.injection_method, "bearer");
+            assert_eq!(seed.service_category, "connection");
+            assert!(seed.requires_user_credential);
+            let allowed =
+                crate::services::scope_catalog::platform_scope_allowlist(provider_slug).unwrap();
+            let menu = crate::services::scope_catalog::for_provider(provider_slug).unwrap();
+            for scope in crate::services::scope_catalog::POSTHOG_DEFAULT_SCOPES {
+                assert!(allowed.contains(scope));
+                assert!(
+                    menu.iter()
+                        .any(|entry| entry.scope == *scope && !entry.sensitive)
+                );
+            }
+            assert!(!allowed.contains(&"feature_flag:write"));
+        }
+    }
+
+    #[tokio::test]
+    async fn posthog_oauth_seeds_preserve_operator_configuration() {
+        let db = seed_default_catalog("posthog_oauth_seeds")
+            .await
+            .expect("PostHog seed test requires MongoDB");
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        for (slug, host) in [
+            ("posthog", "https://us.posthog.com"),
+            ("posthog-eu", "https://eu.posthog.com"),
+        ] {
+            let provider = providers
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                provider.authorization_url.as_deref(),
+                Some(format!("{host}/oauth/authorize/").as_str())
+            );
+            assert_eq!(
+                provider.token_url.as_deref(),
+                Some(format!("{host}/oauth/token/").as_str())
+            );
+            assert_eq!(provider.token_endpoint_auth_method, "client_secret_post");
+            assert_eq!(provider.token_request_encoding.as_deref(), Some("form"));
+            assert!(provider.supports_pkce);
+            assert_eq!(provider.credential_mode, "both");
+            assert_eq!(
+                provider.revocation.as_ref().unwrap().url,
+                format!("{host}/oauth/revoke/")
+            );
+            providers
+                .update_one(
+                    doc! { "_id": &provider.id },
+                    doc! { "$set": {
+                        "credential_mode": "admin", "default_scopes": ["project:read"]
+                    }},
+                )
+                .await
+                .unwrap();
+        }
+        super::seed_default_providers(&db, &test_encryption_keys())
+            .await
+            .unwrap();
+        for slug in ["posthog", "posthog-eu"] {
+            let provider = providers
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(provider.credential_mode, "admin");
+            assert_eq!(provider.default_scopes.unwrap(), vec!["project:read"]);
+            assert_eq!(
+                providers
+                    .count_documents(doc! { "slug": slug })
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
     }
 
     #[tokio::test]
