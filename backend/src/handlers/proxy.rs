@@ -4049,6 +4049,17 @@ async fn execute_resolved_proxy_inner(
     } else {
         None
     };
+    if target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+        crate::services::tool_publication_service::gate(
+            &state.db,
+            &target.service,
+            request.method().as_str(),
+            &canonical,
+        )
+        .await?;
+    }
     let pool_authority_path = path;
     let canonical_forward_path = if target.service.proxy_operation_policy.is_some()
         || !target.service.destination_targets.is_empty()

@@ -1297,6 +1297,9 @@ async fn load_user_tools_with_grants(
 
     let mut eps_by_svc: HashMap<&str, Vec<&ServiceEndpoint>> = HashMap::new();
     for ep in &all_endpoints {
+        if ep.publication != crate::models::service_endpoint::PublicationState::Published {
+            continue;
+        }
         eps_by_svc
             .entry(ep.service_id.as_str())
             .or_default()
@@ -1393,7 +1396,11 @@ async fn load_user_tools_with_grants(
                     endpoints: Vec::new(),
                     durable_metadata: HashMap::new(),
                 });
-            match user_spec_url {
+            match user_spec_url.filter(|_| {
+                catalog_policy.is_none_or(|service| {
+                    service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
+                })
+            }) {
                 Some(spec_url) => {
                     match try_user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id).await {
                         Some(instance_endpoints) => (instance_endpoints, false, false),

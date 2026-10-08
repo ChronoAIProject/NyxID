@@ -194,6 +194,18 @@ pub async fn initial_publication(
     )
 }
 
+pub async fn list_all_endpoints(
+    db: &mongodb::Database,
+    service_id: &str,
+) -> AppResult<Vec<ServiceEndpoint>> {
+    Ok(db
+        .collection::<ServiceEndpoint>(COLLECTION_NAME)
+        .find(doc! {"service_id": service_id})
+        .await?
+        .try_collect()
+        .await?)
+}
+
 /// Create a new endpoint for a service.
 pub async fn create_endpoint(
     db: &mongodb::Database,

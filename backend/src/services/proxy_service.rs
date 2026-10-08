@@ -3132,6 +3132,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    offering_kind: crate::models::downstream_service::OfferingKind,
     inference: Option<crate::models::downstream_service::ServiceInference>,
     workspace_destinations_pending: bool,
     destination_targets: std::collections::BTreeMap<String, String>,
@@ -3160,6 +3161,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        offering_kind: service.offering_kind,
         inference: service.inference.clone(),
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -3175,6 +3177,7 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    service.offering_kind = authorization.offering_kind;
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
     service.destination_targets = authorization.destination_targets.clone();

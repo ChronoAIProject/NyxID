@@ -115,6 +115,8 @@ pub enum AppError {
     VoiceQueueFull,
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
+    #[error("Tool operation is not published")]
+    ToolOperationNotPublished,
     /// Adds safe startup context while preserving the underlying numeric code/status.
     #[error("Voice startup failed")]
     VoiceStartFailed(Box<voice_start::Failure>),
@@ -758,6 +760,7 @@ impl AppError {
             Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -976,6 +979,7 @@ impl AppError {
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::VoiceProviderUnavailable => 12501,
+            Self::ToolOperationNotPublished => 12600,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantAttachmentExpired => 12101,
@@ -1235,6 +1239,7 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::VoiceQueueFull => "voice_queue_full",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",

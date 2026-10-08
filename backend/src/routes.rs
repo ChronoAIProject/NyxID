@@ -654,6 +654,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::services::regenerate_oidc_secret),
         )
         .route(
+            "/{service_id}/publication",
+            post(handlers::endpoints::change_publication_bulk),
+        )
+        .route(
+            "/{service_id}/endpoints/{endpoint_id}/publication",
+            post(handlers::endpoints::change_publication),
+        )
+        .route(
             "/{service_id}/endpoints",
             get(handlers::endpoints::list_endpoints),
         )

@@ -228,7 +228,14 @@ pub async fn list_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
 
-    let endpoints = service_endpoint_service::list_endpoints(&state.db, &service_id).await?;
+    let endpoints = if super::services_helpers::require_admin(&state, &auth_user)
+        .await
+        .is_ok()
+    {
+        service_endpoint_service::list_all_endpoints(&state.db, &service_id).await?
+    } else {
+        service_endpoint_service::list_endpoints(&state.db, &service_id).await?
+    };
     let items: Vec<EndpointResponse> = endpoints
         .into_iter()
         .filter(|endpoint| {
@@ -323,6 +330,13 @@ pub async fn update_endpoint(
     require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
 
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        && body.is_active.is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Use the publication route to enable or pause tool operations".into(),
+        ));
+    }
     if let Some(ref name) = body.name {
         validate_endpoint_name(name)?;
     }
@@ -647,4 +661,63 @@ mod tests {
         assert_eq!(persisted.path, "/original");
         assert_eq!(persisted.operation_generation, 1);
     }
+}
+
+#[derive(Deserialize)]
+pub struct PublicationRequest {
+    pub state: crate::models::service_endpoint::PublicationState,
+}
+
+#[derive(Deserialize)]
+pub struct BulkPublicationRequest {
+    pub state: crate::models::service_endpoint::PublicationState,
+    pub endpoint_names: Vec<String>,
+}
+
+pub async fn change_publication(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((service_id, endpoint_id)): Path<(String, String)>,
+    Json(body): Json<PublicationRequest>,
+) -> AppResult<Json<EndpointResponse>> {
+    let service = fetch_service(&state, &service_id).await?;
+    super::services_helpers::require_admin(&state, &auth_user).await?;
+    require_http_service(&service)?;
+    let mut rows = crate::services::tool_publication_service::change_publication(
+        &state.db,
+        &service_id,
+        &[endpoint_id],
+        body.state,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
+    Ok(Json(endpoint_to_response(rows.remove(0))))
+}
+
+pub async fn change_publication_bulk(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    Json(body): Json<BulkPublicationRequest>,
+) -> AppResult<Json<EndpointListResponse>> {
+    let service = fetch_service(&state, &service_id).await?;
+    super::services_helpers::require_admin(&state, &auth_user).await?;
+    require_http_service(&service)?;
+    let ids = crate::services::tool_publication_service::ids_by_name(
+        &state.db,
+        &service_id,
+        &body.endpoint_names,
+    )
+    .await?;
+    let rows = crate::services::tool_publication_service::change_publication(
+        &state.db,
+        &service_id,
+        &ids,
+        body.state,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
+    Ok(Json(EndpointListResponse {
+        endpoints: rows.into_iter().map(endpoint_to_response).collect(),
+    }))
 }
