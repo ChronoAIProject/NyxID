@@ -40,19 +40,3 @@ pub async fn get(
         .map(Json)
         .ok_or_else(|| AppError::NotFound("Tool not found".into()))
 }
-
-pub async fn editor_authority(
-    State(state): State<AppState>,
-    auth: AuthUser,
-) -> AppResult<Json<serde_json::Value>> {
-    let admin = super::services_helpers::is_admin(&state, &auth).await?;
-    let read = crate::services::catalog_services_access::authorize(&state.db, &auth, false)
-        .await
-        .is_ok();
-    let write = crate::services::catalog_services_access::authorize(&state.db, &auth, true)
-        .await
-        .is_ok();
-    Ok(Json(
-        serde_json::json!({"admin":admin,"read":read,"write":write}),
-    ))
-}

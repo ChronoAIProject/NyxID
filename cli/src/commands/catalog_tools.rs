@@ -1,10 +1,7 @@
 use super::service::catalog_admin::fetch_catalog_service;
 use crate::{
     api::ApiClient,
-    cli::{
-        CatalogCommands, CatalogEndpointArgs, CatalogEndpointCommands, CatalogSpecCommands,
-        ToolsCommands,
-    },
+    cli::{CatalogCommands, CatalogEndpointArgs, CatalogEndpointCommands, ToolsCommands},
     output,
 };
 use anyhow::{Context, Result, bail};
@@ -201,63 +198,13 @@ pub async fn run_admin(command: CatalogCommands) -> Result<()> {
                 )
             }
         },
-        CatalogCommands::Spec { command } => {
-            let (service, auth) = match &command {
-                CatalogSpecCommands::Import { service, auth, .. }
-                | CatalogSpecCommands::Show { service, auth }
-                | CatalogSpecCommands::Delete { service, auth } => (service, auth),
-            };
-            let mut api = ApiClient::from_auth_checked(auth).await?;
-            let id = service_id(&mut api, service).await?;
-            let path = format!("/services/{id}/spec-overlay");
-            let result: Value = match &command {
-                CatalogSpecCommands::Import {
-                    file,
-                    source_kind,
-                    source_ref,
-                    source_version,
-                    ..
-                } => {
-                    let document: Value = serde_json::from_slice(&std::fs::read(file)?)?;
-                    if !document.is_object()
-                        || !document["paths"].is_object()
-                        || !document["openapi"]
-                            .as_str()
-                            .is_some_and(|v| v.starts_with("3."))
-                    {
-                        bail!("Expected an OpenAPI 3.x object with paths");
-                    }
-                    let source=source_kind.as_ref().map(|kind|json!({"kind":kind,"reference":source_ref.as_deref().unwrap_or(""),"version":source_version}));
-                    api.put(&path, &json!({"document":document,"source":source}))
-                        .await?
-                }
-                CatalogSpecCommands::Show { .. } => api.get(&path).await?,
-                CatalogSpecCommands::Delete { .. } => api.delete(&path).await?,
-            };
-            output::print_rows(
-                &result,
-                auth.output,
-                None,
-                &[
-                    ("Service", "service_id"),
-                    ("Revision", "revision"),
-                    ("SHA-256", "sha256"),
-                    ("Operations synced", "operations_synced"),
-                    ("Result", "message"),
-                ],
-            )
-        }
         _ => bail!("Unsupported catalog administration command"),
     }
 }
 
 pub async fn run_tools(command: ToolsCommands) -> Result<()> {
     match command {
-        ToolsCommands::List {
-            topic,
-            all: _,
-            auth,
-        } => {
+        ToolsCommands::List { topic, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get("/tools").await?;
             if matches!(auth.output, crate::cli::OutputFormat::Json) {
@@ -320,19 +267,6 @@ mod tests {
                 "list",
                 "tools-x",
                 "--published-only",
-            ],
-            vec![
-                "nyxid",
-                "catalog",
-                "spec",
-                "import",
-                "tools-x",
-                "--file",
-                "overlay.json",
-                "--source-kind",
-                "monid",
-                "--source-ref",
-                "tinyfish",
             ],
             vec![
                 "nyxid",

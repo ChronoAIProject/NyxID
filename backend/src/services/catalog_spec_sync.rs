@@ -46,11 +46,7 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
             continue;
         }
 
-        let inputs = match super::catalog_spec_overlay_service::get(db, &service.id).await? {
-            Some(overlay) => destination_endpoint_inputs(&service, &overlay.document),
-            None => hosted_endpoint_inputs(&service),
-        };
-        let inputs = match inputs {
+        let inputs = match hosted_endpoint_inputs(&service) {
             Ok(inputs) => inputs,
             Err(error) => {
                 // Embedded specs are validated by unit tests; reaching this

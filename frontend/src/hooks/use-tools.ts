@@ -16,13 +16,3 @@ export function useToolTopics() {
     staleTime: Infinity,
   });
 }
-export function useToolEditorAuthority() {
-  const identity = useAuthStore((state) => state.user?.id);
-  return useQuery({
-    queryKey: ["tools", "editor-authority", identity],
-    queryFn: () =>
-      api.get<{ admin: boolean; read: boolean; write: boolean }>(
-        "/tools/editor-authority",
-      ),
-  });
-}

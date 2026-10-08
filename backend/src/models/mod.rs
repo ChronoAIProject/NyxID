@@ -158,5 +158,3 @@ pub mod assistant_voice;
 
 pub mod assistant_voice_session;
 pub mod machine_access;
-
-pub mod catalog_spec_overlay;

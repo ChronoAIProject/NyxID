@@ -24,10 +24,9 @@ vi.mock("@/hooks/use-tools", () => ({
   useToolTopics: () => ({
     data: [{ slug: "web-search", label: "Web Search" }],
   }),
-  useToolEditorAuthority: () => ({
-    data: { read: true, write: true, admin: mocks.admin },
-  }),
+
 }));
+vi.mock("@/stores/auth-store", () => ({useAuthStore: (selector: (state: {user: {is_admin: boolean}}) => unknown) => selector({user: {is_admin: mocks.admin}})}));
 vi.mock("@/hooks/use-api-keys", () => ({ useApiKeys: () => ({ data: [] }) }));
 vi.mock("@/hooks/use-services", () => ({
   useServices: () => ({
@@ -150,25 +149,9 @@ it("publishes through the publication route from the Tools tab", async () => {
     ),
   );
 });
-it.each([true, false])("gates transport fields for admin=%s", async (admin) => {
-  mocks.admin = admin;
+it("keeps Phase 1 management admin-only", () => {
+  mocks.admin = false;
   mount(<AdminToolsPage />);
-  await userEvent.click(screen.getByRole("button", { name: "Add tool" }));
-  const input = screen.getByLabelText("Base URL");
-  if (admin) expect(input).toBeEnabled();
-  else expect(input).toBeDisabled();
-  expect(screen.getByLabelText("name")).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Add tool" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Imports" })).not.toBeInTheDocument();
 });
-
-it.each([true, false])(
-  "gates offering conversion for admin=%s",
-  async (admin) => {
-    mocks.admin = admin;
-    mount(<AdminToolsPage />);
-    await userEvent.click(screen.getByRole("tab", { name: "Tools" }));
-    await userEvent.click(screen.getByText("Edit metadata"));
-    const field = screen.getByLabelText("Offering kind");
-    if (admin) expect(field).toBeEnabled();
-    else expect(field).toBeDisabled();
-  },
-);

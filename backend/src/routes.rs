@@ -633,12 +633,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let service_routes = Router::new()
         .route("/", get(handlers::services::list_services))
-        .route("/", post(handlers::catalog_services_editor::create))
+        .route("/", post(handlers::services::create_service))
         .route("/{service_id}", get(handlers::services::get_service))
-        .route(
-            "/{service_id}",
-            put(handlers::catalog_services_editor::update),
-        )
+        .route("/{service_id}", put(handlers::services::update_service))
         .route("/{service_id}", delete(handlers::services::delete_service))
         .route(
             "/{service_id}/resync-identity",
@@ -655,13 +652,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/{service_id}/regenerate-secret",
             post(handlers::services::regenerate_oidc_secret),
-        )
-        .route(
-            "/{service_id}/spec-overlay",
-            get(handlers::catalog_spec_overlays::get)
-                .put(handlers::catalog_spec_overlays::put)
-                .delete(handlers::catalog_spec_overlays::delete)
-                .layer(DefaultBodyLimit::max(1024 * 1024 + 4096)),
         )
         .route(
             "/{service_id}/publication",
@@ -1570,7 +1560,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let tools_routes = Router::new()
-        .route("/editor-authority", get(handlers::tools::editor_authority))
         .route("/", get(handlers::tools::list))
         .route("/{slug}", get(handlers::tools::get))
         .layer(middleware::from_fn(reject_service_account_tokens));
@@ -1812,10 +1801,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::runtime_config::get_runtime_config),
         )
         .route(
-            "/catalog-specs/service/{service_id}/openapi.json",
-            get(handlers::catalog_spec_overlays::hosted),
-        )
-        .route(
             "/catalog-specs/{spec_key}/openapi.json",
             get(handlers::docs::catalog_spec_json),
         )
@@ -1973,10 +1958,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         // their existing delegated exception.
         .nest("/catalog", catalog_routes)
         .nest("/tools", tools_routes)
-        .nest(
-            "/services",
-            service_routes.layer(middleware::from_fn(reject_api_key_tokens)),
-        )
         // Like authenticate_mcp: sessions, proxy-scoped access tokens, general
         // API keys (including chat keys), and non-Curation service accounts.
         // AuthUser rejects scheduled keys and Curation SAs; the handler checks
@@ -2493,6 +2474,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::permission_keys::pause)
                 .delete(handlers::permission_keys::revoke),
         )
+        .nest("/services", service_routes)
         .nest("/api-keys", api_key_routes)
         .route("/docs", get(handlers::docs::docs_ui))
         .route("/docs/catalog", get(handlers::docs::catalog_ui))

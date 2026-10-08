@@ -167,8 +167,4 @@ pub mod machine_access;
 
 pub mod admin_utility_inference;
 
-pub mod catalog_spec_overlays;
-
-pub mod catalog_services_editor;
-
 pub mod tools;

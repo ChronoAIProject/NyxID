@@ -37,26 +37,6 @@ export const addToolSchema = z.object({
   auth_key_name: z.string().max(128),
   openapi_spec_url: z.url().optional().or(z.literal("")),
 });
-export const overlayDocumentSchema = z
-  .record(z.string(), z.unknown())
-  .refine(
-    (v) =>
-      typeof v.openapi === "string" &&
-      v.openapi.startsWith("3.") &&
-      typeof v.paths === "object" &&
-      v.paths !== null &&
-      !Array.isArray(v.paths),
-    "Expected an OpenAPI 3.x object with paths",
-  )
-  .refine(
-    (v) => new TextEncoder().encode(JSON.stringify(v)).length <= 1024 * 1024,
-    "Overlay exceeds 1 MiB",
-  );
-export const importOverlaySchema = z.object({
-  kind: z.enum(["monid", "vendor_spec", "manual"]),
-  reference: z.string().max(512),
-  version: z.string().max(128),
-});
 export type PublicationState = z.infer<typeof publicationSchema>;
 export type ToolOffering = {
   id: string;

@@ -23,16 +23,6 @@ pub struct ScopeDefinition {
 
 pub const DEFINITIONS: &[ScopeDefinition] = &[
     ScopeDefinition {
-        value: "catalog:services:read",
-        label: "Read tool catalog",
-        description: "Read tool catalog services, endpoints and overlays with live catalog editor authority.",
-    },
-    ScopeDefinition {
-        value: "catalog:services:write",
-        label: "Edit tool catalog",
-        description: "Edit tool metadata, endpoints, overlays and publication. Credentials and transport configuration require a platform admin.",
-    },
-    ScopeDefinition {
         value: PROXY_SCOPE,
         label: "All services",
         description: "Proxy access to services available to this account, including the LLM gateway. Existing resource and authorization checks still apply.",

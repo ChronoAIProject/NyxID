@@ -489,15 +489,14 @@ const apiKeysRedirectRoute = createRoute({
 // -- Redirect old paths --
 
 const toolsRoute = createRoute({path:"/tools",getParentRoute:()=>dashboardLayout,component:ToolsPage});
-const adminToolsRoute = createRoute({path:"/admin/tools",getParentRoute:()=>dashboardLayout,beforeLoad:async()=>{const authority=await api.get<{read:boolean;write:boolean}>("/tools/editor-authority");if(!authority.read&&!authority.write)throw redirect({to:"/tools"});},component:AdminToolsPage});
+const adminToolsRoute = createRoute({path:"/admin/tools",getParentRoute:()=>dashboardLayout,beforeLoad:()=>{if(!useAuthStore.getState().user?.is_admin)throw redirect({to:"/tools"});},component:AdminToolsPage});
 
 const servicesRedirectRoute = createRoute({
   path: "/services",
   getParentRoute: () => dashboardLayout,
   beforeLoad: async () => {
     const { user } = useAuthStore.getState();
-    const authority=await api.get<{read:boolean;write:boolean}>("/tools/editor-authority");
-    if (user?.is_admin || authority.read || authority.write) {
+    if (user?.is_admin) {
       // Admin users can still access the services management pages
       return;
     }

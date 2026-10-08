@@ -9,7 +9,6 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
     match command {
         command @ (CatalogCommands::Endpoint { .. }
         | CatalogCommands::Discover { .. }
-        | CatalogCommands::Spec { .. }
         | CatalogCommands::Publish { .. }
         | CatalogCommands::Topics { .. }) => super::catalog_tools::run_admin(command).await,
         CatalogCommands::List { all, public, auth } => {

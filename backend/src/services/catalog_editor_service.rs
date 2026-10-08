@@ -15,15 +15,9 @@ pub const READ_PERMISSION: &str = "nyxid:catalog:skills:read";
 pub const WRITE_PERMISSION: &str = "nyxid:catalog:skills:write";
 
 pub fn has_catalog_scopes(scopes: &str) -> bool {
-    scopes.split_whitespace().any(|scope| {
-        matches!(
-            scope,
-            "catalog:skills:read"
-                | "catalog:skills:write"
-                | "catalog:services:read"
-                | "catalog:services:write"
-        )
-    })
+    scopes
+        .split_whitespace()
+        .any(|scope| matches!(scope, "catalog:skills:read" | "catalog:skills:write"))
 }
 
 pub async fn role_has_editor_permissions(db: &Database, role_ids: &[String]) -> AppResult<bool> {
@@ -31,7 +25,7 @@ pub async fn role_has_editor_permissions(db: &Database, role_ids: &[String]) -> 
         .collection::<Document>(ROLES)
         .find_one(doc! {
             "_id": {"$in": role_ids}, "client_id": null,
-            "permissions": {"$in": [READ_PERMISSION, WRITE_PERMISSION, super::catalog_services_editor_service::READ_PERMISSION, super::catalog_services_editor_service::WRITE_PERMISSION]},
+            "permissions": {"$in": [READ_PERMISSION, WRITE_PERMISSION]},
         })
         .projection(doc! {"_id": 1})
         .await?
@@ -149,16 +143,11 @@ pub fn validate_scopes(scopes: &str) -> AppResult<()> {
         || scopes.split_whitespace().any(|scope| {
             !matches!(
                 scope,
-                "catalog:skills:read"
-                    | "catalog:skills:write"
-                    | "catalog:services:read"
-                    | "catalog:services:write"
-                    | "user-services:read"
-                    | "proxy"
+                "catalog:skills:read" | "catalog:skills:write" | "user-services:read" | "proxy"
             )
         })
     {
-        return Err(AppError::ValidationError("Catalog editor scopes must be catalog:skills:read, catalog:skills:write, catalog:services:read, catalog:services:write, user-services:read, or proxy".into()));
+        return Err(AppError::ValidationError("Catalog editor scopes must be catalog:skills:read, catalog:skills:write, user-services:read, or proxy".into()));
     }
     Ok(())
 }

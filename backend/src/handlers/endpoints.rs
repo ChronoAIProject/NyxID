@@ -236,21 +236,14 @@ pub async fn list_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
 
-    if auth_user.auth_method == crate::mw::auth::AuthMethod::ServiceAccount {
-        if service.offering_kind != crate::models::downstream_service::OfferingKind::Tool {
-            return Err(AppError::NotFound("Tool not found".into()));
-        }
-        crate::services::catalog_services_access::authorize(&state.db, &auth_user, false).await?;
-    }
-    let endpoints =
-        if crate::services::catalog_services_access::authorize(&state.db, &auth_user, false)
-            .await
-            .is_ok()
-        {
-            service_endpoint_service::list_all_endpoints(&state.db, &service_id).await?
-        } else {
-            service_endpoint_service::list_endpoints(&state.db, &service_id).await?
-        };
+    let endpoints = if super::services_helpers::require_admin(&state, &auth_user)
+        .await
+        .is_ok()
+    {
+        service_endpoint_service::list_all_endpoints(&state.db, &service_id).await?
+    } else {
+        service_endpoint_service::list_endpoints(&state.db, &service_id).await?
+    };
     let items: Vec<EndpointResponse> = endpoints
         .into_iter()
         .filter(|endpoint| {
@@ -287,11 +280,7 @@ pub async fn create_endpoint(
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-        crate::services::catalog_services_access::authorize(&state.db, &auth_user, true).await?;
-    } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-    }
+    super::services_helpers::require_admin(&state, &auth_user).await?;
 
     validate_endpoint_name(&body.name)?;
     validate_method(&body.method)?;
@@ -347,11 +336,7 @@ pub async fn update_endpoint(
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-        crate::services::catalog_services_access::authorize(&state.db, &auth_user, true).await?;
-    } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-    }
+    super::services_helpers::require_admin(&state, &auth_user).await?;
 
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
         && body.is_active.is_some()
@@ -419,11 +404,7 @@ pub async fn delete_endpoint(
 ) -> AppResult<Json<DeleteEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-        crate::services::catalog_services_access::authorize(&state.db, &auth_user, true).await?;
-    } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-    }
+    super::services_helpers::require_admin(&state, &auth_user).await?;
 
     service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
 
@@ -450,22 +431,13 @@ pub async fn discover_endpoints(
 ) -> AppResult<Json<DiscoverEndpointsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-        crate::services::catalog_services_access::authorize(&state.db, &auth_user, true).await?;
-    } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-    }
+    super::services_helpers::require_admin(&state, &auth_user).await?;
 
-    let parsed = if let Some(overlay) =
-        crate::services::catalog_spec_overlay_service::get(&state.db, &service_id).await?
-    {
-        openapi_parser::parse_openapi_spec_value(&overlay.document)?
-    } else {
-        let api_spec_url = service.openapi_spec_url.as_ref().ok_or_else(|| {
-            AppError::BadRequest("Service has no openapi_spec_url configured".into())
-        })?;
-        openapi_parser::parse_openapi_spec(&state.http_client, api_spec_url).await?
-    };
+    let api_spec_url = service
+        .openapi_spec_url
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("Service has no openapi_spec_url configured".into()))?;
+    let parsed = openapi_parser::parse_openapi_spec(&state.http_client, api_spec_url).await?;
 
     for endpoint in &parsed {
         if let Some(content_type) = endpoint.request_content_type.as_deref() {
@@ -717,8 +689,7 @@ pub async fn change_publication(
     Json(body): Json<PublicationRequest>,
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    crate::services::catalog_services_access::authorize_tool(&state.db, &auth_user, &service, true)
-        .await?;
+    super::services_helpers::require_admin(&state, &auth_user).await?;
     require_http_service(&service)?;
     let mut rows = crate::services::tool_publication_service::change_publication(
         &state.db,
@@ -738,8 +709,7 @@ pub async fn change_publication_bulk(
     Json(body): Json<BulkPublicationRequest>,
 ) -> AppResult<Json<EndpointListResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    crate::services::catalog_services_access::authorize_tool(&state.db, &auth_user, &service, true)
-        .await?;
+    super::services_helpers::require_admin(&state, &auth_user).await?;
     require_http_service(&service)?;
     let ids = crate::services::tool_publication_service::ids_by_name(
         &state.db,

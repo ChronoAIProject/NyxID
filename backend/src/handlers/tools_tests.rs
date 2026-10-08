@@ -1,7 +1,6 @@
-use super::curation_tests::{fixture, request, token};
+use super::curation_tests::{fixture, request};
 use crate::models::{
     downstream_service::{COLLECTION_NAME as CATALOG, DownstreamService, OfferingKind},
-    service_account::COLLECTION_NAME as ACCOUNTS,
     service_endpoint::{COLLECTION_NAME as ENDPOINTS, ServiceEndpoint},
 };
 use axum::http::StatusCode;
@@ -9,7 +8,7 @@ use mongodb::bson::doc;
 use serde_json::json;
 
 #[tokio::test]
-async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
+async fn tool_publication_gates_all_discovery_and_proxy() {
     let mut f = fixture("tools_end_to_end", false).await;
     f.service.offering_kind = OfferingKind::Tool;
     f.service.service_category = "internal".into();
@@ -85,47 +84,15 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
     let (_,result)=mcp_request(&f.state,&f.human_token,&mcp_session,json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":format!("{}__draft_operation",f.service.slug),"arguments_json":"{}"}}})).await;
     assert_eq!(result["result"]["isError"], true, "{result}");
     assert!(result.to_string().contains("12600"), "{result}");
-    let (status,role)=request(&f.state,"POST","/api/v1/admin/roles",&f.human_token,Some(json!({"name":"Tools editor","slug":"tools-editor","permissions":["nyxid:catalog:services:read","nyxid:catalog:services:write"]}))).await;
-    assert_eq!(status, StatusCode::OK, "{role}");
-    let (status,saved)=request(&f.state,"PUT",&format!("/api/v1/admin/service-accounts/{}",f.sa.id),&f.human_token,Some(json!({"allowed_scopes":"catalog:services:read catalog:services:write","role_ids":[role["id"]]}))).await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
-    f.sa = f
-        .state
-        .db
-        .collection(ACCOUNTS)
-        .find_one(doc! {"_id":&f.sa.id})
-        .await
-        .unwrap()
-        .unwrap();
-    let bearer = token(&f, None).await;
-    let (status, topics) = request(&f.state, "GET", "/api/v1/tools/topics", &bearer, None).await;
-    assert_eq!(status, StatusCode::OK, "{topics}");
-    assert_eq!(topics.as_array().unwrap().len(), 29);
     let (status, published) = request(
         &f.state,
         "POST",
         &format!("/api/v1/services/{}/publication", f.service.id),
-        &bearer,
+        &f.human_token,
         Some(json!({"endpoint_names":["draft_operation"],"state":"published"})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{published}");
-    for forbidden in [
-        json!({"credential":null}),
-        json!({"offering_kind":"ai_service"}),
-        json!({"billing":null}),
-        json!({"base_url":"https://evil.invalid"}),
-    ] {
-        let (status, result) = request(
-            &f.state,
-            "PUT",
-            &format!("/api/v1/services/{}", f.service.id),
-            &bearer,
-            Some(forbidden),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
-    }
     let rows = f
         .state
         .db

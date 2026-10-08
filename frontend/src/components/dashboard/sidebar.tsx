@@ -1,4 +1,3 @@
-import { useToolEditorAuthority } from "@/hooks/use-tools";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouterState, Link } from "@tanstack/react-router";
 import {
@@ -237,8 +236,7 @@ export function Sidebar({
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
   const mainNav = getVisibleMainNav(user);
-  const {data:toolAuthority}=useToolEditorAuthority();
-  const adminNav = hasAdminRead(user) ? getVisibleAdminNav(user) : toolAuthority?.read || toolAuthority?.write ? ADMIN_NAV.filter(item=>item.to==="/admin/tools") : [];
+  const adminNav = hasAdminRead(user) ? getVisibleAdminNav(user) : [];
 
   const mode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);

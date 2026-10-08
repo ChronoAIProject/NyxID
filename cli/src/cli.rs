@@ -854,11 +854,6 @@ pub enum CatalogCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Manage a curated OpenAPI overlay
-    Spec {
-        #[command(subcommand)]
-        command: CatalogSpecCommands,
-    },
     /// Change publication for named operations
     Publish {
         service: String,
@@ -6044,8 +6039,6 @@ pub enum ToolsCommands {
     List {
         #[arg(long)]
         topic: Option<String>,
-        #[arg(long)]
-        all: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -6082,8 +6075,6 @@ pub struct CatalogEndpointArgs {
 pub enum CatalogEndpointCommands {
     List {
         service: String,
-        #[arg(long, conflicts_with = "published_only")]
-        all: bool,
         #[arg(long)]
         published_only: bool,
         #[command(flatten)]
@@ -6107,33 +6098,6 @@ pub enum CatalogEndpointCommands {
     Disable {
         service: String,
         endpoint_id: String,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum CatalogSpecCommands {
-    Import {
-        service: String,
-        #[arg(long)]
-        file: std::path::PathBuf,
-        #[arg(long,value_parser=["monid","vendor_spec","manual"])]
-        source_kind: Option<String>,
-        #[arg(long, requires = "source_kind")]
-        source_ref: Option<String>,
-        #[arg(long, requires = "source_kind")]
-        source_version: Option<String>,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-    Show {
-        service: String,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-    Delete {
-        service: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

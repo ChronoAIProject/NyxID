@@ -130,7 +130,7 @@ Key files: `services/openclaw_channel_service.rs`, `handlers/openclaw_channel.rs
 
 ### 8. Streamlined Services Architecture
 
-- Tools are internal catalog offerings with publication enforced across MCP, HTTP and WS execution; preserve legacy defaults and MCP names. See `docs/TOOLS.md` for overlays, editor scopes and listing rules.
+- Tools are internal catalog offerings with publication enforced across MCP, HTTP and WS execution; preserve legacy defaults and MCP names. See `docs/TOOLS.md` for runtime creation, publication and listing rules.
 
 Services/connections/providers were unified into 3 user-managed collections plus one orchestration layer; old collections are kept for backward compatibility during migration.
 

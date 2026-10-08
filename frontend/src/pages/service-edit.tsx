@@ -1,5 +1,4 @@
 import { CatalogToolMetadata } from "@/components/services/catalog-tool-metadata";
-import { useToolEditorAuthority } from "@/hooks/use-tools";
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
 import {
   serviceFormPatch,
@@ -90,7 +89,6 @@ export function ServiceEditPage() {
 }
 
 function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
-  const {data:toolAuthority}=useToolEditorAuthority();
   const [service, setService] = useState(source);
   const serviceId = service.id;
   const requestIdentity = useRef<SkillRequestIdentity | undefined>(undefined);
@@ -220,7 +218,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
         />
       )}
       {review.dialog}
-      {(service.offering_kind === "tool" || user?.is_admin) && <CatalogToolMetadata service={service} disabled={!toolAuthority?.write} admin={toolAuthority?.admin??false} />}
+      {(service.offering_kind === "tool" || user?.is_admin) && <CatalogToolMetadata service={service} disabled={!user?.is_admin} admin={user?.is_admin??false} />}
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
