@@ -650,6 +650,56 @@ mod tests {
     use crate::services::openapi_parser;
 
     #[test]
+    fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {
+        for slug in ["api-lark", "api-feishu"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let list = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_tasks_query")
+                .unwrap();
+            assert_eq!(list.method, "GET");
+            assert_eq!(list.path, "/approval/v4/tasks");
+            assert_eq!(
+                list.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            let forward = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_task_forward")
+                .unwrap();
+            assert_eq!(forward.method, "POST");
+            assert_eq!(forward.path, "/approval/v4/tasks/forward");
+            assert!(forward.request_body_required);
+            assert_eq!(
+                forward.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let schema = forward.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["instance_code", "task_id", "transfer_user_id"])
+            );
+            assert_eq!(schema["additionalProperties"], false);
+            let parameters = forward.parameters.as_ref().unwrap().as_array().unwrap();
+            assert_eq!(parameters[0]["name"], "user_id_type");
+            assert_eq!(parameters[0]["required"], true);
+            assert_eq!(
+                parameters[0]["schema"]["enum"],
+                serde_json::json!(["open_id", "union_id", "user_id", "user_key"])
+            );
+            assert!(forward.destructive);
+            assert_eq!(forward.changes_existing, Some(true));
+            assert_eq!(
+                operation_marks(slug, "POST", &forward.path, "renamed").changes_existing,
+                Some(true)
+            );
+            assert!(operation_marks(slug, "POST", &forward.path, "renamed").destructive);
+            assert!(spec["paths"].get("/approval/v4/tasks/transfer").is_none());
+        }
+    }
+
+    #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
         for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");
