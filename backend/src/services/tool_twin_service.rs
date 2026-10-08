@@ -61,7 +61,7 @@ pub async fn prepare_create(db: &Database, mut body: Value) -> AppResult<Value> 
     body["credential"] = Value::Null;
     body["twin_of_service_id"] = source.id.clone().into();
     let inherited = json!({
-        "name":format!("{} tools",source.name), "base_url":source.base_url,
+        "name":source.name, "base_url":source.base_url,
         "destination_targets":source.destination_targets, "auth_method":source.auth_method,
         "auth_key_name":source.auth_key_name, "openapi_spec_url":source.openapi_spec_url,
         "asyncapi_spec_url":source.asyncapi_spec_url, "default_request_headers":source.default_request_headers,
@@ -79,6 +79,7 @@ pub async fn prepare_create(db: &Database, mut body: Value) -> AppResult<Value> 
     for (key, value) in inherited.as_object().unwrap() {
         target.entry(key.clone()).or_insert_with(|| value.clone());
     }
+    target.insert("import_source".into(), inherited["import_source"].clone());
     Ok(body)
 }
 
