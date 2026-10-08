@@ -6,6 +6,8 @@ import {
   DEFAULT_SERVICE_FILTERS,
   sameServiceFilters,
   serviceViewSchema,
+  serviceViewsSchema,
+  type ServiceViewsPreferences,
   type ServiceViewFilters,
 } from "@/schemas/service-view";
 import type { User } from "@/types/api";
@@ -60,14 +62,76 @@ export function useServiceView() {
     },
   });
 
+  const parsedViews = serviceViewsSchema.safeParse(
+    user?.profile_config?.service_views,
+  );
+  const workspace: ServiceViewsPreferences = parsedViews.success
+    ? parsedViews.data
+    : {
+        views: hasDefault
+          ? [{ id: "legacy-default", name: "My default", filters: saved }]
+          : [],
+        default_id: hasDefault ? "legacy-default" : null,
+      };
+  const selectedViewId = sameAccount
+    ? (view.savedViewId ?? workspace.default_id)
+    : workspace.default_id;
+  const viewsMutation = useMutation({
+    mutationFn: async ({
+      preferences,
+      accountId,
+    }: {
+      preferences: ServiceViewsPreferences;
+      accountId: string;
+    }) => {
+      await queryClient.cancelQueries({ queryKey: ["user", "me"] });
+      if (useAuthStore.getState().user?.id !== accountId)
+        throw new Error("Account changed. Please try again.");
+      return serviceViewsSchema.parse(
+        await api.put<unknown>(
+          "/users/me/preferences/service-views",
+          serviceViewsSchema.parse(preferences),
+        ),
+      );
+    },
+    onSuccess: (preferences, { accountId }) => {
+      const current = useAuthStore.getState().user;
+      if (current?.id !== accountId || !current.profile_config) return;
+      const updated: User = {
+        ...current,
+        profile_config: {
+          ...current.profile_config,
+          service_views: preferences,
+          services_view:
+            preferences.views.find((view) => view.id === preferences.default_id)
+              ?.filters ?? null,
+        },
+      };
+      useAuthStore.getState().setUser(updated);
+      queryClient.setQueryData(["user", "me"], updated);
+    },
+  });
+  const canSaveViews = user?.profile_config?.service_views !== undefined;
+  const persistViews = (
+    preferences: ServiceViewsPreferences,
+    onSuccess?: () => void,
+  ) => {
+    if (user && canSaveViews && !viewsMutation.isPending)
+      viewsMutation.mutate({ accountId: user.id, preferences }, { onSuccess });
+  };
+  const viewsMutationForAccount =
+    viewsMutation.variables?.accountId === user?.id;
+
   const setView = (update: {
     filters?: ServiceViewFilters;
+    savedViewId?: string;
     expanded?: readonly string[];
   }) => {
     useServiceCardView.setState({
       accountId: user?.id,
       filters,
       expanded,
+      savedViewId: selectedViewId ?? undefined,
       ...update,
     });
   };
@@ -75,6 +139,40 @@ export function useServiceView() {
 
   return {
     accountId: user?.id,
+    workspace,
+    selectedViewId,
+    restoreSavedView: (id: string) => {
+      const savedView = workspace.views.find(
+        (savedView) => savedView.id === id,
+      );
+      if (savedView) setView({ filters: savedView.filters, savedViewId: id });
+    },
+    canSaveViews,
+    saveNewView: (name: string, onSuccess?: () => void) =>
+      persistViews(
+        {
+          ...workspace,
+          views: [
+            ...workspace.views,
+            { id: crypto.randomUUID(), name, filters },
+          ],
+        },
+        onSuccess,
+      ),
+    updateSavedView: (id: string) =>
+      persistViews({
+        ...workspace,
+        views: workspace.views.map((view) =>
+          view.id === id ? { ...view, filters } : view,
+        ),
+      }),
+    setDefaultView: (id: string | null) =>
+      persistViews({ ...workspace, default_id: id }),
+    deleteSavedView: (id: string) =>
+      persistViews({
+        views: workspace.views.filter((view) => view.id !== id),
+        default_id: workspace.default_id === id ? null : workspace.default_id,
+      }),
     filters,
     expanded,
     canSave,
@@ -89,10 +187,13 @@ export function useServiceView() {
     saveDefault: () => {
       if (user && canSave) mutation.mutate({ accountId: user.id, filters });
     },
-    isSaving: mutationForAccount && mutation.isPending,
+    isSaving:
+      (mutationForAccount && mutation.isPending) ||
+      (viewsMutationForAccount && viewsMutation.isPending),
     saveError:
-      mutationForAccount && mutation.error
-        ? "Could not save your default view. Please try again."
+      (mutationForAccount && mutation.error) ||
+      (viewsMutationForAccount && viewsMutation.error)
+        ? "Could not save your views. Please try again."
         : null,
   };
 }

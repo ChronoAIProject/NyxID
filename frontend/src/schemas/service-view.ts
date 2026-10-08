@@ -67,11 +67,10 @@ export const DEFAULT_SERVICE_FILTERS: ServiceViewFilters = {
   search: "",
   organization_ids: [],
   service_group_ids: [],
-  source: "personal",
+  source: "all",
   state: "all",
   service_type: "all",
-  // Platform auto-provisioned connections are noise until asked for.
-  show_auto_connected: false,
+  show_auto_connected: true,
 };
 
 export function sameServiceFilters(
@@ -90,3 +89,42 @@ export function sameServiceFilters(
     a.show_auto_connected === b.show_auto_connected
   );
 }
+
+export const serviceViewNameFormSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, "Enter a view name")
+    .refine(
+      (name) => Array.from(name).length <= 100,
+      "Use 100 characters or fewer",
+    ),
+});
+
+export const serviceViewsSchema = z
+  .object({
+    views: z
+      .array(
+        z
+          .object({
+            id: selectionId,
+            name: serviceViewNameFormSchema.shape.name,
+            filters: serviceViewSchema,
+          })
+          .strict(),
+      )
+      .max(20),
+    default_id: selectionId.nullable(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      new Set(value.views.map((view) => view.id)).size === value.views.length,
+  )
+  .refine(
+    (value) =>
+      value.default_id === null ||
+      value.views.some((view) => view.id === value.default_id),
+  );
+
+export type ServiceViewsPreferences = z.infer<typeof serviceViewsSchema>;

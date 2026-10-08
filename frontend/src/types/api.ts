@@ -1,4 +1,7 @@
-import type { ServiceViewFilters } from "@/schemas/service-view";
+import type {
+  ServiceViewFilters,
+  ServiceViewsPreferences,
+} from "@/schemas/service-view";
 import type { ProxyOperationPolicy } from "@/schemas/services";
 import type { InferenceMetadata, PlatformKeyConfig, LanePricingView } from "@/schemas/platform-keys";
 import type { BillingMetric } from "@/schemas/billing";
@@ -44,6 +47,7 @@ export interface OnboardingState {
 /// User-scoped configuration surfaced on `GET /users/me`.
 export interface ProfileConfig {
   readonly services_view?: ServiceViewFilters | null;
+  readonly service_views?: ServiceViewsPreferences | null;
   readonly onboarding: OnboardingState;
 }
 

@@ -39,7 +39,7 @@ export function ServiceFilterMultiselect({
   );
   const summary =
     selected.length === 0
-      ? "All"
+      ? `All ${plural}`
       : selected.length === 1
         ? (options.find((option) => option.id === selected[0])?.label ??
           "Unavailable selection")
@@ -58,6 +58,7 @@ export function ServiceFilterMultiselect({
           aria-label={label}
           className={cn(
             "grid h-11 w-full grid-cols-[6rem_minmax(0,1fr)_auto] items-center gap-2 text-left font-normal sm:w-60 md:h-9",
+            selected.length > 0 && "border-primary/50 bg-primary/5",
             className,
           )}
         >

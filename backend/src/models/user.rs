@@ -83,6 +83,8 @@ pub struct UserProfileConfig {
     pub release_integrity: ReleaseIntegrityProfileConfig,
     #[serde(default)]
     pub services_view: Option<ServiceViewPreferences>,
+    #[serde(default)]
+    pub service_views: Option<ServiceViewsPreferences>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +148,19 @@ pub struct ServiceViewPreferences {
     pub state: ServiceViewState,
     pub service_type: ServiceViewType,
     pub show_auto_connected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedServiceView {
+    pub id: String,
+    pub name: String,
+    pub filters: ServiceViewPreferences,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceViewsPreferences {
+    pub views: Vec<SavedServiceView>,
+    pub default_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
