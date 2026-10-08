@@ -130,6 +130,8 @@ Key files: `services/openclaw_channel_service.rs`, `handlers/openclaw_channel.rs
 
 ### 8. Streamlined Services Architecture
 
+- Tools are internal catalog offerings with publication enforced across MCP, HTTP and WS execution; preserve legacy defaults and MCP names. See `docs/TOOLS.md` for overlays, editor scopes and listing rules.
+
 Services/connections/providers were unified into 3 user-managed collections plus one orchestration layer; old collections are kept for backward compatibility during migration.
 
 - Collections: `user_endpoints` (target URLs, custom or from catalog), `user_api_keys` (external credentials: API keys, OAuth tokens, bearer tokens), `user_services` (proxy routing config: endpoint + key + auth method + optional node + identity propagation + custom User-Agent override)
