@@ -67,6 +67,33 @@ pub async fn gate(
     require_published_operation(&endpoints, method, path)
 }
 
+pub async fn gate_unconfigured_public_tool(
+    db: &Database,
+    service_id: &str,
+    method: &str,
+    path: &CanonicalPath,
+) -> AppResult<()> {
+    let Some(service) = db
+        .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .find_one(doc! {"_id":service_id,"offering_kind":"tool","is_active":true})
+        .await?
+    else {
+        return Ok(());
+    };
+    if service.credential_encrypted.is_empty()
+        && service.service_category == "internal"
+        && service.visibility == "public"
+        && service.provider_config_id.is_none()
+        && service.platform_key.as_ref().is_some_and(|config| {
+            config.enabled
+                && config.audience == crate::models::downstream_service::PlatformKeyAudience::Public
+        })
+    {
+        gate(db, &service, method, path).await?;
+    }
+    Ok(())
+}
+
 pub async fn change_publication(
     db: &Database,
     service_id: &str,

@@ -3241,6 +3241,15 @@ async fn preflight_proxy_deny_before_resolution(
         ));
     }
 
+    let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+    crate::services::tool_publication_service::gate_unconfigured_public_tool(
+        &state.db,
+        &hint.service_id,
+        method,
+        &canonical,
+    )
+    .await?;
+
     Ok(())
 }
 

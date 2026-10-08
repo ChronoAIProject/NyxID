@@ -169,6 +169,16 @@ async fn tool_twins_copy_contracts_as_drafts_without_mutating_source_or_copying_
         assert_eq!(twin["custom_user_agent"], "NyxID tools");
         assert_eq!(twin["import_source"]["kind"], "catalog_twin");
         assert_eq!(twin["import_source"]["reference"], f.service.slug);
+        let (status, error) = request(
+            &f.state,
+            "GET",
+            &format!("/api/v1/proxy/s/{slug}/search"),
+            &f.human_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+        assert_eq!(error["error_code"], 12600, "{error}");
         let id = twin["id"].as_str().unwrap();
         let stored = f
             .state

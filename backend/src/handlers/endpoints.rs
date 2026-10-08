@@ -13,7 +13,7 @@ use crate::services::service_endpoint_service::{
 };
 use crate::services::{openapi_parser, service_endpoint_service};
 
-use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
+use super::services_helpers::{fetch_service, require_http_service};
 
 // --- Request / Response types ---
 
