@@ -1,0 +1,2181 @@
+$ POST /api/v1/auth/setup [isolated admin; password omitted]
+HTTP 200
+$ POST /api/v1/auth/login [admin]
+HTTP 200; token omitted
+$ POST /api/v1/admin/users; POST /api/v1/auth/login [normal user, secrets omitted]
+HTTP 200; is_admin=false
+$ nyxid service show api-firecrawl --catalog-admin --output json
+{
+  "offering_kind": "ai_service",
+  "topics": [],
+  "supplier": null,
+  "import_source": null,
+  "provider_config_id": "4b256ed7-d2d1-46df-a94f-1a498003c348",
+  "credential_configured": false,
+  "id": "d3e85c4a-6d4e-46e1-ac7b-25dc76c66cd9",
+  "name": "Firecrawl",
+  "slug": "api-firecrawl",
+  "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+  "base_url": "https://api.firecrawl.dev",
+  "service_type": "http",
+  "visibility": "public",
+  "auth_method": "bearer",
+  "auth_type": null,
+  "auth_key_name": "Authorization",
+  "is_active": true,
+  "oauth_client_id": null,
+  "openapi_spec_url": "http://127.0.0.1:4311/api/v1/catalog-specs/firecrawl/openapi.json",
+  "api_spec_url": "http://127.0.0.1:4311/api/v1/catalog-specs/firecrawl/openapi.json",
+  "asyncapi_spec_url": null,
+  "streaming_supported": true,
+  "ssh_config": null,
+  "service_category": "connection",
+  "requires_user_credential": true,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
+  "forward_access_token": false,
+  "inject_delegation_token": false,
+  "delegation_token_scope": "proxy:*",
+  "homepage_url": "https://www.firecrawl.dev",
+  "capabilities": {
+    "supports_proxy_read": true,
+    "supports_proxy_write": true,
+    "supports_proxy_binary_upload": false,
+    "supports_direct_downstream_auth": true,
+    "supports_authoring_via_nyx": false,
+    "supports_websocket": false,
+    "supports_streaming": true,
+    "supports_realtime_voice": false
+  },
+  "inference": null,
+  "platform_key": null,
+  "legacy_public_master": false,
+  "effective_platform_metric": "requests",
+  "allowance_metrics": [
+    "requests"
+  ],
+  "auth_notes": "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
+  "known_limitations": "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+  "skills_revision": 0,
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "recommended_skill_refs": null,
+  "ws_frame_injections": [],
+  "anonymous_endpoints": [],
+  "created_by": "system",
+  "owner_user_id": "system",
+  "created_at": "2026-10-08T18:36:10.588+00:00",
+  "updated_at": "2026-10-08T18:36:10.588+00:00",
+  "your_binding_count": 0
+}
+$ nyxid catalog endpoint list api-firecrawl --output json
+{
+  "endpoints": [
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:11.470+00:00",
+      "data_scope": null,
+      "description": "Submit a Firecrawl agent task\n\nStarts an asynchronous Firecrawl agent task. Poll the returned id with GET /v2/agent/{id}.",
+      "execution": "http_operation",
+      "id": "351ffaf6-347c-4a94-9c35-d7aeeb52a115",
+      "is_active": true,
+      "method": "POST",
+      "name": "agent",
+      "parameters": null,
+      "path": "/v2/agent",
+      "publication": "published",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "maxCredits": {
+            "description": "Optional maximum credits to spend on the task.",
+            "type": "integer"
+          },
+          "model": {
+            "description": "Optional model override.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "Natural-language task for the Firecrawl agent.",
+            "type": "string"
+          },
+          "schema": {
+            "additionalProperties": true,
+            "description": "Optional structured extraction schema.",
+            "type": "object"
+          },
+          "urls": {
+            "description": "Optional starting URLs for the agent.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "d3e85c4a-6d4e-46e1-ac7b-25dc76c66cd9",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:11.470+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:11.470+00:00",
+      "data_scope": null,
+      "description": "Poll a Firecrawl agent task\n\nReturns the current status and result for an asynchronous Firecrawl agent task.",
+      "execution": "http_operation",
+      "id": "a57d01f8-a7a2-4680-8e06-c8da8a2269b2",
+      "is_active": true,
+      "method": "GET",
+      "name": "agent_status",
+      "parameters": [
+        {
+          "description": "Firecrawl agent task id returned by POST /v2/agent.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/v2/agent/{id}",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "d3e85c4a-6d4e-46e1-ac7b-25dc76c66cd9",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:11.470+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:11.470+00:00",
+      "data_scope": null,
+      "description": "Scrape a single URL",
+      "execution": "http_operation",
+      "id": "65a5038b-6a3d-43c6-8bce-820c68bcea55",
+      "is_active": true,
+      "method": "POST",
+      "name": "scrape",
+      "parameters": null,
+      "path": "/v2/scrape",
+      "publication": "published",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "formats": {
+            "description": "e.g. markdown, html, links.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "onlyMainContent": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "d3e85c4a-6d4e-46e1-ac7b-25dc76c66cd9",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:11.470+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:11.470+00:00",
+      "data_scope": null,
+      "description": "Search the web",
+      "execution": "http_operation",
+      "id": "f4b24b0b-20a4-4693-a406-6c7ab20e17bd",
+      "is_active": true,
+      "method": "POST",
+      "name": "search",
+      "parameters": null,
+      "path": "/v2/search",
+      "publication": "published",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "scrapeOptions": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "d3e85c4a-6d4e-46e1-ac7b-25dc76c66cd9",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:11.470+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:11.470+00:00",
+      "data_scope": null,
+      "description": "Map a site's URLs",
+      "execution": "http_operation",
+      "id": "99c6df7e-eea9-4e51-99ce-51bb03d305bd",
+      "is_active": true,
+      "method": "POST",
+      "name": "map_site",
+      "parameters": null,
+      "path": "/v2/map",
+      "publication": "published",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "search": {
+            "description": "Optional filter query.",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "d3e85c4a-6d4e-46e1-ac7b-25dc76c66cd9",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:11.470+00:00"
+    }
+  ]
+}
+$ nyxid service add --catalog-admin --twin-of api-firecrawl --slug tools-firecrawl --offering-kind tool --topic web-search --topic page-fetch --supplier Firecrawl --output json
+{
+  "allowance_metrics": [
+    "requests"
+  ],
+  "anonymous_endpoints": [],
+  "api_spec_url": "http://127.0.0.1:4311/api/v1/catalog-specs/firecrawl/openapi.json",
+  "asyncapi_spec_url": null,
+  "auth_key_name": "Authorization",
+  "auth_method": "bearer",
+  "auth_notes": "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
+  "auth_type": "bearer",
+  "base_url": "https://api.firecrawl.dev",
+  "capabilities": {
+    "supports_authoring_via_nyx": false,
+    "supports_direct_downstream_auth": true,
+    "supports_proxy_binary_upload": false,
+    "supports_proxy_read": true,
+    "supports_proxy_write": true,
+    "supports_realtime_voice": false,
+    "supports_streaming": true,
+    "supports_websocket": false
+  },
+  "created_at": "2026-10-08T18:36:25.206+00:00",
+  "created_by": "41581642-989b-4876-b103-f522e8843e56",
+  "credential_configured": false,
+  "delegation_token_scope": "llm:proxy",
+  "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+  "effective_platform_metric": "requests",
+  "forward_access_token": false,
+  "homepage_url": "https://www.firecrawl.dev",
+  "id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_include_user_id": false,
+  "identity_jwt_audience": null,
+  "identity_propagation_mode": "none",
+  "import_source": {
+    "imported_at": null,
+    "kind": "catalog_twin",
+    "reference": "api-firecrawl",
+    "version": "2026-10-08T18:36:10.588+00:00"
+  },
+  "inference": null,
+  "inject_delegation_token": false,
+  "is_active": true,
+  "known_limitations": "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+  "legacy_public_master": false,
+  "name": "tools-firecrawl",
+  "oauth_client_id": null,
+  "offering_kind": "tool",
+  "openapi_spec_url": "http://127.0.0.1:4311/api/v1/catalog-specs/firecrawl/openapi.json",
+  "owner_user_id": "41581642-989b-4876-b103-f522e8843e56",
+  "platform_key": {
+    "allowed_owner_ids": [],
+    "audience": "public",
+    "enabled": true
+  },
+  "provider_config_id": null,
+  "recommended_skill_refs": null,
+  "requires_user_credential": false,
+  "service_category": "internal",
+  "service_type": "http",
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "skills_revision": 0,
+  "slug": "tools-firecrawl",
+  "ssh_config": null,
+  "streaming_supported": false,
+  "supplier": "Firecrawl",
+  "topics": [
+    "web-search",
+    "page-fetch"
+  ],
+  "updated_at": "2026-10-08T18:36:25.206+00:00",
+  "visibility": "public",
+  "ws_frame_injections": [],
+  "your_binding_count": 0
+}
+$ nyxid catalog endpoint list tools-firecrawl --output json
+{
+  "endpoints": [
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:25.208+00:00",
+      "data_scope": null,
+      "description": "Submit a Firecrawl agent task\n\nStarts an asynchronous Firecrawl agent task. Poll the returned id with GET /v2/agent/{id}.",
+      "execution": "http_operation",
+      "id": "aac909ea-ea1a-4952-890e-659b05a18239",
+      "is_active": false,
+      "method": "POST",
+      "name": "agent",
+      "parameters": null,
+      "path": "/v2/agent",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "maxCredits": {
+            "description": "Optional maximum credits to spend on the task.",
+            "type": "integer"
+          },
+          "model": {
+            "description": "Optional model override.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "Natural-language task for the Firecrawl agent.",
+            "type": "string"
+          },
+          "schema": {
+            "additionalProperties": true,
+            "description": "Optional structured extraction schema.",
+            "type": "object"
+          },
+          "urls": {
+            "description": "Optional starting URLs for the agent.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:25.208+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:25.208+00:00",
+      "data_scope": null,
+      "description": "Poll a Firecrawl agent task\n\nReturns the current status and result for an asynchronous Firecrawl agent task.",
+      "execution": "http_operation",
+      "id": "cb7abb7a-f597-402a-b04f-b18c383b5f24",
+      "is_active": false,
+      "method": "GET",
+      "name": "agent_status",
+      "parameters": [
+        {
+          "description": "Firecrawl agent task id returned by POST /v2/agent.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/v2/agent/{id}",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:25.208+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:25.208+00:00",
+      "data_scope": null,
+      "description": "Scrape a single URL",
+      "execution": "http_operation",
+      "id": "cbbd1e8b-cc6c-4384-a874-6b0c84683eb5",
+      "is_active": false,
+      "method": "POST",
+      "name": "scrape",
+      "parameters": null,
+      "path": "/v2/scrape",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "formats": {
+            "description": "e.g. markdown, html, links.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "onlyMainContent": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:25.208+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:25.208+00:00",
+      "data_scope": null,
+      "description": "Search the web",
+      "execution": "http_operation",
+      "id": "e058460f-453b-462f-8a11-5a5531f41823",
+      "is_active": false,
+      "method": "POST",
+      "name": "search",
+      "parameters": null,
+      "path": "/v2/search",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "scrapeOptions": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:25.208+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:25.208+00:00",
+      "data_scope": null,
+      "description": "Map a site's URLs",
+      "execution": "http_operation",
+      "id": "4b0912ca-68ab-4e76-abc2-e88054f25b95",
+      "is_active": false,
+      "method": "POST",
+      "name": "map_site",
+      "parameters": null,
+      "path": "/v2/map",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "search": {
+            "description": "Optional filter query.",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:25.208+00:00"
+    }
+  ]
+}
+$ POST /api/v1/proxy/s/tools-firecrawl/v2/search {"query":"NyxID"} [draft]
+HTTP 404 {"error": "tool_operation_not_published", "error_code": 12600, "message": "Tool operation is not published"}
+$ POST /mcp initialize
+HTTP 200; session identifier omitted
+$ POST /mcp nyx__call_tool tools-firecrawl__search {query:NyxID} [draft]
+HTTP 200 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{\"error\":\"tool_operation_not_published\",\"error_code\":12600,\"message\":\"Tool operation is not published\"}"}], "isError": true}}
+$ nyxid catalog publish tools-firecrawl --operation search --operation scrape --output json
+{
+  "endpoints": [
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:25.208+00:00",
+      "data_scope": null,
+      "description": "Scrape a single URL",
+      "execution": "http_operation",
+      "id": "cbbd1e8b-cc6c-4384-a874-6b0c84683eb5",
+      "is_active": true,
+      "method": "POST",
+      "name": "scrape",
+      "parameters": null,
+      "path": "/v2/scrape",
+      "publication": "published",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "formats": {
+            "description": "e.g. markdown, html, links.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "onlyMainContent": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:25.550+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:25.208+00:00",
+      "data_scope": null,
+      "description": "Search the web",
+      "execution": "http_operation",
+      "id": "e058460f-453b-462f-8a11-5a5531f41823",
+      "is_active": true,
+      "method": "POST",
+      "name": "search",
+      "parameters": null,
+      "path": "/v2/search",
+      "publication": "published",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "scrapeOptions": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:25.564+00:00"
+    }
+  ]
+}
+$ nyxid tools list --output json
+[
+  {
+    "access": {
+      "byok": true,
+      "platform": false
+    },
+    "credential_configured": false,
+    "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+    "homepage_url": "https://www.firecrawl.dev",
+    "id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+    "import_source": {
+      "imported_at": null,
+      "kind": "catalog_twin",
+      "reference": "api-firecrawl",
+      "version": "2026-10-08T18:36:10.588+00:00"
+    },
+    "limits": {
+      "burst": 10,
+      "rate_limit_per_second": 0
+    },
+    "name": "tools-firecrawl",
+    "offering_kind": "tool",
+    "operations": [
+      {
+        "cost_class": null,
+        "data_scope": null,
+        "description": "Scrape a single URL",
+        "execution": "http_operation",
+        "method": "POST",
+        "name": "scrape",
+        "path": "/v2/scrape",
+        "risk": "write"
+      },
+      {
+        "cost_class": null,
+        "data_scope": null,
+        "description": "Search the web",
+        "execution": "http_operation",
+        "method": "POST",
+        "name": "search",
+        "path": "/v2/search",
+        "risk": "write"
+      }
+    ],
+    "pricing": {
+      "byok": "free",
+      "platform": "free"
+    },
+    "provider_label": "Firecrawl",
+    "slug": "tools-firecrawl",
+    "supplier": "Firecrawl",
+    "topics": [
+      "web-search",
+      "page-fetch"
+    ]
+  }
+]
+$ GET /api/v1/tools [normal user, before credential]
+HTTP 200; tools-firecrawl visible=False
+$ nyxid service update --catalog-admin tools-firecrawl --credential-env NYXID_PROOF_DUMMY --output json
+{
+  "allowance_metrics": [
+    "requests"
+  ],
+  "anonymous_endpoints": [],
+  "api_spec_url": "http://127.0.0.1:4311/api/v1/catalog-specs/firecrawl/openapi.json",
+  "asyncapi_spec_url": null,
+  "auth_key_name": "Authorization",
+  "auth_method": "bearer",
+  "auth_notes": "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
+  "auth_type": "bearer",
+  "base_url": "https://api.firecrawl.dev",
+  "capabilities": {
+    "supports_authoring_via_nyx": false,
+    "supports_direct_downstream_auth": true,
+    "supports_proxy_binary_upload": false,
+    "supports_proxy_read": true,
+    "supports_proxy_write": true,
+    "supports_realtime_voice": false,
+    "supports_streaming": true,
+    "supports_websocket": false
+  },
+  "created_at": "2026-10-08T18:36:25.206+00:00",
+  "created_by": "41581642-989b-4876-b103-f522e8843e56",
+  "credential_configured": true,
+  "delegation_token_scope": "llm:proxy",
+  "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+  "effective_platform_metric": "requests",
+  "forward_access_token": false,
+  "homepage_url": "https://www.firecrawl.dev",
+  "id": "eb00a22c-c528-4ffa-bbed-167feb142e44",
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_include_user_id": false,
+  "identity_jwt_audience": null,
+  "identity_propagation_mode": "none",
+  "import_source": {
+    "imported_at": null,
+    "kind": "catalog_twin",
+    "reference": "api-firecrawl",
+    "version": "2026-10-08T18:36:10.588+00:00"
+  },
+  "inference": null,
+  "inject_delegation_token": false,
+  "is_active": true,
+  "known_limitations": "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+  "legacy_public_master": false,
+  "name": "tools-firecrawl",
+  "oauth_client_id": null,
+  "offering_kind": "tool",
+  "openapi_spec_url": "http://127.0.0.1:4311/api/v1/catalog-specs/firecrawl/openapi.json",
+  "owner_user_id": "41581642-989b-4876-b103-f522e8843e56",
+  "platform_key": {
+    "allowed_owner_ids": [],
+    "audience": "public",
+    "enabled": true
+  },
+  "provider_config_id": null,
+  "recommended_skill_refs": null,
+  "requires_user_credential": false,
+  "service_category": "internal",
+  "service_type": "http",
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "skills_revision": 0,
+  "slug": "tools-firecrawl",
+  "ssh_config": null,
+  "streaming_supported": false,
+  "supplier": "Firecrawl",
+  "topics": [
+    "web-search",
+    "page-fetch"
+  ],
+  "updated_at": "2026-10-08T18:36:25.781+00:00",
+  "visibility": "public",
+  "ws_frame_injections": [],
+  "your_binding_count": 0
+}
+$ GET /api/v1/tools [normal user, after dummy credential]
+HTTP 200; tools-firecrawl visible=True
+$ GET /api/v1/keys [normal user]
+HTTP 200; platform tool bindings listed: 0
+$ GET /api/v1/user-services [normal user]
+HTTP 200; retained tool connections: 1
+$ POST /api/v1/proxy/s/tools-firecrawl/v2/search {"query":"NyxID"} [published, dummy credential]
+HTTP 401 {"success": false, "error": "Unauthorized: Invalid token"}
+$ GET /api/v1/services/d3e85c4a-6d4e-46e1-ac7b-25dc76c66cd9
+HTTP 200; source identity/provider/version unchanged
+$ GET /api/v1/proxy/s/tools-firecrawl/v2/search [WebSocket Upgrade, unmatched GET operation]
+HTTP 404 {"error": "tool_operation_not_published", "error_code": 12600, "message": "Tool operation is not published"}
+Fresh proof database has no admin-created Chrono row; create eligible baseline and published operations through CLI before flipping.
+$ nyxid service add --catalog-admin --slug chrono-llm-public --label Chrono LLM public --endpoint-url https://api.chronoai.net --auth-method bearer --service-category internal --platform-key-enabled true --platform-key-audience public --credential-env NYXID_PROOF_CHRONO --inference-protocol openai_completions --output json
+{
+  "allowance_metrics": [
+    "requests"
+  ],
+  "anonymous_endpoints": [],
+  "api_spec_url": null,
+  "asyncapi_spec_url": null,
+  "auth_key_name": "Authorization",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "base_url": "https://api.chronoai.net",
+  "created_at": "2026-10-08T18:36:26.991+00:00",
+  "created_by": "41581642-989b-4876-b103-f522e8843e56",
+  "credential_configured": true,
+  "delegation_token_scope": "llm:proxy",
+  "description": null,
+  "effective_platform_metric": "requests",
+  "forward_access_token": false,
+  "id": "c53c7822-01b6-407a-a48d-12843fb7e34b",
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_include_user_id": false,
+  "identity_jwt_audience": null,
+  "identity_propagation_mode": "none",
+  "import_source": null,
+  "inference": {
+    "model_list": false,
+    "realtime": false,
+    "voice": null,
+    "wire_protocol": "openai_completions"
+  },
+  "inject_delegation_token": false,
+  "is_active": true,
+  "legacy_public_master": false,
+  "name": "Chrono LLM public",
+  "oauth_client_id": null,
+  "offering_kind": "ai_service",
+  "openapi_spec_url": null,
+  "owner_user_id": "41581642-989b-4876-b103-f522e8843e56",
+  "platform_key": {
+    "allowed_owner_ids": [],
+    "audience": "public",
+    "enabled": true
+  },
+  "provider_config_id": null,
+  "recommended_skill_refs": null,
+  "requires_user_credential": false,
+  "service_category": "internal",
+  "service_type": "http",
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "skills_revision": 0,
+  "slug": "chrono-llm-public",
+  "ssh_config": null,
+  "streaming_supported": false,
+  "supplier": null,
+  "topics": [],
+  "updated_at": "2026-10-08T18:36:26.991+00:00",
+  "visibility": "public",
+  "ws_frame_injections": [],
+  "your_binding_count": 0
+}
+$ nyxid catalog endpoint add chrono-llm-public --name chat_completions --method POST --path /v1/chat/completions --output json
+{
+  "cost_class": null,
+  "created_at": "2026-10-08T18:36:27.108069+00:00",
+  "data_scope": null,
+  "description": null,
+  "execution": "http_operation",
+  "id": "0465527d-421b-4893-ae22-936eeb83f879",
+  "is_active": true,
+  "method": "POST",
+  "name": "chat_completions",
+  "parameters": null,
+  "path": "/v1/chat/completions",
+  "publication": "published",
+  "request_body_required": false,
+  "request_body_schema": null,
+  "request_content_type": null,
+  "response": {
+    "binary_artifact": null,
+    "content_types": []
+  },
+  "response_description": null,
+  "risk": null,
+  "service_id": "c53c7822-01b6-407a-a48d-12843fb7e34b",
+  "supports_idempotency_key": false,
+  "updated_at": "2026-10-08T18:36:27.108069+00:00"
+}
+$ nyxid catalog endpoint add chrono-llm-public --name list_models --method GET --path /v1/models --output json
+{
+  "cost_class": null,
+  "created_at": "2026-10-08T18:36:27.204884+00:00",
+  "data_scope": null,
+  "description": null,
+  "execution": "http_operation",
+  "id": "f3e86bfc-28ce-40c9-87f0-e735979316b7",
+  "is_active": true,
+  "method": "GET",
+  "name": "list_models",
+  "parameters": null,
+  "path": "/v1/models",
+  "publication": "published",
+  "request_body_required": false,
+  "request_body_schema": null,
+  "request_content_type": null,
+  "response": {
+    "binary_artifact": null,
+    "content_types": []
+  },
+  "response_description": null,
+  "risk": null,
+  "service_id": "c53c7822-01b6-407a-a48d-12843fb7e34b",
+  "supports_idempotency_key": false,
+  "updated_at": "2026-10-08T18:36:27.204884+00:00"
+}
+$ POST /api/v1/keys [normal user, dummy Chrono BYOK material omitted]
+HTTP 200; BYOK row 17da5a44-ece1-414d-ba55-55f683248432 present before flip
+$ nyxid service update --catalog-admin chrono-llm-public --offering-kind tool --output json
+{
+  "allowance_metrics": [
+    "requests"
+  ],
+  "anonymous_endpoints": [],
+  "api_spec_url": null,
+  "asyncapi_spec_url": null,
+  "auth_key_name": "Authorization",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "base_url": "https://api.chronoai.net",
+  "created_at": "2026-10-08T18:36:26.991+00:00",
+  "created_by": "41581642-989b-4876-b103-f522e8843e56",
+  "credential_configured": true,
+  "delegation_token_scope": "llm:proxy",
+  "description": null,
+  "effective_platform_metric": "requests",
+  "forward_access_token": false,
+  "id": "c53c7822-01b6-407a-a48d-12843fb7e34b",
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_include_user_id": false,
+  "identity_jwt_audience": null,
+  "identity_propagation_mode": "none",
+  "import_source": null,
+  "inference": {
+    "model_list": false,
+    "realtime": false,
+    "voice": null,
+    "wire_protocol": "openai_completions"
+  },
+  "inject_delegation_token": false,
+  "is_active": true,
+  "legacy_public_master": false,
+  "name": "Chrono LLM public",
+  "oauth_client_id": null,
+  "offering_kind": "tool",
+  "openapi_spec_url": null,
+  "owner_user_id": "41581642-989b-4876-b103-f522e8843e56",
+  "platform_key": {
+    "allowed_owner_ids": [],
+    "audience": "public",
+    "enabled": true
+  },
+  "provider_config_id": null,
+  "recommended_skill_refs": null,
+  "requires_user_credential": false,
+  "service_category": "internal",
+  "service_type": "http",
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "skills_revision": 0,
+  "slug": "chrono-llm-public",
+  "ssh_config": null,
+  "streaming_supported": false,
+  "supplier": null,
+  "topics": [],
+  "updated_at": "2026-10-08T18:36:27.376+00:00",
+  "visibility": "public",
+  "ws_frame_injections": [],
+  "your_binding_count": 0
+}
+$ nyxid catalog endpoint list chrono-llm-public --output json
+{
+  "endpoints": [
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.108+00:00",
+      "data_scope": null,
+      "description": null,
+      "execution": "http_operation",
+      "id": "0465527d-421b-4893-ae22-936eeb83f879",
+      "is_active": true,
+      "method": "POST",
+      "name": "chat_completions",
+      "parameters": null,
+      "path": "/v1/chat/completions",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": null,
+        "content_types": []
+      },
+      "response_description": null,
+      "risk": null,
+      "service_id": "c53c7822-01b6-407a-a48d-12843fb7e34b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.108+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.204+00:00",
+      "data_scope": null,
+      "description": null,
+      "execution": "http_operation",
+      "id": "f3e86bfc-28ce-40c9-87f0-e735979316b7",
+      "is_active": true,
+      "method": "GET",
+      "name": "list_models",
+      "parameters": null,
+      "path": "/v1/models",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": null,
+        "content_types": []
+      },
+      "response_description": null,
+      "risk": null,
+      "service_id": "c53c7822-01b6-407a-a48d-12843fb7e34b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.204+00:00"
+    }
+  ]
+}
+$ GET /api/v1/tools [normal user]
+HTTP 200; chrono-llm-public visible with 2 existing published operations
+$ GET /api/v1/keys [normal user, after flip]
+HTTP 200; same BYOK UUID retained, credential_binding=user, offering_kind=tool
+$ scripts/tools/add-tool-twin.sh --source api-twitter --slug tools-x --supplier X --topic social --publish search_recent_tweets --publish get_user_by_username --publish get_user_tweets [run 1]
+Created tools-x from api-twitter
+tools-x: 3 operations -> published
+$ nyxid catalog endpoint list tools-x --output json
+{
+  "endpoints": [
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get the authenticated user",
+      "execution": "http_operation",
+      "id": "e1f6cb3f-c3a6-4124-ba49-7fbb0b638bc4",
+      "is_active": false,
+      "method": "GET",
+      "name": "get_me",
+      "parameters": [
+        {
+          "description": "Comma-separated extra user fields.",
+          "in": "query",
+          "name": "user.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/users/me",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Create a post",
+      "execution": "http_operation",
+      "id": "365753eb-d55b-475b-88b1-bcacbed08511",
+      "is_active": false,
+      "method": "POST",
+      "name": "create_tweet",
+      "parameters": null,
+      "path": "/tweets",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "quote_tweet_id": {
+            "type": "string"
+          },
+          "reply": {
+            "additionalProperties": true,
+            "description": "Reply target settings.",
+            "type": "object"
+          },
+          "text": {
+            "description": "Post text (required unless media/poll only).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Delete a post",
+      "execution": "http_operation",
+      "id": "0176f3f9-8ce9-42bf-964d-bc84629a47e8",
+      "is_active": false,
+      "method": "DELETE",
+      "name": "delete_tweet",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/tweets/{id}",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Send a direct message",
+      "execution": "http_operation",
+      "id": "2906de0e-8ce8-46e0-ad4d-887ac79ab85d",
+      "is_active": false,
+      "method": "POST",
+      "name": "send_dm",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "participant_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/dm_conversations/with/{participant_id}/messages",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "attachments": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "media_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "List direct message events",
+      "execution": "http_operation",
+      "id": "c9639b38-fad5-43da-b12d-657f6811215a",
+      "is_active": false,
+      "method": "GET",
+      "name": "list_dm_events",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "pagination_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "event_types",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "dm_event.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/dm_events",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get direct message events with a user",
+      "execution": "http_operation",
+      "id": "83a889d9-8a76-489f-82f1-954e6e3f3e67",
+      "is_active": false,
+      "method": "GET",
+      "name": "get_dm_conversation_with_user",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "participant_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "pagination_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "event_types",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "dm_event.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/dm_conversations/with/{participant_id}/dm_events",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Search recent posts",
+      "execution": "http_operation",
+      "id": "4f38d5d4-65f7-4a6a-8ad6-e487e862f405",
+      "is_active": true,
+      "method": "GET",
+      "name": "search_recent_tweets",
+      "parameters": [
+        {
+          "description": "Search query using X search operators.",
+          "in": "query",
+          "name": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "next_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated extra tweet fields.",
+          "in": "query",
+          "name": "tweet.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/tweets/search/recent",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:28.020+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get a user by username",
+      "execution": "http_operation",
+      "id": "6900b354-3e8b-4f1d-b223-ee69b0f645a7",
+      "is_active": true,
+      "method": "GET",
+      "name": "get_user_by_username",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "username",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated extra user fields.",
+          "in": "query",
+          "name": "user.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/users/by/username/{username}",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:28.034+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get a user's posts",
+      "execution": "http_operation",
+      "id": "9703c22c-a2c7-43b7-8edf-b4c99c570e4d",
+      "is_active": true,
+      "method": "GET",
+      "name": "get_user_tweets",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "pagination_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated extra tweet fields.",
+          "in": "query",
+          "name": "tweet.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/users/{id}/tweets",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:28.048+00:00"
+    }
+  ]
+}
+$ scripts/tools/add-tool-twin.sh --source api-twitter --slug tools-x --supplier X --topic social --publish search_recent_tweets --publish get_user_by_username --publish get_user_tweets [run 2]
+tools-x unchanged (no-op)
+$ nyxid catalog endpoint list tools-x --output json
+{
+  "endpoints": [
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get the authenticated user",
+      "execution": "http_operation",
+      "id": "e1f6cb3f-c3a6-4124-ba49-7fbb0b638bc4",
+      "is_active": false,
+      "method": "GET",
+      "name": "get_me",
+      "parameters": [
+        {
+          "description": "Comma-separated extra user fields.",
+          "in": "query",
+          "name": "user.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/users/me",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Create a post",
+      "execution": "http_operation",
+      "id": "365753eb-d55b-475b-88b1-bcacbed08511",
+      "is_active": false,
+      "method": "POST",
+      "name": "create_tweet",
+      "parameters": null,
+      "path": "/tweets",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "quote_tweet_id": {
+            "type": "string"
+          },
+          "reply": {
+            "additionalProperties": true,
+            "description": "Reply target settings.",
+            "type": "object"
+          },
+          "text": {
+            "description": "Post text (required unless media/poll only).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Delete a post",
+      "execution": "http_operation",
+      "id": "0176f3f9-8ce9-42bf-964d-bc84629a47e8",
+      "is_active": false,
+      "method": "DELETE",
+      "name": "delete_tweet",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/tweets/{id}",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Send a direct message",
+      "execution": "http_operation",
+      "id": "2906de0e-8ce8-46e0-ad4d-887ac79ab85d",
+      "is_active": false,
+      "method": "POST",
+      "name": "send_dm",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "participant_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/dm_conversations/with/{participant_id}/messages",
+      "publication": "draft",
+      "request_body_required": true,
+      "request_body_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "attachments": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "media_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "write",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "List direct message events",
+      "execution": "http_operation",
+      "id": "c9639b38-fad5-43da-b12d-657f6811215a",
+      "is_active": false,
+      "method": "GET",
+      "name": "list_dm_events",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "pagination_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "event_types",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "dm_event.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/dm_events",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get direct message events with a user",
+      "execution": "http_operation",
+      "id": "83a889d9-8a76-489f-82f1-954e6e3f3e67",
+      "is_active": false,
+      "method": "GET",
+      "name": "get_dm_conversation_with_user",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "participant_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "pagination_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "event_types",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated values.",
+          "in": "query",
+          "name": "dm_event.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/dm_conversations/with/{participant_id}/dm_events",
+      "publication": "draft",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:27.700+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Search recent posts",
+      "execution": "http_operation",
+      "id": "4f38d5d4-65f7-4a6a-8ad6-e487e862f405",
+      "is_active": true,
+      "method": "GET",
+      "name": "search_recent_tweets",
+      "parameters": [
+        {
+          "description": "Search query using X search operators.",
+          "in": "query",
+          "name": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "next_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated extra tweet fields.",
+          "in": "query",
+          "name": "tweet.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/tweets/search/recent",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:28.020+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get a user by username",
+      "execution": "http_operation",
+      "id": "6900b354-3e8b-4f1d-b223-ee69b0f645a7",
+      "is_active": true,
+      "method": "GET",
+      "name": "get_user_by_username",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "username",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated extra user fields.",
+          "in": "query",
+          "name": "user.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/users/by/username/{username}",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:28.034+00:00"
+    },
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:27.700+00:00",
+      "data_scope": null,
+      "description": "Get a user's posts",
+      "execution": "http_operation",
+      "id": "9703c22c-a2c7-43b7-8edf-b4c99c570e4d",
+      "is_active": true,
+      "method": "GET",
+      "name": "get_user_tweets",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "pagination_token",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated extra tweet fields.",
+          "in": "query",
+          "name": "tweet.fields",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "path": "/users/{id}/tweets",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": false,
+        "content_types": [
+          "application/json"
+        ]
+      },
+      "response_description": null,
+      "risk": "read",
+      "service_id": "39405a08-82a7-4dfa-99df-c933ae89162b",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:36:28.048+00:00"
+    }
+  ]
+}
+$ POST /api/v1/services [no-auth tool with RFC3339 import date]
+HTTP 200 {"kind": "manual", "reference": "date-proof", "version": null, "imported_at": "2026-10-09T00:00:00+00:00"}
+$ nyxid catalog endpoint add tools-date-metadata --name health --method GET --path /health --output json
+{
+  "cost_class": null,
+  "created_at": "2026-10-08T18:36:28.710445+00:00",
+  "data_scope": null,
+  "description": null,
+  "execution": "http_operation",
+  "id": "19e0986d-f1a8-4a59-9425-a9f3ca8ca3b9",
+  "is_active": false,
+  "method": "GET",
+  "name": "health",
+  "parameters": null,
+  "path": "/health",
+  "publication": "draft",
+  "request_body_required": false,
+  "request_body_schema": null,
+  "request_content_type": null,
+  "response": {
+    "binary_artifact": null,
+    "content_types": []
+  },
+  "response_description": null,
+  "risk": null,
+  "service_id": "52fe41ad-6228-454d-bde2-c37039b26b5c",
+  "supports_idempotency_key": false,
+  "updated_at": "2026-10-08T18:36:28.710445+00:00"
+}
+$ nyxid catalog publish tools-date-metadata --operation health --output json
+{"body":{"error":"rate_limited","error_code":1005,"message":"Rate limited"},"error":"http_error","path":"/services/52fe41ad-6228-454d-bde2-c37039b26b5c/publication","status":429}
+Request rate window reset; retrying optional import-date publication check.
+$ nyxid catalog publish tools-date-metadata --operation health --output json
+{
+  "endpoints": [
+    {
+      "cost_class": null,
+      "created_at": "2026-10-08T18:36:28.710+00:00",
+      "data_scope": null,
+      "description": null,
+      "execution": "http_operation",
+      "id": "19e0986d-f1a8-4a59-9425-a9f3ca8ca3b9",
+      "is_active": true,
+      "method": "GET",
+      "name": "health",
+      "parameters": null,
+      "path": "/health",
+      "publication": "published",
+      "request_body_required": false,
+      "request_body_schema": null,
+      "request_content_type": null,
+      "response": {
+        "binary_artifact": null,
+        "content_types": []
+      },
+      "response_description": null,
+      "risk": null,
+      "service_id": "52fe41ad-6228-454d-bde2-c37039b26b5c",
+      "supports_idempotency_key": false,
+      "updated_at": "2026-10-08T18:38:36.270+00:00"
+    }
+  ]
+}
+$ GET /api/v1/tools/tools-date-metadata [normal user]
+HTTP 200 {"kind": "manual", "reference": "date-proof", "version": null, "imported_at": "2026-10-09T00:00:00+00:00"}
+Phase 1 manual proof passed; tools-x second run made no endpoint metadata changes.
