@@ -1,3 +1,4 @@
+import { PublicationOperations } from "@/components/services/tool-publication";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import type { CreateEndpointPayload } from "@/lib/endpoint-changes";
 import { useState } from "react";
@@ -21,6 +22,8 @@ import { toast } from "sonner";
 
 interface EndpointListProps {
   readonly serviceId: string;
+  readonly service?:import("@/types/api").DownstreamService;
+  readonly canWrite?:boolean;
   readonly hasApiSpecUrl: boolean;
 }
 
@@ -42,7 +45,7 @@ export function EndpointList(props: EndpointListProps) {
   return <EndpointListEditor key={props.serviceId} {...props} />;
 }
 
-function EndpointListEditor({ serviceId, hasApiSpecUrl }: EndpointListProps) {
+function EndpointListEditor({ serviceId, hasApiSpecUrl,service,canWrite=true }: EndpointListProps) {
   const { data: endpoints, isLoading } = useEndpoints(serviceId);
   const createMutation = useCreateEndpoint();
   const updateMutation = useUpdateEndpoint();
@@ -179,6 +182,7 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs">{ep.name}</span>
+                      <Badge variant={(ep.publication??"published")==="published"?"success":"secondary"}>{ep.publication??"published"}</Badge>
                       {!ep.is_active && (
                         <Badge variant="secondary" className="text-10">
                           Inactive
@@ -237,6 +241,7 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl }: EndpointListProps) {
         </div>
       )}
 
+      {service?.offering_kind === "tool" && <PublicationOperations tool={service} disabled={!canWrite}/>}
       <EndpointFormDialog
         serviceId={serviceId}
         currentEndpoint={

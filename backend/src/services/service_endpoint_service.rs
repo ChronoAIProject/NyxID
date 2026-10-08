@@ -33,8 +33,8 @@ pub struct EndpointInput {
 
 /// Fields that can be updated on an existing endpoint.
 pub struct EndpointUpdate {
-    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
-    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub data_scope: Option<Option<crate::models::service_endpoint::DataScope>>,
+    pub cost_class: Option<Option<crate::models::service_endpoint::CostClass>>,
     pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
 
     pub name: Option<String>,
@@ -266,19 +266,25 @@ pub async fn update_endpoint(
     }
     let mut set_doc = bson::Document::new();
 
-    if let Some(value) = updates.data_scope {
+    if let Some(value) = updates.data_scope
+        && existing.data_scope != value
+    {
         set_doc.insert(
             "data_scope",
             bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
         );
     }
-    if let Some(value) = updates.cost_class {
+    if let Some(value) = updates.cost_class
+        && existing.cost_class != value
+    {
         set_doc.insert(
             "cost_class",
             bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
         );
     }
-    if let Some(value) = updates.execution {
+    if let Some(value) = updates.execution
+        && existing.execution != value
+    {
         set_doc.insert(
             "execution",
             bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,

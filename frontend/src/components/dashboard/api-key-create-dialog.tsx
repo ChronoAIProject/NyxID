@@ -98,7 +98,7 @@ export function ApiKeyCreateDialog({
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
 
-  const { data: services } = useKeys();
+  const { data: services } = useKeys({includeTools:true});
   const { data: nodes } = useNodes();
   const { data: orgs } = useOrgs();
 
@@ -146,7 +146,7 @@ export function ApiKeyCreateDialog({
 
     initializedSetupRef.current = true;
     const initialService = (services ?? []).find(
-      (service) => service.id === initialServiceId,
+      (service) => service.id === initialServiceId || service.catalog_service_id === initialServiceId,
     );
     const serviceSource = initialService?.credential_source;
     const targetOrgId =

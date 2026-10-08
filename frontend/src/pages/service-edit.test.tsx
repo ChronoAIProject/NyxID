@@ -1,3 +1,5 @@
+vi.mock("@/hooks/use-tools",()=>({useToolEditorAuthority:()=>({data:{admin:true,read:true,write:true}})}));
+vi.mock("@/components/services/catalog-tool-metadata",()=>({CatalogToolMetadata:()=>null}));
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";

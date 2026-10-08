@@ -172,7 +172,7 @@ fn build_catalog_entry(
         .and_then(|b| b.byok_pricing.as_ref())
         .map(Into::into);
     CatalogEntry {
-        offering_kind: svc.offering_kind.clone(),
+        offering_kind: svc.offering_kind,
         topics: svc.topics.clone(),
         supplier: svc.supplier.clone(),
         import_source: svc.import_source.clone(),

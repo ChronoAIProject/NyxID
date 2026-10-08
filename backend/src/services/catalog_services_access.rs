@@ -61,7 +61,6 @@ pub fn validate_editor_fields(value: &serde_json::Value, create: bool) -> AppRes
         "description",
         "visibility",
         "openapi_spec_url",
-        "api_spec_url",
         "asyncapi_spec_url",
         "homepage_url",
         "repository_url",
@@ -81,13 +80,39 @@ pub fn validate_editor_fields(value: &serde_json::Value, create: bool) -> AppRes
         .ok_or_else(|| AppError::ValidationError("Expected an object".into()))?
         .keys()
     {
-        if !allowed.contains(&field.as_str()) && !(create && field == "slug") {
+        if !(allowed.contains(&field.as_str()) || create && field == "slug") {
             return Err(AppError::Forbidden(format!(
                 "Field {field} requires platform admin authority"
             )));
         }
     }
     Ok(())
+}
+
+pub async fn authorize_tool(
+    db: &Database,
+    auth: &AuthUser,
+    service: &crate::models::downstream_service::DownstreamService,
+    write: bool,
+) -> AppResult<()> {
+    if service.offering_kind != crate::models::downstream_service::OfferingKind::Tool {
+        if auth.auth_method == AuthMethod::ServiceAccount {
+            return Err(AppError::NotFound("Tool not found".into()));
+        }
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id":auth.user_id.to_string()})
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Admin required".into()))?;
+        if !super::role_service::resolve_platform_role(db, &user)
+            .await?
+            .is_admin()
+        {
+            return Err(AppError::Forbidden("Admin required".into()));
+        }
+        return Ok(());
+    }
+    authorize(db, auth, write).await
 }
 
 #[cfg(test)]
@@ -123,30 +148,4 @@ mod tests {
         assert!(validate_editor_fields(&serde_json::json!({"slug":"tool"}), true).is_ok());
         assert!(validate_editor_fields(&serde_json::json!({"slug":"tool"}), false).is_err());
     }
-}
-
-pub async fn authorize_tool(
-    db: &Database,
-    auth: &AuthUser,
-    service: &crate::models::downstream_service::DownstreamService,
-    write: bool,
-) -> AppResult<()> {
-    if service.offering_kind != crate::models::downstream_service::OfferingKind::Tool {
-        if auth.auth_method == AuthMethod::ServiceAccount {
-            return Err(AppError::NotFound("Tool not found".into()));
-        }
-        let user = db
-            .collection::<User>(USERS)
-            .find_one(doc! {"_id":auth.user_id.to_string()})
-            .await?
-            .ok_or_else(|| AppError::Forbidden("Admin required".into()))?;
-        if !super::role_service::resolve_platform_role(db, &user)
-            .await?
-            .is_admin()
-        {
-            return Err(AppError::Forbidden("Admin required".into()));
-        }
-        return Ok(());
-    }
-    authorize(db, auth, write).await
 }

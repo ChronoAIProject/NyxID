@@ -123,6 +123,8 @@ pub mod webhooks;
 pub mod catalog_curation;
 #[cfg(test)]
 mod catalog_editor_tests;
+#[cfg(test)]
+mod tools_tests;
 
 pub mod assistant_group;
 pub mod assistant_nyxagent;

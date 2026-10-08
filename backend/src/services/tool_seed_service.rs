@@ -126,3 +126,76 @@ pub async fn seed(db: &Database) -> AppResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::TryStreamExt;
+    #[tokio::test]
+    async fn initial_tools_are_curated_and_later_startups_preserve_publication() {
+        let db = crate::test_utils::connect_test_database("tools_seed")
+            .await
+            .unwrap();
+        let mut template = crate::models::downstream_service::test_helpers::dummy_service();
+        template.slug = "api-twitter".into();
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(template)
+            .await
+            .unwrap();
+        seed(&db).await.unwrap();
+        let x = db
+            .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .find_one(doc! {"slug":"tools-x"})
+            .await
+            .unwrap()
+            .unwrap();
+        let rows: Vec<ServiceEndpoint> = db
+            .collection::<ServiceEndpoint>(ENDPOINTS)
+            .find(doc! {"service_id":&x.id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.iter().filter(|row| row.is_active).count(), 3);
+        let selected = rows
+            .iter()
+            .find(|row| row.name == "search_recent_tweets")
+            .unwrap();
+        db.collection::<ServiceEndpoint>(ENDPOINTS)
+            .update_one(
+                doc! {"_id":&selected.id},
+                doc! {"$set":{"publication":"paused","is_active":false}},
+            )
+            .await
+            .unwrap();
+        seed(&db).await.unwrap();
+        let preserved = db
+            .collection::<ServiceEndpoint>(ENDPOINTS)
+            .find_one(doc! {"_id":&selected.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            preserved.publication,
+            crate::models::service_endpoint::PublicationState::Paused
+        );
+        assert!(!preserved.is_active);
+        let state = crate::test_utils::test_app_state(db.clone());
+        let tools = super::super::tools_service::list(
+            &db,
+            &state.encryption_keys,
+            &uuid::Uuid::new_v4().to_string(),
+            false,
+            (10, 20),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tools.is_empty(),
+            "unconfigured seed credentials must stay hidden"
+        );
+        db.drop().await.unwrap();
+    }
+}

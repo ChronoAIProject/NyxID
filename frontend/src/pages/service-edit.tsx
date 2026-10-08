@@ -1,3 +1,5 @@
+import { CatalogToolMetadata } from "@/components/services/catalog-tool-metadata";
+import { useToolEditorAuthority } from "@/hooks/use-tools";
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
 import {
   serviceFormPatch,
@@ -88,6 +90,7 @@ export function ServiceEditPage() {
 }
 
 function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
+  const {data:toolAuthority}=useToolEditorAuthority();
   const [service, setService] = useState(source);
   const serviceId = service.id;
   const requestIdentity = useRef<SkillRequestIdentity | undefined>(undefined);
@@ -217,9 +220,11 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
         />
       )}
       {review.dialog}
+      {(service.offering_kind === "tool" || user?.is_admin) && <CatalogToolMetadata service={service} disabled={!toolAuthority?.write} />}
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+          <fieldset className="space-y-4" disabled={service.offering_kind === "tool" && !user?.is_admin} title={service.offering_kind === "tool" && !user?.is_admin ? "Transport, credentials, and pricing require platform admin authority. Edit tool metadata above." : undefined}>
             {form.formState.errors.root && (
               <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                 {form.formState.errors.root.message}
@@ -1137,6 +1142,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                 Cancel
               </Button>
             </div>
+          </fieldset>
           </form>
         </Form>
       </div>

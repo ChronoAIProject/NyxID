@@ -272,7 +272,7 @@ pub async fn service_to_response_with_viewer(
         .as_ref()
         .map(crate::services::inference_service::normalized);
     ServiceResponse {
-        offering_kind: s.offering_kind.clone(),
+        offering_kind: s.offering_kind,
         topics: s.topics.clone(),
         supplier: s.supplier.clone(),
         import_source: s.import_source.clone(),

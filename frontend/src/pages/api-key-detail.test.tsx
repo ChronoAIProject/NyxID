@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   conversation: undefined as string | undefined,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useSearch:()=>({}),
   useParams: () => ({ keyId: "key" }),
   Link: ({ children, search }: {
     children: import("react").ReactNode; search: { c: string };

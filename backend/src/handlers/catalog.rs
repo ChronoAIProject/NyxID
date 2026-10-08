@@ -331,7 +331,7 @@ pub(crate) fn catalog_entry_response(
     let resource_uri = oauth_resource_service::user_service_resource_uri(config, &entry.slug);
 
     CatalogEntryResponse {
-        offering_kind: entry.offering_kind.clone(),
+        offering_kind: entry.offering_kind,
         topics: entry.topics.clone(),
         supplier: entry.supplier.clone(),
         import_source: entry.import_source.clone(),

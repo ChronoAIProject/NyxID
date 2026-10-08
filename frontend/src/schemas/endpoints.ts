@@ -1,3 +1,4 @@
+import { dataScopeSchema,costClassSchema,executionSchema } from "@/schemas/tools";
 import { z } from "zod";
 
 export const ENDPOINT_METHODS = [
@@ -28,6 +29,9 @@ const optionalJsonString = z
   );
 
 export const createEndpointSchema = z.object({
+  data_scope:dataScopeSchema.nullable().optional(),
+  cost_class:costClassSchema.nullable().optional(),
+  execution:executionSchema.optional(),
   name: z
     .string()
     .min(1, "Name is required")
@@ -59,6 +63,9 @@ export const createEndpointSchema = z.object({
 export type CreateEndpointFormData = z.infer<typeof createEndpointSchema>;
 
 export const updateEndpointSchema = z.object({
+  data_scope:dataScopeSchema.nullable().optional(),
+  cost_class:costClassSchema.nullable().optional(),
+  execution:executionSchema.optional(),
   name: z
     .string()
     .min(1, "Name is required")

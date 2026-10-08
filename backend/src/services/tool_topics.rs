@@ -8,7 +8,7 @@ pub const TOOL_TOPICS: &[(&str, &str)] = &[
     ("company-data", "Company Data"),
     ("people-data", "People Data"),
     ("contact-enrichment", "Contact Enrichment"),
-    ("seo", "Seo"),
+    ("seo", "SEO"),
     ("social", "Social"),
     ("jobs", "Jobs"),
     ("real-estate", "Real Estate"),
@@ -22,7 +22,7 @@ pub const TOOL_TOPICS: &[(&str, &str)] = &[
     ("research-papers", "Research Papers"),
     ("government-data", "Government Data"),
     ("economic-data", "Economic Data"),
-    ("llm-benchmarks", "Llm Benchmarks"),
+    ("llm-benchmarks", "LLM Benchmarks"),
     ("generation-image", "Generation Image"),
     ("generation-video", "Generation Video"),
     ("generation-audio", "Generation Audio"),
@@ -56,17 +56,16 @@ pub fn validate_tool_service(service: &DownstreamService) -> AppResult<()> {
             "supplier exceeds 128 characters".into(),
         ));
     }
-    if let Some(source) = &service.import_source {
-        if source.reference.chars().count() > 512
+    if let Some(source) = &service.import_source
+        && (source.reference.chars().count() > 512
             || source
                 .version
                 .as_ref()
-                .is_some_and(|s| s.chars().count() > 128)
-        {
-            return Err(AppError::ValidationError(
-                "import_source exceeds length limits".into(),
-            ));
-        }
+                .is_some_and(|s| s.chars().count() > 128))
+    {
+        return Err(AppError::ValidationError(
+            "import_source exceeds length limits".into(),
+        ));
     }
     if service.offering_kind == OfferingKind::Tool
         && (service.service_category != "internal"

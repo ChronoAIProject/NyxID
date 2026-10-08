@@ -1,3 +1,4 @@
+import { useToolEditorAuthority } from "@/hooks/use-tools";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouterState, Link } from "@tanstack/react-router";
 import {
@@ -49,6 +50,7 @@ import { canAdminWrite, hasAdminRead, isBillingAvailable } from "@/types/api";
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
+  { to: "/tools", icon: Sparkles, label: "Tools" },
   { to: "/billing", icon: WalletCards, label: "Billing & Usage" },
   { to: "/orgs", icon: Building2, label: "Organizations" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
@@ -89,6 +91,7 @@ export const ADMIN_NAV = [
   { to: "/admin/nodes", icon: HardDrive, label: "Node Registry" },
   { to: "/admin/ownership", icon: Server, label: "Ownership transfers" },
   { to: "/services", icon: Server, label: "Services" },
+  { to: "/admin/tools", icon: Sparkles, label: "Tools" },
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;
 
@@ -234,7 +237,8 @@ export function Sidebar({
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
   const mainNav = getVisibleMainNav(user);
-  const adminNav = getVisibleAdminNav(user);
+  const {data:toolAuthority}=useToolEditorAuthority();
+  const adminNav = hasAdminRead(user) ? getVisibleAdminNav(user) : toolAuthority?.read || toolAuthority?.write ? ADMIN_NAV.filter(item=>item.to==="/admin/tools") : [];
 
   const mode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
@@ -334,7 +338,7 @@ export function Sidebar({
           ))}
         </div>
 
-        {hasAdminRead(user) && (
+        {adminNav.length > 0 && (
           <>
             <div className="px-3 my-2 flex items-center">
               {isCollapsed ? (

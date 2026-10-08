@@ -40,8 +40,16 @@ pub struct CreateEndpointRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateEndpointRequest {
-    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
-    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub data_scope: Option<Option<crate::models::service_endpoint::DataScope>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub cost_class: Option<Option<crate::models::service_endpoint::CostClass>>,
     pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
 
     #[serde(

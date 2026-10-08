@@ -40,6 +40,13 @@ pub async fn get(db: &Database, service_id: &str) -> AppResult<Option<CatalogSpe
         .await?)
 }
 
+#[derive(serde::Serialize)]
+pub struct SyncCounts {
+    pub operations_synced: usize,
+    pub operations_added: usize,
+    pub operations_changed: usize,
+}
+
 pub async fn put(
     db: &Database,
     service: &DownstreamService,
@@ -47,7 +54,7 @@ pub async fn put(
     mut source: Option<CatalogImportSource>,
     actor_id: &str,
     base_url: &str,
-) -> AppResult<(CatalogSpecOverlay, usize)> {
+) -> AppResult<(CatalogSpecOverlay, SyncCounts)> {
     let sha256 = validate_document(&document)?;
     let inputs = super::catalog_spec_sync::destination_endpoint_inputs(service, &document)?;
     if let Some(source) = source.as_mut() {
@@ -90,7 +97,28 @@ pub async fn put(
     } else {
         coll.insert_one(&overlay).await?;
     }
-    let count = inputs.len();
+    let existing = super::service_endpoint_service::list_all_endpoints(db, &service.id).await?;
+    let count = SyncCounts {
+        operations_synced: inputs.len(),
+        operations_added: inputs
+            .iter()
+            .filter(|input| !existing.iter().any(|row| row.name == input.name))
+            .count(),
+        operations_changed: inputs
+            .iter()
+            .filter(|input| {
+                existing.iter().any(|row| {
+                    row.name == input.name
+                        && (row.method != input.method
+                            || row.path != input.path
+                            || row.description != input.description
+                            || row.parameters != input.parameters
+                            || row.request_body_schema != input.request_body_schema
+                            || row.response_description != input.response_description)
+                })
+            })
+            .count(),
+    };
     super::service_endpoint_service::upsert_endpoints_additive(db, &service.id, inputs).await?;
     let mut set = doc! {"import_source": bson::to_bson(&overlay.source).map_err(|e| AppError::Internal(e.to_string()))?, "updated_at": bson::DateTime::from_chrono(now)};
     if service.openapi_spec_url.is_none() {

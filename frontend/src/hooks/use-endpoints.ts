@@ -69,6 +69,9 @@ export function useUpdateEndpoint() {
           (before
             ? changedFields(
                 {
+                  data_scope:before.data_scope??null,
+                  cost_class:before.cost_class??null,
+                  execution:before.execution??"http_operation",
                   name: before.name,
                   description: before.description,
                   method: before.method,

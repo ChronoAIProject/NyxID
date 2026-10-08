@@ -317,9 +317,16 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 let slug = slug
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("Catalog creation requires a slug"))?;
-                let mut body = serde_json::json!({ "slug": slug, "name": label.as_deref().unwrap_or(slug),
-                    "base_url": endpoint_url.as_deref().ok_or_else(|| anyhow::anyhow!("Catalog creation requires --endpoint-url"))?,
-                    "auth_method": auth_method.as_deref().unwrap_or("bearer"), "auth_key_name": auth_key_name.as_deref().unwrap_or("Authorization") });
+                let mut body =
+                    serde_json::json!({ "slug": slug, "name": label.as_deref().unwrap_or(slug) });
+                if let Some(url) = endpoint_url.as_deref() {
+                    body["base_url"] = url.into();
+                    body["auth_method"] = auth_method.as_deref().unwrap_or("bearer").into();
+                    body["auth_key_name"] =
+                        auth_key_name.as_deref().unwrap_or("Authorization").into();
+                } else if auth_method.is_some() || auth_key_name.is_some() {
+                    bail!("Transport configuration requires --endpoint-url");
+                }
                 let secret =
                     catalog_admin::credential_from_env(credential_env.as_deref())?.or(credential);
                 if let Some(secret) = secret {

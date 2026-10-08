@@ -29,11 +29,13 @@ pub struct OverlayResponse {
     pub created_at: String,
     pub updated_at: String,
     pub operations_synced: Option<usize>,
+    pub operations_added: Option<usize>,
+    pub operations_changed: Option<usize>,
 }
 
 fn response(
     row: crate::models::catalog_spec_overlay::CatalogSpecOverlay,
-    operations_synced: Option<usize>,
+    counts: Option<catalog_spec_overlay_service::SyncCounts>,
 ) -> OverlayResponse {
     OverlayResponse {
         service_id: row.service_id,
@@ -45,7 +47,9 @@ fn response(
         created_by: row.created_by,
         created_at: row.created_at.to_rfc3339(),
         updated_at: row.updated_at.to_rfc3339(),
-        operations_synced,
+        operations_synced: counts.as_ref().map(|c| c.operations_synced),
+        operations_added: counts.as_ref().map(|c| c.operations_added),
+        operations_changed: counts.as_ref().map(|c| c.operations_changed),
     }
 }
 

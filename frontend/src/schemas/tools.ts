@@ -1,0 +1,88 @@
+import { z } from "zod";
+export const offeringKindSchema = z.enum(["ai_service", "tool"]);
+export const publicationSchema = z.enum([
+  "draft",
+  "validated",
+  "published",
+  "paused",
+]);
+export const dataScopeSchema = z.enum(["public", "account", "owned_resource"]);
+export const costClassSchema = z.enum(["free", "metered", "resource_backed"]);
+export const executionSchema = z.enum([
+  "http_operation",
+  "job_start",
+  "job_poll",
+]);
+export const importSourceSchema = z.object({
+  kind: z.enum(["monid", "vendor_spec", "manual"]),
+  reference: z.string().max(512),
+  version: z.string().max(128).nullable().optional(),
+  imported_at: z.string().nullable().optional(),
+});
+export const toolMetadataFields = {
+  offering_kind: offeringKindSchema.optional(),
+  topics: z
+    .array(z.string().regex(/^[a-z][a-z-]{1,39}$/))
+    .max(20)
+    .refine((v) => new Set(v).size === v.length, "Topics must be unique")
+    .optional(),
+  supplier: z.string().max(128).optional(),
+};
+export const addToolSchema = z.object({
+  ...toolMetadataFields,
+  name: z.string().min(1).max(200),
+  slug: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  base_url: z.url().optional().or(z.literal("")),
+  auth_method: z.enum(["none", "bearer", "header"]),
+  auth_key_name: z.string().max(128),
+  openapi_spec_url: z.url().optional().or(z.literal("")),
+});
+export const overlayDocumentSchema = z
+  .record(z.string(), z.unknown())
+  .refine(
+    (v) =>
+      typeof v.openapi === "string" &&
+      v.openapi.startsWith("3.") &&
+      typeof v.paths === "object" &&
+      v.paths !== null &&
+      !Array.isArray(v.paths),
+    "Expected an OpenAPI 3.x object with paths",
+  )
+  .refine(
+    (v) => new TextEncoder().encode(JSON.stringify(v)).length <= 1024 * 1024,
+    "Overlay exceeds 1 MiB",
+  );
+export const importOverlaySchema = z.object({
+  kind: z.enum(["monid", "vendor_spec", "manual"]),
+  reference: z.string().max(512),
+  version: z.string().max(128),
+});
+export type PublicationState = z.infer<typeof publicationSchema>;
+export type ToolOffering = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  supplier: string | null;
+  topics: string[];
+  homepage_url: string | null;
+  provider_label: string;
+  offering_kind: "tool";
+  access: { platform: boolean; byok: boolean };
+  pricing: {
+    platform: "free" | { metric: string; credits_per_unit: string };
+    byok: "free" | { metric: string; credits_per_unit: string } | null;
+  };
+  limits: { rate_limit_per_second: number; burst: number };
+  credential_configured: boolean;
+  operations: {
+    name: string;
+    description: string | null;
+    method: string;
+    path: string;
+    data_scope: z.infer<typeof dataScopeSchema> | null;
+    cost_class: z.infer<typeof costClassSchema> | null;
+    execution: z.infer<typeof executionSchema>;
+    risk: "read" | "write" | null;
+  }[];
+};

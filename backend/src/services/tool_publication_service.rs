@@ -90,6 +90,11 @@ pub async fn change_publication(
     }
     let mut result = Vec::new();
     for endpoint in endpoints {
+        if endpoint.operation_generation <= 0 || endpoint.operation_generation == i64::MAX {
+            return Err(AppError::Conflict(
+                "Endpoint has an invalid operation_generation".into(),
+            ));
+        }
         let state_bson = bson::to_bson(&state).map_err(|e| AppError::Internal(e.to_string()))?;
         let updated = coll.find_one_and_update(doc! {"_id": &endpoint.id, "service_id": service_id, "$or": [{"operation_generation": endpoint.operation_generation}, {"operation_generation": {"$exists": false}}]}, vec![doc! {"$set": {
             "publication": {"$literal": state_bson}, "is_active": state == PublicationState::Published,

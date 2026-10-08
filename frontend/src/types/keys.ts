@@ -6,6 +6,7 @@ import type { WsFrameInjection } from "@/schemas/services";
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
+  readonly offering_kind?: "ai_service" | "tool";
   readonly inference?: InferenceView | null;
   readonly capabilities?: import("./api").ServiceCapabilities | null;
   readonly authorship?: import("@/schemas/service-history").ServiceAuthorship;

@@ -94,7 +94,7 @@ pub async fn list(
     let ids: Vec<_> = services.iter().map(|s| s.id.as_str()).collect();
     let endpoints: Vec<ServiceEndpoint> = db
         .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
-        .find(doc! {"service_id":{"$in":ids},"is_active":true,"publication":"published"})
+        .find(doc! {"service_id":{"$in":ids},"is_active":true,"$or":[{"publication":"published"},{"publication":{"$exists":false}}]})
         .await?
         .try_collect()
         .await?;
@@ -222,7 +222,7 @@ mod tests {
         db.collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
             .update_one(
                 doc! {"_id":endpoint.id},
-                doc! {"$set":{"publication":"published","is_active":true}},
+                doc! {"$set":{"$or":[{"publication":"published"},{"publication":{"$exists":false}}],"is_active":true}},
             )
             .await
             .unwrap();

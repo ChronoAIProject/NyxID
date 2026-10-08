@@ -1571,6 +1571,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let tools_routes = Router::new()
         .route("/topics", get(handlers::catalog::tool_topics))
+        .route("/editor-authority", get(handlers::tools::editor_authority))
         .route("/", get(handlers::tools::list))
         .route("/{slug}", get(handlers::tools::get))
         .layer(middleware::from_fn(reject_service_account_tokens));

@@ -445,6 +445,7 @@ export function ServiceDetailPage() {
               <Separator />
               <DetailSection title="API Endpoints">
                 <EndpointList
+                  service={service}
                   serviceId={service.id}
                   hasApiSpecUrl={
                     (service.openapi_spec_url ?? service.api_spec_url) !==

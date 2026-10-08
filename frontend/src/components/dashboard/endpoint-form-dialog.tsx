@@ -123,6 +123,9 @@ function EndpointFormEditor({
   const form = useAppForm<CreateEndpointFormData>({
     resolver: zodResolver(formSchema),
     defaultValues: {
+      data_scope: null,
+      cost_class: null,
+      execution: "http_operation",
       name: "",
       description: "",
       method: "GET",
@@ -137,6 +140,9 @@ function EndpointFormEditor({
     if (open) {
       if (isEditing && endpoint) {
         form.reset({
+          data_scope: endpoint.data_scope ?? null,
+          cost_class: endpoint.cost_class ?? null,
+          execution: endpoint.execution ?? "http_operation",
           name: endpoint.name,
           description: endpoint.description ?? "",
           method: endpoint.method as CreateEndpointFormData["method"],
@@ -147,6 +153,9 @@ function EndpointFormEditor({
         });
       } else {
         form.reset({
+          data_scope: null,
+          cost_class: null,
+          execution: "http_operation",
           name: "",
           description: "",
           method: "GET",
@@ -366,6 +375,50 @@ function EndpointFormEditor({
               )}
             />
 
+            <div className="grid grid-cols-3 gap-3">
+              {(
+                [
+                  {
+                    name: "data_scope",
+                    label: "Data scope",
+                    values: ["public", "account", "owned_resource"],
+                  },
+                  {
+                    name: "cost_class",
+                    label: "Cost class",
+                    values: ["free", "metered", "resource_backed"],
+                  },
+                  {
+                    name: "execution",
+                    label: "Execution",
+                    values: ["http_operation", "job_start", "job_poll"],
+                  },
+                ] as const
+              ).map((field) => (
+                <label key={field.name} className="text-12">
+                  {field.label}
+                  <select
+                    className="h-8 w-full rounded-lg border border-input bg-background"
+                    value={form.watch(field.name) ?? ""}
+                    onChange={(event) =>
+                      form.setValue(
+                        field.name,
+                        (event.target.value || null) as never,
+                      )
+                    }
+                  >
+                    {field.name !== "execution" && (
+                      <option value="">Unspecified</option>
+                    )}
+                    {field.values.map((value) => (
+                      <option key={value} value={value}>
+                        {value.replaceAll("_", " ")}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
             <DialogFooter>
               <Button
                 type="button"
