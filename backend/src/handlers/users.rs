@@ -563,7 +563,8 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let other_id = Uuid::new_v4().to_string();
         let mut user = test_user(&user_id, UserType::Person);
-        user.profile_config.onboarding.ai_services_completed_at = Some(Utc::now());
+        user.profile_config.onboarding.ai_services_completed_at =
+            Some(bson::DateTime::now().to_chrono());
         db.collection::<User>(USERS)
             .insert_many([user.clone(), test_user(&other_id, UserType::Person)])
             .await
