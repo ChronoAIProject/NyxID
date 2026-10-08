@@ -1149,6 +1149,7 @@ pub(crate) async fn create_key_with_service_id(
         key_response_from_view(view)
     } else {
         let mut response = key_response_from_result(&result);
+        response.offering_kind = view.offering_kind;
         response.platform_key_available = view.platform_key_available;
         response.platform_key_pricing = view.platform_key_pricing;
         response.byok_pricing = view.byok_pricing;

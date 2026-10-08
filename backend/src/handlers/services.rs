@@ -918,10 +918,9 @@ pub async fn list_services(
     if crate::services::catalog_services_access::authorize(&state.db, &auth_user, false)
         .await
         .is_ok()
+        && let Some(mongodb::bson::Bson::Array(visibility)) = filter.get_mut("$or")
     {
-        if let Some(mongodb::bson::Bson::Array(visibility)) = filter.get_mut("$or") {
-            visibility.push(mongodb::bson::Bson::Document(doc! {"offering_kind":"tool"}));
-        }
+        visibility.push(mongodb::bson::Bson::Document(doc! {"offering_kind":"tool"}));
     }
     filter.extend(crate::services::retired_service_service::exclusion_filter());
     let services: Vec<DownstreamService> = state

@@ -51,6 +51,14 @@ pub async fn update(
     {
         catalog_services_access::authorize(&state.db, &auth, true).await?;
         catalog_services_access::validate_editor_fields(&value, false)?;
+        if value
+            .get("offering_kind")
+            .is_some_and(|kind| kind != "tool")
+        {
+            return Err(AppError::Forbidden(
+                "offering_kind: only admins can convert tools into AI services".into(),
+            ));
+        }
     }
     let body: UpdateServiceRequest =
         serde_json::from_value(value).map_err(|e| AppError::ValidationError(e.to_string()))?;

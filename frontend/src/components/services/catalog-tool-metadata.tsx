@@ -33,9 +33,11 @@ const schema = z.object({
 export function CatalogToolMetadata({
   service,
   disabled = false,
+  admin = false,
 }: {
   service: DownstreamService;
   disabled?: boolean;
+  admin?: boolean;
 }) {
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
@@ -109,6 +111,12 @@ export function CatalogToolMetadata({
             Offering kind
             <select
               {...form.register("offering_kind")}
+              disabled={!admin}
+              title={
+                !admin
+                  ? "Converting a tool into an AI service requires platform admin authority"
+                  : undefined
+              }
               className="h-8 w-full rounded-lg border border-input bg-background text-12"
             >
               <option value="ai_service">AI Service</option>

@@ -220,7 +220,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
         />
       )}
       {review.dialog}
-      {(service.offering_kind === "tool" || user?.is_admin) && <CatalogToolMetadata service={service} disabled={!toolAuthority?.write} />}
+      {(service.offering_kind === "tool" || user?.is_admin) && <CatalogToolMetadata service={service} disabled={!toolAuthority?.write} admin={toolAuthority?.admin??false} />}
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">

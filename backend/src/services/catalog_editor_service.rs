@@ -158,7 +158,7 @@ pub fn validate_scopes(scopes: &str) -> AppResult<()> {
             )
         })
     {
-        return Err(AppError::ValidationError("Catalog editor scopes must be catalog:skills:read, catalog:skills:write, user-services:read, or proxy".into()));
+        return Err(AppError::ValidationError("Catalog editor scopes must be catalog:skills:read, catalog:skills:write, catalog:services:read, catalog:services:write, user-services:read, or proxy".into()));
     }
     Ok(())
 }

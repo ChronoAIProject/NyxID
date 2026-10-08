@@ -121,6 +121,7 @@ export function AdminToolsPage() {
                           <CatalogToolMetadata
                             service={tool}
                             disabled={!write}
+                            admin={authority?.admin ?? false}
                           />
                         </details>
                       </td>

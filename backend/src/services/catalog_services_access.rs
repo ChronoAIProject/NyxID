@@ -6,6 +6,7 @@ use crate::{
     },
     mw::auth::{AuthMethod, AuthUser},
 };
+use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
 
 pub async fn authorize(db: &Database, auth: &AuthUser, write: bool) -> AppResult<()> {
@@ -42,14 +43,28 @@ pub async fn authorize(db: &Database, auth: &AuthUser, write: bool) -> AppResult
     {
         return Ok(());
     }
-    let rbac =
-        super::rbac_helpers::resolve_rbac_from_ids(db, &user.role_ids, &user.group_ids).await?;
+    let mut role_ids = user.role_ids.clone();
+    if !user.group_ids.is_empty() {
+        let groups: Vec<crate::models::group::Group> = db
+            .collection(crate::models::group::COLLECTION_NAME)
+            .find(doc! {"_id":{"$in":&user.group_ids}})
+            .await?
+            .try_collect()
+            .await?;
+        role_ids.extend(groups.into_iter().flat_map(|group| group.role_ids));
+    }
     let permission = if write {
         super::catalog_services_editor_service::WRITE_PERMISSION
     } else {
         super::catalog_services_editor_service::READ_PERMISSION
     };
-    if !rbac.permissions.iter().any(|p| p == permission) {
+    if db
+        .collection::<mongodb::bson::Document>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! {"_id":{"$in":role_ids},"client_id":null,"permissions":permission})
+        .projection(doc! {"_id":1})
+        .await?
+        .is_none()
+    {
         return Err(AppError::Forbidden(format!("{permission} required")));
     }
     Ok(())
@@ -118,6 +133,48 @@ pub async fn authorize_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn client_scoped_roles_cannot_grant_platform_tool_editor_authority() {
+        let db = crate::test_utils::connect_test_database("tool_editor_roles")
+            .await
+            .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let role_id = uuid::Uuid::new_v4().to_string();
+        let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+        user.role_ids = vec![role_id.clone()];
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        let now = chrono::Utc::now();
+        let role = crate::models::role::Role {
+            id: role_id.clone(),
+            name: "Tools editor".into(),
+            slug: "tools-editor".into(),
+            description: None,
+            permissions: vec![
+                super::super::catalog_services_editor_service::WRITE_PERMISSION.into(),
+            ],
+            is_default: false,
+            is_system: false,
+            client_id: Some("client-local".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        let roles =
+            db.collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME);
+        roles.insert_one(role).await.unwrap();
+        let auth = crate::test_utils::test_auth_user(&id);
+        assert!(matches!(
+            authorize(&db, &auth, true).await,
+            Err(AppError::Forbidden(_))
+        ));
+        roles
+            .update_one(doc! {"_id":&role_id}, doc! {"$set":{"client_id":null}})
+            .await
+            .unwrap();
+        authorize(&db, &auth, true).await.unwrap();
+        assert!(authorize(&db, &auth, false).await.is_err());
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn editor_fields_reject_admin_fields_even_when_null() {
         for field in [

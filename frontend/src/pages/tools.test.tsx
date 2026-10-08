@@ -159,3 +159,16 @@ it.each([true, false])("gates transport fields for admin=%s", async (admin) => {
   else expect(input).toBeDisabled();
   expect(screen.getByLabelText("name")).toBeEnabled();
 });
+
+it.each([true, false])(
+  "gates offering conversion for admin=%s",
+  async (admin) => {
+    mocks.admin = admin;
+    mount(<AdminToolsPage />);
+    await userEvent.click(screen.getByRole("tab", { name: "Tools" }));
+    await userEvent.click(screen.getByText("Edit metadata"));
+    const field = screen.getByLabelText("Offering kind");
+    if (admin) expect(field).toBeEnabled();
+    else expect(field).toBeDisabled();
+  },
+);

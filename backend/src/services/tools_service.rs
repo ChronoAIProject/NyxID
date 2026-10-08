@@ -68,6 +68,19 @@ pub struct ToolOffering {
 }
 
 fn price(lane: Option<&crate::models::service_billing::LanePricing>) -> ToolPrice {
+    let zero = |value: &str| {
+        value.parse::<crate::models::credits::Credits>()
+            == Ok(crate::models::credits::Credits::ZERO)
+    };
+    if lane.is_none_or(|lane| {
+        zero(&lane.credits_per_unit)
+            && lane
+                .components
+                .iter()
+                .all(|component| zero(&component.credits_per_unit))
+    }) {
+        return ToolPrice::Free("free");
+    }
     lane.map(|lane| ToolPrice::Lane {
         metric: lane.metric,
         credits_per_unit: lane.credits_per_unit.clone(),
@@ -243,5 +256,26 @@ mod tests {
             1
         );
         db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn free_price_requires_every_lane_component_to_be_free() {
+        let mut lane: crate::models::service_billing::LanePricing = serde_json::from_value(
+            serde_json::json!({"metric":"requests","credits_per_unit":"0","components":[]}),
+        )
+        .unwrap();
+        assert!(matches!(price(Some(&lane)), ToolPrice::Free("free")));
+        lane.components.push(
+            serde_json::from_value(
+                serde_json::json!({"metric":"input_tokens","credits_per_unit":"0.02"}),
+            )
+            .unwrap(),
+        );
+        assert!(matches!(price(Some(&lane)), ToolPrice::Lane { .. }));
+        assert!(matches!(price(None), ToolPrice::Free("free")));
     }
 }

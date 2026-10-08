@@ -64,14 +64,14 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
     let (status, result) = request(
         &f.state,
         "GET",
-        &format!("/api/v1/proxy/{}/draft", f.service.slug),
+        &format!("/api/v1/proxy/s/{}/draft", f.service.slug),
         &f.human_token,
         None,
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{result}");
     assert_eq!(result["error_code"], 12600, "{result}");
-    let (_,result)=request(&f.state,"POST","/mcp",&f.human_token,Some(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":format!("{}__draft_operation",f.service.slug),"arguments":"{}"}}}))).await;
+    let (_,result)=request(&f.state,"POST","/mcp",&f.human_token,Some(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":format!("{}__draft_operation",f.service.slug),"arguments_json":"{}"}}}))).await;
     assert_eq!(result["result"]["isError"], true, "{result}");
     assert!(result.to_string().contains("12600"), "{result}");
     let (status,role)=request(&f.state,"POST","/api/v1/admin/roles",&f.human_token,Some(json!({"name":"Tools editor","slug":"tools-editor","permissions":["nyxid:catalog:services:read","nyxid:catalog:services:write"]}))).await;
@@ -98,6 +98,7 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
     assert_eq!(status, StatusCode::OK, "{published}");
     for forbidden in [
         json!({"credential":null}),
+        json!({"offering_kind":"ai_service"}),
         json!({"billing":null}),
         json!({"base_url":"https://evil.invalid"}),
     ] {

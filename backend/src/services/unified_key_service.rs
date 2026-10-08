@@ -4670,6 +4670,86 @@ async fn enrich_view_with_oauth_client_id(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn tools_hide_only_platform_bindings_and_preserve_byok_inventory() {
+        let db = crate::test_utils::connect_test_database("tool_key_inventory")
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        catalog.service_category = "internal".into();
+        catalog.auth_method = "none".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let mut byok_id = String::new();
+        for binding in ["platform", "user"] {
+            let endpoint_id = uuid::Uuid::new_v4().to_string();
+            let id = uuid::Uuid::new_v4().to_string();
+            let endpoint = crate::test_utils::test_user_endpoint(
+                &endpoint_id,
+                &owner,
+                binding,
+                "https://api.example.com",
+                None,
+                Some(&catalog.id),
+            );
+            db.collection::<crate::models::user_endpoint::UserEndpoint>(
+                crate::models::user_endpoint::COLLECTION_NAME,
+            )
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+            let mut service = crate::test_utils::test_user_service(
+                &id,
+                &owner,
+                binding,
+                &endpoint_id,
+                Some(&catalog.id),
+                None,
+            );
+            service.credential_binding = Some(binding.into());
+            service.auth_method = "bearer".into();
+            db.collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .insert_one(service)
+            .await
+            .unwrap();
+            if binding == "user" {
+                byok_id = id;
+            }
+        }
+        let state = crate::test_utils::test_app_state(db.clone());
+        let grants = OwnerGrants::load_for_listing(&db, &owner).await.unwrap();
+        let views = list_keys_read_only_with_grants(
+            &db,
+            &state.encryption_keys,
+            &owner,
+            &grants,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].id, byok_id);
+        assert_eq!(
+            views[0].offering_kind,
+            crate::models::downstream_service::OfferingKind::Tool
+        );
+        assert_eq!(views[0].credential_binding, "user");
+        db.drop().await.unwrap();
+    }
+
     use std::collections::HashMap;
     use std::sync::{
         Arc,
