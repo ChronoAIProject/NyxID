@@ -326,7 +326,7 @@ pub async fn delegable_specialist(
     for agent in candidates {
         match super::org_agent_service::require_use(db, actor, &agent).await {
             Ok(()) => usable.push(agent),
-            Err(AppError::Forbidden(_)) => {}
+            Err(error) if error.is_forbidden() => {}
             Err(error) => return Err(error),
         }
     }
@@ -2299,7 +2299,7 @@ pub async fn direct_chats_note(
     let messages: Vec<AssistantMessage> = db
         .collection::<AssistantMessage>(MESSAGES)
         .find(
-            doc! {"user_id": owner, "conversation_id": {"$in": thread_ids}, "role": "user",
+            doc! {"user_id": owner, "conversation_id": {"$in": thread_ids}, "role": "user", "steering": bson::Bson::Null,
             "created_at": {"$gt": bson::DateTime::from_chrono(since)}},
         )
         .sort(doc! {"created_at": 1})

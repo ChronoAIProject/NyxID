@@ -1774,3 +1774,49 @@ fe2cc6b1c2b412e2b67eb51ee71dd068c7feafd8753dcad528e847d94ea220ac,
 with the explicit isolated Mongo8 URI. No historical executable was used.
 All requested local gates now pass; ROOT owns final review-record append and
 publication-bound CI/security/sign-off.
+
+## 20. Main47b conflict resolution and affected local checks
+
+HEAD before this merge is a401b6d8aea850fd7433ab7ebfe03b4ef26c23a9;
+MERGE_HEAD is 47b8d8fe1fa06c98495eff2d6c19f6fd88d23afe. The completed
+a401 CI/security evidence remains valid for its test merge fa3a42073d1b359789861fee231dc17c49941cfb
+with parents 3c6a7303e1278e7f242df6ed9ae062458350e077 and a401.
+Later main advancement alone does not invalidate that proof. This merge addresses
+actual conflicts; continuous latest-main binding is not a new gate.
+
+The module conflicts retain both preference and async operation declarations.
+The chat authority file retains the complete preference regression and main's
+async test module. MCP search keeps the original preference loader and equal
+relevance catalog-slot permutation, then ranks native and service candidates
+together with a stable sort and the combined 25-result cap. Main's filler-word
+filtering and escaped 10,000-byte chat budget remain. Service matches retain
+executable/rank/chat_access metadata; native matches retain true/null and their
+direct-call hint. A cheap unit regression covers native relevance precedence,
+interleaved preferred service slots and the cap; the existing chat regression now
+also asserts native executable/hint metadata. API discovery prose describes this
+combined ordering. The optional truncated-result hint remains unchanged.
+
+The incoming skill fixture is exact main bytes, blob
+6e61da5cd04694f786d5bcc8fee9413311c65a66. Whole cached diff-check reports its
+inherited blank line at EOF (line204); the resolution delta against origin/main
+passes diff-check. No fixture content is changed to hide inherited whitespace.
+
+Fresh evidence is under /tmp/nyxid-service-preference-restart/merge-47b/:
+
+| Affected local check | Result | Evidence |
+| --- | --- | --- |
+| Rust formatting | exit0 | format-check.log |
+| Node22 wizard rebuild | exit0;171 producer inputs | wizard-build.log |
+| Independent wizard closure | recorded/computed ae5007e426ef50fd0f7ecaafa51fa6db05d16fd405790fc989089bc285afd921 | wizard-closure.json |
+| Focused incoming frontend and wizard units | 6 files,83 tests passed;exit0 | focused-front.log |
+| Rebuilt standalone wizard scope real route | Chromium1/1 passed;exit0 | wizard-browser.log |
+| Metadata-only Rust check | cargo check --locked -p nyxid -p nyxid-cli --all-targets -j1 exit0;15m37s | cargo-check.log |
+
+The daemon restart removed prior /tmp logs and Cargo artifacts. These checks
+recreated fresh evidence from the persisted resolved source; interrupted pre-restart
+format/wizard attempts are not counted as passes. No old backend executable is
+used as proof for this merge. Metadata checking type-checks the new tests but
+does not execute them. Affected Rust test execution, Clippy and full backend
+execution remain pending fresh exact-head remote CI after ROOT publishes.
+No broad local frontend/V8 rerun is added by this resolution. ROOT owns its review
+record, commit/publication, final gate acceptance and Opus sign-off.

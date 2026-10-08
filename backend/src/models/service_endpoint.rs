@@ -36,6 +36,8 @@ pub struct OperationResponseContract {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
+    #[serde(default)]
+    pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     #[serde(rename = "_id")]
     pub id: String,
     pub service_id: String,
@@ -93,6 +95,7 @@ mod tests {
 
     fn make_endpoint() -> ServiceEndpoint {
         ServiceEndpoint {
+            async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

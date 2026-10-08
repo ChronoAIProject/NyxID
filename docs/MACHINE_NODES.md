@@ -187,8 +187,33 @@ model knows when to use them. Names:
   that is what the model works from.
 - **Where tools appear.** Tool descriptions say machines are the owner's and
   that commands run with the node user's full permissions on that machine.
-  NyxBot's and specialists' instructions mention machines only when the agent
-  has one.
+  Stable instructions include machine use guidance for NyxBot when its already
+  loaded v2 assignment policy grants any capability; specialists retain the
+  machine-membership rule. Guests receive neither use nor setup guidance.
+  This snapshot is guidance only: discovery and execution still recheck live
+  access, node capabilities and restrictions. Removing or adding the guidance
+  changes the stable fingerprint and refreshes an existing agent session.
+- **Search delivery.** Native and service tools use one relevance ordering.
+  Filler words do not score, and command/file descriptions include ordinary task
+  wording. Assistant search responses fit NyxAgent's 10,000-character limit,
+  including the escaped MCP content envelope. Lower-ranked matches are omitted
+  as whole entries with an explicit truncation notice; narrow the query for more.
+  A schema that alone exceeds the budget is explicitly omitted (available from
+  `tools/list`), never partially rewritten. Failed machine discovery emits a
+  fixed-reason, metadata-only warning and leaves unrelated tools available.
+- **Configured shared mode is supported.** An assignment in `shared_legacy`
+  runs its granted shell/file operations normally, including on headless hosts
+  reporting `separated_requires_managed_browser`. This is the configured mode,
+  not a fallback; no browser grant or extra separation approval is required.
+  Keep the shared OS-user/workspace risk warning and all existing capability,
+  confirmation and owner-control checks. Only a `separated` assignment refuses
+  execution when separation is unavailable. Restore support or change its mode
+  through an owner action card; conversational permission never downgrades it.
+  `nyxid__machine_capabilities` returns `execution_note` and, when needed,
+  `separated_setup_note`; `machine_list` includes the execution note too. Machines
+  settings distinguish this effective mode from optional separation setup.
+  Browserless separated contexts remain a follow-up described in
+  [MACHINE_AGENT_ISOLATION.md](MACHINE_AGENT_ISOLATION.md#browserless-separated-contexts-follow-up-1800).
 
 ### D5. Protocol
 

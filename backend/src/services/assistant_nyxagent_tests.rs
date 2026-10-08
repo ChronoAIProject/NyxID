@@ -260,6 +260,7 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            steering: None,
             voice: None,
             execution_pending: false,
             id: Uuid::new_v4().to_string(),
@@ -505,6 +506,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            running_response: None,
             channel_event_id: None,
             initiating_message_seq: None,
             voice_request_id: None,

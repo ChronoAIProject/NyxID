@@ -6,6 +6,19 @@ pub const THREADS_COLLECTION_NAME: &str = "nyxbot_threads";
 pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 
+/// Negotiated transport metadata, never provider references or message bodies.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GatewayThreadSupport {
+    pub supported: bool,
+    pub version: Option<u8>,
+    pub enabled: bool,
+    pub follow_chat_ids: Vec<String>,
+    pub excluded_chat_ids: Vec<String>,
+    #[serde(with = "crate::models::bson_datetime::optional")]
+    pub checked_at: Option<DateTime<Utc>>,
+}
+
 /// A channel bot linked to one of the owner's agents (NyxBot or a
 /// specialist). Telegram bots, and bots on platforms whose
 /// `nyxbot:gateway-{platform}` feature flag is on for their linking person, are reached
@@ -14,6 +27,8 @@ pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default)]
+    pub gateway_threads: GatewayThreadSupport,
     #[serde(default)]
     pub follow_capacity_revision: i64,
     #[serde(default)]

@@ -529,3 +529,75 @@ external delivery**. Platform sends with ambiguous outcomes may still be lost.
 The earlier 570-second notice is best effort: CMA starts its 600-second clock at
 ingress, so a long admission delay or a shorter operator timeout can close the
 stream first; the durable late-answer path still runs.
+
+## Agent gateway group-thread parity
+
+Implementation review: NyxID `feat/gateway-thread-follow` and
+[CMA PR #980](https://github.com/ChronoAIProject/cma/pull/980) against `develop`
+(`api/crates/cmaeg{,-core}`, normative `docs/CMAEG_Protocol.md`). The Agent
+Event Gateway remains distinct from NyxID's device HTTP Event Gateway.
+
+| Surface | NyxID relay | Gateway gap and owner | Proposed change / scope |
+| --- | --- | --- | --- |
+| Lark / Feishu identity | Canonical root, native thread alias and immediate parent; exact chat/bot scope | **CMA:** only the alias reaches Activity; root and parent are lost | Add opt-in, verified, versioned thread facts from the authenticated raw event. |
+| Follow admission | NyxID follows child threads and applies live sender/settings policy | **Both:** gateway admits mentions/replies by default; NyxID disables gateway follow | Negotiate the contract, admit unmentioned events for selected follow-enabled group chats, and reuse NyxID's follow selection. |
+| Lark / Feishu reply target | Native reply endpoint with `reply_in_thread=true` | **Both:** CMA uses the legacy relay reply API without a bound thread request | Seal the thread-reply decision with the source event; explicitly request server-resolved targeting in NyxID for immediate and delayed sends. Never fall back to the parent. |
+| Mentions | Real bot mentions address; other-user-only mentions stay quiet in a followed child; broadcasts retain ordinary followed behavior | **CMA:** Lark requires pinned bot identity for exact evidence; no other-user boolean | Carry only address evidence and `mentions_others`, never mentioned names/IDs. Broadcasts do not become bot mentions. |
+| Lark / Feishu inbound media | Native adapter normalizes supported attachments | **CMA:** text-only verifier rejects attachments | Follow-up: verified bounded attachment references, authenticated fetch, and provider input support. No media change here. |
+| Lark / Feishu outbound media | Native adapter uploads supported attachments | **CMA:** renderer reduces attachments to safe link text | Follow-up: typed bounded media delivery through NyxID's existing upload/send path, retaining exact thread target. |
+| Edits | Adapter-specific edit hooks and authenticated outbound receipts | **CMA:** Lark/Feishu edits unsupported; only confirmed Telegram interactive cards edit | Follow-up: platform capabilities plus opaque receipt-bound edits through NyxID. Inbound edits need explicit replacement/dedup policy before they can affect an agent. |
+| Slack | `thread_ts`, structured mentions, native bound replies and bounded history | **CMA:** no raw verifier; `trust_normalized` gives unknown actors and no address/thread evidence; NyxID does not opt in | Follow-up: verify Slack raw events and correlate channel/sender/message, then enable the same contract. |
+| Discord | Validated thread channels and correlated reply chains; native bound replies | **CMA:** same normalized-only limitation as Slack | Follow-up: raw verifier plus trusted thread-channel type/parent evidence; exclude interaction credentials from identities. |
+| Telegram / telegram-new | Forum topics and correlated reply chains; exact topic/reply anchor | **CMA:** forum topic ID retained, but no canonical reply-chain facts or other-user mention flag; native sends retain topic but not the full NyxID follow contract | Follow-up: topic/chain facts, exact bot reply evidence and bound source-message replies for both native and relay ingress. |
+| WhatsApp | Quoted replies, no subscribable thread-follow surface | **CMA:** normalized-only text; unknown actor, no address evidence | Follow-up: raw verifier and media/receipt parity; do not advertise thread follow. |
+| X | DM behavior and original-post-bound public replies; public follow out of scope | **CMA:** platform unsupported | Follow-up: verified ingress and original-post/DM-bound delivery before migration; no public follow here. |
+| Aurinko email | Mailbox thread facts, private sender gates, participant-safe history and single-recipient send barrier | **CMA:** platform unsupported | Follow-up: preserve verified mailbox/thread/address/participant authority and irreversible single-recipient send; never reply-all. |
+| Provider history | Bounded native history or supported metadata fallback | **CMA:** no generic history contract | NyxID retains bounded provider history through its existing adapter; never add scopes silently. |
+
+The implementation contract and validation results are recorded below as the two
+sides are completed. Until negotiation succeeds, existing gateway channels keep
+legacy admission and follow remains unavailable. Lark/Feishu stay text-only.
+
+The concrete wire contract is [thread contract 1](CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md).
+It replaces the earlier generic handoff proposal: `activity.thread` carries
+verified metadata, `reply.thread_contract` opts in to bounded per-chat admission,
+and explicit `thread_reply` selects bound replies. No feature is enabled merely
+because an Activity happens to contain a thread alias. Upgrade all gateway
+replicas before authoring opted-in definitions, and upgrade NyxID before opting
+in to the relay reply extension. The existing follow feature flag remains in
+control. Neither repository change deploys the gateway.
+
+The remaining platform surfaces need explicit parity before moving all traffic:
+
+| Platform | Mention / broadcast gap | Media into / out of gateway | Edits and proposed owner work |
+| --- | --- | --- | --- |
+| Lark / Feishu | Contract 1 carries exact pinned-bot evidence and the other-user boolean; `@_all` is not a bot mention | Incoming attachments rejected; outgoing attachments degrade to link text | **CMA:** enable receipt-bound edits through NyxID's existing edit API; add verified media references and delivery. |
+| Slack | **CMA:** verify `app_mention`, structured bot/other-user mentions and broadcast tokens with native `thread_ts` | Incoming attachments rejected by generic verifier; outgoing link text only | **CMA:** use existing NyxID edit/upload APIs after implementing the raw verifier and target binding. |
+| Discord | **CMA:** verify `mentions`, bot ID, everyone/here and role broadcasts; preserve channel/thread parent evidence | Incoming attachments rejected; outgoing link text only | **CMA:** receipt-bound edits and uploads; keep interaction tokens out of thread facts. NyxID's bound thread service handles native replies separately from legacy sends. |
+| Telegram / telegram-new | Bot mention/reply evidence exists, but **CMA** lacks the full other-user boolean and topic/chain contract | Text-only message ingress; outgoing attachments are link text | Native Telegram supports ordinary message edits; relay edits are limited to confirmed interactive cards. **CMA:** extend verified attachment transport and receipt-bound relay edits while retaining the forum topic. |
+| WhatsApp | **CMA:** normalized-only unknown actor/address; no follow capability | Incoming attachments rejected; outgoing link text only | Neither side advertises edits. **CMA:** verify raw sender/quote evidence and bridge NyxID's media/receipt support. |
+| X / Aurinko | **CMA:** no platform source; do not claim addressing or follow parity | Unsupported in gateway | **Both:** design verified sources and credential/receipt boundaries before migration; preserve email single-recipient barriers and keep X public follow excluded. |
+
+No row in this follow-up table is implemented by the Lark/Feishu thread PR.
+
+### Review validation
+
+The NyxID `nyxbot`/`channel` suites passed 764 tests on each of the default
+and `RUST_MIN_STACK=1572864` stacks, using MongoDB on 27022 and Rust 1.98.1.
+`cargo +1.98.1 clippy -p nyxid --all-targets -- -D warnings`, formatting,
+and diff whitespace checks passed.
+Coverage includes shared child selection across gateway partitions, quiet
+other-user mentions retained as context, real bot mentions and broadcasts,
+legacy gateways, lost negotiation acknowledgement, zero-read follow gates,
+and source-bound native replies with reply-to-bot evidence.
+These are local tests with provider/gateway HTTP fixtures; live Lark/Feishu
+rollout remains dependent on the CMA owner's merge and deployment.
+
+CMA gateway/core: 341 default tests plus both opt-in tests passed (343 total),
+including the latency budget and compiled gateway with real Rust/TypeScript SDK
+clients against isolated HTTP fixtures. Rust SDK: 133 tests and 27 doctests
+passed; its gateway fixture also ran through the integration test. The unrelated
+CMA responses fixture was not run locally. TypeScript SDK: 2,833 tests passed.
+Gateway/core and Rust SDK all-target/all-feature Clippy on Rust 1.96.1, formatting,
+SDK lint/typecheck/build/docs, OpenAPI/schema coverage and source-size checks
+passed. No media/edit or additional-platform thread capability was added.

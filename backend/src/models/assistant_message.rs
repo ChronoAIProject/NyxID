@@ -5,6 +5,9 @@ pub const COLLECTION_NAME: &str = "assistant_messages";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    /// Guidance delivered to an existing response, never a new instruction turn.
+    #[serde(default)]
+    pub steering: Option<Box<Steering>>,
     #[serde(default)]
     pub voice: Option<VoiceTranscript>,
     /// Voice input is visible in history but is not execution context until claimed.
@@ -60,4 +63,18 @@ pub struct VoiceTranscript {
     pub request_id: Option<String>,
     #[serde(default)]
     pub backend_message_id: Option<String>,
+}
+
+/// Durable delivery receipt. Text stays on its transcript row, never in Debug.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Steering {
+    #[serde(default)]
+    pub finalized: bool,
+    pub client_request_id: String,
+    pub response_id: String,
+    pub session_id: String,
+    /// `applied`, `may_not_have_applied`, or `refused`.
+    pub outcome: String,
+    pub code: Option<String>,
+    pub http_status: u16,
 }

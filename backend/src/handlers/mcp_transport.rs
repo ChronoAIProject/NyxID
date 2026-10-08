@@ -1,6 +1,9 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+#[path = "async_service_operations.rs"]
+pub(crate) mod async_operations;
+
 use axum::body::Body;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -1635,13 +1638,7 @@ async fn handle_tools_list(
     }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        tool_defs.extend(
-            Box::pin(crate::services::machine_access_service::definitions(
-                &state.db, chat,
-            ))
-            .await
-            .unwrap_or_default(),
-        );
+        tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
         tool_defs.push(crate::services::assistant_upload_service::definition());
     }
 
@@ -2265,8 +2262,24 @@ async fn dispatch_service_tool(
         return resp;
     }
 
+    let async_watch = if endpoint.async_operation.is_some() {
+        if let Some(chat) = auth.chat.as_ref() {
+            match crate::services::async_service_operation::reserve(
+                &state.db, chat, service, endpoint,
+            )
+            .await
+            {
+                Ok(watch) => Some(watch),
+                Err(error) => return tool_result(request.id.clone(), &error.to_string(), true),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let exec_ctx = mcp_exec_context(auth);
-    let mut response = match mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -2285,8 +2298,18 @@ async fn dispatch_service_tool(
         &exec_ctx,
         billing_egress_permit,
     )
-    .await
+    .await;
+    if let Some(watch) = &async_watch
+        && let Err(error) = crate::services::async_service_operation::submitted(
+            &state.db,
+            watch,
+            execution.as_ref().ok(),
+        )
+        .await
     {
+        tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
+    }
+    let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request.id.clone(), &msg, true);
@@ -2307,6 +2330,9 @@ async fn dispatch_service_tool(
         }
     };
 
+    if async_watch.is_some() && (200..300).contains(&response.status) {
+        response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
+    }
     // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
@@ -2337,6 +2363,7 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
         caller_token: auth.caller_token.as_deref(),
         delegation_restrictions: Box::new(jwt::TokenRestrictionClaims::from_authenticated_scope(
@@ -3156,8 +3183,24 @@ async fn handle_meta_call_tool(
         None => false,
     };
 
+    let async_watch = if endpoint.async_operation.is_some() {
+        if let Some(chat) = auth.chat.as_ref() {
+            match crate::services::async_service_operation::reserve(
+                &state.db, chat, service, endpoint,
+            )
+            .await
+            {
+                Ok(watch) => Some(watch),
+                Err(error) => return tool_result(request_id.clone(), &error.to_string(), true),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let exec_ctx = mcp_exec_context(auth);
-    let mut response = match mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -3176,8 +3219,18 @@ async fn handle_meta_call_tool(
         &exec_ctx,
         billing_egress_permit,
     )
-    .await
+    .await;
+    if let Some(watch) = &async_watch
+        && let Err(error) = crate::services::async_service_operation::submitted(
+            &state.db,
+            watch,
+            execution.as_ref().ok(),
+        )
+        .await
     {
+        tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
+    }
+    let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);
@@ -3194,6 +3247,9 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if async_watch.is_some() && (200..300).contains(&response.status) {
+        response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
+    }
     // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
@@ -3235,6 +3291,75 @@ async fn handle_meta_call_tool(
     }
 }
 
+/// A discovery failure must not hide its cause or remove unrelated tools.
+/// Record only fixed error metadata: no query, identifiers, or error contents.
+async fn machine_discovery_definitions(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> Vec<mcp_service::McpToolDefinition> {
+    match Box::pin(crate::services::machine_access_service::definitions(
+        &state.db, chat,
+    ))
+    .await
+    {
+        Ok(tools) => tools,
+        Err(error) => {
+            tracing::warn!(
+                reason = error.error_key(),
+                error_code = error.error_code(),
+                "Machine tool discovery unavailable"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// NyxAgent serializes the whole MCP result and truncates it at 10,000 chars.
+/// Bound the escaped wire result in bytes (also safe for multi-byte text), keep
+/// complete schemas for the best matches, and explicitly report omitted rows.
+fn bounded_chat_search_result(mut result: serde_json::Value) -> String {
+    loop {
+        let text = result.to_string();
+        let wire =
+            serde_json::json!({"content": [{"type": "text", "text": &text}], "isError": false});
+        if wire.to_string().len() <= 10_000 {
+            return text;
+        }
+        result["truncated"] = serde_json::json!(true);
+        result["hint"] = serde_json::json!(
+            "Call a matching tool with nyx__call_tool. For more matches, narrow the query; tools/list provides complete input schemas."
+        );
+        let matches = result["matches"].as_array_mut().expect("search matches");
+        if matches.len() > 1 {
+            matches.pop();
+        } else if matches
+            .first()
+            .is_some_and(|tool| tool["input_schema_omitted"] == true)
+        {
+            // Even the compact metadata failed the escaped wire budget (for
+            // example a corrupt legacy tool name). Always make progress.
+            matches.clear();
+        } else if let Some(tool) = matches.first_mut() {
+            // A single schema can exceed the entire budget. Do not fabricate a
+            // partial JSON Schema or pretend no tool matched.
+            tool.as_object_mut()
+                .expect("tool match")
+                .remove("inputSchema");
+            tool["input_schema_omitted"] = serde_json::json!(true);
+            if let Some(description) = tool["description"].as_str() {
+                tool["description"] =
+                    serde_json::json!(description.chars().take(512).collect::<String>());
+            }
+            // Names are normally bounded by service/endpoint validation. A
+            // corrupt legacy row must not make this loop unbounded either.
+            if tool["name"].as_str().is_some_and(|name| name.len() > 1024) {
+                matches.clear();
+            }
+        }
+        result["count"] = serde_json::json!(result["matches"].as_array().unwrap().len());
+    }
+}
+
 async fn handle_meta_search(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3268,57 +3393,34 @@ async fn handle_meta_search(
     // to invoke discovered tools, which auto-activates on first call)
     let search_result = mcp_service::search_all_tools_ranked(&services, query, &ranks);
 
-    let mut results: Vec<serde_json::Value> = search_result
-        .matches
-        .iter()
-        .map(|t| {
+    let mut candidates = search_result.matches;
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
+        candidates.push(crate::services::assistant_upload_service::definition());
+    }
+    let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
+        .into_iter()
+        .map(|tool| {
             let mut value = serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
-                "executable": mcp_service::resolve_tool_call(&t.name, &services)
-                    .is_some_and(|(service, _)| service.executable),
-                "preference_rank": mcp_service::resolve_tool_call(&t.name, &services)
-                    .and_then(|(service, _)| ranks.get(&service.service_id).copied()),
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
             });
-            if auth.chat.is_some()
-                && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)
-            {
-                value["chat_access"] = serde_json::json!(chat_access(auth, service));
+            if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
+                value["executable"] = serde_json::json!(service.executable);
+                value["preference_rank"] =
+                    serde_json::json!(ranks.get(&service.service_id).copied());
+                if auth.chat.is_some() {
+                    value["chat_access"] = serde_json::json!(chat_access(auth, service));
+                }
+            } else {
+                value["executable"] = serde_json::json!(true);
+                value["preference_rank"] = serde_json::Value::Null;
+                value["hint"] = serde_json::json!("Call this native tool directly by name.");
             }
             value
         })
         .collect();
-
-    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        let matcher = mcp_service::ToolSearch::new(query);
-        let mut tools: Vec<_> = Box::pin(crate::services::machine_access_service::definitions(
-            &state.db, chat,
-        ))
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .chain(std::iter::once(
-            crate::services::assistant_upload_service::definition(),
-        ))
-        .filter_map(|tool| {
-            matcher
-                .rank(&tool.name, &tool.description)
-                .map(|rank| (rank, tool))
-        })
-        .collect();
-        tools.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
-        results.extend(tools.into_iter().map(|(_, tool)| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": tool.input_schema,
-                "hint": "Call this native tool directly by name.",
-                "preference_rank": null,
-                "executable": true,
-            })
-        }));
-    }
     let mut response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
@@ -3329,7 +3431,11 @@ async fn handle_meta_search(
         response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
     }
 
-    let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
+    let text = if auth.chat.is_some() {
+        bounded_chat_search_result(response_json)
+    } else {
+        serde_json::to_string_pretty(&response_json).unwrap_or_default()
+    };
     tool_result(request_id, &text, false)
 }
 
@@ -5403,6 +5509,7 @@ mod tests {
         let now = chrono::Utc::now();
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),
@@ -5432,6 +5539,7 @@ mod tests {
             .expect("insert blocked MCP endpoint");
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),

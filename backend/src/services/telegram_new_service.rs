@@ -432,7 +432,7 @@ impl TelegramNewService<'_> {
             .await
         {
             Ok(()) => Ok(true),
-            Err(AppError::Forbidden(_) | AppError::NotFound(_)) => {
+            Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => {
                 self.cancel_unstarted(request).await?;
                 Ok(false)
             }

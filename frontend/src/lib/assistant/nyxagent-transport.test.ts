@@ -810,3 +810,51 @@ it("optimistically renames during a turn and rolls back on failure without losin
   expect(transport.session(id).title).toBe("Question");
   expect(transport.isRunning(id)).toBe(true);
 });
+
+describe("steering transport", () => {
+  it("posts the exact stable request and refreshes history after response mismatch", async () => {
+    const seen: { endpoint: string; body?: BodyInit | null }[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      seen.push({ endpoint, body: init.body });
+      if (endpoint.endsWith("/steer")) return json({ error: "response_mismatch", message: "Refresh turn" }, 409);
+      return json(history());
+    };
+    const transport = new NyxAgentTransport();
+    await expect(transport.steer(id, "Guidance", "turn", "stable-request")).rejects.toThrow("Refresh turn");
+    expect(JSON.parse(String(seen[0]?.body))).toEqual({ text: "Guidance", turn_id: "turn", clientRequestId: "stable-request" });
+    expect(seen).toHaveLength(2);
+    expect(transport.getHistory(id)?.messages).toHaveLength(2);
+  });
+
+  it("merges a steer once during a live stream and preserves its label during a later turn", async () => {
+    const page = history();
+    const receipt = { client_request_id: "guidance", outcome: "applied" as const, code: null };
+    page.messages.splice(1, 0, { ...page.messages[0]!, id: "steer", seq: 2, text: "Direction", steering: receipt });
+    page.messages[2] = { ...page.messages[2]!, seq: 3 };
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) return new Response(new ReadableStream({ start(c) { controller = c; } }), { headers: { "content-type": "text/event-stream" } });
+      return json(page);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const sending = transport.send(id, "Next question", vi.fn());
+    await vi.waitFor(() => expect(controller).toBeDefined());
+    const emit = (event: object) => controller!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    emit({ cursor: 1, event: "turn.status", conversation_id: id, turn_id: "next", status: "running" });
+    await vi.waitFor(() => expect(transport.getActiveTurnId(id)).toBe("next"));
+    page.conversation.active_turn = { turn_id: "next", started_at: start, steering_allowed: true, response_id: "resp_next", stop_requested: false, activities: [], attachments: [] };
+    page.messages.push({ ...page.messages[0]!, id: "new-steer", seq: 4, turn_id: "next", text: "New direction", steering: { ...receipt, client_request_id: "new" } });
+    await transport.history(id);
+    await transport.history(id);
+    const session = transport.session(id);
+    expect(session.messages.filter((m) => m.steering)).toHaveLength(2);
+    expect(session.messages.find((m) => m.id === "steer")?.steering).toEqual(receipt);
+    expect(session.expectedTurnCount).toBe(2);
+    expect(transport.getConversation(id)?.active_turn?.response_id).toBe("resp_next");
+    page.conversation.active_turn = null;
+    emit({ cursor: 2, event: "turn.completed", turn_id: "next", status: "completed", error: null });
+    controller!.close();
+    await sending;
+  });
+});

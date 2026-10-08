@@ -206,6 +206,7 @@ pub(crate) async fn restore_historical_drive_endpoints(
         .into_iter()
         .map(
             |endpoint| crate::services::service_endpoint_service::EndpointInput {
+                async_operation: None,
                 name: endpoint.name,
                 description: endpoint.description,
                 method: endpoint.method,
@@ -519,6 +520,7 @@ pub(crate) async fn mcp_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
+            response_body_limit: None,
             actor_user_id: None,
             caller_token: None,
             delegation_restrictions: Default::default(),

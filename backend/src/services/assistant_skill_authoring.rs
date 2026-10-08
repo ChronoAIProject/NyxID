@@ -65,39 +65,37 @@ struct BaseInput {
     version: String,
 }
 
-fn invalid() -> AppError {
-    AppError::ValidationError("Invalid skill draft: use a lowercase hyphenated name (1–64), a short description and bounded .md/.txt files without credentials".into())
-}
+#[path = "assistant_skill_authoring_validation.rs"]
+mod validation;
+use validation::invalid;
+pub(crate) use validation::{decode as decode_body, validate as validate_body};
 
-pub(crate) fn validate_body(body: &GeneratedProposal) -> AppResult<()> {
-    // Ornn/Agent Skills slug contract; remote format validation remains authoritative.
-    if body.name.is_empty()
-        || body.name.len() > 64
-        || !body
-            .name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        || body.name.starts_with('-')
-        || body.name.ends_with('-')
-        || body.name.contains("--")
-        || body.description.trim().is_empty()
-        || body
-            .skill_md
-            .chars()
-            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-        || [&body.name, &body.description, &body.skill_md]
-            .into_iter()
-            .any(|text| team::looks_secret(text))
-        || body
-            .files
-            .iter()
-            .any(|file| team::looks_secret(&file.path) || team::looks_secret(&file.content))
-    {
-        return Err(invalid());
+pub(crate) fn parse_input(value: &Value) -> AppResult<DraftInput> {
+    // Diagnose only known schema locations. Unknown JSON keys can themselves
+    // contain private material, so report their containing object instead.
+    validation::object(
+        value,
+        "draft",
+        &[
+            "agent",
+            "name",
+            "description",
+            "skill_md",
+            "files",
+            "base_skill",
+        ],
+    )?;
+    for field in ["agent", "name", "description", "skill_md"] {
+        validation::string(&value[field], field)?;
     }
-    learning::validate_generated(&serde_json::to_string(body).map_err(|_| invalid())?)?
-        .ok_or_else(invalid)?;
-    Ok(())
+    validation::files_shape(value.get("files"))?;
+    if let Some(base) = value.get("base_skill").filter(|v| !v.is_null()) {
+        validation::object(base, "base_skill", &["skill_id", "version"])?;
+        for field in ["skill_id", "version"] {
+            validation::string(&base[field], &format!("base_skill.{field}"))?;
+        }
+    }
+    serde_json::from_value(value.clone()).map_err(|_| invalid("invalid_shape", "draft"))
 }
 
 pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -> AppResult<Value> {
@@ -121,9 +119,9 @@ pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -
                         && pin.source == "ornn"
                         && pin.dependencies.is_empty()
                 })
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid("base_skill_not_attached", "base_skill"))?;
             if input.name != pin.name {
-                return Err(invalid());
+                return Err(invalid("base_skill_name_mismatch", "name"));
             }
             Ok(crate::models::catalog_skill_revision::SkillPin {
                 source: pin.source.clone(),
@@ -150,11 +148,8 @@ pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -
         rationale: String::new(),
         safety_notes: String::new(),
     };
-    validate_body(&body)?;
+    let encoded = validate_body(&body)?;
     review::validate_proposal_base(&state.db, &agent, &body, ProposalSource::Authored).await?;
-    let encoded =
-        learning::validate_generated(&serde_json::to_string(&body).map_err(|_| invalid())?)?
-            .ok_or_else(invalid)?;
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(state.audit_chain_hmac_key.as_slice())
         .expect("HMAC key");
     mac.update(b"nyxid-authored-skill-v1\0");
@@ -211,7 +206,7 @@ pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -
             .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
             .update_one(
                 doc! {"_id":&id},
-                doc! {"$setOnInsert": bson::to_document(&row).map_err(|_| invalid())?},
+                doc! {"$setOnInsert": bson::to_document(&row).map_err(|_| AppError::Internal("Skill proposal encoding failed".into()))?},
             )
             .upsert(true)
             .await?;

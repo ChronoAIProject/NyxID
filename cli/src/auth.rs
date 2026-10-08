@@ -16,6 +16,7 @@ use crate::cli::{AuthArgs, LoginArgs};
 pub mod agent_key;
 pub mod login_exchange;
 pub mod login_hints;
+mod login_input;
 
 /// Default NyxID base URL used when prompting for re-login on a session that
 /// was never associated with a saved base URL. Mirrors the `LoginArgs::base_url`

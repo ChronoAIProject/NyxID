@@ -422,6 +422,8 @@ async fn run_billing_route_coverage_smoke() {
         "/api/v1/assistant/nyxagent/turns",
         "/api/v1/assistant/nyxagent/models",
         "/api/v1/assistant/nyxagent/conversations/{id}",
+        "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
+        "/api/v1/assistant/nyxagent/conversations/{id}/steer",
     ]);
 
     call_mounted_route(
@@ -1586,6 +1588,59 @@ async fn exercise_nyxagent_routes(
     )
     .await;
     assert!(String::from_utf8_lossy(&models).contains("nyxagent/research"));
+    let capabilities = call_mounted_route(
+        app,
+        route_request(
+            Method::GET,
+            &format!(
+                "/api/v1/assistant/nyxagent/conversations/{}/capabilities",
+                row.id
+            ),
+            token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&capabilities).contains("\"max_per_turn\":20"));
+    // Steering needs a live web turn with a running response on this thread.
+    let turn_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": owner},
+            doc! {"$set": {"active_turn": {
+                "turn_id": &turn_id,
+                "started_at": bson::DateTime::from_chrono(now),
+                "lease_expires_at": bson::DateTime::from_chrono(now + Duration::minutes(5)),
+                "heartbeat_at": bson::DateTime::from_chrono(now),
+                "stop_requested": false,
+                "running_response": {
+                    "credential_api_key_id": &row.credential_api_key_id,
+                    "response_id": BILLING_STEER_RESPONSE,
+                    "session_id": BILLING_STEER_SESSION,
+                },
+            }}},
+        )
+        .await
+        .unwrap();
+    let steered = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            &format!("/api/v1/assistant/nyxagent/conversations/{}/steer", row.id),
+            token,
+            Body::from(
+                serde_json::json!({
+                    "text": "billing steer boundary",
+                    "turn_id": turn_id,
+                    "clientRequestId": "billing-steer-1",
+                })
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&steered).contains("\"outcome\":\"applied\""));
     call_mounted_route(
         app,
         route_request(
@@ -1596,8 +1651,13 @@ async fn exercise_nyxagent_routes(
         ),
     )
     .await;
-    assert_route_settled_count(db, &catalog.slug, BillingMetric::Requests, 3).await;
+    // turns, models, capabilities, steer (capabilities cached) and delete.
+    assert_route_settled_count(db, &catalog.slug, BillingMetric::Requests, 5).await;
 }
+
+const BILLING_STEER_SESSION: &str = "conv_33333333333333333333333333333333";
+const BILLING_STEER_RESPONSE: &str =
+    "resp_33333333333333333333333333333333_44444444444444444444444444444444";
 
 async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
     async fn respond(request: Request<Body>) -> axum::response::Response {
@@ -1627,6 +1687,24 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
         if path == "/nyxagent/v1/models" {
             return Json(serde_json::json!({"object":"list","data":[{"id":"nyxagent/research"}]}))
                 .into_response();
+        }
+        if path == "/nyxagent/v1/capabilities" {
+            return Json(
+                serde_json::json!({"steer":{"version":1,"protocol":"nyxagent-steer-v1",
+                "input":["text"],"max_chars":32000,"max_per_turn":20}}),
+            )
+            .into_response();
+        }
+        if path == format!("/nyxagent/v1/conversations/{BILLING_STEER_SESSION}/steer") {
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(request.into_body(), 100_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["input"], "billing steer boundary");
+            assert_eq!(body["expected_response_id"], BILLING_STEER_RESPONSE);
+            return Json(serde_json::json!({"object":"conversation.steer",
+                "conversation_id":BILLING_STEER_SESSION,"response_id":BILLING_STEER_RESPONSE,
+                "status":"accepted"}))
+            .into_response();
         }
 
         if path == "/codex-connection/responses" {

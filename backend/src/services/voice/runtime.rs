@@ -1053,6 +1053,7 @@ async fn task_updates(
             && let Some(message)=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{
                 "conversation_id":request.task_conversation_id.as_deref().unwrap_or(&call.conversation_id),
                 "user_id":&call.user_id,"turn_id":&request.turn_id,"role":"assistant","execution_pending":{"$ne":true}}).await? {
+                let message = super::super::assistant_voice::settled_result(&request, message);
                 let _ = super::super::assistant_voice::publish_result(&state.db, &request, &message).await?;
                 // Persist the result immediately, but wait to claim its spoken
                 // announcement until the authoritative input transcript is

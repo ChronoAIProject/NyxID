@@ -38,6 +38,12 @@ request snapshot; the next request is refused with `assistant_turn_required`.
 Voice delegation must enter through `begin_turn` on the same thread and must
 not call tools with the bare key after the voice session or turn ends.
 
+Trusted async service watches have a separate, narrowly bound background reader:
+it may call only the declared status/result/cancel operations with the saved ID,
+using the original key and live authority. It never fabricates a live turn. Results
+resume the thread through event admission; see
+[asynchronous service results](09-nyxbot-orchestrator.md#asynchronous-service-results).
+
 The flag is default-off for rollout safety: deploy every auth, MCP, proxy, LLM
 and worker replica with fence support, then enable `assistant:live-turn-gate`.
 Rollback disables the flag before rolling back binaries. Existing fences are
@@ -410,6 +416,8 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `PATCH /conversations/{id}` | closed `{title}`; trimmed nonempty, max 200 Unicode scalars | conversation DTO |
 | `DELETE /conversations/{id}` | no body | 204; stops/cancels active work, then locally hard-deletes, with best-effort upstream session delete |
 | `POST /conversations/{id}/stop` | no body | 204; owner-only, idempotent for an idle turn |
+| `GET /conversations/{id}/capabilities` | no body | `{steer: null \| {max_chars,max_per_turn}}` |
+| `POST /conversations/{id}/steer` | closed `{text,turn_id,clientRequestId}` | `{client_request_id,outcome,code}` on acceptance; safe error code on refusal/uncertainty |
 | `PATCH /conversations/{id}/access-mode` | ignored | `410 Gone` (`access_mode_retired`) |
 | `GET` / `POST /agents` | `POST`: closed `{name,description,services?,account_read?}` | `{agents,limits}` / `201 {id,name,home_conversation_id}` |
 | `GET` / `PATCH` / `DELETE /agents/{id}` | `PATCH`: `{name?,description?}`; `DELETE` only after destroy | `{agent,memory,threads}` / agent / 204 |
@@ -428,9 +436,10 @@ Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message
 pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel`.
 `access_mode` is always `full`; `agent` is `{id,kind,name,destroyed}` (a destroyed
 agent's threads are read-only).
-`active_turn` is null or `{turn_id,started_at,activities}`.
+`active_turn` is null or `{turn_id,started_at,activities,response_id,steering_allowed,stop_requested}`.
 Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`,
-where `role` is `user`, `assistant`, `orchestrator` (an instruction the orchestrator
+The optional `steering` field is `{client_request_id,outcome,code}`.
+Here `role` is `user`, `assistant`, `orchestrator` (an instruction the orchestrator
 sent a subagent) or `event` (a NyxID-authored wake-up notice).
 Acknowledgement DTO adds `decider`, `decided_by` and `reason`.
 `active_turn` also carries `attachments`. An attachment is
@@ -481,6 +490,77 @@ server cache of successful upstream lists and an uncached fallback
 Discovery does not provision a key: users without one initially see the default
 profile. The browser refreshes profiles after a send, so provisioning makes the
 upstream list available immediately. No new NyxID environment variable is introduced.
+
+## Steering a running web turn (0.68.0)
+
+The owner can send text guidance to the same running response without starting
+another turn. The original SSE stream and event types do not change. This uses
+NyxAgent's `nyxagent-steer-v1` contract (`origin/main` at `fe97457`,
+`docs/api.md`, “Steering an active turn”).
+
+`GET /assistant/nyxagent/conversations/{id}/capabilities` returns
+`{"steer":{"max_chars":32000,"max_per_turn":20}}`, or `{"steer":null}`.
+The authenticated upstream capability lookup shares a bounded 60-second cache
+with image capability discovery, keyed by database, catalog service and base URL.
+Only metadata is cached; every operation still checks live owner/key authority.
+No additional upstream lookup runs on ordinary text turns. Missing/unknown
+steering capability preserves the existing blocked composer and `turn_active`
+response. Existing image protocol fields are unchanged.
+
+`POST /assistant/nyxagent/conversations/{id}/steer` accepts only
+`{"text":"new direction","turn_id":"<NyxID turn UUID>","clientRequestId":"<stable client ID>"}`.
+It requires a first-party human and exact acting-person conversation ownership.
+Text must be nonblank and at most 32,000 Unicode characters (or the advertised
+lower limit); images and unknown fields are rejected. The client ID is 1–256
+printable ASCII bytes and is forwarded unchanged as `Idempotency-Key`.
+The handler loads the conversation's existing encrypted thread credential;
+it never provisions/replaces a key or accepts a caller destination/session.
+Calls use the same catalog-controlled proxy destination as `/v1/responses`.
+
+The worker records `active_turn.running_response` (response and session IDs) as
+soon as it decodes `response.created`. The write is fenced by the turn ID and
+Stop flag. Every automatic continuation clears it before dispatch and writes
+its new response ID on creation; the last committed response head is never
+used for steering. A missing ID returns `409 starting` with `Retry-After: 1`.
+Stop-pending turns return `409 stop_pending`, and expired leases or stale
+heartbeats refuse guidance. Steering does not acquire or bypass a Stop fence.
+
+A valid dispatched steer is appended as a user transcript row on the original
+turn, with an additive `steering` receipt and no new turn/admission/event budget.
+The receipt is reserved transactionally before proxy dispatch. A unique index
+on conversation + client request ID and the conversation write serialize
+replicas; changed text or turn under the same ID returns
+`409 idempotency_conflict`. Concurrent retries wait for the durable outcome,
+without forwarding again. A process crash after reservation conservatively
+leaves `may_not_have_applied`; it never becomes a new request after restart or
+continuation. Receipts are removed with the conversation's ordinary transcript.
+
+Only a validated upstream `200 accepted` records `applied`. Upstream 400/404,
+409 `no_active_turn`/`response_mismatch`/`idempotency_conflict`, and 429
+`steer_limit` record `refused` with their safe code. A 503, network failure,
+unrecognized response or the bounded 15-second request deadline records
+`may_not_have_applied`. No upstream error prose, credentials or request bodies
+enter metadata audit/logs. Local validation, unsupported scope and `starting`
+refusals do not reserve a receipt or dispatch.
+
+The composer keeps Stop available alongside Send guidance. It shows acceptance,
+retains definitely refused drafts, refreshes state on a response mismatch, and
+offers an explicit **Send as new message** action for `no_active_turn` once idle.
+Uncertain guidance is shown as such and never automatically resent under a new
+key. Persisted outcomes remain visible on the steering message after reload.
+
+Steering rows are not later user instructions or previous-message anchors.
+Acknowledgement windows, events since the previous turn, channel thread facts,
+specialist activity summaries, learning evidence and title generation exclude
+them. A recap after a context reset may include the text as quoted history,
+labelled `steering` and its outcome. The upstream stored thread already contains
+accepted guidance, so normal later turns do not replay it.
+
+Scope is the web composer, including event/automation work on an eligible owner
+thread; steering preserves its existing turn origin, guards and delivery. Group member threads are deliberately
+unsupported: they are hidden execution contexts and need an explicit member
+selection plus a corresponding shared transcript action. Channel and voice steering remain unsupported. Group targeting and channel/voice
+steering are follow-ups; no new NyxID environment variables are required.
 
 ## User uploads
 
@@ -628,7 +708,7 @@ separate stable session instructions from volatile turn facts:
 | Pinned skill metadata and agent memory notes | Stable instructions; omitted for guests |
 | Org private/shared-group memory and privacy rules | Stable instructions |
 | Guest policy and owner/guest audience | Stable instructions |
-| Machine use guidance (when granted), NyxBot machine setup guidance | Stable instructions; omitted for guests |
+| Machine use guidance (NyxBot: loaded usable assignment policy; specialists: machine membership), NyxBot machine setup guidance | Stable instructions; omitted for guests |
 | Context-envelope protocol | Stable instructions |
 | Drained events on non-event turns | Input context; omitted for guests |
 | Card decisions since the previous user message | Input context; omitted for guests |

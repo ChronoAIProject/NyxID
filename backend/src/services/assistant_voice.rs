@@ -124,6 +124,7 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        async_operation_pending: false,
         id: Uuid::new_v4().to_string(),
         user_id: user.into(),
         conversation_id: conversation.into(),
@@ -236,6 +237,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                steering: None,
                 voice: None,
                 execution_pending: true,
                 id: request.message_id.clone(),
@@ -273,6 +275,22 @@ pub async fn get(
         .ok_or_else(|| AppError::NotFound("Voice request not found".into()))
 }
 
+/// A submit acknowledgement is not a successful result after async cancellation.
+pub(crate) fn settled_result(
+    request: &VoiceRequest,
+    mut source: AssistantMessage,
+) -> AssistantMessage {
+    if request.async_operation_pending
+        && request.state == RequestState::Cancelled
+        && source.error_code.is_none()
+    {
+        source.text = "The background task was stopped.".into();
+        source.status = "failed".into();
+        source.error_code = Some("cancelled".into());
+    }
+    source
+}
+
 /// Publish a settled hidden-task response into the visible thread exactly once.
 /// The hidden assistant message remains the execution record; this bounded copy
 /// is the result link used by the call timeline and receipt.
@@ -306,6 +324,10 @@ pub(crate) async fn publish_result(
                 let Some(current) = current else {
                     return Ok(existing_result.clone());
                 };
+                if source.turn_id != current.turn_id {
+                    return Ok(existing_result.clone());
+                }
+                let source = settled_result(&current, source);
                 let thread = db
                     .collection::<AssistantConversation>(CONVERSATIONS)
                     .find_one_and_update(
@@ -320,6 +342,7 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        steering: None,
                         id: id.clone(),
                         conversation_id: current.conversation_id,
                         user_id: current.user_id,
@@ -717,6 +740,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,
             user_id: row.user_id.clone(),
@@ -768,6 +792,13 @@ pub async fn recover(db: &Database) -> AppResult<()> {
                         let Some(row) = requests.find_one(doc! {
                     "_id":&candidate.id,"state":{"$in":["claimed","awaiting_confirmation"]}
                 }).session(&mut *session).await? else { return Ok(()) };
+                        if super::async_service_operation::pending_voice_in_session(
+                            &db, &row.id, session,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
                         let thread_id = row
                             .task_conversation_id
                             .as_deref()
@@ -916,6 +947,7 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            async_operation_pending: false,
             id: Uuid::new_v4().to_string(),
             user_id: card.user_id.clone(),
             conversation_id: parent.conversation_id.clone(),
@@ -1010,6 +1042,8 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                 requests
                     .update_many(family, doc! {"$set":{"state":"cancelled"}})
                     .session(&mut *session)
+                    .await?;
+                super::async_service_operation::cancel_voice_in_session(&db, &user, root, session)
                     .await?;
                 let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let current = conversations

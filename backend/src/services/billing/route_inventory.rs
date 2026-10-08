@@ -174,6 +174,16 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::steer",
+        route: "/api/v1/assistant/nyxagent/conversations/{id}/steer",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::capabilities",
+        route: "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::assistant_nyxagent::models",
         route: "/api/v1/assistant/nyxagent/models",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),

@@ -959,3 +959,31 @@ review addition. Attachments remain untracked. ROOT will publish the merge
 and bind remote CI, full backend/billing execution, security analysis and
 renewed Opus sign-off to its exact commit. Earlier published-head approvals
 remain historical and do not grant final delivery approval.
+
+### Release 0.68 merge resolution review
+
+ROOT and Opus reviewed the resolution of `a401b6d8` with main
+`47b8d8fe`. Main's asynchronous-operation modules and regression tests remain
+alongside the preference modules and tests. Service matches retain preference
+ordering within equal-relevance catalog slots; native machine/upload matches
+then compete in the same stable relevance ranking before the combined 25-result
+cap. Main's escaped 10,000-byte chat result budget and live native authorization
+remain intact. The added regression covers native relevance, interleaved service
+slots and the cap. API discovery prose now describes this combined behavior.
+
+Opus approved publication conditional on restoring an unrelated imported
+fixture's final blank line. The fixture now matches main's blob
+`6e61da5cd04694f786d5bcc8fee9413311c65a66` exactly. The optional truncated-hint
+wording remains unchanged. Resolution whitespace checks against main pass;
+the whole incoming diff retains main's fixture blank-at-EOF warning. Attachments
+remain excluded.
+
+Fresh Node 22 wizard build and 171-input closure verification, one real-route
+wizard browser case, 83 focused frontend tests and formatting pass. Metadata
+Cargo checks for both crates and all targets pass (`--locked`, one job;
+15m37s). These checks type-check tests without executing them. New-head Rust
+execution, Clippy,
+CI and security evidence remain pending publication. Completed `a401b6d8` checks
+and its Opus approval remain historical evidence; subsequent movement of main
+does not invalidate that completed proof. The unchanged discovery UI does not
+require another full frontend run for this resolution.

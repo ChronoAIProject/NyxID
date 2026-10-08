@@ -233,6 +233,8 @@ pub struct ProxyOperationRule {
 #[serde(rename_all = "snake_case")]
 pub enum ProxyPathConstraint {
     SheetsA1Range,
+    /// The corresponding path parameter is encoded per segment and may span multiple segments.
+    MultiSegment,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

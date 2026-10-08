@@ -5,6 +5,7 @@ use std::{error::Error, sync::LazyLock};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
+    Input,
     Config,
     Connect,
     Proxy,
@@ -18,6 +19,8 @@ pub enum Stage {
 #[derive(Debug, Clone, Serialize)]
 pub struct Diagnostic {
     pub stage: Stage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,6 +42,7 @@ impl Diagnostic {
     ) -> Self {
         let cause = sanitize(cause).chars().take(300).collect::<String>();
         let hint = match stage {
+            Stage::Input => "Run in an interactive terminal, or use nyxid login (device flow) or nyxid login --callback.".into(),
             Stage::Config => ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"]
                 .into_iter()
                 .find(|name| cause.contains(name))
@@ -68,6 +72,7 @@ impl Diagnostic {
         };
         Self {
             stage,
+            reason: None,
             timeout: None,
             http_status,
             server_error_code: None,
@@ -171,6 +176,9 @@ impl Diagnostic {
             "  stage: {}",
             stage.as_str().expect("stage string")
         )];
+        if let Some(reason) = self.reason {
+            lines.push(format!("  reason: {reason}"));
+        }
         if let Some(timeout) = self.timeout {
             lines.push(format!("  timeout: {timeout}"));
         }

@@ -247,21 +247,33 @@ pub(crate) fn rule_from_endpoint(
         .into_iter()
         .flatten()
     {
-        let Some(constraint) = parameter.get("x-nyxid-path-constraint") else {
-            continue;
-        };
-        let name = parameter["name"].as_str().ok_or_else(invalid_template)?;
         if parameter["in"] != "path" {
-            return Err(invalid_template());
+            if parameter.get("x-nyxid-path-constraint").is_some() {
+                return Err(invalid_template());
+            }
+            continue;
         }
-        let constraint =
-            serde_json::from_value(constraint.clone()).map_err(|_| invalid_template())?;
-        if rule
-            .path_parameter_constraints
-            .insert(name.to_string(), constraint)
-            .is_some()
+        let name = parameter["name"].as_str().ok_or_else(invalid_template)?;
+        let multi_segment = parameter["allowReserved"].as_bool() == Some(true)
+            || parameter["x-nyxid-path-segments"].as_bool() == Some(true);
+        if multi_segment
+            && rule
+                .path_parameter_constraints
+                .insert(name.to_string(), ProxyPathConstraint::MultiSegment)
+                .is_some()
         {
             return Err(invalid_template());
+        }
+        if let Some(constraint) = parameter.get("x-nyxid-path-constraint") {
+            let constraint =
+                serde_json::from_value(constraint.clone()).map_err(|_| invalid_template())?;
+            if rule
+                .path_parameter_constraints
+                .insert(name.to_string(), constraint)
+                .is_some()
+            {
+                return Err(invalid_template());
+            }
         }
     }
     validate_rule(&rule)?;
@@ -299,30 +311,59 @@ pub(crate) fn match_path_arguments(
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect();
-    if template_segments.len() != path.segments.len() {
-        return None;
-    }
     let mut arguments = std::collections::BTreeMap::new();
-    for (template, actual) in template_segments.iter().zip(&path.segments) {
+    let mut actual_index = 0;
+    for (template_index, template) in template_segments.iter().enumerate() {
         let (resource, verb) = split_template_segment(template);
-        let value = match verb {
-            Some(verb) => strip_custom_method(actual, verb)?,
-            None => actual.as_str(),
+        let Some(name) = parameter_name(resource) else {
+            if path.segments.get(actual_index)?.as_str() != resource {
+                return None;
+            }
+            actual_index += 1;
+            continue;
         };
-        if let Some(name) = parameter_name(resource) {
-            if !parameter_matches(rule.path_parameter_constraints.get(name), value) {
-                return None;
+        let multi_segment =
+            rule.path_parameter_constraints.get(name) == Some(&ProxyPathConstraint::MultiSegment);
+        let value = if multi_segment {
+            let remaining = template_segments.len().saturating_sub(template_index + 1);
+            let take = path.segments.len().checked_sub(actual_index + remaining)?;
+            if take == 0 {
+                String::new()
+            } else {
+                let values = &path.segments[actual_index..actual_index + take];
+                if values.iter().any(|value| {
+                    value.is_empty()
+                        || value == "."
+                        || value == ".."
+                        || value.contains(['%', '\\', '?', '#'])
+                        || value.chars().any(char::is_control)
+                }) {
+                    return None;
+                }
+                actual_index += take;
+                values.join("/")
             }
-            if let Some(previous) = arguments.insert(name.to_string(), value.to_string())
-                && previous != value
-            {
-                return None;
-            }
-        } else if resource != value {
+        } else {
+            let actual = path.segments.get(actual_index)?.as_str();
+            actual_index += 1;
+            actual.to_string()
+        };
+        let value = match verb {
+            Some(verb) => strip_custom_method(&value, verb)?.to_string(),
+            None => value,
+        };
+        if !multi_segment && !parameter_matches(rule.path_parameter_constraints.get(name), &value) {
             return None;
         }
+        if let Some(previous) = arguments.get(name) {
+            if previous != &value {
+                return None;
+            }
+        } else {
+            arguments.insert(name.to_string(), value);
+        }
     }
-    Some(arguments)
+    (actual_index == path.segments.len()).then_some(arguments)
 }
 
 pub(crate) fn rule_matches(rule: &ProxyOperationRule, method: &str, path: &CanonicalPath) -> bool {
@@ -340,24 +381,37 @@ pub(crate) fn rule_forwarding_path(
     if !rule_matches(rule, method, path) {
         return None;
     }
-    Some(
-        rule.path_template
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .zip(&path.segments)
-            .map(|(template, actual)| {
-                Some(match split_template_segment(template).1 {
-                    Some(verb) => format!(
-                        "{}:{verb}",
-                        urlencoding::encode(strip_custom_method(actual, verb)?)
-                    ),
-                    None => urlencoding::encode(actual).into_owned(),
-                })
+    let arguments = match_path_arguments(rule, path)?;
+    let segments = rule
+        .path_template
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|template| {
+            let (resource, verb) = split_template_segment(template);
+            let name = parameter_name(resource);
+            let value = name
+                .and_then(|name| arguments.get(name).map(String::as_str))
+                .unwrap_or(resource);
+            let encoded = if name.is_some_and(|name| {
+                rule.path_parameter_constraints.get(name)
+                    == Some(&ProxyPathConstraint::MultiSegment)
+            }) {
+                value
+                    .split('/')
+                    .map(urlencoding::encode)
+                    .collect::<Vec<_>>()
+                    .join("/")
+            } else {
+                urlencoding::encode(value).into_owned()
+            };
+            Some(match verb {
+                Some(verb) => format!("{encoded}:{verb}"),
+                None => encoded,
             })
-            .collect::<Option<Vec<_>>>()?
-            .join("/"),
-    )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(segments.join("/"))
 }
 
 fn parameter_matches(constraint: Option<&ProxyPathConstraint>, value: &str) -> bool {
@@ -369,6 +423,7 @@ fn parameter_matches(constraint: Option<&ProxyPathConstraint>, value: &str) -> b
     }
     match constraint {
         Some(ProxyPathConstraint::SheetsA1Range) => sheets_a1_range(value),
+        Some(ProxyPathConstraint::MultiSegment) => true,
         None => !value.contains(':') && !value.chars().any(char::is_whitespace),
     }
 }
@@ -484,6 +539,34 @@ mod tests {
         let original = serde_json::json!({"method": "GET", "path_template": "/files/{id}"});
         let rule: ProxyOperationRule = serde_json::from_value(original.clone()).unwrap();
         assert_eq!(serde_json::to_value(rule).unwrap(), original);
+    }
+
+    #[test]
+    fn multi_segment_endpoint_rules_match_and_forward_each_segment() {
+        let parameters = serde_json::json!([{
+            "name":"path", "in":"path", "allowReserved":true,
+            "schema":{"type":"string"}
+        }]);
+        let rule =
+            rule_from_endpoint("GET", "/repos/{owner}/contents/{path}", Some(&parameters)).unwrap();
+        assert_eq!(
+            rule.path_parameter_constraints.get("path"),
+            Some(&ProxyPathConstraint::MultiSegment)
+        );
+        let path =
+            CanonicalPath::from_mcp_built("/repos/org/contents/backend/src%20file.rs").unwrap();
+        assert!(rule_matches(&rule, "GET", &path));
+        assert_eq!(
+            rule_forwarding_path(&rule, "GET", &path).as_deref(),
+            Some("repos/org/contents/backend/src%20file.rs")
+        );
+        for value in [
+            "/repos/org/contents/a/../b",
+            "/repos/org/contents/a//b",
+            "/repos/org/contents/a%2Fb",
+        ] {
+            assert!(CanonicalPath::from_mcp_built(value).is_err(), "{value}");
+        }
     }
 
     #[test]

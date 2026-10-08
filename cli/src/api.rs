@@ -84,6 +84,16 @@ impl ApiError {
     pub fn body_json(&self) -> Option<&serde_json::Value> {
         self.body_json.as_ref()
     }
+
+    pub(crate) fn request_path(&self) -> &str {
+        self.request
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .split('?')
+            .next()
+            .unwrap_or("")
+    }
 }
 
 pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {

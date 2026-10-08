@@ -2215,7 +2215,7 @@ async fn automation_routes_require_first_party_owner_credentials() {
         ];
         for (route, result) in results {
             assert!(
-                matches!(result, Err(AppError::Forbidden(_))),
+                result.as_ref().is_err_and(|error| error.is_forbidden()),
                 "{method} {route}: {result:?}"
             );
         }

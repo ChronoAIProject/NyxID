@@ -638,6 +638,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
         .db
         .collection(crate::models::service_endpoint::COLLECTION_NAME)
         .insert_one(ServiceEndpoint {
+            async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: service.id.clone(),
@@ -3448,6 +3449,11 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
         .find(|row| row["name"] == "nyx__attachment_read")
         .expect("native upload search extra");
     assert_eq!(attachment["preference_rank"], Value::Null);
+    assert_eq!(attachment["executable"], true);
+    assert_eq!(
+        attachment["hint"],
+        "Call this native tool directly by name."
+    );
     let after = axum::body::to_bytes(
         handle_tools_list(&f.state, &auth, None, &request)
             .await
@@ -3595,3 +3601,5 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     assert!(!listed.to_string().contains(&hidden));
     server.abort();
 }
+#[path = "async_service_operation_tests.rs"]
+mod async_service_operation_tests;

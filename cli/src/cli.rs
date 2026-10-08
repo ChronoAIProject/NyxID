@@ -5305,6 +5305,7 @@ pub enum ChannelBotCommands {
         auth: AuthArgs,
     },
     /// List registered bots
+    #[command(after_help = crate::credential_guidance::CHANNEL_HELP)]
     List {
         /// List bots owned by the given org (admin-only). Omit for
         /// personal bots.
@@ -5534,6 +5535,7 @@ pub enum ChannelEventChannelCommands {
         auth: AuthArgs,
     },
     /// List device channels (platform = "device").
+    #[command(after_help = crate::credential_guidance::CHANNEL_HELP)]
     List {
         /// List channels owned by the given org (admin-only).
         #[arg(

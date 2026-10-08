@@ -2102,3 +2102,6 @@ async fn attachment_expiring_after_admission_is_announced_in_input() {
 
 #[path = "assistant_nyxagent_upload_tests.rs"]
 mod upload_matrix;
+
+#[path = "assistant_nyxagent_steering_tests.rs"]
+mod steering_tests;
