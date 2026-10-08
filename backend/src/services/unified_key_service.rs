@@ -550,6 +550,7 @@ pub struct CreateKeyResult {
 /// Combined view for GET /keys and GET /keys/:id.
 #[derive(Debug)]
 pub struct KeyView {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub id: String,
     pub label: String,
     pub slug: String,
@@ -2620,6 +2621,17 @@ pub async fn list_keys_read_only_with_grants(
     let mut views: Vec<KeyView> = tagged
         .into_iter()
         .filter_map(|t| {
+            if t.service
+                .catalog_service_id
+                .as_deref()
+                .and_then(|id| cat_map.get(id))
+                .is_some_and(|catalog| {
+                    catalog.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+                })
+                && super::platform_key_service::binding(&t.service) == "platform"
+            {
+                return None;
+            }
             let ep = ep_map.get(t.service.endpoint_id.as_str())?;
             let ak = t
                 .service
@@ -4497,6 +4509,7 @@ fn build_key_view(
         .and_then(|id| app_name_map.get(id).cloned());
 
     KeyView {
+        offering_kind: catalog_ds.map(|c| c.offering_kind).unwrap_or_default(),
         inference: catalog_ds.and_then(|c| super::inference_service::view(c, None, false)),
         capabilities: catalog_ds.and_then(super::inference_service::capabilities),
         platform_key_available: false,

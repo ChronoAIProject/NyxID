@@ -197,6 +197,7 @@ pub struct CatalogEndpointsListResponse {
 
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct CatalogListQuery {
+    pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     /// Include all active services (including system services without auth).
     /// Default: false (only shows services requiring user credential setup).
     #[serde(default)]
@@ -221,13 +222,22 @@ pub async fn list_catalog(
     Query(query): Query<CatalogListQuery>,
 ) -> AppResult<Json<CatalogListResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let entries = if query.include_all {
+    let entries = if query.include_all
+        || query.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool)
+    {
         catalog_service::list_catalog_all(&state.db, &state.encryption_keys, &user_id).await?
     } else {
         catalog_service::list_catalog(&state.db, &state.encryption_keys, &user_id).await?
     };
     let items: Vec<CatalogEntryResponse> = entries
         .into_iter()
+        .filter(|entry| {
+            query.include_all
+                || query.offering_kind.map_or(
+                    entry.offering_kind != crate::models::downstream_service::OfferingKind::Tool,
+                    |kind| kind == entry.offering_kind,
+                )
+        })
         .map(|entry| catalog_entry_response(&state.config, entry))
         .collect();
 

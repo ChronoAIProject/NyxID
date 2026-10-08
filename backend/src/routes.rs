@@ -1569,7 +1569,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::orgs::cancel_invite),
         );
 
-    let tools_routes = Router::new().route("/topics", get(handlers::catalog::tool_topics));
+    let tools_routes = Router::new()
+        .route("/topics", get(handlers::catalog::tool_topics))
+        .route("/", get(handlers::tools::list))
+        .route("/{slug}", get(handlers::tools::get))
+        .layer(middleware::from_fn(reject_service_account_tokens));
     let catalog_routes = Router::new()
         .route("/", get(handlers::catalog::list_catalog))
         .route("/{slug}", get(handlers::catalog::get_catalog_entry))

@@ -413,6 +413,7 @@ impl std::fmt::Debug for CreateKeyRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyResponse {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorship: Option<crate::handlers::service_history::AuthorshipResponse>,
     pub id: String,
@@ -2680,6 +2681,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
     .to_string();
 
     KeyResponse {
+        offering_kind: Default::default(),
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
@@ -2821,6 +2823,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     let endpoint_url = (!view.auto_connected).then_some(view.endpoint_url);
 
     KeyResponse {
+        offering_kind: view.offering_kind,
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
