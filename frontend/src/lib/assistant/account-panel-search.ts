@@ -1,16 +1,7 @@
 import { billingSearchSchema } from "@/schemas/billing";
 import { parseTab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT } from "@/lib/url-tabs";
 
-export const ASSISTANT_SHELL_ROUTES = [
-  "/assistant",
-  "/assistant/plugins",
-  "/assistant/approvals",
-  "/assistant/automations",
-  "/assistant/machines",
-  "/assistant/machines/new",
-  "/assistant/machines/pair",
-] as const;
-export type AssistantShellRoute = (typeof ASSISTANT_SHELL_ROUTES)[number];
+export { ASSISTANT_SHELL_ROUTES, isAssistantShellRoute, type AssistantShellRoute } from "./shell-routes";
 export type AccountPanel = "settings" | "billing" | "nyxbot";
 export interface AccountPanelSearch {
   panel?: AccountPanel;
@@ -24,10 +15,6 @@ export type AccountPanelParams = Omit<AccountPanelSearch, "panel">;
 export const ACCOUNT_PANEL_KEYS = [
   "panel", "panelTab", "panelPeriod", "panelService", "panelServices", "panelAction",
 ] as const;
-
-export function isAssistantShellRoute(path: string): path is AssistantShellRoute {
-  return ASSISTANT_SHELL_ROUTES.some((route) => route === path);
-}
 
 export const validateSettingsSearch = (search: Record<string, unknown>): { tab?: string } => ({
   ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
