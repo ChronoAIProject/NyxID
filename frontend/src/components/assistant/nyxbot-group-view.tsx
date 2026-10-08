@@ -179,6 +179,7 @@ function GroupTranscript({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
+  const lastScrollTop = useRef(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const names = group.members.map((member) => member.name);
   const working = group.members.filter((member) =>
@@ -188,13 +189,29 @@ function GroupTranscript({
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (!following.current) return;
+      element.scrollTop = element.scrollHeight;
+      lastScrollTop.current = element.scrollTop;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
     if (!element || !following.current) return;
     element.scrollTop = element.scrollHeight;
+    lastScrollTop.current = element.scrollTop;
   }, [lastSeq, working.length, bottomInset]);
 
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget;
-    following.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 48;
+    const distance = element.scrollHeight - element.clientHeight - element.scrollTop;
+    if (distance <= 48) following.current = true;
+    else if (element.scrollTop < lastScrollTop.current - 1) following.current = false;
+    lastScrollTop.current = element.scrollTop;
   }
 
   async function loadOlder() {
@@ -209,7 +226,10 @@ function GroupTranscript({
       setLoadingOlder(false);
       // Keep the reader's place once older messages are prepended.
       requestAnimationFrame(() => {
-        if (element) element.scrollTop = element.scrollHeight - before;
+        if (element) {
+          element.scrollTop = element.scrollHeight - before;
+          lastScrollTop.current = element.scrollTop;
+        }
       });
     }
   }
@@ -218,7 +238,7 @@ function GroupTranscript({
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto px-4 sm:px-6"
+      className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
     >
       <div
         className="mx-auto flex min-h-full w-full max-w-[758px] flex-col gap-4 pt-4"

@@ -1,4 +1,5 @@
 import { AssistantAccountPanel } from "./assistant-account-panel";
+import { useAssistantViewport } from "@/hooks/use-assistant-viewport";
 import { ThreadTitle } from "@/components/assistant/thread-title";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -29,6 +30,7 @@ export function AssistantShell({
   readonly children: ReactNode;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const viewportRef = useAssistantViewport();
   const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);
   const [previewWidth, setPreviewWidth] = useState<number | null>(null);
   const sidebarWidth = previewWidth ?? savedSidebarWidth;
@@ -72,7 +74,8 @@ export function AssistantShell({
     <AssistantDrawerDismissContext value={dismissDrawer}>
       <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}>
         <div
-          className="flex h-dvh flex-col overflow-hidden bg-background"
+          ref={viewportRef}
+          className="fixed inset-x-0 top-0 flex h-dvh flex-col overflow-hidden overscroll-none bg-background"
           style={{
             paddingTop: "var(--sat)",
             paddingLeft: "var(--sal)",

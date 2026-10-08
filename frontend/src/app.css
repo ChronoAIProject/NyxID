@@ -419,6 +419,7 @@ input[type="number"] {
   input,
   select,
   textarea,
+  [data-composer-text-measure],
   [role="combobox"],
   [role="option"] {
     font-size: 16px !important;

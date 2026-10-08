@@ -804,7 +804,7 @@ export function AssistantSidebar({
           {notice}
         </p>
       ) : null}
-      <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3">
         {agents ? (
           <>
             <div className="-ml-2 flex items-center justify-between">
