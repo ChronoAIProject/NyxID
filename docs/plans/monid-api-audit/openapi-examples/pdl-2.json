@@ -1,0 +1,127 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "pdl research import example",
+    "version": "0.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.peopledatalabs.com"
+    }
+  ],
+  "paths": {
+    "/v5/company/search": {
+      "post": {
+        "operationId": "pdl_v5_company_search",
+        "summary": "Find Companies",
+        "description": "Search and filter the full People Data Labs company dataset using Elasticsearch or SQL queries (provide one, not both; Elasticsearch recommended). The query runs directly against the Company Dataset without cleaning or preprocessing. Build queries from any field in the Company Schema (name, industry, size, location, funding, tech stack, etc.); the field descriptions in the Company Schema and the underlying Elasticsearch Mapping are the reference for writing effective queries. Returns up to 100 matching company records per request with scroll_token pagination; a valid query with no matches is a 200 with an empty data array. Charged per record retrieved.",
+        "x-monid-source-id": "pdl#v5/company/search",
+        "x-nyxid-audit-status": "candidate_requires_live_validation",
+        "responses": {
+          "200": {
+            "description": "Upstream response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "query": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Elasticsearch v7.7 query object run directly against the dataset. Provide EITHER query OR sql."
+                      },
+                      "size": {
+                        "description": "Records to return (1-100). Each returned record is one credit.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100
+                      },
+                      "scroll_token": {
+                        "description": "Pagination token from a previous response's scroll_token.",
+                        "type": "string"
+                      },
+                      "titlecase": {
+                        "description": "Titlecase the returned records. Default false.",
+                        "type": "boolean"
+                      },
+                      "pretty": {
+                        "description": "Pretty-print the response. Default false.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "query",
+                      "size"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "sql": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "SQL query of the form SELECT * FROM <dataset> WHERE ... . Provide EITHER sql OR query."
+                      },
+                      "size": {
+                        "description": "Records to return (1-100). Each returned record is one credit.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100
+                      },
+                      "scroll_token": {
+                        "description": "Pagination token from a previous response's scroll_token.",
+                        "type": "string"
+                      },
+                      "titlecase": {
+                        "description": "Titlecase the returned records. Default false.",
+                        "type": "boolean"
+                      },
+                      "pretty": {
+                        "description": "Pretty-print the response. Default false.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "sql",
+                      "size"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "providerCredential": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Api-Key"
+      }
+    }
+  },
+  "security": [
+    {
+      "providerCredential": []
+    }
+  ]
+}

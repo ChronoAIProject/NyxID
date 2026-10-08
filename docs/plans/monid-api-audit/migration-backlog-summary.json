@@ -1,0 +1,160 @@
+{
+  "status": "planning_only_no_vendor_accounts_or_runtime_changes",
+  "source_provider_aliases": {
+    "contextdev": "context.dev",
+    "magic-hour": "magichour"
+  },
+  "provider_entries": 87,
+  "hosted_identities_accounted": 2440,
+  "source_identities_accounted": 699,
+  "backlog_rows": 2502,
+  "coverage": {
+    "hosted_and_source": 637,
+    "source_only": 62,
+    "hosted_only": 1803
+  },
+  "waves": {
+    "01-search-pilot": {
+      "providers": 3,
+      "provider_ids": [
+        "exa",
+        "firecrawl",
+        "tinyfish"
+      ],
+      "hosted_tools": 18,
+      "source_definitions": 12
+    },
+    "02-source-data": {
+      "providers": 16,
+      "provider_ids": [
+        "ahrefs",
+        "akta",
+        "apollo",
+        "contactout",
+        "context.dev",
+        "dataforseo",
+        "fundable",
+        "hunterio",
+        "litescrape",
+        "mrscraper",
+        "octen",
+        "opoint",
+        "pdl",
+        "search1api",
+        "surf",
+        "vaquill"
+      ],
+      "hosted_tools": 557,
+      "source_definitions": 554
+    },
+    "03-data-jobs": {
+      "providers": 5,
+      "provider_ids": [
+        "apify",
+        "clay",
+        "cloro",
+        "orbit",
+        "ploid"
+      ],
+      "hosted_tools": 75,
+      "source_definitions": 77
+    },
+    "04-generation": {
+      "providers": 9,
+      "provider_ids": [
+        "alibaba",
+        "bytedance",
+        "elevenlabs",
+        "gemini",
+        "kling",
+        "magichour",
+        "minimax",
+        "openai",
+        "suzanne"
+      ],
+      "hosted_tools": 59,
+      "source_definitions": 39
+    },
+    "05-owned-services": {
+      "providers": 5,
+      "provider_ids": [
+        "agentmail",
+        "saperly",
+        "sfs",
+        "smolmachine",
+        "x402.browserbase.com"
+      ],
+      "hosted_tools": 79,
+      "source_definitions": 17
+    },
+    "06-hosted-contracts": {
+      "providers": 49,
+      "provider_ids": [
+        "aaa-gas-prices",
+        "accuweather",
+        "api.itsgloria.ai",
+        "api.kadec0.xyz",
+        "api.strale.io",
+        "artificial-analysis",
+        "bid.cars",
+        "blockrun.ai",
+        "builtin",
+        "capterra",
+        "carfax",
+        "cars.com",
+        "clutch",
+        "crunchbase",
+        "defillama",
+        "edmunds",
+        "emc2ai.io",
+        "finviz",
+        "g2",
+        "getapp",
+        "google-trends.use.x402atlas.com",
+        "homes.com",
+        "idealist",
+        "indeed",
+        "iqair",
+        "kbb",
+        "keenable",
+        "levels.fyi",
+        "lmarena",
+        "loopnet",
+        "marketbeat",
+        "nasdaq",
+        "recall",
+        "secform4",
+        "stockanalysis",
+        "tendata",
+        "the-companies-api",
+        "tikhub",
+        "topaz",
+        "trustpilot",
+        "typesafe",
+        "weather-underground",
+        "web3.career",
+        "wellfound",
+        "www.capminal.ai",
+        "x402.quicknode.com",
+        "yahoo-finance",
+        "ycombinator",
+        "zillow"
+      ],
+      "hosted_tools": 1652,
+      "source_definitions": 0
+    }
+  },
+  "input_sha256": {
+    "providers.csv": "3dcf2c96777f7cefcad16d7f9ed688c6eb0730fc95f9d89af7a2aad7ba9d854f",
+    "hosted-endpoints.csv": "e5a249b9fd1260e7ae1ddc12e44031a86f0a20c5a94ba31d4a8910dcb9a5918c",
+    "source-endpoints.csv": "901f48a7690c7441ca144cff7e5f1ced83f3f18c9cc91ce151c01b3108b982ce"
+  },
+  "limitations": [
+    "Hosted provider identities do not prove distinct vendor accounts or native API operators.",
+    "Hosted prices describe Monid's offering; native upstream costs and NyxID user prices require separate review.",
+    "Missing resource metadata does not prove public scope or absence of side effects.",
+    "Provider waves prioritize investigation; each operation retains its own runtime and ownership dependencies.",
+    "A source-only row may later reconcile to a hosted tool; these rows are not a claim of 2502 distinct production capabilities.",
+    "Overlap candidates establish existing provider-level contracts, not deployed access or exact operation equivalence."
+  ]
+}
