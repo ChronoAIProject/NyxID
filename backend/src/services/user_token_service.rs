@@ -4318,7 +4318,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(connected.status, "active");
-                assert_eq!(connected.expires_at.is_some(), slug == "stripe");
+                assert!(connected.expires_at.is_some());
                 assert_eq!(
                     enc.decrypt(connected.access_token_encrypted.as_ref().unwrap())
                         .await
@@ -4348,7 +4348,7 @@ mod tests {
                     b"rotated-refresh"
                 );
                 assert_eq!(refreshed.credential_epoch, connected.credential_epoch);
-                assert_eq!(refreshed.expires_at.is_some(), slug == "stripe");
+                assert!(refreshed.expires_at.is_some());
                 let request = &server.received_requests().await.unwrap()[0];
                 let form: HashMap<_, _> = url::form_urlencoded::parse(&request.body)
                     .into_owned()
