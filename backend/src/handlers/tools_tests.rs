@@ -136,7 +136,9 @@ async fn mcp_request(
 async fn tool_twins_copy_contracts_as_drafts_without_mutating_source_or_copying_secrets() {
     let mut f = fixture("tool_twins", false).await;
     f.service.auth_method = "header".into();
-    f.service.auth_key_name = Some("xi-api-key".into());
+    f.service.auth_key_name = "xi-api-key".into();
+    f.service.provider_config_id = Some("source-provider".into());
+    f.service.credential_encrypted = vec![1, 2, 3];
     f.service.custom_user_agent = Some("NyxID tools".into());
     f.service.description = Some("Source description".into());
     f.service.proxy_operation_policy = None;
