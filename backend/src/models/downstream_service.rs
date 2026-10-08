@@ -270,6 +270,7 @@ pub enum OfferingKind {
 pub enum CatalogImportKind {
     Monid,
     VendorSpec,
+    CatalogTwin,
     Manual,
 }
 

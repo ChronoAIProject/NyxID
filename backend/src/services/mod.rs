@@ -287,3 +287,5 @@ pub mod tool_topics;
 pub mod tool_publication_service;
 
 pub mod tools_service;
+
+pub mod tool_twin_service;

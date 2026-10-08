@@ -37,6 +37,9 @@ use super::services_helpers::{
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateServiceRequest {
+    pub twin_of_service_id: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    pub custom_user_agent: Option<String>,
     pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     pub topics: Option<Vec<String>>,
     pub supplier: Option<String>,
@@ -965,6 +968,19 @@ pub async fn create_service(
     Box::pin(create_service_inner(state, auth_user, tele, body)).await
 }
 
+pub async fn create_service_request(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    Json(body): Json<serde_json::Value>,
+) -> AppResult<Json<ServiceResponse>> {
+    require_admin(&state, &auth_user).await?;
+    let prepared = crate::services::tool_twin_service::prepare_create(&state.db, body).await?;
+    let body =
+        serde_json::from_value(prepared).map_err(|e| AppError::ValidationError(e.to_string()))?;
+    create_service(State(state), auth_user, tele, Json(body)).await
+}
+
 async fn create_service_inner(
     state: AppState,
     auth_user: AuthUser,
@@ -1379,6 +1395,20 @@ async fn create_service_inner(
         )
     };
 
+    let asyncapi_spec_url = body.asyncapi_spec_url.clone().or(asyncapi_spec_url);
+    if let Some(url) = asyncapi_spec_url.as_deref() {
+        validate_optional_spec_url(url)?;
+    }
+    if body
+        .custom_user_agent
+        .as_ref()
+        .is_some_and(|v| v.len() > 512 || v.chars().any(char::is_control))
+    {
+        return Err(AppError::ValidationError(
+            "Invalid custom_user_agent".into(),
+        ));
+    }
+
     // Validate metadata URL fields
     for (label, url_opt) in [
         ("homepage_url", &body.homepage_url),
@@ -1532,7 +1562,7 @@ async fn create_service_inner(
         required_permissions: body.required_permissions.clone(),
         examples_url: body.examples_url.clone(),
         recommended_skills: body.recommended_skills.clone(),
-        custom_user_agent: None,
+        custom_user_agent: body.custom_user_agent.clone(),
         default_request_headers,
         ws_frame_injections: body.ws_frame_injections.clone(),
         developer_app_ids: body.developer_app_ids.clone(),
@@ -1548,15 +1578,39 @@ async fn create_service_inner(
 
     crate::services::destination_routing::validate_credential_source(&new_service)?;
 
-    let new_service = crate::services::catalog_skill_service::create(
-        &state.db,
-        &new_service,
-        &auth_user.user_id.to_string(),
-        &initial_skills,
-        &skill_request_id,
-        &create_fingerprint,
-    )
-    .await?;
+    let twin_endpoints = match body.twin_of_service_id.as_deref() {
+        Some(source_id) => {
+            crate::services::tool_twin_service::clone_endpoints(
+                &state.db,
+                source_id,
+                &new_service.id,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
+    let new_service = if body.twin_of_service_id.is_some() {
+        crate::services::catalog_skill_service::create_with_endpoints(
+            &state.db,
+            &new_service,
+            &auth_user.user_id.to_string(),
+            &initial_skills,
+            &skill_request_id,
+            &create_fingerprint,
+            &twin_endpoints,
+        )
+        .await?
+    } else {
+        crate::services::catalog_skill_service::create(
+            &state.db,
+            &new_service,
+            &auth_user.user_id.to_string(),
+            &initial_skills,
+            &skill_request_id,
+            &create_fingerprint,
+        )
+        .await?
+    };
     let id = new_service.id.clone();
 
     for (changed, event) in [
@@ -3517,6 +3571,9 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            twin_of_service_id: None,
+            asyncapi_spec_url: None,
+            custom_user_agent: None,
             offering_kind: None,
             topics: None,
             supplier: None,
