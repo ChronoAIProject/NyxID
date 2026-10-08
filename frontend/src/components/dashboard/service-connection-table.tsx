@@ -90,6 +90,7 @@ import {
 } from "@/lib/service-insights";
 import { FadeIn } from "./service-card-motion";
 import { useRevealMotion } from "@/hooks/use-card-sequence";
+import { ConnectionDeleteAction } from "./connection-delete-action";
 
 const authNames: Record<string, string> = {
   bearer: "Bearer",
@@ -560,6 +561,9 @@ export function ServiceConnectionTable({
                         : ""}
                     </span>
                     {editable && renderActions?.(key)}
+                    {editable && (
+                      <ConnectionDeleteAction connection={key} disabled={Boolean(ordering)} />
+                    )}
                   </p>
                 </TableCell>
                 <TableCell>
