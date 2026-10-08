@@ -865,6 +865,7 @@ pub async fn load_operation_catalog(
             published_services.push(service);
         }
     }
+    invalid_contract_services += unpublished_services.len();
     let mut visible = published_services;
     visible.retain(|service| {
         let valid = operation_set_is_publishable(service);
