@@ -1178,3 +1178,10 @@ proposes owner-reviewed widening; it cannot approve its own request. A v2 node
 receives signed, 45-second authority renewed every ten seconds, and stops work on revocation
 or lease expiry even after socket loss. Legacy assignments remain visibly shared;
 context IDs in this phase do not isolate files or browser sessions.
+
+Chat-key discovery rows carry dense authorized `preference_rank` and follow the
+owner's saved same-catalog connection order by refilling only that group's occupied slots within equal relevance buckets; search also reports `executable`. Execution targets and approval
+authority are unchanged. Guest connected search/list includes only granted
+UserManaged and Platform connections and drops Internal catalog entries before
+ranking. Native `nyxid` virtual tools remain subject to their separate guest
+authorization; including that virtual catalog does not grant execution access.

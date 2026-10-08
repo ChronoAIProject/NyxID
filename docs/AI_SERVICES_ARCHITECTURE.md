@@ -181,6 +181,19 @@ selected pool under its personal or organization owner and scrolls its expanded
 card into view. Pool configuration, member ordering and policy edits live in
 **Service Pools** only.
 
+Personal discovery preference is separate from pool selection. `Discovery #n`
+pills belong to individual connections: the shared connection table shows each
+authorized dense rank, while a collapsed group chip names its best-ranked
+connection from the complete group and expands that card. Filters hide rows
+without renumbering ranks; groups remain alphabetical and connection rows retain
+inventory order. Inline Agent order controls use the complete service group and
+preserve filters, saved views and the expanded card without writing service-view settings.
+Within equal relevance, discovery preference refills only that catalog service's
+occupied slots; unrelated services retain their slots. The order is advisory.
+Explicit execution uses the called
+slug, pool priority or rotation, and the personal → organization → platform
+credential cascade. Preference does not change those decisions or cause retries.
+
 Priority pools support bounded failover; round-robin and weighted pools select a
 single member per request. Omitted/null priority policies use server defaults, not
 "failover off". Disabled pools, disabled members and failed inspection remain
@@ -940,3 +953,77 @@ Raw usage meters also retain the exact connection ID. Charged hourly and daily
 rollups retain it in existing cost-partition metadata, preserving established
 bucket/replay identities during mixed-version deployment. These metadata additions
 do not change pricing, settlement, or the routing policy.
+
+## Agent discovery order
+
+The acting person's flat `service_preferences` document stores connection UUIDs,
+version and BSON timestamps. Its position has meaning only within a catalog
+service group. Existing grouped cards keep normal display order; an expanded
+card or service overview provides inline drag handles, Move up/down, disabled-row
+positions and confirmed Reset to default. All group rows remain visible during
+editing even if filters change. No global editor replaces the page and editing
+does not write saved-view settings. A content-sized summary shows the preference
+or honest saved/default/unknown state on one line, with enabled/disabled counts
+beneath it. Known preferred names use stronger foreground beside the muted
+label. The single primary Reorder discovery CTA sits
+beside this discovery summary, below the card's Hide connections toolbar or
+below the overview's Connections/History tabs. Editing replaces it with a
+readable Discovery order label, one primary Save button and one outline Cancel
+button beside the same summary. Explicit gaps keep the summary and controls
+together, with natural wrapping and no expanding spacer. This compact row and
+its availability status remain sticky and operable while scrolled. Save targets a
+dedicated native order form outside the connection table, so unrelated panel
+buttons cannot submit the order. Invalid/failed submissions focus and reveal
+one error below the sticky cover, including repeated same-error attempts.
+The named **Info** button sits beside the preference text in that same shared
+section. Its standard tooltip gives three short rules: equal matches follow the saved order; the AI chooses a
+connection and this order is advisory; agents see only enabled HTTP connections
+they can access. Only applicable short protocol/gateway notes are added.
+The tooltip is noninteractive, with no links or buttons; Service Pools retain
+their existing settings navigation. Normal LLM copy is at most about 85 words.
+Implementation details remain in this documentation. No separate help row,
+inline explanatory area or extra settings box sits above the table. The tooltip
+leaves table geometry unchanged. Hover and keyboard focus open it; mouse/keyboard activation keeps it open,
+while touch taps toggle. Escape, blur, outside click/tap and the
+second trigger tap dismiss it without saving or discarding. Keyboard focus
+stays on the Info button. Failed/loading/404 reads keep a short honest availability
+line, Retry when applicable, and known `/keys` pills while disabling entry.
+Production404 says “Saving agent order requires the backend update”; it refers
+to preference saving and never Service Pools availability. One live state
+element announces actual loading/errors even when the preferred connection is
+known. Hide connections keeps its existing ChevronRight and retains the
+standard ghost hover background/text while expanded, scoped to this control.
+Connection labels keep a usable minimum width in normal/editing
+headers; readiness wraps below when necessary and order pills remain beneath it. Conflicts preserve the
+draft and offer scoped Reload/Overwrite, bound to the original identity.
+
+| Choice | Behavior |
+|---|---|
+| Present preferred Anthropic alternatives to agents | Refill that catalog group's discovery slots; preference applies within equal search relevance |
+| Run a named tool or connection slug | Execute exactly the addressed connection |
+| Route/fail over across alternatives | Explicit service pool, addressed by its pool slug; its strategy is unchanged |
+| Resolve an implicit LLM provider/model without `pool:` | Existing active-row database choice within owner tiers; unchanged by Part A |
+
+The card's agent-key count is keys with access, not connections. HTTP rows are alternatives
+with different tool-name prefixes. Non-HTTP rows keep saved positions but have
+no connected MCP discovery rank or tool prefix. Enabled does not mean verified or executable;
+discovery can include an unavailable credential with `executable: false`.
+Disabled stored rows show `Saved #p · disabled` and no discovery rank. Restricted callers
+see dense ranks over their permitted discovered connections: the owner's REST
+Discovery #2 and #4 can become MCP #1 and #2. A disabled Saved #1 is excluded
+from those MCP ranks. These technical contracts describe the behavior behind
+the concise product help; it does not promise that the model picks a row.
+
+Scoped saves merge only currently authorized IDs of the requested group, preserve
+all unrelated/hidden/stale IDs and their order, and append stored visible IDs
+omitted by a stale nonempty draft. Reset `[]` removes only authorized IDs in that
+group. Capacity is 200 IDs account-wide. Hidden IDs are removed only by the
+explicit confirmed human-only hidden DELETE, against the full authorized
+inventory; accessible custom singleton IDs and disabled rows are retained.
+GET exposes only authorized catalog groups, version and timestamp, with no counts.
+
+Visibility and caller scope precede ranking. Owner, relay and guest discovery
+apply the human subject's order after their live filters; org/service-account
+subjects normally have no human document. Preference is never consulted for
+execution, retries, approvals, authority digests, platform grants, billing, pools,
+catalog digests or the implicit gateway in Part A.

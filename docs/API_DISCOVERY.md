@@ -342,13 +342,55 @@ and `/api/v1/mcp/config` for the whole user.
 
 ### Tool search semantics
 
-`nyx__search_tools` splits the query on non-alphanumeric characters and matches
-each word as a case-insensitive substring of the qualified tool name
-(`<slug>__<operation>`), the service name and the description. Tools containing
-every word rank first, then partial matches in catalog order, capped at 25. Word
-order is irrelevant, so "skill search" and "search skills" both find
-`ornn-api__searchskills`, and concatenated operation names such as
-`getentitystate` match "entity state". An empty query lists the first 25 tools.
+Personal agent order applies within an immutable catalog group, preserving
+slots occupied by unrelated services. `nyx__list_connected_services` starts from
+the caller's original loader vector and refills each group's existing slots with
+its ranked connections first, then unranked connections in their original order.
+Custom singleton connections and platform/internal catalog entries keep their
+slots and have `preference_rank: null`.
+
+`nyx__search_tools` splits its nonempty query on non-alphanumeric characters,
+ignores common filler words, and matches the remaining words as case-insensitive
+substrings of the qualified tool name
+(`<connection-slug>__<operation>`), service name and description. Relevance sorts
+by matched words descending, words in the name descending, then original loader
+candidate order. Within each equal-relevance bucket, only slots occupied by the
+same catalog group are refilled by connection preference; operations of each
+connection keep their relative order. Search always consumes the original loader
+vector, never the listing permutation. Native machine/upload candidates join the
+service matches in one stable relevance ranking, then the combined result is
+capped at 25. Equal relevance retains the preference-ordered service slots and
+original candidate order. Better matches remain above preferred partial matches.
+With no ranks, existing search and listing order is preserved. Word order is irrelevant and concatenated names
+such as `getentitystate` match "entity state". The pure helper also accepts an
+empty query using the same slot rule; the transport requires a nonempty query.
+
+Every search match and listing row carries `preference_rank` (dense within the
+caller's discovered catalog group, or null) and `executable`. Enabled rows with
+revoked, expired or missing credentials may appear with `executable: false`;
+disabled rows are not loaded. Native machine/upload search matches carry
+`preference_rank: null` and `executable: true` while competing with service
+matches by relevance. Ranks do not verify downstream providers or grant execution.
+
+Ranks derive after all existing membership, allowlist, node, operation and guest
+filters. For example, a disabled saved position 1 appears as `Saved #1 · disabled` in the
+owner's UI; a restricted key seeing only the owner's Discovery #2 and #4 sees MCP
+ranks 1 and 2, in the same relative order. Guest connected search/list includes
+only granted UserManaged/Platform connections and drops Internal catalog entries;
+native `nyxid` virtual tools retain their separate guest authorization.
+
+The minimal grouped GET and human-only scoped PUT/hidden DELETE are documented
+in [API.md](API.md#agent-discovery-order-per-service-group). Relay REST reads and
+writes are rejected; scoped MCP applies the verified relay owner's order.
+Service-account subjects normally have no human document and retain default
+order. Delegated/OAuth metadata GET follows management policy; they cannot write,
+and MCP order applies only when existing proxy scopes authorize the request.
+
+This is advisory ordering for NyxID responses. Independent clients may use their
+own tools and choose another connection. Named tools and slugs execute exactly
+the addressed connection; explicit service pools keep their own routing rules.
+`tools/list`, `/mcp/config`, catalog digests, approvals, authority and billing are
+unchanged. Implicit LLM gateway selection is unchanged by Part A.
 
 ### Image tool results
 

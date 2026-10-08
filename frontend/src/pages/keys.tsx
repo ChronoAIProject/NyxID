@@ -1,3 +1,8 @@
+import {
+  useServiceGroupOrder,
+  type ServiceGroupOrder,
+} from "@/hooks/use-service-group-order";
+import { useBlocker } from "@tanstack/react-router";
 import { ServiceConnectionTable } from "@/components/dashboard/service-connection-table";
 import { ArchivedServiceHistory } from "@/components/dashboard/service-history";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -124,10 +129,12 @@ function LoadingSkeleton() {
 }
 
 function ExternalServicesTab({
+  agentOrder,
   onAdd,
   onReconnect,
   viewMode,
 }: {
+  readonly agentOrder: ServiceGroupOrder;
   readonly onAdd: () => void;
   readonly onReconnect: (keyInfo: KeyInfo) => void;
   readonly viewMode: ViewMode;
@@ -148,9 +155,16 @@ function ExternalServicesTab({
     return map;
   }, [userServices]);
 
+  const joinSources = (inventory: readonly KeyInfo[]) =>
+    inventory.map((keyInfo) => ({
+      ...keyInfo,
+      credential_source:
+        keyInfo.credential_source ?? sourceById.get(keyInfo.id),
+    }));
+
   if (isLoading) return <LoadingSkeleton />;
 
-  if (error) {
+  if (error && !agentOrder.groupId) {
     return (
       <ErrorBanner
         message="Failed to load services. Please try again."
@@ -159,46 +173,52 @@ function ExternalServicesTab({
     );
   }
 
-  if (!keys?.length) return <ServicesEmptyState onAdd={onAdd} />;
+  if (!agentOrder.groupId && !(keys ?? agentOrder.inventory)?.length)
+    return <ServicesEmptyState onAdd={onAdd} />;
 
   return (
-    <GroupedServiceCards
-      keys={keys.map((keyInfo) => ({
-        ...keyInfo,
-        credential_source:
-          keyInfo.credential_source ?? sourceById.get(keyInfo.id),
-      }))}
-      catalog={catalog}
-      actions={(compact) => (
-        <AddCtaButton
-          label="Connect Service"
-          onClick={onAdd}
-          compact={compact}
-          compactLabel="Connect"
+    <>
+      {error && (
+        <ErrorBanner
+          message="Failed to refresh services. Your edits are kept."
+          onRetry={refetch}
         />
       )}
-      renderTable={
-        viewMode === "table"
-          ? (filteredKeys) => (
-              <div className="overflow-hidden rounded-xl border border-border bg-card">
-                <ServiceConnectionTable
-                  connections={filteredKeys}
-                  serviceName="All services"
-                  renderActions={(key) => (
-                    <ConnectionReconnect
-                      connection={key}
-                      onReconnect={onReconnect}
-                    />
-                  )}
-                />
-              </div>
-            )
-          : undefined
-      }
-      renderConnectionActions={(keyInfo) => (
-        <ConnectionReconnect connection={keyInfo} onReconnect={onReconnect} />
-      )}
-    />
+      <GroupedServiceCards
+        agentOrder={agentOrder}
+        keys={joinSources(keys ?? agentOrder.inventory)}
+        catalog={catalog}
+        actions={(compact) => (
+          <AddCtaButton
+            label="Connect Service"
+            onClick={onAdd}
+            compact={compact}
+            compactLabel="Connect"
+          />
+        )}
+        renderTable={
+          viewMode === "table"
+            ? (filteredKeys) => (
+                <div className="overflow-hidden rounded-xl border border-border bg-card">
+                  <ServiceConnectionTable
+                    connections={filteredKeys}
+                    serviceName="All services"
+                    renderActions={(key) => (
+                      <ConnectionReconnect
+                        connection={key}
+                        onReconnect={onReconnect}
+                      />
+                    )}
+                  />
+                </div>
+              )
+            : undefined
+        }
+        renderConnectionActions={(keyInfo) => (
+          <ConnectionReconnect connection={keyInfo} onReconnect={onReconnect} />
+        )}
+      />
+    </>
   );
 }
 
@@ -314,7 +334,13 @@ export function KeysPage() {
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
   // Shared query with ExternalServicesTab; only decides header CTA placement.
-  const { data: pageKeys } = useKeys();
+  const inventory = useKeys();
+  const pageKeys = inventory.data;
+  const agentOrder = useServiceGroupOrder(pageKeys ?? []);
+  useBlocker({
+    shouldBlockFn: () => !agentOrder.guard(),
+    enableBeforeUnload: agentOrder.dirty,
+  });
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(
     null,
   );
@@ -413,24 +439,29 @@ export function KeysPage() {
         }
       />
 
-      <Tabs value={tab} onValueChange={setTab}>
+      <Tabs
+        value={tab}
+        onValueChange={setTab}
+        activationMode={agentOrder.dirty ? "manual" : "automatic"}
+      >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
           <TabsList className="min-w-0">
             <TabsTrigger value="services">External Services</TabsTrigger>
             <TabsTrigger value="pools">Service Pools</TabsTrigger>
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
-          <div className="flex shrink-0 items-center justify-between gap-4 sm:pb-1">
+          <div className="flex flex-wrap items-center justify-between gap-3 sm:pb-1">
             {tab !== "pools" && !(tab === "services" && previewActive) && (
               <ViewToggle
                 viewMode={
                   tab === "services" ? servicesViewMode : agentKeysViewMode
                 }
-                onViewModeChange={
-                  tab === "services"
-                    ? setServicesViewMode
-                    : setAgentKeysViewMode
-                }
+                onViewModeChange={(mode) => {
+                  if (tab === "services") {
+                    if (!agentOrder.guard()) return;
+                    setServicesViewMode(mode);
+                  } else setAgentKeysViewMode(mode);
+                }}
               />
             )}
             {/* Services keep Connect Service inside the sticky filter toolbar;
@@ -474,6 +505,7 @@ export function KeysPage() {
             </Suspense>
           ) : (
             <ExternalServicesTab
+              agentOrder={agentOrder}
               onAdd={() => setAddServiceOpen(true)}
               onReconnect={(keyInfo) => {
                 setReconnectKey(keyInfo);

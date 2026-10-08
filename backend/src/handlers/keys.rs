@@ -415,6 +415,9 @@ impl std::fmt::Debug for CreateKeyRequest {
 pub struct KeyResponse {
     /// Whether the current caller may inspect and edit connection configuration.
     pub can_edit_configuration: bool,
+    pub preference_rank: Option<u32>,
+    /// Saved position within the authorized catalog group, including disabled rows.
+    pub preference_position: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorship: Option<crate::handlers::service_history::AuthorshipResponse>,
     pub id: String,
@@ -1278,14 +1281,48 @@ pub async fn list_keys(
         )
         .await?
     };
-    let scope = auth_user.api_key_service_scope();
+    let views = crate::services::service_preference_service::filter_inventory(
+        views,
+        auth_user.api_key_service_scope(),
+        auth_user.auth_method == AuthMethod::ApiKey,
+    );
+    let visible = views
+        .iter()
+        .map(|view| {
+            (
+                view.id.clone(),
+                crate::services::service_preference_service::PreferenceMember {
+                    group: crate::services::service_preference_service::group_key(
+                        &view.id,
+                        view.catalog_service_id.as_deref(),
+                    ),
+                    listed: view.is_active && view.service_type == "http",
+                },
+            )
+        })
+        .collect();
+    let preference =
+        crate::services::service_preference_service::get(&state.db, &user_id_str).await?;
+    let ranks = crate::services::service_preference_service::rank_map_by_group(
+        preference
+            .as_ref()
+            .map_or(&[], |row| row.ordered.as_slice()),
+        &visible,
+    );
+    let positions = crate::services::service_preference_service::position_map_by_group(
+        preference
+            .as_ref()
+            .map_or(&[], |row| row.ordered.as_slice()),
+        &visible,
+    );
     let mut keys = views
         .into_iter()
-        .filter(|view| scope.is_none_or(|ids| ids.contains(&view.id)))
-        .filter(|view| {
-            auth_user.auth_method != AuthMethod::ApiKey || !view.credential_source.is_viewer_org()
+        .map(|view| {
+            let mut response = key_response_from_view(view);
+            response.preference_rank = ranks.get(&response.id).copied();
+            response.preference_position = positions.get(&response.id).copied();
+            response
         })
-        .map(key_response_from_view)
         .collect::<Vec<_>>();
     enrich_key_node_metadata(
         &state.db,
@@ -1336,6 +1373,16 @@ pub async fn get_key(
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
     let mut response = resolve_key_response(&state, &auth_user, &key_id).await?;
+    (response.preference_rank, response.preference_position) =
+        crate::services::service_preference_service::detail_rank(
+            &state.db,
+            &actor,
+            &response.id,
+            response.catalog_service_id.as_deref(),
+            auth_user.api_key_service_scope(),
+            auth_user.auth_method == AuthMethod::ApiKey,
+        )
+        .await?;
     enrich_key_response(
         &state.db,
         &state.node_ws_manager,
@@ -2685,6 +2732,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
 
     KeyResponse {
         can_edit_configuration: true,
+        preference_rank: None,
+        preference_position: None,
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
@@ -2834,6 +2883,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         view.credential_source.clone().into();
     KeyResponse {
         can_edit_configuration: !view.auto_connected && credential_source.can_edit_configuration(),
+        preference_rank: None,
+        preference_position: None,
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,

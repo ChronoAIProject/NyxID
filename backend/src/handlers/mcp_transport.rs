@@ -3381,7 +3381,7 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    let services = match load_all_services_for_meta_tools(state, auth).await {
+    let (services, ranks) = match load_preferred_services_for_meta_tools(state, auth).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for search: {e}");
@@ -3391,40 +3391,32 @@ async fn handle_meta_search(
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
-    let search_result = mcp_service::search_all_tools(&services, query);
+    let search_result = mcp_service::search_all_tools_ranked(&services, query, &ranks);
 
     let mut candidates = search_result.matches;
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
         candidates.push(crate::services::assistant_upload_service::definition());
     }
-    // Native tools compete in the same ranking as service tools. Appending them
-    // after 25 full service schemas hid them past NyxAgent's result-text limit.
-    let matcher = mcp_service::ToolSearch::new(query);
-    let mut ranked: Vec<_> = candidates
+    let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
         .into_iter()
-        .filter_map(|tool| {
-            matcher
-                .rank(&tool.name, &tool.description)
-                .map(|rank| (rank, tool))
-        })
-        .collect();
-    ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
-    let results: Vec<_> = ranked
-        .into_iter()
-        .take(mcp_service::MAX_SEARCH_RESULTS)
-        .map(|(_, tool)| {
+        .map(|tool| {
             let mut value = serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
             });
-            if auth.chat.is_some() {
-                if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
+            if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
+                value["executable"] = serde_json::json!(service.executable);
+                value["preference_rank"] =
+                    serde_json::json!(ranks.get(&service.service_id).copied());
+                if auth.chat.is_some() {
                     value["chat_access"] = serde_json::json!(chat_access(auth, service));
-                } else {
-                    value["hint"] = serde_json::json!("Call this native tool directly by name.");
                 }
+            } else {
+                value["executable"] = serde_json::json!(true);
+                value["preference_rank"] = serde_json::Value::Null;
+                value["hint"] = serde_json::json!("Call this native tool directly by name.");
             }
             value
         })
@@ -3433,7 +3425,7 @@ async fn handle_meta_search(
         "matches": results,
         "count": results.len(),
         "hint": "Use nyx__call_tool to invoke any of these tools by name. \
-            Pass the tool name and arguments as shown in the match results.",
+            Pass the tool name and arguments as shown in the match results. At equal relevance, connections of the same service follow the owner's agent order in their original slots. preference_rank is relative to that service; executable reports current credential and routing availability.",
     });
     if auth.chat.is_some() {
         response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
@@ -3470,6 +3462,17 @@ async fn load_all_services_for_meta_tools(
     );
     if let Some(chat) = auth.chat.as_ref() {
         let mut services = services;
+        if chat.guest {
+            services.retain(|service| match &service.source {
+                mcp_service::McpToolSource::UserManaged { .. } => {
+                    auth.allowed_service_ids.contains(&service.service_id)
+                }
+                mcp_service::McpToolSource::Platform { .. } => auth
+                    .allowed_platform_service_ids
+                    .contains(&service.service_id),
+                mcp_service::McpToolSource::Internal => false,
+            });
+        }
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
         services.push(
@@ -3479,6 +3482,18 @@ async fn load_all_services_for_meta_tools(
     } else {
         Ok(filter_services_by_scope(services, auth))
     }
+}
+
+async fn load_preferred_services_for_meta_tools(
+    state: &AppState,
+    auth: &McpAuthContext,
+) -> crate::errors::AppResult<(
+    Vec<mcp_service::McpToolService>,
+    std::collections::HashMap<String, u32>,
+)> {
+    let services = load_all_services_for_meta_tools(state, auth).await?;
+    crate::services::service_preference_service::order_discovery(&state.db, &auth.user_id, services)
+        .await
 }
 
 async fn handle_meta_list_connected(
@@ -3492,7 +3507,7 @@ async fn handle_meta_list_connected(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    let services = match load_all_services_for_meta_tools(state, auth).await {
+    let (services, ranks) = match load_preferred_services_for_meta_tools(state, auth).await {
         Ok(services) => services,
         Err(error) => {
             tracing::error!("Failed to load connected services: {error}");
@@ -3500,7 +3515,7 @@ async fn handle_meta_list_connected(
         }
     };
 
-    let mut result = mcp_service::list_connected_services(&services, query);
+    let mut result = mcp_service::list_connected_services_ranked(&services, query, &ranks);
     if auth.chat.is_some()
         && let Some(rows) = result["services"].as_array_mut()
     {

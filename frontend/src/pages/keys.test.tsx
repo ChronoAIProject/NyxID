@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ServicePool } from "@/schemas/pools";
 import type { KeyInfo } from "@/types/keys";
 
 function render(ui: ReactNode) {
@@ -37,13 +38,17 @@ const { mockNavigate, mockPoolOwner, state } = vi.hoisted(() => ({
     },
     keys: [] as KeyInfo[],
     keysLoading: false,
+    keysFetching: false,
+    preferenceFetching: false,
     keysError: null as unknown,
     userServices: [] as unknown[],
+    routingPools: [] as ServicePool[],
     nodes: [] as { id: string; name: string }[],
   },
 }));
 
 vi.mock("@tanstack/react-router", () => ({
+  useBlocker: vi.fn(),
   Link: ({
     children,
     to,
@@ -71,7 +76,25 @@ vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({
     data: state.keys,
     isLoading: state.keysLoading,
+    isFetching: state.keysFetching,
+    isError: Boolean(state.keysError),
     error: state.keysError,
+    refetch: vi.fn(),
+  }),
+}));
+
+vi.mock("@/hooks/use-service-preference", () => ({
+  SERVICE_ORDER_UNAVAILABLE: "unavailable",
+  useSaveServiceGroupOrder: () => ({
+    save: vi.fn(),
+    release: vi.fn(),
+    isPending: false,
+  }),
+  useServicePreference: () => ({
+    data: { groups: [], version: 0, updated_at: null },
+    isLoading: false,
+    isFetching: state.preferenceFetching,
+    isError: false,
     refetch: vi.fn(),
   }),
 }));
@@ -111,7 +134,7 @@ vi.mock("@/hooks/use-pools", () => ({
 
 vi.mock("@/hooks/use-service-routing-pools", () => ({
   useServiceRoutingPools: () => ({
-    pools: [],
+    pools: state.routingPools,
     loading: false,
     incomplete: false,
   }),
@@ -238,6 +261,7 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 describe("KeysPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.removeItem("nyxid-view-mode:keys-services");
     useServiceCardView.setState({
       accountId: undefined,
       expanded: [],
@@ -246,9 +270,119 @@ describe("KeysPage", () => {
     state.search = {};
     state.keys = [];
     state.keysLoading = false;
+    state.keysFetching = false;
+    state.preferenceFetching = false;
     state.keysError = null;
     state.userServices = [];
     state.nodes = [];
+    state.routingPools = [];
+  });
+
+  it.each(["keysFetching", "preferenceFetching"] as const)(
+    "blocks entry from cached data during %s and enables entry once refreshed",
+    async (pending) => {
+      state.keys = [makeKey(), makeKey({ id: "second" })];
+      state[pending] = true;
+      const { rerender } = render(<KeysPage />);
+      await userEvent.click(
+        screen.getByRole("button", { name: /^Expand .+ connections$/ }),
+      );
+      const reorder = screen.getByRole("button", { name: "Reorder discovery" });
+      expect(reorder).toBeDisabled();
+      expect(reorder).toHaveAttribute("title", "Loading agent order");
+      state[pending] = false;
+      rerender(<KeysPage />);
+      expect(reorder).toBeEnabled();
+    },
+  );
+
+  it("keeps accessible ranks scoped to the actual row service in a mixed table", async () => {
+    state.keys = [makeKey({id:"alpha",label:"Alpha",preference_rank:2}),makeKey({id:"slack",label:"Slack",catalog_service_id:"slack",catalog_service_name:"Slack",catalog_service_slug:"api-slack",preference_rank:1}),makeKey({id:"disabled",is_active:false,preference_rank:null,preference_position:4})];
+    render(<KeysPage />);
+    await userEvent.click(screen.getByRole("button",{name:/table view/i}));
+    expect(screen.getByLabelText("Discovery preference 2 for OpenAI")).toHaveTextContent("Discovery #2");
+    expect(screen.getByLabelText("Discovery preference 1 for Slack")).toHaveTextContent("Discovery #1");
+    expect(screen.getByLabelText("Saved order position 4; disabled connections are not listed to agents")).toHaveTextContent("Saved #4");
+  });
+  it("shows connection preference pills in grouped and standalone tables without renumbering hidden rows", async () => {
+    state.keys = [
+      makeKey({ id: "gamma", label: "Gamma", preference_rank: 3, preference_position: 3 }),
+      makeKey({ id: "alpha", label: "Alpha", preference_rank: 2 }),
+      makeKey({
+        id: "auto",
+        label: "Auto",
+        auto_connected: true,
+        preference_rank: 1,
+      }),
+    ];
+    state.routingPools = [
+      {
+        id: "route",
+        user_id: "human",
+        name: "Example route",
+        slug: "example-route",
+        strategy: "priority",
+        members: [
+          { user_service_id: "alpha", enabled: true, weight: 1, priority: 7 },
+        ],
+        rr_counter: 0,
+        is_active: true,
+        created_at: "2026-10-07",
+        updated_at: "2026-10-07",
+      },
+    ];
+    render(<KeysPage />);
+    const chip = screen.getByRole("button", {
+      name: "Preferred: Auto",
+    });
+    expect(chip).toHaveTextContent("Preferred: Auto");
+    expect(chip).toHaveAttribute("title", "#3 · Gamma\n#2 · Alpha\n#1 · Auto");
+    expect(
+      screen.queryByLabelText(/^Discovery preference 1 for/),
+    ).not.toBeInTheDocument();
+    await userEvent.click(chip);
+    expect(
+      screen.getByLabelText(/^Discovery preference 2 for/),
+    ).toHaveTextContent("#2");
+    expect(
+      screen.getByLabelText(/^Discovery preference 3 for/),
+    ).toHaveTextContent("#3");
+    const alpha = screen.getByRole("link", {
+      name: "View Alpha connection details (Personal)",
+    });
+    const gamma = screen.getByRole("link", {
+      name: "View Gamma connection details (Personal)",
+    });
+    expect(
+      gamma.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      within(
+        document.querySelector('[data-service-connection-pools="alpha"]') as HTMLElement,
+      ).getByText("Example route · Priority 7"),
+    ).toBeVisible();
+    const alphaCell = within(alpha.closest("td")!);
+    expect(
+      alphaCell.getByLabelText(/^Discovery preference 2 for/),
+    ).toHaveTextContent("Discovery #2");
+    expect(alphaCell.getByText("Credential check needed")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: /table view/i }));
+    expect(
+      screen.getByLabelText(/^Discovery preference 2 for/),
+    ).toHaveTextContent("#2");
+    expect(
+      screen.getByLabelText(/^Discovery preference 3 for/),
+    ).toHaveTextContent("#3");
+    expect(
+      screen
+        .getByRole("link", { name: "View Gamma connection details (Personal)" })
+        .compareDocumentPosition(
+          screen.getByRole("link", {
+            name: "View Alpha connection details (Personal)",
+          }),
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /grid view/i }));
   });
 
   it("defaults to one collapsed card per service with duplicates inside", async () => {

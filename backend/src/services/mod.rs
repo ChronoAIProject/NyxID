@@ -293,3 +293,4 @@ pub mod service_concurrency_service;
 pub mod utility_inference_service;
 
 pub mod async_service_operation;
+pub mod service_preference_service;

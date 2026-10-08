@@ -1382,6 +1382,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/", post(handlers::keys::create_key))
         .route("/{key_id}", delete(handlers::keys::delete_key));
 
+    let service_preference_reads = Router::new()
+        .route(
+            "/service-preferences",
+            get(handlers::service_preference::get),
+        )
+        .layer(middleware::from_fn(reject_service_account_tokens));
+    let service_preference_writes = Router::new()
+        .route(
+            "/service-preferences/groups/{group}",
+            put(handlers::service_preference::put_group),
+        )
+        .route(
+            "/service-preferences/hidden",
+            delete(handlers::service_preference::release_hidden),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::services::service_preference_service::MAX_REQUEST_BYTES,
+        ))
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_api_key_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let key_update_routes = Router::new()
         .route("/keys/{key_id}", put(handlers::key_updates::update_key))
         .layer(middleware::from_fn(reject_delegated_tokens))
@@ -1978,6 +2001,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_account_key_reads::get_key),
         )
         .merge(service_inventory_read_routes)
+        .merge(service_preference_reads)
         // General API keys may discover templates without proxy scope;
         // AuthUser still rejects scheduled keys. Unlike MCP discover_services,
         // catalog detail uses OwnerGrants::load, which requires a User actor
@@ -2567,6 +2591,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .merge(api_v1_shared)
         .merge(api_v1_human_only)
         .merge(key_update_routes)
+        .merge(service_preference_writes)
         .merge(ownership_routes);
 
     let well_known_routes = Router::new()

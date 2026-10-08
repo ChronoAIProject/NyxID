@@ -13,6 +13,7 @@ const { state } = vi.hoisted(() => ({
 }));
 vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ groupId: state.groupId }),
+  useBlocker: vi.fn(),
   Link: ({
     to,
     params,
@@ -35,6 +36,21 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("@/components/layout/dashboard-layout", () => ({
   useBreadcrumbLabel: vi.fn(),
 }));
+vi.mock("@/hooks/use-service-preference", () => ({
+  SERVICE_ORDER_UNAVAILABLE: "unavailable",
+  useServicePreference: () => ({
+    data: { groups: [], version: 0, updated_at: null },
+    isLoading: false,
+    isFetching: false,
+    isError: false,
+    refetch: vi.fn(),
+  }),
+  useSaveServiceGroupOrder: () => ({
+    save: vi.fn(),
+    release: vi.fn(),
+    isPending: false,
+  }),
+}));
 vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({ data: state.keys, error: state.error, refetch: vi.fn() }),
   useCatalog: () => ({
@@ -53,6 +69,13 @@ vi.mock("@/hooks/use-user-services", () => ({
   useUserServices: () => ({ data: [] }),
 }));
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-service-routing-pools", () => ({
+  useServiceRoutingPools: () => ({
+    pools: [],
+    loading: false,
+    incomplete: false,
+  }),
+}));
 vi.mock("@/hooks/use-service-insights", () => ({
   useServiceInsights: () => ({
     connections: new Map(),
@@ -106,6 +129,36 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("full service page", () => {
+  it("keeps overview connection order with discovery pills below labels", () => {
+    state.keys = [
+      key("Development", { preference_rank: 3 }),
+      key("Team", { preference_rank: 1 }),
+      key("Unranked"),
+    ];
+    render(<ServiceOverviewPage />);
+    const links = screen.getAllByRole("link", {
+      name: /^View .+ connection details/,
+    });
+    expect(links.map((link) => link.textContent)).toEqual([
+      "Development",
+      "Team",
+      "Unranked",
+    ]);
+    expect(
+      within(links[0]!.closest("td")!).getByLabelText(
+        /^Discovery preference 3 for/,
+      ),
+    ).toHaveTextContent("Discovery #3");
+    const teamCell = within(links[1]!.closest("td")!);
+    expect(
+      teamCell.getByLabelText(/^Discovery preference 1 for/),
+    ).toHaveTextContent("Discovery #1");
+    expect(teamCell.getByText("Not verified")).toBeVisible();
+    expect(
+      within(links[2]!.closest("tr")!).queryByLabelText(/Discovery preference/),
+    ).not.toBeInTheDocument();
+  });
+
   it("contains all connections for the service with full information and configuration links", async () => {
     const user = userEvent.setup();
     render(<ServiceOverviewPage />);

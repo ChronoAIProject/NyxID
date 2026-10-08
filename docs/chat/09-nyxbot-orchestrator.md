@@ -581,6 +581,11 @@ as group admins, and NyxBot says so when a chat is set to `all`.
 turn (`guest_turn` on the thread, `guest` on its chat authority; kept after the
 turn so late tool calls stay restricted):
 
+Connected-service search/list discovery for guests includes only the specialist's
+granted UserManaged and Platform connections, dropping Internal catalog entries
+before dense preference ranking. Native `nyxid` virtual tools follow their separate
+guest authorization; their catalog inclusion grants no execution access.
+
 - NyxBot holds every service of the owner, so its guest turns call no tools at
   all and answer from the conversation; to let a chat's members use a service,
   the owner gives the chat a specialist with just that service;
