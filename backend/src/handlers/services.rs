@@ -412,6 +412,7 @@ impl std::ops::DerefMut for BillingUpdate {
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdateServiceRequest {
+    pub service_category: Option<String>,
     pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     pub topics: Option<Vec<String>>,
     pub supplier: Option<String>,
@@ -1984,7 +1985,15 @@ async fn update_service_inner(
             ));
         }
     }
+    if body.service_category.is_some() {
+        require_admin(&state, &auth_user).await?;
+    }
     let mut proposed = service.clone();
+    if let Some(category) = &body.service_category {
+        proposed.service_category =
+            derive_http_service_category(&service.auth_method, Some(category))?;
+        proposed.requires_user_credential = proposed.service_category == "connection";
+    }
     if let Some(kind) = body.offering_kind {
         proposed.offering_kind = kind;
     }
@@ -2009,6 +2018,13 @@ async fn update_service_inner(
     }
     crate::services::tool_topics::validate_tool_service(&proposed)?;
     let mut set_doc = doc! {};
+    if body.service_category.is_some() {
+        set_doc.insert("service_category", &proposed.service_category);
+        set_doc.insert(
+            "requires_user_credential",
+            proposed.requires_user_credential,
+        );
+    }
     if body.offering_kind.is_some() {
         set_doc.insert(
             "offering_kind",

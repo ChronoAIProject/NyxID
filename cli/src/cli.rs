@@ -58,6 +58,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: CatalogCommands,
     },
+    /// Browse NyxID-provided tools
+    Tools {
+        #[command(subcommand)]
+        command: ToolsCommands,
+    },
     /// List configured service keys and their credential binding
     Keys(AuthArgs),
     /// Manage AI services (external APIs)
@@ -838,6 +843,37 @@ pub enum TelemetryCommands {
 
 #[derive(Subcommand)]
 pub enum CatalogCommands {
+    /// Manage catalog endpoint operations
+    Endpoint {
+        #[command(subcommand)]
+        command: CatalogEndpointCommands,
+    },
+    /// Discover operations from the configured OpenAPI URL
+    Discover {
+        service: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Manage a curated OpenAPI overlay
+    Spec {
+        #[command(subcommand)]
+        command: CatalogSpecCommands,
+    },
+    /// Change publication for named operations
+    Publish {
+        service: String,
+        #[arg(long = "operation", required = true)]
+        operations: Vec<String>,
+        #[arg(long, default_value="published", value_parser=["published","paused","draft","validated"])]
+        state: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List the controlled topic vocabulary
+    Topics {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List available services from the catalog
     List {
         /// Include all active services (including system services without auth)
@@ -877,6 +913,16 @@ pub enum CatalogCommands {
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
+    #[arg(long, value_parser=["provider","connection","internal"])]
+    pub service_category: Option<String>,
+    #[arg(long, value_parser=["ai_service","tool"])]
+    pub offering_kind: Option<String>,
+    #[arg(long = "topic", conflicts_with = "clear_topics")]
+    pub topics: Vec<String>,
+    #[arg(long)]
+    pub clear_topics: bool,
+    #[arg(long)]
+    pub supplier: Option<String>,
     /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
     #[arg(long)]
     pub catalog_admin: bool,
@@ -5988,6 +6034,106 @@ pub enum OraclePoolCommands {
     RotateToken {
         /// Pool slug or id
         pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ToolsCommands {
+    List {
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    Show {
+        slug: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Args, Default)]
+pub struct CatalogEndpointArgs {
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long, value_parser=["GET","POST","PUT","PATCH","DELETE"])]
+    pub method: Option<String>,
+    #[arg(long)]
+    pub path: Option<String>,
+    #[arg(long)]
+    pub description: Option<String>,
+    #[arg(long)]
+    pub parameters_file: Option<std::path::PathBuf>,
+    #[arg(long)]
+    pub body_schema_file: Option<std::path::PathBuf>,
+    #[arg(long,value_parser=["public","account","owned_resource"])]
+    pub data_scope: Option<String>,
+    #[arg(long,value_parser=["free","metered","resource_backed"])]
+    pub cost_class: Option<String>,
+    #[arg(long,value_parser=["http_operation","job_start","job_poll"])]
+    pub execution: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum CatalogEndpointCommands {
+    List {
+        service: String,
+        #[arg(long, conflicts_with = "published_only")]
+        all: bool,
+        #[arg(long)]
+        published_only: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    Add {
+        service: String,
+        #[command(flatten)]
+        endpoint: CatalogEndpointArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    Update {
+        service: String,
+        endpoint_id: String,
+        #[command(flatten)]
+        endpoint: CatalogEndpointArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    Disable {
+        service: String,
+        endpoint_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CatalogSpecCommands {
+    Import {
+        service: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long,value_parser=["monid","vendor_spec","manual"])]
+        source_kind: Option<String>,
+        #[arg(long, requires = "source_kind")]
+        source_ref: Option<String>,
+        #[arg(long, requires = "source_kind")]
+        source_version: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    Show {
+        service: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    Delete {
+        service: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

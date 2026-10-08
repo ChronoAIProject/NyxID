@@ -9,6 +9,11 @@ use serde_json::{Value, json};
 impl CatalogServiceArgs {
     pub fn is_requested(&self) -> bool {
         self.catalog_admin
+            || self.service_category.is_some()
+            || self.offering_kind.is_some()
+            || !self.topics.is_empty()
+            || self.clear_topics
+            || self.supplier.is_some()
             || self.inference_protocol.is_some()
             || self.inference_model_list.is_some()
             || self.inference_realtime.is_some()
@@ -27,6 +32,20 @@ impl CatalogServiceArgs {
             || self.platform_key_price.is_some()
             || self.platform_key_free
     }
+    pub fn apply_tool_fields(&self, body: &mut Value) {
+        if let Some(value) = &self.service_category {
+            body["service_category"] = value.clone().into();
+        }
+        if let Some(value) = &self.offering_kind {
+            body["offering_kind"] = value.clone().into();
+        }
+        if self.clear_topics || !self.topics.is_empty() {
+            body["topics"] = json!(self.topics);
+        }
+        if let Some(value) = &self.supplier {
+            body["supplier"] = value.clone().into();
+        }
+    }
     pub async fn apply(&self, api: &mut ApiClient, body: &mut Value) -> Result<()> {
         self.apply_update(api, &json!({}), body).await
     }
@@ -36,6 +55,7 @@ impl CatalogServiceArgs {
         current: &Value,
         body: &mut Value,
     ) -> Result<()> {
+        self.apply_tool_fields(body);
         if self.inference_protocol.as_deref() == Some("none") {
             if self.inference_model_list.is_some() || self.inference_realtime.is_some() {
                 bail!("Cannot clear inference and set its capabilities together");

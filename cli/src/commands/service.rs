@@ -325,6 +325,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 if let Some(secret) = secret {
                     body["credential"] = Value::String(secret);
                 }
+                if let Some(url) = openapi_spec_url {
+                    body["openapi_spec_url"] = url.into();
+                }
                 catalog.apply(&mut api, &mut body).await?;
                 let result: Value = api.post("/services", &body).await?;
                 catalog_admin::print_result(&result, auth.output)?;

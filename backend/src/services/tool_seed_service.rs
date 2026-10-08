@@ -72,7 +72,15 @@ pub async fn seed(db: &Database) -> AppResult<()> {
         }
         service.supplier = Some(supplier.into());
         service.import_source = None;
-        service.openapi_spec_url = catalog_spec_registry::spec_path_for_slug(slug);
+        service.openapi_spec_url = catalog_spec_registry::spec_path_for_slug(slug).map(|path| {
+            format!(
+                "{}{}",
+                std::env::var("BASE_URL")
+                    .unwrap_or_else(|_| "http://localhost:3001".into())
+                    .trim_end_matches('/'),
+                path
+            )
+        });
         service.visibility = "public".into();
         service.created_by = "system".into();
         service.owner_user_id = None;
