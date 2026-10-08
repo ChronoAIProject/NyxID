@@ -99,11 +99,11 @@ export function ServiceViewToolbar({
     })),
   ];
   const applied = [
-    ...(filters.source === "org" || filters.source === "platform"
+    ...(filters.source !== "all"
       ? [
           {
             key: "source" as const,
-            label: "Source",
+            label: "Scope",
             value: SOURCE_LABELS[filters.source],
           },
         ]
@@ -126,12 +126,12 @@ export function ServiceViewToolbar({
           },
         ]
       : []),
-    ...(filters.show_auto_connected
+    ...(!filters.show_auto_connected
       ? [
           {
             key: "show_auto_connected" as const,
             label: "Auto-connected",
-            value: "Shown",
+            value: "Hidden",
           },
         ]
       : []),
@@ -142,20 +142,18 @@ export function ServiceViewToolbar({
   };
   const clear = () => {
     setDraft(null);
-    setFilters({
-      ...DEFAULT_SERVICE_FILTERS,
-      source: filters.source === "personal" ? "personal" : "all",
-    });
+    setFilters({ ...DEFAULT_SERVICE_FILTERS });
   };
   const sourceToggle = (
     <TooltipProvider delayDuration={100} disableHoverableContent>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
-            variant="outline"
+            variant={filters.source === "all" ? "outline" : "secondary"}
             size={stuck ? "icon" : "default"}
             className="shrink-0 rounded-full"
-            aria-label={`Service view: ${filters.source === "personal" ? "Personal" : "All services"}`}
+            aria-label={`Service view: ${filters.source === "all" ? "All services" : SOURCE_LABELS[filters.source]}`}
+            aria-pressed={filters.source !== "all"}
             onClick={() =>
               setFilters({
                 ...filters,
@@ -172,7 +170,10 @@ export function ServiceViewToolbar({
             )}
             {!stuck && (
               <>
-                {filters.source === "personal" ? "Personal" : "All services"}
+                <span className="text-muted-foreground">Show:</span>
+                {filters.source === "all"
+                  ? "All services"
+                  : SOURCE_LABELS[filters.source]}
                 <ArrowLeftRight
                   className="ml-1 size-3 text-muted-foreground"
                   aria-hidden="true"
@@ -196,7 +197,9 @@ export function ServiceViewToolbar({
           <p className="text-muted-foreground">
             {filters.source === "personal"
               ? "Showing services with a personal connection, including their accessible organization and platform connections."
-              : "Showing all accessible services. Switch to keep only services with a personal connection and their counterparts."}
+              : filters.source === "all"
+                ? "Showing all accessible services. Switch to keep only services with a personal connection and their counterparts."
+                : `Showing only ${SOURCE_LABELS[filters.source]} connections. Switch to services with a personal connection and their counterparts.`}
           </p>
         </TooltipContent>
       </Tooltip>
@@ -209,7 +212,7 @@ export function ServiceViewToolbar({
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
-            variant="outline"
+            variant={filters.show_auto_connected ? "outline" : "secondary"}
             size={stuck ? "icon" : "default"}
             className="shrink-0 rounded-full"
             aria-pressed={filters.show_auto_connected}
@@ -228,7 +231,8 @@ export function ServiceViewToolbar({
             )}
             {!stuck && (
               <>
-                Auto-connected
+                Auto-connected:{" "}
+                {filters.show_auto_connected ? "Included" : "Hidden"}
                 <span className="text-muted-foreground tabular-nums">
                   {autoConnected}
                 </span>
@@ -253,7 +257,7 @@ export function ServiceViewToolbar({
             added automatically by NyxID.{" "}
             {filters.show_auto_connected
               ? "They are currently listed."
-              : "They are hidden by default."}
+              : "They are currently hidden. Turn this on to include them."}
           </p>
         </TooltipContent>
       </Tooltip>
@@ -279,13 +283,22 @@ export function ServiceViewToolbar({
         {!stuck && (
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 px-3 py-2">
             <ServiceSavedViews
+              key={view.accountId}
               view={view}
-              onRestore={() => {
+              onRestore={(filters, viewId) => {
                 setDraft(null);
-                view.restoreDefault();
+                if (viewId) view.restoreSavedView(viewId);
+                else if (filters) view.setFilters(filters);
+                else view.restoreDefault();
               }}
             />
-            <div className="flex items-center gap-2">
+            <div
+              className="flex flex-wrap items-center gap-2"
+              aria-label="Display filters"
+            >
+              <span className="text-11 text-muted-foreground">
+                Display filters
+              </span>
               {autoToggle}
               {sourceToggle}
             </div>

@@ -26,6 +26,7 @@ pub struct OnboardingStateResponse {
 #[derive(Debug, Serialize)]
 pub struct ProfileConfigResponse {
     pub services_view: Option<ServiceViewResponse>,
+    pub service_views: Option<ServiceViewsResponse>,
     pub onboarding: OnboardingStateResponse,
 }
 
@@ -82,15 +83,7 @@ pub async fn save_services_view(
     auth_user: AuthUser,
     Json(body): Json<SaveServiceViewRequest>,
 ) -> AppResult<Json<ServiceViewResponse>> {
-    let preferences = ServiceViewPreferences {
-        organization_ids: body.organization_ids,
-        service_group_ids: body.service_group_ids,
-        search: body.search,
-        source: body.source,
-        state: body.state,
-        service_type: body.service_type,
-        show_auto_connected: body.show_auto_connected,
-    };
+    let preferences = body.into();
     let saved = crate::services::user_preferences_service::save_services_view(
         &state.db,
         &auth_user.user_id.to_string(),
@@ -98,6 +91,93 @@ pub async fn save_services_view(
     )
     .await?;
     Ok(Json(saved.into()))
+}
+
+impl From<SaveServiceViewRequest> for ServiceViewPreferences {
+    fn from(body: SaveServiceViewRequest) -> Self {
+        Self {
+            organization_ids: body.organization_ids,
+            service_group_ids: body.service_group_ids,
+            search: body.search,
+            source: body.source,
+            state: body.state,
+            service_type: body.service_type,
+            show_auto_connected: body.show_auto_connected,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedServiceViewRequest {
+    pub id: String,
+    pub name: String,
+    pub filters: SaveServiceViewRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveServiceViewsRequest {
+    pub views: Vec<SavedServiceViewRequest>,
+    pub default_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SavedServiceViewResponse {
+    pub id: String,
+    pub name: String,
+    pub filters: ServiceViewResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceViewsResponse {
+    pub views: Vec<SavedServiceViewResponse>,
+    pub default_id: Option<String>,
+}
+
+impl From<crate::models::user::ServiceViewsPreferences> for ServiceViewsResponse {
+    fn from(value: crate::models::user::ServiceViewsPreferences) -> Self {
+        Self {
+            default_id: value.default_id,
+            views: value
+                .views
+                .into_iter()
+                .map(|view| SavedServiceViewResponse {
+                    id: view.id,
+                    name: view.name,
+                    filters: view.filters.into(),
+                })
+                .collect(),
+        }
+    }
+}
+
+pub async fn save_service_views(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<SaveServiceViewsRequest>,
+) -> AppResult<Json<ServiceViewsResponse>> {
+    let preferences = crate::models::user::ServiceViewsPreferences {
+        default_id: body.default_id,
+        views: body
+            .views
+            .into_iter()
+            .map(|view| crate::models::user::SavedServiceView {
+                id: view.id,
+                name: view.name,
+                filters: view.filters.into(),
+            })
+            .collect(),
+    };
+    Ok(Json(
+        crate::services::user_preferences_service::save_service_views(
+            &state.db,
+            &auth_user.user_id.to_string(),
+            preferences,
+        )
+        .await?
+        .into(),
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -236,6 +316,7 @@ pub async fn get_me(
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
             services_view: user_model.profile_config.services_view.map(Into::into),
+            service_views: user_model.profile_config.service_views.map(Into::into),
             onboarding: OnboardingStateResponse {
                 ai_services_completed_at: user_model
                     .profile_config
@@ -474,6 +555,125 @@ mod tests {
             service_type: ServiceViewType::Http,
             show_auto_connected: false,
         }
+    }
+
+    #[tokio::test]
+    async fn named_service_views_round_trip_and_clear_deleted_default() {
+        let db = connect_test_database("named_service_views").await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let other_id = Uuid::new_v4().to_string();
+        let mut user = test_user(&user_id, UserType::Person);
+        user.profile_config.onboarding.ai_services_completed_at = Some(Utc::now());
+        db.collection::<User>(USERS)
+            .insert_many([user.clone(), test_user(&other_id, UserType::Person)])
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let response = save_service_views(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Json(SaveServiceViewsRequest {
+                views: vec![
+                    SavedServiceViewRequest {
+                        id: "first".into(),
+                        name: " First ".into(),
+                        filters: service_view_request(),
+                    },
+                    SavedServiceViewRequest {
+                        id: "second".into(),
+                        name: "Second".into(),
+                        filters: service_view_request(),
+                    },
+                ],
+                default_id: Some("second".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.views.len(), 2);
+        assert_eq!(response.views[0].name, "First");
+        let persisted = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted
+                .profile_config
+                .service_views
+                .unwrap()
+                .default_id
+                .as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            persisted.profile_config.services_view.unwrap().search,
+            "team"
+        );
+        assert_eq!(
+            persisted.profile_config.onboarding,
+            user.profile_config.onboarding
+        );
+        let other = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &other_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(other.profile_config.service_views.is_none());
+        let mut legacy_update = service_view_request();
+        legacy_update.search = "$literal search".into();
+        save_services_view(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Json(legacy_update),
+        )
+        .await
+        .unwrap()
+        .0;
+        let updated = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        let views = updated.profile_config.service_views.unwrap().views;
+        assert_eq!(views[0].filters.search, "team");
+        assert_eq!(views[1].filters.search, "$literal search");
+        assert_eq!(
+            updated.profile_config.services_view.unwrap().search,
+            "$literal search"
+        );
+        let deleted = save_service_views(
+            State(state),
+            test_auth_user(&user_id),
+            Json(SaveServiceViewsRequest {
+                views: vec![SavedServiceViewRequest {
+                    id: "first".into(),
+                    name: "First".into(),
+                    filters: service_view_request(),
+                }],
+                default_id: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(deleted.default_id.is_none());
+        assert_eq!(deleted.views.len(), 1);
+        let persisted = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(persisted.profile_config.services_view.is_none());
+        assert_eq!(
+            persisted.profile_config.service_views.unwrap().views.len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -896,6 +1096,7 @@ mod tests {
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
                 services_view: None,
+                service_views: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: Some("2025-03-15T10:00:00+00:00".to_string()),
                 },
@@ -947,6 +1148,7 @@ mod tests {
             last_login_at: None,
             profile_config: ProfileConfigResponse {
                 services_view: None,
+                service_views: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: None,
                 },
@@ -989,6 +1191,7 @@ mod tests {
             last_login_at: None,
             profile_config: ProfileConfigResponse {
                 services_view: None,
+                service_views: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: None,
                 },
@@ -1034,6 +1237,7 @@ mod tests {
     fn profile_config_response_serialization() {
         let resp = ProfileConfigResponse {
             services_view: None,
+            service_views: None,
             onboarding: OnboardingStateResponse {
                 ai_services_completed_at: Some("2025-01-01T00:00:00+00:00".to_string()),
             },
@@ -1170,6 +1374,7 @@ mod tests {
             last_login_at: None,
             profile_config: ProfileConfigResponse {
                 services_view: None,
+                service_views: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: None,
                 },

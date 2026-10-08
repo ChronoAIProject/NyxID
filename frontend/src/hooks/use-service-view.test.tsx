@@ -59,20 +59,27 @@ beforeEach(() => {
     accountId: undefined,
     expanded: [],
     filters: undefined,
+    savedViewId: undefined,
   });
 });
 afterEach(cleanup);
 
 describe("account service view preferences", () => {
-  it("starts personal, honors saved All services, and restores only the newest expanded card", () => {
+  it("starts with all services, honors saved Personal, and restores only the newest expanded card", () => {
     const { result } = mount();
-    expect(result.current.filters.source).toBe("personal");
+    expect(result.current.filters.source).toBe("all");
+    expect(result.current.filters.show_auto_connected).toBe(true);
     act(() =>
       useAuthStore.setState({
-        user: user("user-a", { ...DEFAULT_SERVICE_FILTERS, source: "all" }),
+        user: user("user-a", {
+          ...DEFAULT_SERVICE_FILTERS,
+          source: "personal",
+          show_auto_connected: false,
+        }),
       }),
     );
-    expect(result.current.filters.source).toBe("all");
+    expect(result.current.filters.source).toBe("personal");
+    expect(result.current.filters.show_auto_connected).toBe(false);
     act(() => result.current.setExpanded(["first", "latest"]));
     expect(result.current.expanded).toEqual(["latest"]);
   });
@@ -204,5 +211,66 @@ describe("account service view preferences", () => {
     expect(result.current.canSave).toBe(false);
     act(() => result.current.saveDefault());
     expect(put).not.toHaveBeenCalled();
+  });
+});
+
+describe("named service views", () => {
+  beforeEach(() => {
+    const current = user("user-a", saved);
+    useAuthStore.setState({
+      user: {
+        ...current,
+        profile_config: { ...current.profile_config!, service_views: null },
+      },
+    });
+    put.mockImplementation(async (_path, body) => body);
+  });
+
+  it("preserves the legacy default, saves multiple views, updates one, and deletes the default", async () => {
+    const { result } = mount();
+    expect(result.current.workspace.views[0]!.name).toBe("My default");
+    act(() => result.current.setFilters({ ...saved, search: "openai" }));
+    act(() => result.current.saveNewView("OpenAI"));
+    await waitFor(() => expect(result.current.workspace.views).toHaveLength(2));
+    const id = result.current.workspace.views[1]!.id;
+    expect(result.current.savedFilters).toEqual(saved);
+    act(() => result.current.setDefaultView(id));
+    await waitFor(() => expect(result.current.workspace.default_id).toBe(id));
+    expect(result.current.savedFilters.search).toBe("openai");
+    act(() => result.current.setFilters({ ...saved, search: "updated" }));
+    act(() => result.current.updateSavedView(id));
+    await waitFor(() =>
+      expect(result.current.savedFilters.search).toBe("updated"),
+    );
+    expect(result.current.workspace.views[0]!.filters).toEqual(saved);
+    act(() => result.current.deleteSavedView(id));
+    await waitFor(() => expect(result.current.workspace.views).toHaveLength(1));
+    expect(result.current.workspace.default_id).toBeNull();
+    expect(result.current.savedFilters).toEqual(DEFAULT_SERVICE_FILTERS);
+    expect(result.current.filters.search).toBe("updated");
+  });
+
+  it("keeps saved views on failure and ignores responses after an account switch", async () => {
+    put.mockRejectedValueOnce(new Error("offline"));
+    const { result } = mount();
+    act(() => result.current.saveNewView("New"));
+    await waitFor(() =>
+      expect(result.current.saveError).toMatch(/Could not save/),
+    );
+    expect(result.current.workspace.views).toHaveLength(1);
+    let resolveSave!: (value: unknown) => void;
+    put.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    act(() => result.current.saveNewView("Retry"));
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2));
+    const submitted = put.mock.calls[1]![1];
+    act(() => useAuthStore.getState().setUser(user("user-b")));
+    await act(async () => resolveSave(submitted));
+    expect(useAuthStore.getState().user?.id).toBe("user-b");
+    expect(result.current.workspace.views).toHaveLength(0);
   });
 });

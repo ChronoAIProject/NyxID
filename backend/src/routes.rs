@@ -558,6 +558,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/me/preferences/services",
             put(handlers::users::save_services_view),
         )
+        .route(
+            "/me/preferences/service-views",
+            put(handlers::users::save_service_views),
+        )
         // Assistant postcondition evidence. These MUST be mounted on the
         // production router: a browser journey that proves success by a 404
         // cannot distinguish "resource absent" from "route absent", so an

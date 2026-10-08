@@ -421,9 +421,6 @@ describe("KeysPage", () => {
       }),
     ];
     render(<KeysPage />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
-    );
     expect(
       screen.queryByRole("button", { name: "Filters" }),
     ).not.toBeInTheDocument();
@@ -450,12 +447,6 @@ describe("KeysPage", () => {
 
     try {
       render(<KeysPage />);
-      fireEvent.click(
-        screen.getByRole("button", { name: "Auto-connected services: hidden" }),
-      );
-      fireEvent.click(
-        screen.getByRole("button", { name: "Service view: Personal" }),
-      );
 
       expect(
         screen.getByText("https://manual-table.example/v1"),
@@ -486,9 +477,6 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await expandConnections();
 
     expect(screen.getAllByText("Acme Org").length).toBeGreaterThan(0);
@@ -628,9 +616,6 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await expandConnections();
 
     expect(
@@ -656,9 +641,6 @@ describe("KeysPage", () => {
       }),
     ];
     render(<KeysPage />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await expandConnections();
     expect(screen.getByText("No access")).toBeVisible();
     expect(

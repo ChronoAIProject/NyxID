@@ -57,15 +57,21 @@ describe("service view matching", () => {
       ...group,
       connections: group.connections.filter((key) => key.auto_connected),
     };
-    expect(matchingConnections(autoOnly, DEFAULT_SERVICE_FILTERS)).toEqual([]);
+    expect(
+      matchingConnections(autoOnly, {
+        ...DEFAULT_SERVICE_FILTERS,
+        source: "personal",
+        show_auto_connected: false,
+      }),
+    ).toEqual([]);
     expect(matchingConnections(autoOnly, SHOWN).map((key) => key.id)).toEqual([
       "platform",
     ]);
   });
-  it("hides auto-connected connections by default", () => {
+  it("includes personal, organization and auto-connected connections by default", () => {
     expect(
       matchingConnections(group, DEFAULT_SERVICE_FILTERS).map((key) => key.id),
-    ).toEqual(["personal", "org"]);
+    ).toEqual(["personal", "org", "platform"]);
   });
   it("keeps organization and platform counterparts for services with a personal connection", () => {
     expect(matchingConnections(group, SHOWN).map((key) => key.id)).toEqual([
@@ -78,7 +84,11 @@ describe("service view matching", () => {
       connections: group.connections.slice(1),
     };
     expect(
-      matchingConnections(withoutPersonal, DEFAULT_SERVICE_FILTERS),
+      matchingConnections(withoutPersonal, {
+        ...DEFAULT_SERVICE_FILTERS,
+        source: "personal",
+        show_auto_connected: false,
+      }),
     ).toEqual([]);
     expect(
       matchingConnections(withoutPersonal, SHOWN).map((key) => key.id),

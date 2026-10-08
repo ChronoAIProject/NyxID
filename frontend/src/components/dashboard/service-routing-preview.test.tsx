@@ -176,6 +176,7 @@ beforeEach(() => {
     accountId: undefined,
     expanded: [],
     filters: undefined,
+    savedViewId: undefined,
   });
   localStorage.clear();
   account.id = "user-a";
@@ -483,7 +484,9 @@ describe("live grouped services", () => {
     const summary = card.getByRole("button", {
       name: "Show billing for Twitter",
     });
-    expect(summary).toHaveTextContent("2 NyxID managed · 1 BYOK · 1 unverified");
+    expect(summary).toHaveTextContent(
+      "2 NyxID managed · 1 BYOK · 1 unverified",
+    );
     await user.hover(summary);
     const tooltip = await screen.findByRole("tooltip");
     for (const text of [
@@ -604,6 +607,15 @@ describe("live grouped services", () => {
     ).toHaveAttribute("aria-expanded", "true");
   });
   it("keeps mixed-source billing separate in Personal view and opens the selected source", async () => {
+    useServiceCardView.setState({
+      accountId: "user-a",
+      filters: {
+        ...DEFAULT_SERVICE_FILTERS,
+        source: "personal",
+        show_auto_connected: false,
+      },
+      savedViewId: undefined,
+    });
     records.push({
       ...records[0]!,
       id: "platform",
@@ -634,7 +646,7 @@ describe("live grouped services", () => {
     expect(
       screen.queryByRole("region", { name: "Platform-only service" }),
     ).not.toBeInTheDocument();
-    fireEvent.click(
+    await user.click(
       screen.getByRole("button", { name: "Auto-connected services: hidden" }),
     );
     // Shown auto-connected services belong to your account, so they list too.
@@ -691,9 +703,6 @@ describe("live grouped services", () => {
         name: "Billing for Personal account",
       }),
     ).not.toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     expect(
       screen.getByRole("region", { name: "Platform-only service" }),
     ).toBeVisible();
@@ -993,6 +1002,15 @@ describe("live grouped services", () => {
   });
 
   it("shows only filters and active pills while stuck, then restores saved views and the footer", async () => {
+    useServiceCardView.setState({
+      accountId: "user-a",
+      filters: {
+        ...DEFAULT_SERVICE_FILTERS,
+        source: "personal",
+        show_auto_connected: false,
+      },
+      savedViewId: undefined,
+    });
     const user = userEvent.setup();
     const connect = vi.fn();
     render(
@@ -1021,7 +1039,7 @@ describe("live grouped services", () => {
     );
     expect(screen.getByRole("button", { name: "Collapse" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Saved views" }));
-    expect(screen.getByText(/No saved view yet/)).toBeVisible();
+    expect(screen.getByText(/No saved views yet/)).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Connect Service" }),
     ).toHaveTextContent("Connect Service");
@@ -1040,7 +1058,7 @@ describe("live grouped services", () => {
     expect(
       screen.queryByRole("button", { name: "Saved views" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText(/No saved view yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No saved views yet/)).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Save as default" }),
     ).not.toBeInTheDocument();
@@ -1108,8 +1126,8 @@ describe("live grouped services", () => {
     ).toHaveTextContent("All services");
     expect(screen.getByRole("button", { name: "Saved views" })).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Save as default" }),
-    ).toBeVisible();
+      screen.queryByRole("button", { name: "Save as default" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Refresh metadata" }),
     ).not.toBeInTheDocument();
@@ -1120,95 +1138,89 @@ describe("live grouped services", () => {
     ).toHaveLength(1);
   });
 
-  it("starts in Personal view and keeps all view controls in the filter card", async () => {
-    records.push({
-      ...records[0]!,
-      id: "platform",
-      auto_connected: true,
-      label: "Platform connection",
-      slug: "openai-platform",
-    });
+  it("shows every service by default and makes narrowing presets explicit", async () => {
+    records.push(
+      {
+        ...records[0]!,
+        id: "platform",
+        auto_connected: true,
+        label: "Platform connection",
+        slug: "openai-platform",
+      },
+      {
+        ...records[1]!,
+        id: "org-only",
+        catalog_service_id: "org-only",
+        catalog_service_name: "Organization-only service",
+        catalog_service_slug: "org-only",
+      },
+    );
     const user = userEvent.setup();
     render(preview());
+    const filters = screen.getByRole("region", { name: "Service filters" });
+    expect(
+      screen.getByRole("region", { name: "Organization-only service" }),
+    ).toBeVisible();
+    expect(
+      screen.getByText("2 services · 4 matching connections"),
+    ).toBeVisible();
+    expect(
+      within(filters).getByRole("button", {
+        name: "Service view: All services",
+      }),
+    ).toHaveTextContent("Show:All services");
+    expect(
+      within(filters).getByRole("button", {
+        name: "Auto-connected services: shown",
+      }),
+    ).toHaveTextContent("Auto-connected: Included");
+    expect(
+      within(filters).queryByRole("button", { name: "Clear filters" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(filters).queryByRole("button", {
+        name: /Update default|Save as default/,
+      }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Service view: All services" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove Scope filter" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("region", { name: "Organization-only service" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Auto-connected services: shown" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
+    ).toHaveTextContent("Auto-connected: Hidden");
+    expect(
+      screen.getByRole("button", { name: "Remove Auto-connected filter" }),
+    ).toBeVisible();
     expect(
       screen.getByText("1 service · 2 matching connections"),
     ).toBeVisible();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
-    );
-    const filters = screen.getByRole("region", { name: "Service filters" });
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
     expect(
-      within(filters).getByRole("button", { name: "Service view: Personal" }),
+      screen.getByRole("region", { name: "Organization-only service" }),
     ).toBeVisible();
     expect(
-      within(filters).getByText("1 service · 3 matching connections"),
+      screen.getByText("2 services · 4 matching connections"),
     ).toBeVisible();
     expect(
-      within(filters).queryByRole("button", { name: "Refresh metadata" }),
+      screen.queryByRole("button", { name: "Remove Scope filter" }),
     ).not.toBeInTheDocument();
     expect(
-      within(filters).getByRole("button", { name: "Save as default" }),
-    ).toBeVisible();
-    expect(
-      within(filters).getAllByRole("button", { name: /^Service view:/ }),
-    ).toHaveLength(1);
-    await user.click(
-      within(filters).getByRole("button", { name: "Saved views" }),
-    );
-    expect(screen.getByText(/No saved view yet/)).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "Save current filters as default" }),
-    ).toBeDisabled();
-    await user.keyboard("{Escape}");
-    await user.click(
-      screen.getByRole("button", { name: "Expand OpenAI connections" }),
-    );
-    expect(screen.getByText("openai-team")).toBeVisible();
-    expect(screen.getByText("Platform connection")).toBeVisible();
-    await user.click(
-      within(filters).getByRole("button", { name: "Service view: Personal" }),
-    );
-    expect(screen.getByText("openai-team")).toBeVisible();
-    expect(screen.getByText("Platform connection")).toBeVisible();
-    expect(
-      within(filters).getByText("1 service · 3 matching connections"),
-    ).toBeVisible();
-    await user.click(
-      within(filters).getByRole("button", {
-        name: "Service view: All services",
-      }),
-    );
-    await user.click(
-      within(filters).getByRole("button", { name: "Organization" }),
-    );
-    await user.click(screen.getByRole("checkbox", { name: "Chrono" }));
-    await user.click(screen.getByRole("button", { name: "Done" }));
-    expect(
-      within(filters).getByRole("button", {
-        name: "Service view: All services",
-      }),
-    ).toBeVisible();
-    expect(
-      within(filters).getByRole("button", { name: "Remove Org: Chrono" }),
-    ).toBeVisible();
-    expect(screen.getByText("openai-team")).toBeVisible();
-    await user.click(
-      within(filters).getByRole("button", {
-        name: "Service view: All services",
-      }),
-    );
-    expect(
-      screen.queryByRole("button", { name: "Remove Org: Chrono" }),
+      screen.queryByRole("button", { name: "Remove Auto-connected filter" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("openai-personal")).toBeVisible();
   });
 
   it("starts collapsed and compares connections in a table inside one service", async () => {
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     const group = screen.getByRole("region", { name: "OpenAI" });
     const scroll = vi.fn();
     group.scrollIntoView = scroll;
@@ -1280,9 +1292,6 @@ describe("live grouped services", () => {
     });
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     const openai = screen.getByRole("region", { name: "OpenAI" });
     const twilio = screen.getByRole("region", { name: "Twilio" });
     const scrollOpenai = vi.fn();
@@ -1323,9 +1332,6 @@ describe("live grouped services", () => {
   it("searches a nested connection and shows only matching rows with the group total", async () => {
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await user.type(
       screen.getByRole("textbox", { name: "Search services and connections" }),
       "Team account{Enter}",
@@ -1403,9 +1409,6 @@ describe("live grouped services", () => {
     );
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await user.click(screen.getByRole("button", { name: "Organization" }));
     await user.click(screen.getByRole("checkbox", { name: "Chrono" }));
     await user.click(screen.getByRole("checkbox", { name: "Elf" }));
@@ -1541,9 +1544,6 @@ describe("live grouped services", () => {
     );
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     );
@@ -1562,9 +1562,6 @@ describe("live grouped services", () => {
   it("lets the user clear an empty filter result", async () => {
     const user = userEvent.setup();
     render(preview());
-    await user.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await user.type(
       screen.getByRole("textbox", { name: "Search services and connections" }),
       "no-matching-service{Enter}",
@@ -1577,9 +1574,6 @@ describe("live grouped services", () => {
   it("omits nonexistent platform sources and never invents a routing decision", async () => {
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     );
@@ -1599,12 +1593,6 @@ describe("live grouped services", () => {
     });
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     expect(screen.getByText("3 connections")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
@@ -1629,9 +1617,6 @@ describe("live grouped services", () => {
     });
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     expect(screen.getByRole("region", { name: "OpenAI" })).toBeVisible();
     expect(screen.getByRole("region", { name: "OpenAI custom" })).toBeVisible();
     await user.click(
@@ -1645,9 +1630,6 @@ describe("live grouped services", () => {
   it("restores expansion after detail navigation and isolates it when accounts change", async () => {
     const user = userEvent.setup();
     const mounted = render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     );
@@ -1661,9 +1643,6 @@ describe("live grouped services", () => {
     ).toHaveAttribute("aria-expanded", "true");
     account.id = "user-b";
     next.rerender(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
     expect(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     ).toHaveAttribute("aria-expanded", "false");

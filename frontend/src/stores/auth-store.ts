@@ -14,7 +14,7 @@ import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 const MFA_REQUIRED_ERROR_CODE = 2002;
 
 function clearAccountLocalState(): void {
-  useServiceCardView.setState({ accountId: undefined, filters: undefined, expanded: [] });
+  useServiceCardView.setState({ accountId: undefined, filters: undefined, expanded: [], savedViewId: undefined });
   useAssistantContextStore.getState().clear();
   useAssistantDraftStore.getState().clear();
   useAssistantWireLogStore.getState().reset();
@@ -25,7 +25,7 @@ function applyIdentityTransition(
   nextUser: User | null,
 ): void {
   if (previousUser?.id === nextUser?.id) return;
-  useServiceCardView.setState({ accountId: nextUser?.id, filters: undefined, expanded: [] });
+  useServiceCardView.setState({ accountId: nextUser?.id, filters: undefined, expanded: [], savedViewId: undefined });
   if (previousUser !== null) clearAccountLocalState();
   transitionAssistantIdentity(nextUser?.id ?? null);
 }
