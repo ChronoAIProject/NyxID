@@ -644,6 +644,18 @@ Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop 
 standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
+Account data (Settings with all six tabs, Billing & Usage when available, and
+NyxBot settings for the NyxAgent engine) opens as URL-driven modals over the
+current assistant view using `?panel=` and namespaced `panelTab`/filter keys,
+never as in-shell pages. Both account menus share these actions; the header gear
+opens the NyxBot panel, and NyxBot's settings links target the same panel URLs.
+Opening pushes history; Settings tab changes replace, Billing user changes push
+and automatic cleanup replaces. Back immediately after opening closes the panel;
+Back after an explicit close reopens it with any pending top-up already consumed.
+Notification settings links to Studio. The agent details sheet and in-chat
+connection/setup flows keep their existing presentation. Studio `/settings` and
+`/billing` remain available. Lago checkout returns to `/billing` (as configured in
+`docs/LAGO_SETUP.md`), even when started in the assistant.
 Server-generated browser URLs use `services::assistant_links::AssistantPage`.
 Machine web tasks use `nyx__machine_browser`; secure browser DevTools and arbitrary script evaluation are disabled. The separate dev browser is for debugging and has no saved-login access. Explicit NyxAgent budget/time errors continue the same session under `max_auto_continuations`; Stop must fence the turn and cancel node jobs/gateway work. Machine error codes 12413–12418 distinguish browser/driver/display/restart/stop states.
 

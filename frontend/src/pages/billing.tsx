@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useAccountPanel } from "@/hooks/use-account-panel";
+import { billingPanelSearch, type AccountPanelParams } from "@/lib/assistant/account-panel-search";
+import { useEffect, useEffectEvent, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
@@ -34,8 +36,14 @@ import {
 } from "@/schemas/billing";
 import "@/components/billing/billing-page.css";
 
-export function BillingPage() {
-  const rawSearch: Record<string, unknown> = useSearch({ strict: false });
+export function BillingPage({
+  presentation = "page",
+}: {
+  readonly presentation?: "page" | "panel";
+} = {}) {
+  const account = useAccountPanel();
+  const locationSearch: Record<string, unknown> = useSearch({ strict: false });
+  const rawSearch = presentation === "panel" ? billingPanelSearch(account.current) : locationSearch;
   const search = normalizeBillingSearch(rawSearch);
   const navigate = useNavigate();
   const { tab, period } = search;
@@ -67,6 +75,16 @@ export function BillingPage() {
   // (pushed) navigation abandons a pending top-up: it is consumed in the
   // current entry first and never copied forward, so Back cannot replay it.
   function updateSearch(patch: Partial<BillingSearch>, replace = false) {
+    if (presentation === "panel") {
+      const params: AccountPanelParams = {
+        ...("tab" in patch ? { panelTab: patch.tab } : {}),
+        ...("period" in patch ? { panelPeriod: patch.period } : {}),
+        ...("services" in patch ? { panelServices: patch.services?.length ? patch.services : undefined, panelService: undefined } : {}),
+        ...("action" in patch ? { panelAction: patch.action } : {}),
+      };
+      void account.update(params, replace ? "replace" : "push");
+      return;
+    }
     if (!replace && search.action) {
       void navigate({
         to: "/billing",
@@ -89,11 +107,11 @@ export function BillingPage() {
   const selectionStale =
     selected.length !== search.services.length ||
     rawSearch.service !== undefined;
+  const pruneSelection = useEffectEvent(() => updateSearch({ services: selected }, true));
+  const selectionKey = JSON.stringify(selected);
   useEffect(() => {
-    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale) {
-      updateSearch({ services: selected }, true);
-    }
-  });
+    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale) pruneSelection();
+  }, [usageQuery.isSuccess, usageQuery.isFetching, selectionStale, selectionKey, search.tab]);
   const topUpReady = Boolean(wallet) && billingReady;
   const topUpSettled =
     !walletQuery.isLoading && (!usageQuery.isLoading || !wallet);
@@ -108,9 +126,10 @@ export function BillingPage() {
   } else if (!search.action && topUpHandled) {
     setTopUpHandled(false);
   }
+  const consumeTopUp = useEffectEvent(() => updateSearch({ tab: "billing", action: undefined }, true));
   useEffect(() => {
-    if (wantsTopUp) updateSearch({ tab: "billing", action: undefined }, true);
-  });
+    if (wantsTopUp) consumeTopUp();
+  }, [wantsTopUp]);
   async function handleProvisionWallet() {
     try {
       await provisionWallet.mutateAsync({});
@@ -134,10 +153,10 @@ export function BillingPage() {
 
   return (
     <div className="billing-page space-y-6">
-      <PageHeader
+      {presentation === "page" && <PageHeader
         title="Billing & Usage"
         description="Your balance, benefits, and usage in one place."
-      />
+      />}
       <Tabs
         value={tab}
         onValueChange={(value) =>

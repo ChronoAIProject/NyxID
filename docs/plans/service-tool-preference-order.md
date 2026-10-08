@@ -446,8 +446,9 @@ Cards use main's one-card-at-a-time close/reflow/reveal sequence. Every
 collapse or group switch checks the draft guard before requesting motion.
 The editing group forces the card's expansion, span, layout identity and
 CardReveal body open exclusively for that group even when filters or a
-saved-view restore change the stored expansion. Reconcile the ephemeral
-expansion to that group before paint, without saving account defaults, so
+named-view application change the stored expansion. Reconcile the ephemeral
+expansion to that group before paint, without writing either legacy service
+preferences or the named-view workspace, so
 Save/Cancel preserve the expanded card and return focus to Reorder discovery.
 Dirty forms and delayed focus stay mounted through reflow.
 Each logical connection uses one sortable tbody containing its actual main
@@ -980,7 +981,9 @@ authorized implicit-routing behavior; docs.
   including reduced motion, guards before collapse/other-card/view/tab/navigation,
   disabled other-group entry, focus return, and that saved view, filters and
   other cards are unchanged. The ephemeral expansion store may sync to the
-  editing group (no `PUT /users/me/preferences/services`).
+  editing group (no `PUT /users/me/preferences/services` or
+  `PUT /users/me/preferences/service-views`). Named-view coverage applies an
+  actual default workspace row through the Saved views popover.
 - **AC-28** (*revised*): read failure cannot enable saving; a two-connection
   group (one enabled, one disabled) can be ordered; the 30/26/duplicate-label
   group renders, drags complete connection row groups and saves; main service-card
@@ -1820,3 +1823,33 @@ does not execute them. Affected Rust test execution, Clippy and full backend
 execution remain pending fresh exact-head remote CI after ROOT publishes.
 No broad local frontend/V8 rerun is added by this resolution. ROOT owns its review
 record, commit/publication, final gate acceptance and Opus sign-off.
+
+### Named-view compatibility after the c8eeb6dd merge
+
+The §19/§20 browser results describe their historical source and default-restore
+UI. Current coverage uses `profile_config.service_views` with a named default
+workspace view and applies its row through the Saved views popover. Both legacy
+service-preference and named-workspace PUTs are recorded; ordering must write
+neither. Guard, mounted-form, exclusive expansion, focus-return and reduced-motion
+assertions remain applicable. Fresh browser evidence is recorded separately.
+
+Fresh Node 22.21.1 Chromium validation: the full unfiltered
+`CI=1 npx playwright test e2e/service-preference.spec.ts --workers=1` run passed
+37/37, exit 0, in 3.4 minutes. Published `8fd7c62e` discovers 36 preference
+cases; the additional case exercises mocked row deletion cancellation, selected
+row confirmation, and the organization-viewer permission counterpart. The earlier
+41-case run covered 36 preference + 4 service-card-scroll + 1 wizard cases; current
+combined discovery is 42. No cases were removed or excluded. Both preference
+PUT endpoints remain unwritten by ordering and named-view application.
+
+The interim full run (33 passed, 4 failed, exit 1) remains preserved, including
+keyboard repickup, inventory-error and card-tooltip traces. The new permission
+fixture was corrected to set viewer ownership before the initial response. The
+three unchanged interaction/recovery cases and corrected deletion case then passed
+isolated (4/4, 32.9 seconds), followed by the complete frozen pass. No production
+fix, timeout/retry relaxation, blind delay or weakened assertion was used; the
+interim interaction-failure cause is unproven. Logs, lists, source hashes and
+screenshots are under
+`/tmp/nyxid-service-preference-restart/merge-c8e-named-views/`. ROOT's final
+delete-dialog copy was included in the frozen runtime. Wizard rebuild evidence
+remains ROOT-owned; E2E/docs do not change its producer closure.

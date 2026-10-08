@@ -285,6 +285,19 @@ Sidebar organized into 3 groups (4 with admin) separated by labeled section head
 
 **Admin** (visible only to users with admin or operator role; admin pages share the same dashboard chrome — there is no separate admin layout. Operators see admin pages read-only.) — Users, Invite Codes, Audit Log, Service Accounts, Roles, Groups, Node Registry, Services, Providers
 
+The assistant shell has its own workspace navigation and a shared account menu
+in the sidebar user row and header profile button. Settings, Billing & Usage and
+NyxBot settings open as URL-driven modals (`?panel=settings|billing|nyxbot`) over
+the current assistant view, never as in-shell pages. Namespaced `panelTab` and
+billing filter keys preserve the underlying view's search. NyxBot settings links
+target these panel URLs; the header gear opens the same NyxBot panel. Billing is
+capability-gated and NyxBot settings requires the NyxAgent engine. Notification
+settings links to Studio at `/approvals/settings` with a visible Studio hint.
+Open Studio and Log out complete both menus. Studio `/settings` and `/billing`
+retain their pages and chrome. Lago checkout returns to Studio `/billing`.
+Panels push on open and explicit close (Back after close reopens); Settings tabs
+replace, while Billing user changes push and automatic cleanup replaces.
+
 ### Naming reconciliation
 The sidebar label and page title can drift; track this when writing breadcrumbs or copy:
 
@@ -321,7 +334,7 @@ Every content page starts with `<PageHeader title description? actions? leading?
 - `leading` slot: 32–48px avatar/icon to the left of the title (`OrgAvatar`, status dot, color chip)
 - `description`: `text-12 text-muted-foreground` directly below the title group
 - `actions` slot: right-aligned, `flex items-center gap-2 shrink-0`. Most pages put their `AddCtaButton` here; filter pages put a `Select` here; multi-action pages may stack a couple of icon buttons.
-- A few legacy pages (`provider-list`, `developer-apps`, `settings`, `guide`, `ai-setup`) still hand-roll a header. They typically also miss the `text-22 sm:text-28` responsive downshift (e.g. `provider-list.tsx:129` and `ai-setup.tsx:266` both hardcode `text-28`), so on mobile their titles overflow. New code uses `PageHeader`; when touching a legacy page, migrate it.
+- A few legacy pages (`provider-list`, `developer-apps`, `guide`, `ai-setup`) still hand-roll a header. They typically also miss the `text-22 sm:text-28` responsive downshift (e.g. `provider-list.tsx:129` and `ai-setup.tsx:266` both hardcode `text-28`), so on mobile their titles overflow. New code uses `PageHeader`; when touching a legacy page, migrate it.
 
 ### List page
 The default shape for any "list of N things" page (`keys`, `nodes`, `channel-bots`, `orgs`, `developer-apps`, all admin lists, approval lists, sessions inside Settings):

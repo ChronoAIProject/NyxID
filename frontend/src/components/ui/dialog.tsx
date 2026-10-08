@@ -1,3 +1,5 @@
+import { DialogFocusReturnContext } from "./dialog-focus-return";
+import { restorePanelFocus } from "@/lib/assistant/panel-focus";
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
@@ -40,8 +42,10 @@ interface DialogContentProps extends React.ComponentPropsWithoutRef<
 const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, children, scrollMode = "content", style, ...props }, ref) => {
+>(({ className, children, scrollMode = "content", style, onOpenAutoFocus, onCloseAutoFocus, ...props }, ref) => {
   const layer = useOverlayLayer();
+  const restoreFocus = React.useContext(DialogFocusReturnContext);
+  const opener = React.useRef<HTMLElement | null>(null);
   return (
   <OverlayLayer layer={layer}>
   <DialogPortal>
@@ -61,6 +65,17 @@ const DialogContent = React.forwardRef<
         className,
       )}
       {...props}
+      onOpenAutoFocus={(event) => {
+        if (restoreFocus) opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        onOpenAutoFocus?.(event);
+      }}
+      onCloseAutoFocus={(event) => {
+        onCloseAutoFocus?.(event);
+        if (restoreFocus && !event.defaultPrevented) {
+          event.preventDefault();
+          restorePanelFocus(opener.current);
+        }
+      }}
       style={{ ...style, zIndex: layer }}
     >
       <div

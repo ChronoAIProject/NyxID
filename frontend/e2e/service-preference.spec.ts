@@ -85,7 +85,7 @@ function service(i: number, slack = false) {
         : { type: "personal" },
   };
 }
-async function fixture(page: Page, count = 30) {
+async function fixture(page: Page, count = 30, readOnly = false) {
   const state = {
     count,
     ordered: [ids[0]!, ids[4]!, ids[2]!, ids[1]!],
@@ -98,6 +98,8 @@ async function fixture(page: Page, count = 30) {
     capacity: false,
     stale: false,
     removed: [] as string[],
+    deletions: [] as string[],
+    readOnly,
     disabled: [] as number[],
     delayInventory: 0,
     delaySave: 0,
@@ -119,6 +121,8 @@ async function fixture(page: Page, count = 30) {
     const rows = Array.from({ length: state.count }, (_, i) => {
       const row = service(i);
       if (state.disabled.includes(i)) row.is_active = false;
+      if (state.readOnly && i === 2 && row.credential_source.type === "org")
+        row.credential_source.role = "viewer";
       const stored = state.ordered.filter(
         (id) => ids.indexOf(id) < state.count && !state.removed.includes(id),
       );
@@ -164,6 +168,24 @@ async function fixture(page: Page, count = 30) {
         feature_flags: {},
         profile_config: {
           onboarding: { ai_services_completed_at: "2026-10-07T00:00:00Z" },
+          service_views: {
+            views: [
+              {
+                id: "workspace-default",
+                name: "Workspace default",
+                filters: {
+                  search: "",
+                  organization_ids: [],
+                  service_group_ids: [],
+                  source: "all",
+                  state: "all",
+                  service_type: "all",
+                  show_auto_connected: false,
+                },
+              },
+            ],
+            default_id: "workspace-default",
+          },
           services_view: {
             search: "",
             organization_ids: [],
@@ -175,8 +197,12 @@ async function fixture(page: Page, count = 30) {
           },
         },
       };
-    else if (path === "/api/v1/users/me/preferences/services") {
-      state.viewWrites.push(req.postDataJSON());
+    else if (
+      path === "/api/v1/users/me/preferences/services" ||
+      path === "/api/v1/users/me/preferences/service-views"
+    ) {
+      if (req.method() === "PUT")
+        state.viewWrites.push({ path, body: req.postDataJSON() });
       body = req.postDataJSON();
     } else if (path === "/api/v1/service-preferences") {
       status = state.failRead ? 503 : state.gone ? 404 : 200;
@@ -210,6 +236,14 @@ async function fixture(page: Page, count = 30) {
       state.capacity = false;
       state.version++;
       body = response();
+    } else if (
+      req.method() === "DELETE" &&
+      /^\/api\/v1\/keys\/[^/]+$/.test(path)
+    ) {
+      const id = path.split("/").at(-1)!;
+      state.deletions.push(id);
+      state.removed.push(id);
+      body = { upstream_revocation_scheduled: false };
     } else if (path === "/api/v1/keys") {
       if (state.delayInventory)
         await new Promise((resolve) =>
@@ -1950,7 +1984,7 @@ for (const modality of ["mouse", "keyboard", "touch"] as const) {
 }
 
 for (const reducedMotion of ["no-preference", "reduce"] as const) {
-  test(`dirty ordering stays revealed through filters and default restore, then guards switching: ${reducedMotion}`, async ({
+  test(`dirty ordering stays revealed through filters and named default application, then guards switching: ${reducedMotion}`, async ({
     page,
   }) => {
     await page.emulateMedia({ reducedMotion });
@@ -1972,7 +2006,7 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
       .getByRole("button", { name: "Saved views", exact: true })
       .click();
     await page
-      .getByRole("button", { name: "Restore default", exact: true })
+      .getByRole("button", { name: /^Workspace default.*Default/ })
       .click();
     await page
       .getByRole("button", { name: "Service view: All services", exact: true })
@@ -2038,7 +2072,7 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
 }
 
 for (const action of ["Save", "Cancel"] as const) {
-  test(`default restore with changed ephemeral expansion keeps one card open and returns focus after ${action}`, async ({
+  test(`named default application with changed ephemeral expansion keeps one card open and returns focus after ${action}`, async ({
     page,
   }) => {
     const state = await fixture(page);
@@ -2062,7 +2096,7 @@ for (const action of ["Save", "Cancel"] as const) {
       .getByRole("button", { name: "Saved views", exact: true })
       .click();
     await page
-      .getByRole("button", { name: "Restore default", exact: true })
+      .getByRole("button", { name: /^Workspace default.*Default/ })
       .click();
     await expect(
       page.getByRole("button", { name: /^Collapse .* connections$/ }),
@@ -2089,3 +2123,37 @@ for (const action of ["Save", "Cancel"] as const) {
     expect(state.viewWrites).toEqual([]);
   });
 }
+
+test("connection deletion cancels safely, confirms only its row and respects organization permissions", async ({
+  page,
+}) => {
+  const state = await fixture(page, 30, true);
+  await expand(page);
+  await expect(
+    row(page, 2).getByRole("button", { name: /^Delete connection/ }),
+  ).toHaveCount(0);
+  const remove = row(page, 0).getByRole("button", {
+    name: /^Delete connection/,
+  });
+  await remove.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Delete connection",
+    exact: true,
+  });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(state.deletions).toEqual([]);
+  await expect(row(page, 0)).toBeVisible();
+  await remove.click();
+  await dialog
+    .getByRole("button", { name: "Delete connection", exact: true })
+    .click();
+  await expect(row(page, 0)).toHaveCount(0);
+  await expect(row(page, 1)).toBeVisible();
+  await expect(row(page, 2)).toBeVisible();
+  expect(state.deletions).toEqual([ids[0]]);
+  expect(state.writes).toEqual([]);
+  expect(state.viewWrites).toEqual([]);
+  await page.screenshot({
+    path: test.info().outputPath("connection-deletion.png"),
+  });
+});

@@ -120,6 +120,8 @@ describe("isCreditsDialogSuppressed", () => {
 
   it.each([
     "/assistant",
+    "/assistant/settings",
+    "/assistant/billing/other",
     "/dashboard",
     "/channel-bots/connect/x",
     "/nyxbot/onboarding",
@@ -127,4 +129,13 @@ describe("isCreditsDialogSuppressed", () => {
   ])("presents on %s", (path) => {
     expect(isCreditsDialogSuppressed(path)).toBe(false);
   });
+});
+
+it("suppresses only a renderable billing panel on a supported assistant route", () => {
+  expect(isCreditsDialogSuppressed("/assistant", { panel: "billing" }, true)).toBe(true);
+  for (const path of ["/dashboard", "/assistant/machines/n/desktop", "/assistant/settings"]) {
+    expect(isCreditsDialogSuppressed(path, { panel: "billing" }, true)).toBe(false);
+  }
+  expect(isCreditsDialogSuppressed("/assistant", { panel: "billing" }, false)).toBe(false);
+  expect(isCreditsDialogSuppressed("/assistant", {}, true)).toBe(false);
 });

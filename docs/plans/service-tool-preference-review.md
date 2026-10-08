@@ -987,3 +987,24 @@ CI and security evidence remain pending publication. Completed `a401b6d8` checks
 and its Opus approval remain historical evidence; subsequent movement of main
 does not invalidate that completed proof. The unchanged discovery UI does not
 require another full frontend run for this resolution.
+
+### Connection deletion and named-view compatibility
+
+ROOT reviewed the row-level Delete action and Opus approved its authorization
+gate, confirmation, shared OAuth cascade/remove-only choice and retained error
+dialog. The confirmation now also recommends Disable for a temporary stop.
+Main's named-view and account-menu changes merged without source conflicts;
+generated wizard conflicts were resolved by rebuilding the bundle (173 inputs).
+
+Opus found outdated browser setups using Restore default and the legacy view
+preferences endpoint. The fixture now serves a named default view, tests apply
+it through the Saved views popover, and ordering asserts no writes to either
+view preferences endpoint. All 37 discovery browser cases pass on frozen Node
+22 source, including the added deletion cancellation/confirmation and org-viewer
+case. The earlier 33-pass/four-failure run remains failed evidence; unchanged
+keyboard/retry/tooltip cases passed in isolation and in the final full run.
+No timeout, retry or assertion was weakened. The earlier 41-case browser total
+included 36 discovery, four scroll and one wizard case; the current discovery
+spec has 37 cases. ROOT inspected the deletion screenshot. Focused 62 tests,
+format/lint/type checks and wizard regeneration pass. Final CI/security and
+renewed Opus delivery sign-off remain pending publication of this merge.

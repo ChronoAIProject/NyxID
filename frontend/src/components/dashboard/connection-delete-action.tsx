@@ -110,9 +110,9 @@ function DeleteConnectionDialog({
           <DialogDescription>
             Delete {connection.label} ({connection.slug}) and its stored
             credential? Requests using this connection will stop working. This
-            cannot be undone. Removing an OAuth connection may also revoke its
-            upstream authorization; shared authorizations require a separate
-            confirmation.
+            cannot be undone. To stop it temporarily, use Disable. Removing an
+            OAuth connection may also revoke its upstream authorization; shared
+            authorizations require a separate confirmation.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

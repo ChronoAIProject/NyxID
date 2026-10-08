@@ -82,6 +82,7 @@ pub const SETTINGS_AREAS: &[&str] = &[
     "services",
     "service_pools",
     "channel_bots",
+    "nyxbot_settings",
     "nodes",
     "approvals",
     "approval_history",
@@ -91,8 +92,10 @@ pub const SETTINGS_AREAS: &[&str] = &[
     "security",
     "sessions",
     "mcp",
+    "display",
     "privacy",
     "billing",
+    "usage",
     "organizations",
     "triggers",
     "developer_apps",
@@ -117,17 +120,18 @@ pub fn settings_path(area: &str, service: Option<&str>, org_id: Option<&str>) ->
         "services" => "/keys?tab=services".into(),
         "service_pools" => "/keys?tab=pools".into(),
         "channel_bots" => "/channel-bots".into(),
+        "nyxbot_settings" => AssistantPage::NyxBotSettings.path(),
         "nodes" => "/nodes".into(),
         "approvals" | "notifications" => "/approvals/settings".into(),
         "approval_history" => "/approvals/history".into(),
         "approval_grants" => "/approvals/grants".into(),
-        "profile" | "security" | "sessions" | "mcp" | "privacy" => {
-            format!("/settings?tab={area}")
+        "profile" | "security" | "sessions" | "mcp" | "display" | "privacy" => {
+            AssistantPage::Settings { tab: area }.path()
         }
         "saved_logins" => AssistantPage::SavedLogins.path(),
         "machines" => AssistantPage::Machines.path(),
         "automations" => AssistantPage::Automations { setup: None }.path(),
-        "billing" => "/billing".into(),
+        "billing" | "usage" => AssistantPage::Billing { tab: area }.path(),
         "organizations" => match org_id {
             Some(id) => format!("/orgs/{}", encode(id)),
             None => "/orgs".into(),
@@ -684,8 +688,8 @@ pub(crate) fn description(name: &str) -> &'static str {
         "settings_link" => {
             "Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
-            MFA), profile, sessions, billing, organizations, automations, machines, saved_logins, developer apps, devices \
-            and more. Automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
+            MFA), profile, sessions, MCP, display, privacy, billing, usage, NyxBot settings (nyxbot_settings), organizations, automations, machines, saved_logins, developer apps, devices \
+            and more. Account settings, NyxBot settings, billing and usage open as panels over the current assistant view; automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
             explicit owner consent because untrusted event text persists into later \
             full-authority owner turns outside webhook confirmations. Use your nyxid__ tools \
             directly for what they cover."
@@ -966,12 +970,40 @@ mod tests {
         }
         assert_eq!(settings_path("unknown", None, None), None);
         for (area, expected) in [
+            ("profile", "/assistant?panel=settings&panelTab=profile"),
+            ("security", "/assistant?panel=settings&panelTab=security"),
+            ("sessions", "/assistant?panel=settings&panelTab=sessions"),
+            ("mcp", "/assistant?panel=settings&panelTab=mcp"),
+            ("display", "/assistant?panel=settings&panelTab=display"),
+            ("privacy", "/assistant?panel=settings&panelTab=privacy"),
+            ("billing", "/assistant?panel=billing&panelTab=billing"),
+            ("usage", "/assistant?panel=billing&panelTab=usage"),
             ("automations", "/assistant/automations"),
             ("machines", "/assistant/machines"),
             ("saved_logins", "/assistant/machines?tab=logins"),
             ("triggers", "/triggers"),
+            ("create_agent_key", "/keys?tab=nyxid&action=create-key"),
+            ("agent_keys", "/keys?tab=nyxid"),
+            ("add_service", "/keys?tab=services&action=add-service"),
+            ("services", "/keys?tab=services"),
+            ("service_pools", "/keys?tab=pools"),
+            ("channel_bots", "/channel-bots"),
+            ("nyxbot_settings", "/assistant?panel=nyxbot"),
+            ("nodes", "/nodes"),
+            ("approvals", "/approvals/settings"),
+            ("notifications", "/approvals/settings"),
+            ("approval_history", "/approvals/history"),
+            ("approval_grants", "/approvals/grants"),
+            ("organizations", "/orgs"),
+            ("developer_apps", "/developer/apps"),
+            ("devices", "/settings/devices/onboard"),
+            ("ai_setup", "/ai-setup"),
         ] {
             assert_eq!(settings_path(area, None, None).as_deref(), Some(expected));
+            assert!(
+                validate("settings_link", &json!({"area": area})).is_ok(),
+                "{area}"
+            );
         }
 
         assert_eq!(
