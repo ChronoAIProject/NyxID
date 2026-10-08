@@ -444,6 +444,19 @@ async fn ensure_catalog_editor_route(
             "Catalog editor requires protected ordinary HTTP access".into(),
         ));
     }
+    if path_matches_prefix(path, "/api/v1/services") {
+        return crate::services::catalog_services_editor_service::authorize(
+            db,
+            sa,
+            scope,
+            if *method == Method::GET {
+                "catalog:services:read"
+            } else {
+                "catalog:services:write"
+            },
+        )
+        .await;
+    }
     if *method == Method::GET
         && crate::services::service_account_key_read_service::is_key_metadata_path(path)
     {

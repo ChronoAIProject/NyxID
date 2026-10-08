@@ -287,3 +287,7 @@ pub mod tool_topics;
 pub mod tool_publication_service;
 
 pub mod catalog_spec_overlay_service;
+
+pub mod catalog_services_editor_service;
+
+pub mod catalog_services_access;

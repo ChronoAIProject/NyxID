@@ -910,6 +910,10 @@ pub async fn list_services(
         filter.insert("service_category", category.as_str());
     }
 
+    if auth_user.auth_method == crate::mw::auth::AuthMethod::ServiceAccount {
+        crate::services::catalog_services_access::authorize(&state.db, &auth_user, false).await?;
+        filter = doc! {"offering_kind":"tool","is_active":true};
+    }
     filter.extend(crate::services::retired_service_service::exclusion_filter());
     let services: Vec<DownstreamService> = state
         .db
@@ -977,7 +981,11 @@ async fn create_service_inner(
         inference.realtime |= inference.voice.is_some();
     }
 
-    require_admin(&state, &auth_user).await?;
+    if body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool) {
+        crate::services::catalog_services_access::authorize(&state.db, &auth_user, true).await?;
+    } else {
+        require_admin(&state, &auth_user).await?;
+    }
 
     let create_fingerprint = crate::services::catalog_skill_service::create_fingerprint(
         &serde_json::to_value(&body).map_err(|e| AppError::Internal(e.to_string()))?,
@@ -1751,6 +1759,15 @@ pub async fn get_service(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
+    if auth_user.auth_method == crate::mw::auth::AuthMethod::ServiceAccount {
+        if service.offering_kind != crate::models::downstream_service::OfferingKind::Tool {
+            return Err(AppError::NotFound("Tool not found".into()));
+        }
+        crate::services::catalog_services_access::authorize(&state.db, &auth_user, false).await?;
+        return Ok(Json(
+            service_to_response_with_viewer(None, service, None).await,
+        ));
+    }
     let viewer_id = auth_user.user_id.to_string();
     crate::services::catalog_service::enforce_catalog_read_access(&state.db, &viewer_id, &service)
         .await?;
@@ -1818,7 +1835,12 @@ async fn update_service_inner(
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        crate::services::catalog_services_access::authorize(&state.db, &auth_user, true).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
+
     if body.destination_targets.is_some() {
         require_admin(&state, &auth_user).await?;
     }

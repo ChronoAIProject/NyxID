@@ -633,9 +633,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let service_routes = Router::new()
         .route("/", get(handlers::services::list_services))
-        .route("/", post(handlers::services::create_service))
+        .route("/", post(handlers::catalog_services_editor::create))
         .route("/{service_id}", get(handlers::services::get_service))
-        .route("/{service_id}", put(handlers::services::update_service))
+        .route(
+            "/{service_id}",
+            put(handlers::catalog_services_editor::update),
+        )
         .route("/{service_id}", delete(handlers::services::delete_service))
         .route(
             "/{service_id}/resync-identity",
@@ -1965,6 +1968,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         // their existing delegated exception.
         .nest("/catalog", catalog_routes)
         .nest("/tools", tools_routes)
+        .nest(
+            "/services",
+            service_routes.layer(middleware::from_fn(reject_api_key_tokens)),
+        )
         // Like authenticate_mcp: sessions, proxy-scoped access tokens, general
         // API keys (including chat keys), and non-Curation service accounts.
         // AuthUser rejects scheduled keys and Curation SAs; the handler checks
@@ -2482,7 +2489,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::permission_keys::revoke),
         )
         .nest("/api-keys", api_key_routes)
-        .nest("/services", service_routes)
         .route("/docs", get(handlers::docs::docs_ui))
         .route("/docs/catalog", get(handlers::docs::catalog_ui))
         .route("/docs/openapi.json", get(handlers::docs::openapi_json))

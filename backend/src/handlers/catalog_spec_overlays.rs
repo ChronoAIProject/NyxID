@@ -54,7 +54,9 @@ pub async fn get(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<OverlayResponse>> {
-    super::services_helpers::require_admin(&state, &auth).await?;
+    let service = super::services_helpers::fetch_service(&state, &id).await?;
+    crate::services::catalog_services_access::authorize_tool(&state.db, &auth, &service, false)
+        .await?;
     let row = catalog_spec_overlay_service::get(&state.db, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("Spec overlay not found".into()))?;
@@ -67,8 +69,9 @@ pub async fn put(
     Path(id): Path<String>,
     Json(body): Json<OverlayRequest>,
 ) -> AppResult<Json<OverlayResponse>> {
-    super::services_helpers::require_admin(&state, &auth).await?;
     let service = super::services_helpers::fetch_service(&state, &id).await?;
+    crate::services::catalog_services_access::authorize_tool(&state.db, &auth, &service, true)
+        .await?;
     super::services_helpers::require_http_service(&service)?;
     let (row, count) = catalog_spec_overlay_service::put(
         &state.db,
@@ -87,7 +90,9 @@ pub async fn delete(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    super::services_helpers::require_admin(&state, &auth).await?;
+    let service = super::services_helpers::fetch_service(&state, &id).await?;
+    crate::services::catalog_services_access::authorize_tool(&state.db, &auth, &service, true)
+        .await?;
     catalog_spec_overlay_service::delete(&state.db, &id).await?;
     Ok(Json(
         serde_json::json!({"message":"Overlay removed; endpoint rows retained"}),
