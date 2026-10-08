@@ -991,6 +991,9 @@ pub enum ServiceCommands {
         /// Custom slug for this service (omit to auto-derive from the label/catalog slug; must be unique per user).
         #[arg(long = "slug", value_name = "SLUG")]
         custom_slug: Option<String>,
+        /// Clone a catalog service into a credential-free tool twin
+        #[arg(long, requires = "catalog_admin")]
+        twin_of: Option<String>,
         /// Use OAuth flow for authentication
         #[arg(long)]
         oauth: bool,

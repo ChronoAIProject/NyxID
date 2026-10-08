@@ -279,6 +279,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             slug,
             custom,
             custom_slug,
+            twin_of,
             oauth,
             device_code,
             via_node,
@@ -316,9 +317,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 let mut api = ApiClient::from_auth_checked(&auth).await?;
                 let slug = slug
                     .as_deref()
+                    .or(custom_slug.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("Catalog creation requires a slug"))?;
                 let mut body =
                     serde_json::json!({ "slug": slug, "name": label.as_deref().unwrap_or(slug) });
+                if let Some(source) = twin_of.as_ref() {
+                    body["twin_of_service_id"] = source.clone().into();
+                }
                 if let Some(url) = endpoint_url.as_deref() {
                     body["base_url"] = url.into();
                     body["auth_method"] = auth_method.as_deref().unwrap_or("bearer").into();
@@ -3732,6 +3737,7 @@ mod command_tests {
             slug: None,
             custom: true,
             custom_slug: Some("my-custom".to_string()),
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,
@@ -3993,6 +3999,7 @@ mod branch_tests {
             slug: Some(slug.to_string()),
             custom: false,
             custom_slug: None,
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,
@@ -4572,6 +4579,7 @@ mod branch_tests {
             slug: None,
             custom: true,
             custom_slug: Some("my-custom".to_string()),
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,

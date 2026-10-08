@@ -353,3 +353,41 @@ mod tests {
         assert_eq!(body["topics"], json!([]));
     }
 }
+
+#[cfg(test)]
+mod twin_arguments {
+    use clap::Parser;
+    #[test]
+    fn twin_add_accepts_flag_slug_and_requires_catalog_admin() {
+        let args = [
+            "nyxid",
+            "service",
+            "add",
+            "--catalog-admin",
+            "--twin-of",
+            "api-twitter",
+            "--slug",
+            "tools-x",
+            "--offering-kind",
+            "tool",
+        ];
+        let parsed = crate::cli::Cli::try_parse_from(args).unwrap();
+        assert!(
+            matches!(parsed.command, crate::cli::Commands::Service {command: crate::cli::ServiceCommands::Add {twin_of: Some(source), custom_slug: Some(slug), ..}} if source == "api-twitter" && slug == "tools-x")
+        );
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "service",
+                "add",
+                "--twin-of",
+                "api-twitter"
+            ])
+            .is_err()
+        );
+        assert!(
+            crate::cli::Cli::try_parse_from(["nyxid", "catalog", "spec", "show", "tools-x"])
+                .is_err()
+        );
+    }
+}
