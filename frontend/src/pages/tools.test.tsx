@@ -24,13 +24,24 @@ vi.mock("@/hooks/use-tools", () => ({
   useToolTopics: () => ({
     data: [{ slug: "web-search", label: "Web Search" }],
   }),
-
 }));
-vi.mock("@/stores/auth-store", () => ({useAuthStore: (selector: (state: {user: {is_admin: boolean}}) => unknown) => selector({user: {is_admin: mocks.admin}})}));
+vi.mock("@/stores/auth-store", () => ({
+  useAuthStore: (
+    selector: (state: { user: { is_admin: boolean } }) => unknown,
+  ) => selector({ user: { is_admin: mocks.admin } }),
+}));
 vi.mock("@/hooks/use-api-keys", () => ({ useApiKeys: () => ({ data: [] }) }));
 vi.mock("@/hooks/use-services", () => ({
   useServices: () => ({
     data: [
+      {
+        id: "source-1",
+        name: "Firecrawl",
+        slug: "api-firecrawl",
+        service_type: "http",
+        offering_kind: "ai_service",
+        auth_method: "bearer",
+      },
       {
         id: "tool-1",
         name: "Search",
@@ -152,6 +163,52 @@ it("publishes through the publication route from the Tools tab", async () => {
 it("keeps Phase 1 management admin-only", () => {
   mocks.admin = false;
   mount(<AdminToolsPage />);
-  expect(screen.queryByRole("button", { name: "Add tool" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("tab", { name: "Imports" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Add tool" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("tab", { name: "Imports" }),
+  ).not.toBeInTheDocument();
+});
+
+it("creates a twin with the selected source and no transport or credential fields", async () => {
+  mocks.post.mockResolvedValue({ id: "created-tool", name: "Firecrawl tools" });
+  mount(<AdminToolsPage />);
+  await userEvent.click(screen.getByRole("button", { name: "Add tool" }));
+  expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
+  await userEvent.selectOptions(
+    screen.getByLabelText("Source service"),
+    "source-1",
+  );
+  await userEvent.type(screen.getByLabelText("name"), "Firecrawl tools");
+  await userEvent.type(screen.getByLabelText("slug"), "tools-firecrawl");
+  await userEvent.click(screen.getByRole("button", { name: "Create tool" }));
+  await waitFor(() =>
+    expect(mocks.post).toHaveBeenCalledWith(
+      "/services",
+      expect.objectContaining({
+        twin_of_service_id: "source-1",
+        slug: "tools-firecrawl",
+        offering_kind: "tool",
+      }),
+    ),
+  );
+  const body = mocks.post.mock.calls[0]![1];
+  expect(body).not.toHaveProperty("credential");
+  expect(body).not.toHaveProperty("base_url");
+  expect(body).not.toHaveProperty("provider_config_id");
+  expect(screen.getByText(/draft operations/)).toBeInTheDocument();
+});
+it("offers a new-service path without an Imports tab", async () => {
+  mount(<AdminToolsPage />);
+  expect(
+    screen.queryByRole("tab", { name: "Imports" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Add tool" }));
+  await userEvent.selectOptions(
+    screen.getByLabelText("Creation method"),
+    "new",
+  );
+  expect(screen.getByLabelText("Base URL")).toBeEnabled();
+  expect(screen.getByLabelText("OpenAPI spec URL")).toBeInTheDocument();
 });

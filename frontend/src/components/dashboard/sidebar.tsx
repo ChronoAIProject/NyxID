@@ -45,7 +45,6 @@ import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
 import { canAdminWrite, hasAdminRead, isBillingAvailable } from "@/types/api";
 
-
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
@@ -78,7 +77,11 @@ export const ADMIN_NAV = [
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
   { to: "/admin/upload-retention", icon: HardDrive, label: "Upload retention" },
-  { to: "/admin/platform-credentials", icon: KeyRound, label: "Platform Credentials" },
+  {
+    to: "/admin/platform-credentials",
+    icon: KeyRound,
+    label: "Platform Credentials",
+  },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/usage", icon: ChartNoAxesCombined, label: "Usage" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
@@ -113,7 +116,12 @@ function getVisibleAdminNav(
 ): readonly NavItemDef[] {
   return ADMIN_NAV.filter(
     (item) =>
-      !["/admin/platform-credentials", "/admin/ownership", "/admin/upload-retention"].includes(item.to) || canAdminWrite(user),
+      ![
+        "/admin/platform-credentials",
+        "/admin/ownership",
+        "/admin/tools",
+        "/admin/upload-retention",
+      ].includes(item.to) || canAdminWrite(user),
   );
 }
 
@@ -451,7 +459,9 @@ export function Sidebar({
       )}
       style={mode === "collapsed" ? undefined : { width }}
     >
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{sidebarContent}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {sidebarContent}
+      </div>
       {mode === "expanded" && (
         <SidebarResizeHandle
           sidebar="dashboard"

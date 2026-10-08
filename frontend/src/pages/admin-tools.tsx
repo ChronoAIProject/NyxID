@@ -34,10 +34,14 @@ export function AdminToolsPage() {
   const { data: services = [], isLoading, error, refetch } = useServices();
   const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   const [adding, setAdding] = useState(false);
+  const [createdTool, setCreatedTool] = useState<DownstreamService | null>(
+    null,
+  );
   const tools = services.filter((s) => s.offering_kind === "tool");
   const write = admin;
   const suppliers = Array.from(new Set(tools.map((s) => s.supplier ?? s.name)));
-  if (!admin) return <ErrorBanner message="Platform admin authority required" />;
+  if (!admin)
+    return <ErrorBanner message="Platform admin authority required" />;
   return (
     <div className="space-y-6">
       <PageHeader
@@ -130,16 +134,18 @@ export function AdminToolsPage() {
           </TabsContent>
         </Tabs>
       )}
+      {createdTool && <CreatedToolStatus tool={createdTool} />}
       {!isLoading && tools.length === 0 && (
         <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">
-          No tools yet. Add a tool and publish
-          validated operations.
+          No tools yet. Add a tool and publish validated operations.
         </p>
       )}
       <AddToolDialog
         open={adding}
         onOpenChange={setAdding}
         admin={admin}
+        services={services}
+        onCreated={setCreatedTool}
       />
     </div>
   );
@@ -182,7 +188,11 @@ function AddToolDialog({
   open,
   onOpenChange,
   admin,
+  services,
+  onCreated,
 }: {
+  services: readonly DownstreamService[];
+  onCreated: (tool: DownstreamService) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   admin: boolean;
@@ -192,6 +202,8 @@ function AddToolDialog({
   const form = useAppForm<z.infer<typeof addToolSchema>>({
     resolver: zodResolver(addToolSchema),
     defaultValues: {
+      creation_mode: "twin",
+      twin_of_service_id: "",
       name: "",
       slug: "",
       base_url: "",
@@ -216,14 +228,22 @@ function AddToolDialog({
         <form
           className="space-y-3"
           onSubmit={form.handleSubmit(async (values) => {
-            const { base_url, auth_method, auth_key_name, ...metadata } =
-              values;
+            const {
+              creation_mode,
+              twin_of_service_id,
+              base_url,
+              auth_method,
+              auth_key_name,
+              openapi_spec_url,
+              ...metadata
+            } = values;
             const body: Record<string, unknown> = {
               ...metadata,
               offering_kind: "tool",
             };
-            if (!body.openapi_spec_url) delete body.openapi_spec_url;
-            if (admin)
+            if (creation_mode === "twin") {
+              body.twin_of_service_id = twin_of_service_id;
+            } else {
               Object.assign(body, {
                 base_url,
                 auth_method,
@@ -235,8 +255,11 @@ function AddToolDialog({
                   allowed_owner_ids: [],
                 },
               });
+              if (openapi_spec_url) body.openapi_spec_url = openapi_spec_url;
+            }
             try {
               const created = await mutation.mutateAsync({ body });
+              onCreated(created);
               onOpenChange(false);
               form.reset();
               toast.success("Tool created");
@@ -245,7 +268,53 @@ function AddToolDialog({
             }
           })}
         >
-          {["name", "slug", "supplier", "openapi_spec_url"].map((name) => (
+          <label className="block text-12">
+            Creation method
+            <select
+              aria-label="Creation method"
+              className="h-8 w-full rounded-lg border border-input bg-background"
+              {...form.register("creation_mode")}
+            >
+              <option value="twin">From an existing catalog service</option>
+              <option value="new">New service</option>
+            </select>
+          </label>
+          {form.watch("creation_mode") === "twin" && (
+            <label className="block text-12">
+              Source service
+              <select
+                aria-label="Source service"
+                className="h-8 w-full rounded-lg border border-input bg-background"
+                {...form.register("twin_of_service_id")}
+              >
+                <option value="">Choose a service</option>
+                {services
+                  .filter(
+                    (service) =>
+                      service.service_type === "http" &&
+                      service.offering_kind !== "tool" &&
+                      [
+                        "none",
+                        "bearer",
+                        "header",
+                        "query",
+                        "query_param",
+                        "basic",
+                      ].includes(service.auth_method),
+                  )
+                  .map((service) => (
+                    <option key={service.id} value={service.id}>
+                      {service.name} ({service.slug})
+                    </option>
+                  ))}
+              </select>
+              <p className="mt-1 text-11 text-muted-foreground">
+                Copies transport and operations as drafts. Credentials stay with
+                the source.
+              </p>
+            </label>
+          )}
+          {["name", "slug", "supplier"].map((name) => (
             <label key={name} className="block text-12">
               {name.replaceAll("_", " ")}
               <Input
@@ -255,35 +324,41 @@ function AddToolDialog({
               />
             </label>
           ))}
-          <fieldset
-            disabled={!admin}
-            title={
-              !admin
-                ? "Transport and credential configuration requires platform admin authority"
-                : undefined
-            }
-            className="space-y-3"
-          >
-            <label className="block text-12">
-              Base URL
-              <Input {...form.register("base_url")} />
-            </label>
-            <label className="block text-12">
-              Auth method
-              <select
-                {...form.register("auth_method")}
-                className="h-8 w-full rounded-lg border border-input bg-background"
-              >
-                <option value="none">None</option>
-                <option value="bearer">Bearer</option>
-                <option value="header">Header</option>
-              </select>
-            </label>
-            <label className="block text-12">
-              Key header
-              <Input {...form.register("auth_key_name")} />
-            </label>
-          </fieldset>
+          {form.watch("creation_mode") === "new" && (
+            <fieldset
+              disabled={!admin}
+              title={
+                !admin
+                  ? "Transport and credential configuration requires platform admin authority"
+                  : undefined
+              }
+              className="space-y-3"
+            >
+              <label className="block text-12">
+                Base URL
+                <Input {...form.register("base_url")} />
+              </label>
+              <label className="block text-12">
+                Auth method
+                <select
+                  {...form.register("auth_method")}
+                  className="h-8 w-full rounded-lg border border-input bg-background"
+                >
+                  <option value="none">None</option>
+                  <option value="bearer">Bearer</option>
+                  <option value="header">Header</option>
+                </select>
+              </label>
+              <label className="block text-12">
+                Key header
+                <Input {...form.register("auth_key_name")} />
+              </label>
+              <label className="block text-12">
+                OpenAPI spec URL
+                <Input {...form.register("openapi_spec_url")} />
+              </label>
+            </fieldset>
+          )}
           <div className="flex flex-wrap gap-1">
             {topics.map((topic) => (
               <Button
@@ -324,7 +399,9 @@ function AddToolDialog({
                 !form.formState.isDirty ||
                 !form.watch("name") ||
                 !form.watch("slug") ||
-                (admin && !form.watch("base_url"))
+                (form.watch("creation_mode") === "new"
+                  ? !form.watch("base_url")
+                  : !form.watch("twin_of_service_id"))
               }
               isLoading={mutation.isPending}
             >
@@ -334,5 +411,36 @@ function AddToolDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function CreatedToolStatus({ tool }: { tool: DownstreamService }) {
+  const { data: operations = [] } = useEndpoints(tool.id);
+  return (
+    <section
+      className="rounded-xl border border-border/50 bg-card p-4 text-12"
+      role="status"
+    >
+      <p>
+        {tool.name} created ·{" "}
+        {
+          operations.filter((operation) => operation.publication === "draft")
+            .length
+        }{" "}
+        draft operations
+      </p>
+      <div className="mt-3 flex gap-2">
+        <Button variant="secondary" asChild>
+          <Link to="/services/$serviceId/edit" params={{ serviceId: tool.id }}>
+            Configure credential and pricing
+          </Link>
+        </Button>
+        <Button variant="ghost" asChild>
+          <Link to="/services/$serviceId" params={{ serviceId: tool.id }}>
+            Review and publish operations
+          </Link>
+        </Button>
+      </div>
+    </section>
   );
 }

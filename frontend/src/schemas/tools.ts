@@ -14,7 +14,7 @@ export const executionSchema = z.enum([
   "job_poll",
 ]);
 export const importSourceSchema = z.object({
-  kind: z.enum(["monid", "vendor_spec", "manual"]),
+  kind: z.enum(["monid", "vendor_spec", "manual", "catalog_twin"]),
   reference: z.string().max(512),
   version: z.string().max(128).nullable().optional(),
   imported_at: z.string().nullable().optional(),
@@ -28,15 +28,32 @@ export const toolMetadataFields = {
     .optional(),
   supplier: z.string().max(128).optional(),
 };
-export const addToolSchema = z.object({
-  ...toolMetadataFields,
-  name: z.string().min(1).max(200),
-  slug: z.string().regex(/^[a-z][a-z0-9-]*$/),
-  base_url: z.url().optional().or(z.literal("")),
-  auth_method: z.enum(["none", "bearer", "header"]),
-  auth_key_name: z.string().max(128),
-  openapi_spec_url: z.url().optional().or(z.literal("")),
-});
+export const addToolSchema = z
+  .object({
+    ...toolMetadataFields,
+    creation_mode: z.enum(["twin", "new"]),
+    twin_of_service_id: z.string(),
+    name: z.string().min(1).max(200),
+    slug: z.string().regex(/^[a-z][a-z0-9-]*$/),
+    base_url: z.url().optional().or(z.literal("")),
+    auth_method: z.enum(["none", "bearer", "header"]),
+    auth_key_name: z.string().max(128),
+    openapi_spec_url: z.url().optional().or(z.literal("")),
+  })
+  .superRefine((value, ctx) => {
+    if (value.creation_mode === "twin" && !value.twin_of_service_id)
+      ctx.addIssue({
+        code: "custom",
+        path: ["twin_of_service_id"],
+        message: "Choose a source service",
+      });
+    if (value.creation_mode === "new" && !value.base_url)
+      ctx.addIssue({
+        code: "custom",
+        path: ["base_url"],
+        message: "Base URL is required",
+      });
+  });
 export type PublicationState = z.infer<typeof publicationSchema>;
 export type ToolOffering = {
   id: string;
