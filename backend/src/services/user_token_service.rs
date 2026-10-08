@@ -1915,12 +1915,12 @@ pub async fn handle_oauth_callback(
     // SEC-H2: Use no-redirect client for token exchange
     let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
-        request = oauth_flow::authenticate_token_request(
+        let (username, password) = oauth_flow::token_basic_auth_credentials(
             &provider,
-            request,
             &resolved.client_id,
             resolved.client_secret.as_deref(),
         )?;
+        request = request.basic_auth(username, password);
     }
     let token_response = request
         .send()
@@ -2575,12 +2575,12 @@ async fn refresh_user_api_key_under_lease(
 
     let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
-        request = oauth_flow::authenticate_token_request(
+        let (username, password) = oauth_flow::token_basic_auth_credentials(
             &provider,
-            request,
             &client_id,
             client_secret.as_deref(),
         )?;
+        request = request.basic_auth(username, password);
     }
 
     let response = request

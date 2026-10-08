@@ -118,12 +118,11 @@ pub fn token_request(
 
 /// Stripe Apps authenticates token requests with the developer API key as
 /// the Basic username, rather than the OAuth client ID.
-pub fn authenticate_token_request(
+pub fn token_basic_auth_credentials<'a>(
     provider: &ProviderConfig,
-    request: reqwest::RequestBuilder,
-    client_id: &str,
-    client_secret: Option<&str>,
-) -> AppResult<reqwest::RequestBuilder> {
+    client_id: &'a str,
+    client_secret: Option<&'a str>,
+) -> AppResult<(&'a str, Option<&'a str>)> {
     if is_stripe_apps(provider) {
         let secret = client_secret
             .filter(|secret| !secret.is_empty())
@@ -132,9 +131,9 @@ pub fn authenticate_token_request(
                     "Stripe OAuth requires the app developer secret API key".into(),
                 )
             })?;
-        Ok(request.basic_auth(secret, Some("")))
+        Ok((secret, Some("")))
     } else {
-        Ok(request.basic_auth(client_id, client_secret))
+        Ok((client_id, client_secret))
     }
 }
 
@@ -277,8 +276,9 @@ pub async fn refresh_oauth_token(
         &params,
     )?;
     if use_basic_auth {
-        request =
-            authenticate_token_request(&provider, request, &client_id, client_secret.as_deref())?;
+        let (username, password) =
+            token_basic_auth_credentials(&provider, &client_id, client_secret.as_deref())?;
+        request = request.basic_auth(username, password);
     }
     let response = request
         .send()
@@ -449,15 +449,14 @@ mod tests {
             if grant == "refresh_token" {
                 params[1] = ("refresh_token".into(), "rt_fixture".into());
             }
-            let request = authenticate_token_request(
-                &provider,
-                token_request(&provider, "https://api.stripe.com/v1/oauth/token", &params).unwrap(),
-                "ca_fixture",
-                Some("sk_fixture"),
-            )
-            .unwrap()
-            .build()
-            .unwrap();
+            let (username, password) =
+                token_basic_auth_credentials(&provider, "ca_fixture", Some("sk_fixture")).unwrap();
+            let request =
+                token_request(&provider, "https://api.stripe.com/v1/oauth/token", &params)
+                    .unwrap()
+                    .basic_auth(username, password)
+                    .build()
+                    .unwrap();
             use base64::Engine;
             assert_eq!(
                 request.headers()[reqwest::header::AUTHORIZATION],
@@ -472,15 +471,7 @@ mod tests {
             assert!(!body.contains("client_secret"));
             assert!(!body.contains("redirect_uri"));
         }
-        assert!(
-            authenticate_token_request(
-                &provider,
-                reqwest::Client::new().post("https://example.com"),
-                "ca_fixture",
-                None
-            )
-            .is_err()
-        );
+        assert!(token_basic_auth_credentials(&provider, "ca_fixture", None).is_err());
     }
 
     #[test]
@@ -511,15 +502,13 @@ mod tests {
             ("client_id".into(), "client".into()),
             ("code_verifier".into(), "verifier".into()),
         ];
-        let request = authenticate_token_request(
-            &provider,
-            token_request(&provider, "https://example.com/token", &params).unwrap(),
-            "client",
-            Some("secret"),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
+        let (username, password) =
+            token_basic_auth_credentials(&provider, "client", Some("secret")).unwrap();
+        let request = token_request(&provider, "https://example.com/token", &params)
+            .unwrap()
+            .basic_auth(username, password)
+            .build()
+            .unwrap();
         assert_eq!(
             request.headers()[reqwest::header::AUTHORIZATION],
             "Basic Y2xpZW50OnNlY3JldA=="
@@ -538,15 +527,13 @@ mod tests {
     #[test]
     fn basic_auth_for_other_providers_preserves_client_credentials() {
         let provider = test_provider();
-        let request = authenticate_token_request(
-            &provider,
-            reqwest::Client::new().post("https://example.com"),
-            "client",
-            Some("secret"),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
+        let (username, password) =
+            token_basic_auth_credentials(&provider, "client", Some("secret")).unwrap();
+        let request = reqwest::Client::new()
+            .post("https://example.com")
+            .basic_auth(username, password)
+            .build()
+            .unwrap();
         assert_eq!(
             request.headers()[reqwest::header::AUTHORIZATION],
             "Basic Y2xpZW50OnNlY3JldA=="
