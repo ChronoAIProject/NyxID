@@ -1,8 +1,9 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
+import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
-import { NyxBotSettingsButton } from "./nyxbot-settings-dialog";
+import { NyxBotSettingsButton } from "./nyxbot-settings-button";
 import {
   ChannelBadge,
   PendingEventsNote,
@@ -114,11 +115,8 @@ export function AssistantChatPage() {
   const adoptConversation = useCallback(
     (conversationId: string) => {
       void navigate({
-        to: "/assistant" as never,
-        search: {
-          c: conversationId,
-          ...(fixtureMode ? { mock: 1 } : {}),
-        } as never,
+        to: "/assistant",
+        search: (previous) => ({ ...parseAccountPanelSearch(previous), c: conversationId, ...(fixtureMode ? { mock: 1 as const } : {}) }),
         replace: true,
       });
     },
@@ -126,8 +124,8 @@ export function AssistantChatPage() {
   );
   const repairMissingConversation = useCallback(() => {
     void navigate({
-      to: "/assistant" as never,
-      search: (fixtureMode ? { mock: 1 } : {}) as never,
+      to: "/assistant",
+      search: (previous) => ({ ...parseAccountPanelSearch(previous), ...(fixtureMode ? { mock: 1 as const } : {}) }),
       replace: true,
     });
   }, [fixtureMode, navigate]);
@@ -167,11 +165,11 @@ export function AssistantChatPage() {
   function selectConversation(conversationId: string) {
     setComposerFocusRequest((value) => value + 1);
     void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant" as never,
+      to: "/assistant",
       search: {
         c: conversationId,
         ...(fixtureMode ? { mock: 1 } : {}),
-      } as never,
+      },
     }));
   }
 
@@ -179,11 +177,11 @@ export function AssistantChatPage() {
     setComposerFocusRequest((value) => value + 1);
     chat.newChat();
     void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant" as never,
+      to: "/assistant",
       search: {
         draft: true,
         ...(fixtureMode ? { mock: 1 } : {}),
-      } as never,
+      },
     }));
   }
 
@@ -193,8 +191,8 @@ export function AssistantChatPage() {
       await chat.deleteConversation(conversationId);
       if (selectedId === conversationId) {
         void navigate({
-          to: "/assistant" as never,
-          search: (fixtureMode ? { mock: 1 } : {}) as never,
+          to: "/assistant",
+          search: (fixtureMode ? { mock: 1 } : {}),
         });
       }
     } catch (error) {
@@ -335,8 +333,8 @@ export function DirectAssistantChatPage() {
   const adoptConversation = useCallback(
     (conversationId: string) => {
       void navigate({
-        to: "/assistant" as never,
-        search: { c: conversationId } as never,
+        to: "/assistant",
+        search: (previous) => ({ ...parseAccountPanelSearch(previous), c: conversationId }),
         replace: true,
       });
     },
@@ -360,8 +358,8 @@ export function DirectAssistantChatPage() {
   useEffect(() => {
     if (!chat.isMissing) return;
     void navigate({
-      to: "/assistant" as never,
-      search: { draft: true } as never,
+      to: "/assistant",
+      search: (previous) => ({ ...parseAccountPanelSearch(previous), draft: true }),
       replace: true,
     });
   }, [chat.isMissing, navigate]);
@@ -369,16 +367,16 @@ export function DirectAssistantChatPage() {
   function selectConversation(conversationId: string) {
     setComposerFocusRequest((value) => value + 1);
     void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant" as never,
-      search: { c: conversationId } as never,
+      to: "/assistant",
+      search: { c: conversationId },
     }));
   }
 
   function createNewChat() {
     setComposerFocusRequest((value) => value + 1);
     void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant" as never,
-      search: { draft: true } as never,
+      to: "/assistant",
+      search: { draft: true },
     }));
   }
 
@@ -443,11 +441,13 @@ export function DirectAssistantChatPage() {
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <DirectModeBanner />
+        <AssistantLinkModalHost>
         <ChatMessageList
           session={chat.session}
           bottomInset={composerHeight}
           emptyDescription={DIRECT_MODE_COPY}
         />
+        </AssistantLinkModalHost>
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <ChatComposer
             active={chat.isStreaming}
@@ -512,8 +512,8 @@ function NyxAgentThreadPage() {
   const adopt = useCallback((id: string) => {
     if (selection.current !== selectedId) return;
     void navigate({
-      to: "/assistant" as never,
-      search: { c: id, ...(search.mock ? { mock: 1 } : {}) } as never,
+      to: "/assistant",
+      search: (previous) => ({ ...parseAccountPanelSearch(previous), c: id, ...(search.mock ? { mock: 1 as const } : {}) }),
       replace: true,
     });
   }, [navigate, search.mock, selectedId]);
@@ -565,8 +565,8 @@ function NyxAgentThreadPage() {
       return;
     }
     void navigate({
-      to: "/assistant" as never,
-      search: { c: latestThreadId, ...(search.mock ? { mock: 1 } : {}) } as never,
+      to: "/assistant",
+      search: (previous) => ({ ...parseAccountPanelSearch(previous), c: latestThreadId, ...(search.mock ? { mock: 1 as const } : {}) }),
       replace: true,
     });
   }, [
@@ -582,8 +582,8 @@ function NyxAgentThreadPage() {
 
   function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
     void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant" as never,
-      search: { ...next, ...(search.mock ? { mock: 1 } : {}) } as never,
+      to: "/assistant",
+      search: { ...next, ...(search.mock ? { mock: 1 } : {}) },
     }));
   }
 

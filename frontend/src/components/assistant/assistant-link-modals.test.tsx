@@ -1,7 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantLinkModalHost } from "./assistant-link-modals";
+
+const account = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => account }));
+beforeEach(() => account.open.mockReset());
 
 vi.mock("@/components/connect-link/connect-link-content", () => ({
   ConnectLinkContent: ({
@@ -92,4 +96,17 @@ describe("AssistantLinkModalHost", () => {
       screen.queryByTestId("channel-modal-content"),
     ).not.toBeInTheDocument();
   });
+});
+
+it("opens same-origin account links on the current chat and leaves modified clicks alone", async () => {
+  const user = userEvent.setup();
+  render(<AssistantLinkModalHost><a href="/assistant?panel=settings&panelTab=security">Security settings</a></AssistantLinkModalHost>);
+  const link = screen.getByRole("link", { name: "Security settings" });
+  await user.keyboard("{Control>}");
+  await user.click(link);
+  await user.keyboard("{/Control}");
+  expect(account.open).not.toHaveBeenCalled();
+  await user.click(link);
+  expect(account.open).toHaveBeenCalledWith("settings", { panelTab: "security" }, link);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

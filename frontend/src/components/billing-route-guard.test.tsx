@@ -41,49 +41,65 @@ beforeEach(() => {
 });
 
 describe("BillingRouteGuard", () => {
-  it("redirects after billing capability resolves unavailable", async () => {
-    render(
-      <BillingRouteGuard>
-        <div>Billing content</div>
-      </BillingRouteGuard>,
-    );
+    it("redirects after billing capability resolves unavailable", async () => {
+      render(
+        <BillingRouteGuard>
+          <div>Billing content</div>
+        </BillingRouteGuard>,
+      );
 
-    expect(screen.queryByText("Billing content")).not.toBeInTheDocument();
-    expect(navigate).not.toHaveBeenCalled();
+      expect(screen.queryByText("Billing content")).not.toBeInTheDocument();
+      expect(navigate).not.toHaveBeenCalled();
 
-    act(() => {
-      useAuthStore.setState({
-        user: testUser(false),
-        isAuthenticated: true,
-        isLoading: false,
+      act(() => {
+        useAuthStore.setState({
+          user: testUser(false),
+          isAuthenticated: true,
+          isLoading: false,
+        });
       });
+
+      await waitFor(() => {
+        expect(navigate).toHaveBeenCalledWith({
+          to: "/dashboard",
+          replace: true,
+        });
+      });
+      expect(screen.queryByText("Billing content")).not.toBeInTheDocument();
     });
 
-    await waitFor(() => {
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/dashboard",
-        replace: true,
+    it("renders when billing capability is available", () => {
+      act(() => {
+        useAuthStore.setState({
+          user: testUser(true),
+          isAuthenticated: true,
+          isLoading: false,
+        });
       });
+
+      render(
+        <BillingRouteGuard>
+          <div>Billing content</div>
+        </BillingRouteGuard>,
+      );
+
+      expect(screen.getByText("Billing content")).toBeInTheDocument();
+      expect(navigate).not.toHaveBeenCalled();
     });
-    expect(screen.queryByText("Billing content")).not.toBeInTheDocument();
+});
+
+it("redirects a signed-in assistant visitor with a missing billing capability", async () => {
+  useAuthStore.setState({
+    isAuthenticated: true,
+    isLoading: false,
+    user: { ...testUser(true), capabilities: {} },
   });
-
-  it("renders when billing capability is available", () => {
-    act(() => {
-      useAuthStore.setState({
-        user: testUser(true),
-        isAuthenticated: true,
-        isLoading: false,
-      });
-    });
-
-    render(
-      <BillingRouteGuard>
-        <div>Billing content</div>
-      </BillingRouteGuard>,
-    );
-
-    expect(screen.getByText("Billing content")).toBeInTheDocument();
-    expect(navigate).not.toHaveBeenCalled();
-  });
+  render(
+    <BillingRouteGuard>
+      <div>Billing content</div>
+    </BillingRouteGuard>,
+  );
+  await waitFor(() =>
+    expect(navigate).toHaveBeenCalledWith({ to: "/dashboard", replace: true }),
+  );
 });

@@ -1,3 +1,5 @@
+import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel-search";
+
 /**
  * The `/assistant` search contract, in one place: the router validates with
  * it and the page reads with it, so the two cannot drift into disagreeing
@@ -17,7 +19,7 @@
  * search parser hands back a real boolean for its own round-tripped links,
  * but a hand-typed or copy-pasted URL arrives as a string.
  */
-export interface AssistantSearch {
+export interface AssistantSearch extends AccountPanelSearch {
   readonly c?: string;
   readonly draft?: boolean;
   readonly agent?: string;
@@ -25,9 +27,9 @@ export interface AssistantSearch {
   readonly mock?: 1;
 }
 
-export function parseAssistantSearch(
+function parseChatSearch(
   search: Record<string, unknown>,
-): AssistantSearch {
+): Omit<AssistantSearch, keyof AccountPanelSearch> {
   return {
     ...(typeof search.c === "string" ? { c: search.c } : {}),
     ...(search.draft === true || search.draft === "true"
@@ -42,3 +44,5 @@ export function parseAssistantSearch(
       : {}),
   };
 }
+
+export const parseAssistantSearch = withAccountPanelSearch(parseChatSearch);

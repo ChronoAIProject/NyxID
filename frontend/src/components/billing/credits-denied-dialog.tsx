@@ -1,5 +1,9 @@
-import type { ReactNode } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useAuthStore } from "@/stores/auth-store";
+import { useAccountPanel } from "@/hooks/use-account-panel";
+import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
+import { restorePanelFocus } from "@/lib/assistant/panel-focus";
+import { useRef, type ReactNode } from "react";
+import { useNavigate, useRouter, useRouterState } from "@tanstack/react-router";
 import { CreditCard, ShieldCheck } from "lucide-react";
 import { DrainedCreditsIcon } from "@/components/icons/empty-state";
 import { Button } from "@/components/ui/button";
@@ -32,6 +36,12 @@ export default function CreditsDeniedDialog({
   onDismiss,
 }: CreditsDeniedDialogProps) {
   const navigate = useNavigate();
+  const router = useRouter();
+  const purchaseOrigin = useRef<{ path: string; actor?: string } | null>(null);
+  const account = useAccountPanel();
+  const opener = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const purchaseRequested = useRef(false);
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const org = typeof payer === "object" ? payer.org : null;
   const orgs = useOrgs();
   const orgName =
@@ -42,16 +52,33 @@ export default function CreditsDeniedDialog({
   const canPurchase = billingAvailable && !org;
 
   function purchase() {
+    purchaseRequested.current = true;
+    purchaseOrigin.current = { path: router.state.location.pathname, actor: useAuthStore.getState().user?.id };
     onDismiss();
-    void navigate({
-      to: "/billing",
-      search: { tab: "billing", action: "topup" },
-    });
+  }
+
+  function finishClose(event: Event) {
+    event.preventDefault();
+    if (!purchaseRequested.current) {
+      restorePanelFocus(opener.current);
+      return;
+    }
+    setTimeout(() => {
+      const origin = purchaseOrigin.current;
+      if (!origin || router.state.location.pathname !== origin.path || useAuthStore.getState().user?.id !== origin.actor) return;
+      if (isAssistantShellRoute(pathname)) {
+        void account.open("billing", { panelTab: "billing", panelAction: "topup" }, opener.current);
+      } else if (pathname.startsWith("/assistant/")) {
+        void navigate({ to: "/assistant", search: { panel: "billing", panelTab: "billing", panelAction: "topup" } });
+      } else {
+        void navigate({ to: "/billing", search: { tab: "billing", action: "topup" } });
+      }
+    }, 0);
   }
 
   return (
     <Dialog open onOpenChange={(open) => !open && onDismiss()}>
-      <DialogContent className="md:max-w-[420px]">
+      <DialogContent className="md:max-w-[420px]" onCloseAutoFocus={finishClose}>
         {/* Cropped to the art: the family viewBox leaves room below it. */}
         <DrainedCreditsIcon
           viewBox="4 -2 94 104"

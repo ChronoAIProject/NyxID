@@ -139,7 +139,7 @@ function ChatRow({
         ) : null}
       </div>
       <p className="text-11 text-muted-foreground">{summary}</p>
-      <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-11 text-muted-foreground">
+      <div className="grid grid-cols-[auto_1fr] @max-[480px]/channel-bots:grid-cols-1 items-center gap-x-3 gap-y-1.5 text-11 text-muted-foreground">
         {group ? (
           <>
             <span>Answers</span>

@@ -19,7 +19,7 @@ import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
-import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-dialog";
+import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
 import { Button } from "@/components/ui/button";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
