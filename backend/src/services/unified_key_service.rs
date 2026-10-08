@@ -4774,15 +4774,17 @@ mod tests {
 
     use super::{
         AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
-        OpenApiSpecUrlInput, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy, SshCreateParams,
-        UpdateCredentialAction, auto_provision_no_auth_services, auto_provision_source_id,
-        build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
-        direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
+        OpenApiSpecUrlInput, OwnerGrants, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy,
+        SshCreateParams, UpdateCredentialAction, auto_provision_no_auth_services,
+        auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
+        derive_effective_auth, direct_credential_type_for_service,
+        direct_credential_type_from_auth_method, ensure_user_api_key_for_update,
+        exact_slug_conflict, generate_slug_from_label, get_key,
         identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
-        is_duplicate_slug_app_error, list_keys, oauth_connection_status, random_slug_suffix,
-        reconcile_provider_key_for_service_routing, resolve_openapi_spec_url, resolve_unique_slug,
-        revoke_key_if_pending, slug_candidate_with_suffix, validate_catalog_credential,
+        is_duplicate_slug_app_error, list_keys, list_keys_read_only_with_grants,
+        oauth_connection_status, random_slug_suffix, reconcile_provider_key_for_service_routing,
+        resolve_openapi_spec_url, resolve_unique_slug, revoke_key_if_pending,
+        slug_candidate_with_suffix, validate_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{

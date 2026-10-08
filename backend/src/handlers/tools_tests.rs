@@ -35,6 +35,13 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
     assert_eq!(status, StatusCode::OK, "{endpoint}");
     assert_eq!(endpoint["publication"], "draft");
     assert_eq!(endpoint["is_active"], false);
+    let mcp_session = f
+        .state
+        .mcp_sessions
+        .create_with_proxy_access(&f.owner, true)
+        .await
+        .unwrap()
+        .unwrap();
     for (method, path, body) in [
         ("GET", "/api/v1/mcp/config", None),
         (
@@ -57,7 +64,11 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
             ),
         ),
     ] {
-        let (status, result) = request(&f.state, method, path, &f.human_token, body).await;
+        let (status, result) = if path == "/mcp" {
+            mcp_request(&f.state, &f.human_token, &mcp_session, body.unwrap()).await
+        } else {
+            request(&f.state, method, path, &f.human_token, body).await
+        };
         assert_eq!(status, StatusCode::OK, "{path}: {result}");
         assert!(!result.to_string().contains("draft_operation"), "{result}");
     }
@@ -71,7 +82,7 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{result}");
     assert_eq!(result["error_code"], 12600, "{result}");
-    let (_,result)=request(&f.state,"POST","/mcp",&f.human_token,Some(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":format!("{}__draft_operation",f.service.slug),"arguments_json":"{}"}}}))).await;
+    let (_,result)=mcp_request(&f.state,&f.human_token,&mcp_session,json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":format!("{}__draft_operation",f.service.slug),"arguments_json":"{}"}}})).await;
     assert_eq!(result["result"]["isError"], true, "{result}");
     assert!(result.to_string().contains("12600"), "{result}");
     let (status,role)=request(&f.state,"POST","/api/v1/admin/roles",&f.human_token,Some(json!({"name":"Tools editor","slug":"tools-editor","permissions":["nyxid:catalog:services:read","nyxid:catalog:services:write"]}))).await;
@@ -87,6 +98,9 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
         .unwrap()
         .unwrap();
     let bearer = token(&f, None).await;
+    let (status, topics) = request(&f.state, "GET", "/api/v1/tools/topics", &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{topics}");
+    assert_eq!(topics.as_array().unwrap().len(), 29);
     let (status, published) = request(
         &f.state,
         "POST",
@@ -123,4 +137,30 @@ async fn tool_publication_gates_all_discovery_proxy_and_editor_fields() {
     assert!(rows.is_active);
     assert_eq!(rows.operation_generation, 2);
     f.state.db.drop().await.unwrap();
+}
+
+async fn mcp_request(
+    state: &crate::AppState,
+    bearer: &str,
+    session: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("mcp-session-id", session)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let response = super::curation_tests::router(state)
+        .oneshot(req)
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
 }

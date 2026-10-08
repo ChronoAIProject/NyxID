@@ -235,7 +235,7 @@ mod tests {
         db.collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
             .update_one(
                 doc! {"_id":endpoint.id},
-                doc! {"$set":{"$or":[{"publication":"published"},{"publication":{"$exists":false}}],"is_active":true}},
+                doc! {"$set":{"publication":"published","is_active":true}},
             )
             .await
             .unwrap();
@@ -257,11 +257,7 @@ mod tests {
         );
         db.drop().await.unwrap();
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
     #[test]
     fn free_price_requires_every_lane_component_to_be_free() {
         let mut lane: crate::models::service_billing::LanePricing = serde_json::from_value(

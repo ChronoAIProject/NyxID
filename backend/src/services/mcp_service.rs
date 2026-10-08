@@ -343,6 +343,7 @@ pub struct McpCatalogDiagnostics {
 }
 
 pub struct McpOperationCatalog {
+    pub unpublished_services: Vec<McpToolService>,
     pub services: Vec<McpToolService>,
     pub diagnostics: McpCatalogDiagnostics,
 }
@@ -855,6 +856,16 @@ pub async fn load_operation_catalog(
         .iter()
         .filter(|service| service.invalid_openapi_contract)
         .count();
+    let mut unpublished_services = Vec::new();
+    let mut published_services = Vec::new();
+    for service in visible {
+        if service.endpoints.is_empty() {
+            unpublished_services.push(service);
+        } else {
+            published_services.push(service);
+        }
+    }
+    let mut visible = published_services;
     visible.retain(|service| {
         let valid = operation_set_is_publishable(service);
         if !valid {
@@ -872,6 +883,7 @@ pub async fn load_operation_catalog(
         .filter(|service| service.is_generic_proxy)
         .count();
     Ok(McpOperationCatalog {
+        unpublished_services,
         services: visible,
         diagnostics: McpCatalogDiagnostics {
             no_visible_connections,
@@ -5787,11 +5799,16 @@ pub async fn unpublished_tool(
     db: &mongodb::Database,
     tool_name: &str,
     services: &[McpToolService],
+    unpublished_services: &[McpToolService],
 ) -> AppResult<bool> {
     let Some((slug, name)) = tool_name.split_once("__") else {
         return Ok(false);
     };
-    let Some(service) = services.iter().find(|s| s.service_slug == slug) else {
+    let Some(service) = services
+        .iter()
+        .chain(unpublished_services)
+        .find(|s| s.service_slug == slug)
+    else {
         return Ok(false);
     };
     let catalog_id = match &service.source {

@@ -38,7 +38,7 @@ An editor's metadata-only create uses an internal no-auth transport placeholder 
 |---|---|---|
 | GET | `/api/v1/tools` | Ready published offerings under the caller's live platform ACL; admins can see missing-credential offerings |
 | GET | `/api/v1/tools/{slug}` | One visible offering |
-| GET | `/api/v1/tools/topics` | Controlled topic vocabulary |
+| GET | `/api/v1/tools/topics` | Public controlled topic vocabulary |
 | GET | `/api/v1/tools/editor-authority` | Current human catalog read/write authority for navigation |
 | POST | `/api/v1/services/{id}/endpoints/{endpoint_id}/publication` | Set one operation's state |
 | POST | `/api/v1/services/{id}/publication` | Set 1–200 explicitly named operations |

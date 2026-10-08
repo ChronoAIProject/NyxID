@@ -1570,7 +1570,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let tools_routes = Router::new()
-        .route("/topics", get(handlers::catalog::tool_topics))
         .route("/editor-authority", get(handlers::tools::editor_authority))
         .route("/", get(handlers::tools::list))
         .route("/{slug}", get(handlers::tools::get))
@@ -1788,6 +1787,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .route("/tools/topics", get(handlers::catalog::tool_topics))
         .route(
             "/machines/pair/request",
             post(handlers::machine_setup::request_pair),

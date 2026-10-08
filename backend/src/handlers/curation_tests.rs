@@ -124,7 +124,7 @@ pub(super) async fn token(f: &Fixture, scope: Option<&str>) -> String {
     .access_token
 }
 
-fn router(state: &AppState) -> Router {
+pub(super) fn router(state: &AppState) -> Router {
     let (public, private) = crate::routes::build_router_with_state(state.clone());
     public.merge(private).with_state(state.clone())
 }
