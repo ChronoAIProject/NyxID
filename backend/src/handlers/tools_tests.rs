@@ -204,7 +204,17 @@ async fn tool_twins_copy_contracts_as_drafts_without_mutating_source_or_copying_
         let copied = &endpoints["endpoints"][0];
         assert_eq!(copied["publication"], "draft");
         assert_eq!(copied["is_active"], false);
-        assert_eq!(copied["operation_generation"], 1);
+        let persisted = f
+            .state
+            .db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": copied["id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.operation_generation, 1);
         assert_ne!(copied["id"], source_endpoint["id"]);
         assert_eq!(copied["data_scope"], "public");
     }
