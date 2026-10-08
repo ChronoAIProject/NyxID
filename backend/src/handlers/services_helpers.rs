@@ -272,7 +272,7 @@ pub async fn service_to_response_with_viewer(
         offering_kind: s.offering_kind,
         topics: s.topics.clone(),
         supplier: s.supplier.clone(),
-        import_source: s.import_source.clone(),
+        import_source: s.import_source.clone().map(Into::into),
         provider_config_id: s.provider_config_id.clone(),
         credential_configured: match inspection_keys {
             Some(keys) => {

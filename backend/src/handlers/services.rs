@@ -43,7 +43,7 @@ pub struct CreateServiceRequest {
     pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     pub topics: Option<Vec<String>>,
     pub supplier: Option<String>,
-    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
 
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
@@ -157,7 +157,7 @@ pub struct ServiceResponse {
     pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub topics: Vec<String>,
     pub supplier: Option<String>,
-    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
 
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
@@ -419,7 +419,7 @@ pub struct UpdateServiceRequest {
     pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     pub topics: Option<Vec<String>>,
     pub supplier: Option<String>,
-    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_targets: Option<std::collections::BTreeMap<String, String>>,
@@ -1507,7 +1507,11 @@ async fn create_service_inner(
         offering_kind: body.offering_kind.unwrap_or_default(),
         topics: body.topics.clone().unwrap_or_default(),
         supplier: body.supplier.clone(),
-        import_source: body.import_source.clone(),
+        import_source: body
+            .import_source
+            .clone()
+            .map(crate::services::catalog_import_source::CatalogImportSourceDto::into_model)
+            .transpose()?,
         git_http: None,
         destination_targets,
         owner_user_id: None,
@@ -2047,7 +2051,7 @@ async fn update_service_inner(
         proposed.supplier = Some(supplier.clone());
     }
     if let Some(source) = &body.import_source {
-        proposed.import_source = Some(source.clone());
+        proposed.import_source = Some(source.clone().into_model()?);
     }
     if body
         .credential

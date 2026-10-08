@@ -26,7 +26,7 @@ pub struct CatalogEntryResponse {
     pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub topics: Vec<String>,
     pub supplier: Option<String>,
-    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
 
     pub slug: String,
     pub resource_uri: String,
@@ -334,7 +334,7 @@ pub(crate) fn catalog_entry_response(
         offering_kind: entry.offering_kind,
         topics: entry.topics.clone(),
         supplier: entry.supplier.clone(),
-        import_source: entry.import_source.clone(),
+        import_source: entry.import_source.clone().map(Into::into),
         slug: entry.slug,
         resource_uri,
         name: entry.name,

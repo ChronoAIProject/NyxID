@@ -6,7 +6,7 @@ Tools are catalog services offered through NyxID-held credentials or without aut
 
 `DownstreamService.offering_kind` defaults to `ai_service`; curated offerings use `tool`. Tools require `service_category = internal` and `requires_user_credential = false`, with either `auth_method = none`, a stored master credential, or platform-key configuration. A master credential and `provider_config_id` remain mutually exclusive. Authenticated runtime twins are provider-less and use the existing encrypted master credential and live public/restricted platform ACL.
 
-`topics` allows up to 20 unique slugs from `GET /api/v1/tools/topics`. `supplier` identifies the API operator (128 characters maximum). `import_source` records kind (`monid`, `vendor_spec`, `manual`, `catalog_twin`), reference (512 characters), optional version (128 characters) and optional BSON `imported_at`.
+`topics` allows up to 20 unique slugs from `GET /api/v1/tools/topics`. `supplier` identifies the API operator (128 characters maximum). `import_source` records kind (`monid`, `vendor_spec`, `manual`, `catalog_twin`), reference (512 characters), optional version (128 characters) and optional `imported_at` (RFC3339 in the API, BSON datetime in MongoDB).
 
 Endpoint classifications are optional `data_scope` (`public`, `account`, `owned_resource`), optional `cost_class` (`free`, `metered`, `resource_backed`) and default `execution = http_operation` (`job_start` and `job_poll` are metadata options). They neither override billing nor introduce a job engine. All additions are serde-defaulted for legacy records.
 
