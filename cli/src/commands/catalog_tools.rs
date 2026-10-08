@@ -119,9 +119,6 @@ pub async fn run_admin(command: CatalogCommands) -> Result<()> {
                 let mut api = ApiClient::from_auth_checked(&auth).await?;
                 let id = service_id(&mut api, &service).await?;
                 let result: Value = api.get(&format!("/services/{id}/endpoints")).await?;
-                if matches!(auth.output, crate::cli::OutputFormat::Json) {
-                    return output::print_rows(&result, auth.output, None, &[]);
-                }
                 let mut display = result;
                 if published_only && let Some(rows) = display["endpoints"].as_array_mut() {
                     rows.retain(|row| row["publication"] == "published");
@@ -207,9 +204,6 @@ pub async fn run_tools(command: ToolsCommands) -> Result<()> {
         ToolsCommands::List { topic, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get("/tools").await?;
-            if matches!(auth.output, crate::cli::OutputFormat::Json) {
-                return output::print_rows(&result, auth.output, None, &[]);
-            }
             let mut display = result;
             if let Some(topic) = topic
                 && let Some(rows) = display.as_array_mut()
