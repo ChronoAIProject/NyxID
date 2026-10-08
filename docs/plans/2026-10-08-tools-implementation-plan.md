@@ -87,7 +87,11 @@ After A or B the admin stores the credential and prices through the existing ser
 
 Twins must not break the source: no shared mutable state, no change to the source row, and MCP names for the twin are `tools-<vendor>__<op>` by construction, so a user who has both the source connection and the tool sees two distinct tool sets.
 
-### 2.9 Documentation
+### 2.9 Programmatic POC (one tool, through the API only)
+
+Check in `scripts/tools/add-tool-twin.sh`: a small bash script that uses only the `nyxid` CLI (no direct Mongo, no code seeds) to create one tool from an existing catalog row and publish a chosen operation set. Parameters: `--source <slug>`, `--slug <tools-slug>`, `--supplier`, `--topic` (repeatable), `--publish <op>` (repeatable), optional `--credential-env`. It is idempotent: if the slug exists it updates topics/supplier and the publication set and never re-creates. Ship it with a documented invocation for `tools-x` (twin of `api-twitter`, publish `search_recent_tweets`, `get_user_by_username`, `get_user_tweets`) and run that invocation in the manual proof as step (h). This is the proof that future seeding is a scripted admin action, not a code change; code-level seeding is deferred until the structure is confirmed.
+
+### 2.10 Documentation
 
 - New `docs/TOOLS.md`: model, boundary, publication rule, roles, API, CLI, seeding, how to add a tool (flip in place, tool twin, new row with spec URL), billing lanes, Phase 2 items (overlay store, editor roles) listed as planned.
 - `docs/API.md`: Tools section. CLAUDE.md: one short rule under section 8 pointing at `docs/TOOLS.md`, plus the 12600 code line.
@@ -128,7 +132,8 @@ Commit after each step with conventional commits on the current branch. Never co
 4. `feat(tools): user tools listing and keys/catalog filtering` (2.5)
 5. `feat(cli): catalog endpoint/publish commands, tools commands, tool flags` (3)
 6. `feat(frontend): Tools page, admin Tools workspace, editor fields` (4)
-7. `docs(tools): TOOLS.md, API.md, CLAUDE.md` (2.9)
+7. `feat(tools): programmatic tool twin script` (2.9)
+8. `docs(tools): TOOLS.md, API.md, CLAUDE.md` (2.10)
 
 ## 6. Verification (must all pass before reporting done)
 
@@ -138,7 +143,7 @@ Environment facts for this Mac: Node is at `/opt/homebrew/bin` (`export PATH=/op
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test -p nyxid` (unfiltered) and `cargo test -p nyxid-cli`
 - `cd frontend && npm run lint && npm test && npm run build`
-- Manual proof (record the commands and outputs in the final report): with the backend running against local Mongo, (a) `nyxid service add --catalog-admin --twin-of api-firecrawl --slug tools-firecrawl --offering-kind tool --topic web-search --topic page-fetch --supplier Firecrawl`, (b) `nyxid catalog endpoint list tools-firecrawl` shows the copied operations as drafts, (c) a proxy call and `nyx__call_tool` on `tools-firecrawl__search` return 12600, (d) `nyxid catalog publish tools-firecrawl --operation search --operation scrape`, (e) `nyxid tools list` shows it (as admin; as a normal user it is hidden until a credential is stored, prove both), (f) store a dummy credential through the editor route and confirm the normal user now sees it and `GET /keys` does not show its platform binding, (g) flip `chrono-llm-public` in place with `nyxid service update --catalog-admin chrono-llm-public --offering-kind tool` and confirm it lists on `/tools` with its existing operations published and `/keys` still shows a user's BYOK rows unchanged. Live vendor calls are not required; a 401 from Firecrawl with the dummy key is an acceptable proof that the published path reaches the vendor.
+- Manual proof (record the commands and outputs in the final report): with the backend running against local Mongo, (a) `nyxid service add --catalog-admin --twin-of api-firecrawl --slug tools-firecrawl --offering-kind tool --topic web-search --topic page-fetch --supplier Firecrawl`, (b) `nyxid catalog endpoint list tools-firecrawl` shows the copied operations as drafts, (c) a proxy call and `nyx__call_tool` on `tools-firecrawl__search` return 12600, (d) `nyxid catalog publish tools-firecrawl --operation search --operation scrape`, (e) `nyxid tools list` shows it (as admin; as a normal user it is hidden until a credential is stored, prove both), (f) store a dummy credential through the editor route and confirm the normal user now sees it and `GET /keys` does not show its platform binding, (g) flip `chrono-llm-public` in place with `nyxid service update --catalog-admin chrono-llm-public --offering-kind tool` and confirm it lists on `/tools` with its existing operations published and `/keys` still shows a user's BYOK rows unchanged. (h) run `scripts/tools/add-tool-twin.sh` for `tools-x` twice and show the second run is a no-op. Live vendor calls are not required; a 401 from Firecrawl with the dummy key is an acceptable proof that the published path reaches the vendor.
 
 ## 7. Definition of done
 
