@@ -34,6 +34,7 @@ pub mod billing;
 pub mod billing_credit_schedules;
 pub mod billing_credits;
 pub(crate) mod body_limit;
+pub mod brand_icons;
 pub mod broker_bindings;
 pub mod catalog;
 pub mod channel_bots;

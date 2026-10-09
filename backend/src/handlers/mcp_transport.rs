@@ -1548,6 +1548,7 @@ async fn handle_initialize(
         "serverInfo": {
             "name": "NyxID",
             "version": env!("CARGO_PKG_VERSION"),
+            "icons": crate::handlers::brand_icons::mcp_server_icons(state),
         }
     });
 
