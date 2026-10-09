@@ -113,8 +113,9 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
         </div>
         <p className="text-13 font-semibold">{toolPrice(tool)}</p>
         <p className="text-11 text-text-tertiary">
-          {tool.limits.rate_limit_per_second} requests / second · Burst{" "}
-          {tool.limits.burst}
+          {tool.limits
+            ? `${tool.limits.rate_limit_per_second} requests / second · Burst ${tool.limits.burst}`
+            : "No per-user rate limit"}
         </p>
         <details>
           <summary className="cursor-pointer text-12">
@@ -136,7 +137,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
                 <div>
                   {op.risk && (
                     <Badge variant={op.risk === "read" ? "success" : "warning"}>
-                      {op.risk === "read" ? "Read-only" : "Destructive"}
+                      {op.risk === "read" ? "Read-only" : "Changes data"}
                     </Badge>
                   )}
                 </div>

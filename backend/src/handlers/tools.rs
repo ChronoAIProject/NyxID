@@ -17,7 +17,6 @@ pub async fn list(
     Ok(Json(
         tools_service::list(
             &state.db,
-            &state.encryption_keys,
             &auth.user_id.to_string(),
             admin,
             (

@@ -1,6 +1,5 @@
 use super::platform_key_service::{self, OwnerGrants};
 use crate::{
-    crypto::aes::EncryptionKeys,
     errors::AppResult,
     models::{
         downstream_service::{DownstreamService, OfferingKind},
@@ -62,7 +61,7 @@ pub struct ToolOffering {
     pub provider_label: String,
     pub access: ToolAccess,
     pub pricing: ToolPricing,
-    pub limits: ToolLimits,
+    pub limits: Option<ToolLimits>,
     pub operations: Vec<ToolOperation>,
     pub credential_configured: bool,
 }
@@ -90,7 +89,6 @@ fn price(lane: Option<&crate::models::service_billing::LanePricing>) -> ToolPric
 
 pub async fn list(
     db: &Database,
-    keys: &EncryptionKeys,
     actor_id: &str,
     admin: bool,
     limits: (u32, u32),
@@ -123,8 +121,7 @@ pub async fn list(
         if !platform && !admin {
             continue;
         }
-        let configured =
-            platform_key_service::credential_configured(keys, &service).await == Some(true);
+        let configured = !service.credential_encrypted.is_empty();
         if !configured && service.auth_method != "none" && !admin {
             continue;
         }
@@ -167,10 +164,10 @@ pub async fn list(
                 platform: price(billing.and_then(|b| b.platform_key_pricing.as_ref())),
                 byok: byok.then(|| price(billing.and_then(|b| b.byok_pricing.as_ref()))),
             },
-            limits: ToolLimits {
+            limits: (limits.0 != 0).then_some(ToolLimits {
                 rate_limit_per_second: limits.0,
                 burst: limits.1,
-            },
+            }),
             operations,
             credential_configured: configured,
         });
@@ -225,13 +222,7 @@ mod tests {
             super::super::service_endpoint_service::create_endpoint(&db, &service.id, input)
                 .await
                 .unwrap();
-        let keys = crate::test_utils::test_encryption_keys();
-        assert!(
-            list(&db, &keys, &actor, false, (2, 10))
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(list(&db, &actor, false, (2, 10)).await.unwrap().is_empty());
         db.collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
             .update_one(
                 doc! {"_id":endpoint.id},
@@ -239,22 +230,19 @@ mod tests {
             )
             .await
             .unwrap();
-        let rows = list(&db, &keys, &actor, false, (2, 10)).await.unwrap();
+        let rows = list(&db, &actor, false, (2, 10)).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].access.platform);
+        assert!(
+            list(&db, &actor, false, (0, 10)).await.unwrap()[0]
+                .limits
+                .is_none()
+        );
         assert!(!rows[0].access.byok);
         assert!(matches!(rows[0].pricing.platform, ToolPrice::Free("free")));
         db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME).update_one(doc! {"_id":service.id}, doc! {"$set":{"auth_method":"bearer","platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]}}}).await.unwrap();
-        assert!(
-            list(&db, &keys, &actor, false, (2, 10))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            list(&db, &keys, &actor, true, (2, 10)).await.unwrap().len(),
-            1
-        );
+        assert!(list(&db, &actor, false, (2, 10)).await.unwrap().is_empty());
+        assert_eq!(list(&db, &actor, true, (2, 10)).await.unwrap().len(), 1);
         db.drop().await.unwrap();
     }
 

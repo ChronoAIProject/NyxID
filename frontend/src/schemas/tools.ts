@@ -70,7 +70,7 @@ export type ToolOffering = {
     platform: "free" | { metric: string; credits_per_unit: string };
     byok: "free" | { metric: string; credits_per_unit: string } | null;
   };
-  limits: { rate_limit_per_second: number; burst: number };
+  limits: { rate_limit_per_second: number; burst: number } | null;
   credential_configured: boolean;
   operations: {
     name: string;
