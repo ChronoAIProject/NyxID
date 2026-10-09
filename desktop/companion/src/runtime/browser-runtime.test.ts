@@ -7,6 +7,7 @@ import {
   NYXID_ASSISTANT_URL,
   type RuntimeStorage,
 } from "./browser-runtime";
+import { NyxIdChatSendError } from "./chat";
 
 class MemoryStorage implements RuntimeStorage {
   private readonly values = new Map<string, string>();
@@ -477,5 +478,23 @@ describe("browser companion runtime", () => {
     expect(persisted).not.toContain("device_code");
     expect(persisted).not.toContain("bearer");
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("definitely rejects chat that browser preview cannot admit", async () => {
+    const runtime = new BrowserCompanionRuntime({
+      storage: new MemoryStorage(),
+      timezone: utcTimezone,
+      autoStart: false,
+    });
+
+    await expect(
+      runtime.sendNyxIdChat({
+        requestId: "123e4567-e89b-42d3-a456-426614174000",
+        text: "帮我处理",
+      }),
+    ).rejects.toMatchObject({
+      name: "NyxIdChatSendError",
+      kind: "rejected",
+    } satisfies Partial<NyxIdChatSendError>);
   });
 });

@@ -215,6 +215,7 @@ pub mod assistant_settings_service;
 pub mod assistant_steering;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
+pub mod assistant_turn_admission_service;
 pub mod channel_retry_ingress;
 pub mod channel_turn_delivery;
 pub mod provider_link_service;

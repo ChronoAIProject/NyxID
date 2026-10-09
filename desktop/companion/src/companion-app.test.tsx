@@ -1,5 +1,11 @@
 import { StrictMode } from "react";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -13,12 +19,22 @@ import {
   type MealId,
   type RecommendationMood,
 } from "./domain";
-import type {
-  CompanionRuntime,
-  NyxIdView,
-  Unlisten,
-  WindowMode,
+import {
+  NyxIdChatSendError,
+  type CompanionRuntime,
+  type NyxIdChatCompletedEvent,
+  type NyxIdChatEvent,
+  type NyxIdChatHistory,
+  type NyxIdChatRecovery,
+  type NyxIdChatRequest,
+  type NyxIdView,
+  type Unlisten,
+  type WindowDragEvent,
+  type WindowMode,
 } from "./runtime";
+
+const CHAT_CONVERSATION_ID = "nyxa-0123456789abcdef0123456789abcdef";
+const CHAT_RECOVERY_REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
 
 function clone(snapshot: CompanionSnapshot): CompanionSnapshot {
   return parseCompanionSnapshot(snapshot, snapshot.settings.timezone);
@@ -78,7 +94,11 @@ class TestRuntime implements CompanionRuntime {
     (snapshot: CompanionSnapshot) => void
   >();
   private readonly mealListeners = new Set<(prompt: ActivePrompt) => void>();
+  private readonly windowDragListeners = new Set<
+    (event: WindowDragEvent) => void
+  >();
   private readonly nyxIdListeners = new Set<(view: NyxIdView) => void>();
+  private readonly chatListeners = new Set<(event: NyxIdChatEvent) => void>();
 
   readonly saveSettingsCall = vi.fn();
   readonly dislikeCall = vi.fn();
@@ -86,6 +106,7 @@ class TestRuntime implements CompanionRuntime {
   readonly snoozeCall = vi.fn();
   readonly skipCall = vi.fn();
   readonly setWindowModeCall = vi.fn();
+  readonly startWindowDragCall = vi.fn();
   readonly openNyxidAssistantCall = vi.fn();
   readonly startNyxIdLoginCall = vi.fn();
   readonly cancelNyxIdLoginCall = vi.fn();
@@ -94,6 +115,12 @@ class TestRuntime implements CompanionRuntime {
   readonly nyxIdStatusCall = vi.fn();
   readonly triggerDemoCall = vi.fn();
   readonly snapshotCall = vi.fn();
+  readonly sendNyxIdChatCall = vi.fn();
+  readonly recoverNyxIdChatCall = vi.fn(
+    async (): Promise<NyxIdChatRecovery | null> => null,
+  );
+  readonly nyxIdChatHistoryCall = vi.fn();
+  readonly stopNyxIdChatCall = vi.fn();
   private readonly launchAtLoginResult: Promise<boolean>;
   private readonly saveSettingsGate: Promise<void>;
   private readonly nyxIdStatusResult: Promise<NyxIdView>;
@@ -136,10 +163,22 @@ class TestRuntime implements CompanionRuntime {
     }
   }
 
+  emitWindowDrag(event: WindowDragEvent): void {
+    for (const listener of this.windowDragListeners) {
+      listener(event);
+    }
+  }
+
   emitNyxIdView(view: NyxIdView): void {
     this.currentNyxId = view;
     for (const listener of this.nyxIdListeners) {
       listener(view);
+    }
+  }
+
+  emitNyxIdChatEvent(event: NyxIdChatEvent): void {
+    for (const listener of this.chatListeners) {
+      listener(event);
     }
   }
 
@@ -217,6 +256,10 @@ class TestRuntime implements CompanionRuntime {
     this.setWindowModeCall(mode);
   }
 
+  async startWindowDrag(): Promise<void> {
+    this.startWindowDragCall();
+  }
+
   async openNyxidAssistant(): Promise<void> {
     this.openNyxidAssistantCall();
   }
@@ -258,6 +301,48 @@ class TestRuntime implements CompanionRuntime {
     return view;
   }
 
+  async sendNyxIdChat(
+    request: NyxIdChatRequest,
+  ): Promise<NyxIdChatCompletedEvent> {
+    this.sendNyxIdChatCall(request);
+    this.emitNyxIdChatEvent({
+      kind: "started",
+      requestId: request.requestId,
+      conversationId: CHAT_CONVERSATION_ID,
+      turnId: "turn-1",
+    });
+    this.emitNyxIdChatEvent({
+      kind: "delta",
+      requestId: request.requestId,
+      text: "我会通过 NyxID 帮你处理。",
+    });
+    const completed = {
+      kind: "completed",
+      requestId: request.requestId,
+      conversationId: CHAT_CONVERSATION_ID,
+      status: "completed",
+      error: null,
+    } as const;
+    this.emitNyxIdChatEvent(completed);
+    return completed;
+  }
+
+  async nyxIdChatHistory(conversationId: string): Promise<NyxIdChatHistory> {
+    this.nyxIdChatHistoryCall(conversationId);
+    return {
+      conversation: { id: conversationId, activeTurn: false },
+      messages: [],
+    };
+  }
+
+  async recoverNyxIdChat(): Promise<NyxIdChatRecovery | null> {
+    return this.recoverNyxIdChatCall();
+  }
+
+  async stopNyxIdChat(conversationId: string): Promise<void> {
+    this.stopNyxIdChatCall(conversationId);
+  }
+
   async getLaunchAtLogin(): Promise<boolean> {
     return this.launchAtLoginResult;
   }
@@ -282,6 +367,15 @@ class TestRuntime implements CompanionRuntime {
     };
   }
 
+  async onWindowDrag(
+    listener: (event: WindowDragEvent) => void,
+  ): Promise<Unlisten> {
+    this.windowDragListeners.add(listener);
+    return () => {
+      this.windowDragListeners.delete(listener);
+    };
+  }
+
   async onNyxidChanged(listener: (view: NyxIdView) => void): Promise<Unlisten> {
     this.nyxIdListeners.add(listener);
     return () => {
@@ -289,10 +383,21 @@ class TestRuntime implements CompanionRuntime {
     };
   }
 
+  async onNyxIdChatEvent(
+    listener: (event: NyxIdChatEvent) => void,
+  ): Promise<Unlisten> {
+    this.chatListeners.add(listener);
+    return () => {
+      this.chatListeners.delete(listener);
+    };
+  }
+
   dispose(): void {
     this.stateListeners.clear();
     this.mealListeners.clear();
+    this.windowDragListeners.clear();
     this.nyxIdListeners.clear();
+    this.chatListeners.clear();
   }
 }
 
@@ -313,7 +418,7 @@ describe("CompanionApp", () => {
     await user.click(screen.getByRole("button", { name: "开始陪你" }));
 
     expect(
-      await screen.findByRole("button", { name: "让 Nyx 帮我选吃的" }),
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
     ).toBeInTheDocument();
     expect(runtime.saveSettingsCall).toHaveBeenCalledWith(
       expect.objectContaining({ onboardingComplete: true }),
@@ -321,6 +426,963 @@ describe("CompanionApp", () => {
     await waitFor(() => {
       expect(runtime.setWindowModeCall).toHaveBeenLastCalledWith("compact");
     });
+  });
+
+  it("opens NyxID chat from the mascot and streams the assistant reply", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await user.type(composer, "帮我安排今天的事情");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(runtime.sendNyxIdChatCall).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "帮我安排今天的事情" }),
+      );
+    });
+    expect(screen.getByText("帮我安排今天的事情")).toBeInTheDocument();
+    expect(screen.getByText("我会通过 NyxID 帮你处理。")).toBeInTheDocument();
+    expect(composer).toHaveValue("");
+  });
+
+  it("routes chat dragging through the runtime without hijacking controls", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+
+    const dragHandle = screen.getAllByText("NyxID 已连接")[0]?.parentElement;
+    expect(dragHandle).toHaveClass("chat-toolbar-title");
+    fireEvent.pointerDown(dragHandle!, {
+      button: 0,
+      isPrimary: true,
+      pointerId: 31,
+    });
+    expect(runtime.startWindowDragCall).toHaveBeenCalledTimes(1);
+
+    fireEvent.pointerDown(dragHandle!, {
+      button: 2,
+      isPrimary: true,
+      pointerId: 32,
+    });
+    fireEvent.pointerDown(dragHandle!, {
+      button: 0,
+      isPrimary: false,
+      pointerId: 33,
+    });
+
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await user.type(composer, "帮我看看今天的安排");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(screen.getByRole("button", { name: "收起对话" }));
+
+    expect(runtime.startWindowDragCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces an incomplete stream with NyxID's final text snapshot", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    vi.spyOn(runtime, "sendNyxIdChat").mockImplementation(async (request) => {
+      runtime.emitNyxIdChatEvent({
+        kind: "started",
+        requestId: request.requestId,
+        conversationId: CHAT_CONVERSATION_ID,
+        turnId: "turn-snapshot",
+      });
+      runtime.emitNyxIdChatEvent({
+        kind: "delta",
+        requestId: request.requestId,
+        text: "回复后半段",
+      });
+      runtime.emitNyxIdChatEvent({
+        kind: "snapshot",
+        requestId: request.requestId,
+        text: "这是完整回复后半段",
+      });
+      const completed: NyxIdChatCompletedEvent = {
+        kind: "completed",
+        requestId: request.requestId,
+        conversationId: CHAT_CONVERSATION_ID,
+        status: "completed",
+        error: null,
+      };
+      runtime.emitNyxIdChatEvent(completed);
+      return completed;
+    });
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+      "给我完整结果",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("这是完整回复后半段")).toBeInTheDocument();
+    expect(screen.queryByText("回复后半段")).not.toBeInTheDocument();
+  });
+
+  it("drives the pet movement from native window drag events", async () => {
+    const runtime = new TestRuntime(onboardedSnapshot());
+
+    render(<CompanionApp runtime={runtime} />);
+    const mascotButton = await screen.findByRole("button", {
+      name: /拖动可以移动/,
+    });
+
+    act(() => runtime.emitWindowDrag({ phase: "moving", direction: "left" }));
+    expect(mascotButton).toHaveAttribute("data-interaction", "dragging-left");
+    expect(mascotButton.querySelector(".mascot--running-left")).not.toBeNull();
+
+    act(() => runtime.emitWindowDrag({ phase: "settled", direction: null }));
+    expect(mascotButton).toHaveAttribute("data-interaction", "resting");
+    expect(mascotButton.querySelector(".mascot--idle")).not.toBeNull();
+  });
+
+  it.each([
+    {
+      status: "failed" as const,
+      error: { code: "assistant_failed", message: "稍后再试一次" },
+      terminalCopy: "稍后再试一次",
+      mascotLabel: "Nyx could not finish the task",
+    },
+    {
+      status: "cancelled" as const,
+      error: null,
+      terminalCopy: "这次处理已经停止",
+      mascotLabel: "Nyx is resting",
+    },
+  ])(
+    "shows partial text and the independent $status terminal state",
+    async ({ status, error, terminalCopy, mascotLabel }) => {
+      const user = userEvent.setup();
+      const runtime = new TestRuntime(
+        onboardedSnapshot(),
+        Promise.resolve(false),
+        Promise.resolve(),
+        Promise.resolve(connectedNyxIdView()),
+      );
+      vi.spyOn(runtime, "sendNyxIdChat").mockImplementation(async (request) => {
+        runtime.emitNyxIdChatEvent({
+          kind: "started",
+          requestId: request.requestId,
+          conversationId: CHAT_CONVERSATION_ID,
+          turnId: "turn-terminal",
+        });
+        runtime.emitNyxIdChatEvent({
+          kind: "delta",
+          requestId: request.requestId,
+          text: "已经完成一部分",
+        });
+        const completed: NyxIdChatCompletedEvent = {
+          kind: "completed",
+          requestId: request.requestId,
+          conversationId: CHAT_CONVERSATION_ID,
+          status,
+          error,
+        };
+        runtime.emitNyxIdChatEvent(completed);
+        return completed;
+      });
+
+      render(<CompanionApp runtime={runtime} />);
+      await user.click(
+        await screen.findByRole("button", { name: "和 NyxID 对话" }),
+      );
+      await user.type(
+        screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+        "执行一个会返回部分结果的任务",
+      );
+      await user.click(screen.getByRole("button", { name: "发送" }));
+
+      expect(await screen.findByText("已经完成一部分")).toBeInTheDocument();
+      expect(await screen.findByText(terminalCopy)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "收起对话" }));
+      expect(
+        screen.getByRole("img", { name: mascotLabel }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("keeps sending disabled until the native chat listener is ready", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    let finishListener: ((unlisten: Unlisten) => void) | undefined;
+    vi.spyOn(runtime, "onNyxIdChatEvent").mockReturnValue(
+      new Promise<Unlisten>((resolve) => {
+        finishListener = resolve;
+      }),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    expect(composer).toBeDisabled();
+    expect(screen.getAllByText("正在准备 NyxID 对话")).toHaveLength(2);
+    expect(runtime.sendNyxIdChatCall).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishListener?.(() => undefined);
+    });
+    await waitFor(() => expect(composer).toBeEnabled());
+  });
+
+  it("reconciles an interrupted stream from the same NyxID conversation", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    let sentRequestId: string | undefined;
+    vi.spyOn(runtime, "sendNyxIdChat").mockImplementation(async (request) => {
+      sentRequestId = request.requestId;
+      runtime.emitNyxIdChatEvent({
+        kind: "started",
+        requestId: request.requestId,
+        conversationId: CHAT_CONVERSATION_ID,
+        turnId: "turn-recovery",
+      });
+      throw new Error("stream disconnected");
+    });
+    runtime.recoverNyxIdChatCall.mockImplementation(async () => {
+      if (!sentRequestId) return null;
+      return {
+        requestId: sentRequestId,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: false },
+          messages: [
+            {
+              id: "message-user",
+              seq: 1,
+              turnId: "turn-recovery",
+              role: "user",
+              text: "同意刚才那条申请",
+              status: "completed",
+              errorCode: null,
+            },
+            {
+              id: "message-assistant",
+              seq: 2,
+              turnId: "turn-recovery",
+              role: "assistant",
+              text: "已经通过 NyxID 处理好了。",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      };
+    });
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await user.type(composer, "同意刚才那条申请");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(
+      await screen.findByText("已经通过 NyxID 处理好了。"),
+    ).toBeInTheDocument();
+    expect(runtime.recoverNyxIdChatCall).toHaveBeenCalled();
+    expect(composer).toHaveValue("");
+  });
+
+  it("recovers a new-conversation admission unknown through its receipt", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    let sentRequest: NyxIdChatRequest | undefined;
+    vi.spyOn(runtime, "sendNyxIdChat").mockImplementation(async (request) => {
+      sentRequest = request;
+      throw new NyxIdChatSendError(
+        "admission_unknown",
+        "无法确认 NyxID 是否已收到这条消息，请不要重复发送。",
+      );
+    });
+    runtime.recoverNyxIdChatCall.mockImplementation(async () => {
+      if (!sentRequest) return null;
+      return {
+        requestId: sentRequest.requestId,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: false },
+          messages: [
+            {
+              id: "new-conversation-user",
+              seq: 1,
+              turnId: "turn-new-conversation",
+              role: "user",
+              text: "执行一次且只能执行一次",
+              status: "completed",
+              errorCode: null,
+            },
+            {
+              id: "new-conversation-result",
+              seq: 2,
+              turnId: "turn-new-conversation",
+              role: "assistant",
+              text: "这次操作已完成",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      };
+    });
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+      ).toBeEnabled(),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+      "执行一次且只能执行一次",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("这次操作已完成")).toBeInTheDocument();
+    expect(sentRequest).not.toHaveProperty("conversationId");
+    expect(runtime.recoverNyxIdChatCall).toHaveBeenCalled();
+  });
+
+  it("uses the exact receipt before resolving an existing-conversation unknown", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await waitFor(() => expect(composer).toBeEnabled());
+    await user.type(composer, "先建立会话");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByText("我会通过 NyxID 帮你处理。");
+
+    let secondRequest: NyxIdChatRequest | undefined;
+    vi.spyOn(runtime, "sendNyxIdChat").mockImplementationOnce(
+      async (request) => {
+        secondRequest = request;
+        throw new NyxIdChatSendError(
+          "admission_unknown",
+          "无法确认 NyxID 是否已收到这条消息，请不要重复发送。",
+        );
+      },
+    );
+    runtime.recoverNyxIdChatCall.mockImplementation(async () => {
+      if (!secondRequest) return null;
+      return {
+        requestId: secondRequest.requestId,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: false },
+          messages: [
+            {
+              id: "second-turn-user",
+              seq: 3,
+              turnId: "turn-second",
+              role: "user",
+              text: "处理第二个动作",
+              status: "completed",
+              errorCode: null,
+            },
+            {
+              id: "second-turn-result",
+              seq: 4,
+              turnId: "turn-second",
+              role: "assistant",
+              text: "第二个动作已完成",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      };
+    });
+    await user.type(composer, "处理第二个动作");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("第二个动作已完成")).toBeInTheDocument();
+    expect(secondRequest).toMatchObject({
+      conversationId: CHAT_CONVERSATION_ID,
+      text: "处理第二个动作",
+    });
+    expect(runtime.recoverNyxIdChatCall).toHaveBeenCalled();
+  });
+
+  it("restores an active NyxID turn after restart without reposting its message", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    let finishRecovery:
+      ((recovery: NyxIdChatRecovery | null) => void) | undefined;
+    runtime.recoverNyxIdChatCall
+      .mockResolvedValueOnce({
+        requestId: CHAT_RECOVERY_REQUEST_ID,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: true },
+          messages: [
+            {
+              id: "restarted-user-message",
+              seq: 1,
+              turnId: "turn-restarted",
+              role: "user",
+              text: "同意这条请假申请",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise<NyxIdChatRecovery | null>((resolve) => {
+            finishRecovery = resolve;
+          }),
+      );
+
+    render(<CompanionApp runtime={runtime} />);
+    await waitFor(() =>
+      expect(runtime.recoverNyxIdChatCall).toHaveBeenCalledTimes(2),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+
+    expect(await screen.findByText("同意这条请假申请")).toBeInTheDocument();
+    expect(screen.getByText("正在确认处理结果")).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+    ).toBeDisabled();
+    expect(runtime.sendNyxIdChatCall).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishRecovery?.({
+        requestId: CHAT_RECOVERY_REQUEST_ID,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: false },
+          messages: [
+            {
+              id: "restarted-user-message",
+              seq: 1,
+              turnId: "turn-restarted",
+              role: "user",
+              text: "同意这条请假申请",
+              status: "completed",
+              errorCode: null,
+            },
+            {
+              id: "restarted-assistant-message",
+              seq: 2,
+              turnId: "turn-restarted",
+              role: "assistant",
+              text: "已经通过 NyxID 处理好了。",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      });
+    });
+    expect(
+      await screen.findByText("已经通过 NyxID 处理好了。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+    ).toBeEnabled();
+  });
+
+  it("recovers each owner's pending turn when switching away and back", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    runtime.recoverNyxIdChatCall
+      .mockResolvedValueOnce({
+        requestId: CHAT_RECOVERY_REQUEST_ID,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: true },
+          messages: [
+            {
+              id: "owner-one-user-message",
+              seq: 1,
+              turnId: "turn-owner-one",
+              role: "user",
+              text: "第一位用户未完成的任务",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      })
+      .mockImplementationOnce(
+        () => new Promise<NyxIdChatRecovery | null>(() => undefined),
+      )
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        requestId: CHAT_RECOVERY_REQUEST_ID,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: false },
+          messages: [
+            {
+              id: "owner-one-result",
+              seq: 2,
+              turnId: "turn-owner-one",
+              role: "assistant",
+              text: "第一位用户的任务已经完成",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      });
+    render(<CompanionApp runtime={runtime} />);
+    await waitFor(() =>
+      expect(runtime.recoverNyxIdChatCall).toHaveBeenCalledTimes(2),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    expect(
+      await screen.findByText("第一位用户未完成的任务"),
+    ).toBeInTheDocument();
+
+    act(() => {
+      runtime.emitNyxIdView({
+        ...connectedNyxIdView(),
+        user: {
+          id: "user-2",
+          email: "second@example.com",
+          displayName: "第二位用户",
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(runtime.recoverNyxIdChatCall).toHaveBeenCalledTimes(3),
+    );
+    expect(
+      screen.queryByText("第一位用户未完成的任务"),
+    ).not.toBeInTheDocument();
+
+    act(() => runtime.emitNyxIdView(connectedNyxIdView()));
+    await waitFor(() =>
+      expect(runtime.recoverNyxIdChatCall).toHaveBeenCalledTimes(4),
+    );
+    expect(
+      await screen.findByText("第一位用户的任务已经完成"),
+    ).toBeInTheDocument();
+    expect(runtime.sendNyxIdChatCall).not.toHaveBeenCalled();
+  });
+
+  it("stops the active NyxID turn from the composer", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    let sentRequestId: string | undefined;
+    vi.spyOn(runtime, "sendNyxIdChat").mockImplementation((request) => {
+      sentRequestId = request.requestId;
+      runtime.emitNyxIdChatEvent({
+        kind: "started",
+        requestId: request.requestId,
+        conversationId: CHAT_CONVERSATION_ID,
+        turnId: "turn-running",
+      });
+      return new Promise<NyxIdChatCompletedEvent>(() => undefined);
+    });
+    runtime.recoverNyxIdChatCall.mockImplementation(async () => {
+      if (!sentRequestId) return null;
+      return {
+        requestId: sentRequestId,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: false },
+          messages: [
+            {
+              id: "message-user",
+              seq: 1,
+              turnId: "turn-running",
+              role: "user",
+              text: "执行一个长任务",
+              status: "completed",
+              errorCode: null,
+            },
+            {
+              id: "message-assistant",
+              seq: 2,
+              turnId: "turn-running",
+              role: "assistant",
+              text: "已经完成一部分",
+              status: "failed",
+              errorCode: "cancelled",
+            },
+          ],
+        },
+      };
+    });
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+      "执行一个长任务",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(await screen.findByRole("button", { name: "停止处理" }));
+
+    await waitFor(() => {
+      expect(runtime.stopNyxIdChatCall).toHaveBeenCalledWith(
+        CHAT_CONVERSATION_ID,
+      );
+    });
+    expect(await screen.findByText("已经完成一部分")).toBeInTheDocument();
+    expect(await screen.findByText("这次处理已经停止")).toBeInTheDocument();
+    expect(runtime.recoverNyxIdChatCall).toHaveBeenCalled();
+  });
+
+  it("keeps an admission with no conversation id fenced as unknown", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    vi.spyOn(runtime, "sendNyxIdChat").mockRejectedValue(
+      new Error("连接中断。"),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await waitFor(() =>
+      expect(runtime.recoverNyxIdChatCall).toHaveBeenCalledOnce(),
+    );
+    runtime.recoverNyxIdChatCall.mockImplementation(
+      () => new Promise<NyxIdChatRecovery | null>(() => undefined),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await user.type(composer, "执行一次操作");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(
+      await screen.findByText(/执行状态无法确认，请不要重复发送/),
+    ).toBeInTheDocument();
+    expect(composer).toHaveValue("");
+    expect(composer).toBeDisabled();
+    expect(screen.getByRole("button", { name: "停止处理" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始新对话" })).toBeDisabled();
+  });
+
+  it("releases the local turn after a definite send rejection", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    vi.spyOn(runtime, "sendNyxIdChat").mockRejectedValue(
+      new NyxIdChatSendError("rejected", "NyxID 余额不足，这次对话没有执行。"),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await user.type(composer, "执行一次操作");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(
+      await screen.findByText("NyxID 余额不足，这次对话没有执行。"),
+    ).toBeInTheDocument();
+    expect(composer).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始新对话" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
+
+  it("preserves an unknown active turn across transient account states", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    vi.spyOn(runtime, "sendNyxIdChat").mockRejectedValue(
+      new Error("stream disconnected"),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await waitFor(() =>
+      expect(runtime.recoverNyxIdChatCall).toHaveBeenCalledOnce(),
+    );
+    runtime.recoverNyxIdChatCall.mockImplementation(
+      () => new Promise<NyxIdChatRecovery | null>(() => undefined),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await user.type(composer, "只能执行一次的操作");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(
+      await screen.findByText(/执行状态无法确认，请不要重复发送/),
+    ).toBeInTheDocument();
+
+    act(() => runtime.emitNyxIdView({ state: "checking" }));
+    expect(screen.getByText("只能执行一次的操作")).toBeInTheDocument();
+    act(() =>
+      runtime.emitNyxIdView({
+        state: "error",
+        error: {
+          code: "temporary_failure",
+          message: "暂时无法刷新账号状态",
+          retryable: true,
+          retryAction: "refresh",
+        },
+      }),
+    );
+    expect(screen.getByText("只能执行一次的操作")).toBeInTheDocument();
+    act(() => runtime.emitNyxIdView(connectedNyxIdView()));
+
+    expect(screen.getByText("只能执行一次的操作")).toBeInTheDocument();
+    expect(composer).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始新对话" })).toBeDisabled();
+  });
+
+  it("clears an unsent draft when the connected account changes", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+      "第一位用户尚未发送的草稿",
+    );
+
+    act(() => {
+      runtime.emitNyxIdView({
+        ...connectedNyxIdView(),
+        user: {
+          id: "user-2",
+          email: "second@example.com",
+          displayName: "第二位用户",
+        },
+      });
+    });
+
+    expect(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+    ).toHaveValue("");
+  });
+
+  it("clears transcript authority when the connected NyxID user changes", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await user.type(composer, "第一位用户的消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("第一位用户的消息")).toBeInTheDocument();
+
+    act(() => {
+      runtime.emitNyxIdView({
+        ...connectedNyxIdView(),
+        user: {
+          id: "user-2",
+          email: "second@example.com",
+          displayName: "第二位用户",
+        },
+      });
+    });
+    expect(screen.queryByText("第一位用户的消息")).not.toBeInTheDocument();
+
+    runtime.sendNyxIdChatCall.mockClear();
+    const secondComposer = screen.getByRole("textbox", {
+      name: "给 NyxID 发送消息",
+    });
+    await waitFor(() => expect(secondComposer).toBeEnabled());
+    await user.type(secondComposer, "第二位用户的消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(runtime.sendNyxIdChatCall).toHaveBeenCalled());
+    expect(runtime.sendNyxIdChatCall.mock.calls[0]?.[0]).not.toHaveProperty(
+      "conversationId",
+    );
+  });
+
+  it("ignores an old admission recovery response after the NyxID account changes", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      Promise.resolve(connectedNyxIdView()),
+    );
+    let sentRequestId: string | undefined;
+    let finishRecovery:
+      ((recovery: NyxIdChatRecovery | null) => void) | undefined;
+    let createdOldRecovery = false;
+    vi.spyOn(runtime, "sendNyxIdChat").mockImplementation(async (request) => {
+      sentRequestId = request.requestId;
+      runtime.emitNyxIdChatEvent({
+        kind: "started",
+        requestId: request.requestId,
+        conversationId: CHAT_CONVERSATION_ID,
+        turnId: "turn-old-account",
+      });
+      throw new Error("stream disconnected");
+    });
+    runtime.recoverNyxIdChatCall.mockImplementation(() => {
+      if (!sentRequestId) return Promise.resolve(null);
+      if (createdOldRecovery) return Promise.resolve(null);
+      createdOldRecovery = true;
+      return new Promise<NyxIdChatRecovery | null>((resolve) => {
+        finishRecovery = resolve;
+      });
+    });
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+      "旧账号操作",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(finishRecovery).toBeTypeOf("function"));
+
+    act(() => {
+      runtime.emitNyxIdView({
+        ...connectedNyxIdView(),
+        user: {
+          id: "user-2",
+          email: "second@example.com",
+          displayName: "第二位用户",
+        },
+      });
+    });
+    await act(async () => {
+      finishRecovery?.({
+        requestId: sentRequestId!,
+        history: {
+          conversation: { id: CHAT_CONVERSATION_ID, activeTurn: false },
+          messages: [
+            {
+              id: "old-answer",
+              seq: 1,
+              turnId: "turn-old-account",
+              role: "assistant",
+              text: "旧账号的完成结果",
+              status: "completed",
+              errorCode: null,
+            },
+          ],
+        },
+      });
+    });
+
+    expect(screen.queryByText("旧账号的完成结果")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "给 NyxID 发送消息" }),
+    ).toBeEnabled();
   });
 
   it("turns a due meal into explainable choices and remembers feedback", async () => {
@@ -767,7 +1829,7 @@ describe("CompanionApp", () => {
     );
 
     expect(
-      await screen.findByRole("button", { name: "让 Nyx 帮我选吃的" }),
+      await screen.findByRole("button", { name: "和 NyxID 对话" }),
     ).toBeInTheDocument();
     expect(dispose).not.toHaveBeenCalled();
 

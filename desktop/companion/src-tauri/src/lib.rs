@@ -52,7 +52,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let app_data_dir = app.path().app_data_dir()?;
-            let store = SnapshotStore::in_directory(app_data_dir);
+            let store = SnapshotStore::in_directory(&app_data_dir);
             let mut snapshot = match store.load() {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) => {
@@ -72,7 +72,7 @@ pub fn run() {
             }
             let quiet_mode = snapshot.settings.quiet_mode;
             app.manage(CompanionState::new(snapshot, store));
-            let nyxid_state = nyxid::NyxIdState::system()?;
+            let nyxid_state = nyxid::NyxIdState::system(app_data_dir)?;
             app.manage(nyxid_state.clone());
 
             window::configure_main_window(app.handle())?;
@@ -86,11 +86,18 @@ pub fn run() {
             nyxid_state.bootstrap(app.handle().clone());
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+        .on_window_event(|app_window, event| match event {
+            WindowEvent::Moved(position) => {
+                window::handle_window_moved(app_window, *position);
             }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                window::handle_window_geometry_changed(app_window);
+            }
+            WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let _ = app_window.hide();
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::companion_snapshot,
@@ -102,6 +109,7 @@ pub fn run() {
             commands::set_quiet_mode,
             commands::trigger_demo_reminder,
             commands::set_window_mode,
+            commands::start_window_drag,
             commands::get_launch_at_login,
             commands::set_launch_at_login,
             commands::open_nyxid_assistant,
@@ -110,6 +118,10 @@ pub fn run() {
             commands::cancel_nyxid_login,
             commands::refresh_nyxid_capabilities,
             commands::logout_nyxid,
+            commands::send_nyxid_chat,
+            commands::recover_nyxid_chat,
+            commands::nyxid_chat_history,
+            commands::nyxid_chat_stop,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run NyxID Companion");

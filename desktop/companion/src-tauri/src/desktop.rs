@@ -115,7 +115,10 @@ pub fn install_tray(app: &mut App<Wry>, quiet_mode: bool) -> tauri::Result<()> {
                     eprintln!("failed to open NyxID: {error}");
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                window::flush_placement(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

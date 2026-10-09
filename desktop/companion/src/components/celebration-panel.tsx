@@ -11,7 +11,7 @@ export function CelebrationPanel({
 }: CelebrationPanelProps) {
   return (
     <main className="panel celebration-panel" aria-live="polite">
-      <div className="window-drag-strip" data-tauri-drag-region />
+      <div className="window-drag-strip" data-window-drag-handle />
       <Mascot state="happy" size={176} />
       <p className="eyebrow">决定好了</p>
       <h1>{choice}</h1>

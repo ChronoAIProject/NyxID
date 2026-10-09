@@ -2,12 +2,28 @@ import type { CSSProperties } from "react";
 
 import "./mascot.css";
 
-export type MascotState = "idle" | "hungry" | "thinking" | "happy";
+export type MascotState =
+  | "idle"
+  | "hungry"
+  | "thinking"
+  | "happy"
+  | "waving"
+  | "jumping"
+  | "running-left"
+  | "running-right"
+  | "waiting"
+  | "running"
+  | "review"
+  | "failed";
 
 interface MascotProps {
   readonly state: MascotState;
   readonly size?: number;
   readonly label?: string;
+  readonly look?: {
+    readonly x: number;
+    readonly y: number;
+  };
 }
 
 const DEFAULT_LABELS: Record<MascotState, string> = {
@@ -15,13 +31,34 @@ const DEFAULT_LABELS: Record<MascotState, string> = {
   hungry: "Nyx says it is meal time",
   thinking: "Nyx is thinking",
   happy: "Nyx is happy",
+  waving: "Nyx is waving",
+  jumping: "Nyx is jumping",
+  "running-left": "Nyx is moving left",
+  "running-right": "Nyx is moving right",
+  waiting: "Nyx is waiting for you",
+  running: "Nyx is working",
+  review: "Nyx has a result ready",
+  failed: "Nyx could not finish the task",
 };
 
-export function Mascot({ state, size = 168, label }: MascotProps) {
+function clampLook(value: number): number {
+  return Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0;
+}
+
+export function Mascot({ state, size = 168, label, look }: MascotProps) {
+  const lookX = clampLook(look?.x ?? 0);
+  const lookY = clampLook(look?.y ?? 0);
+
   return (
     <div
       className={`mascot mascot--${state}`}
-      style={{ "--mascot-size": `${String(size)}px` } as CSSProperties}
+      style={
+        {
+          "--mascot-size": `${String(size)}px`,
+          "--mascot-look-x": lookX.toFixed(3),
+          "--mascot-look-y": lookY.toFixed(3),
+        } as CSSProperties
+      }
       role="img"
       aria-label={label ?? DEFAULT_LABELS[state]}
     >
@@ -108,20 +145,22 @@ export function Mascot({ state, size = 168, label }: MascotProps) {
             fill="#f4eee5"
           />
 
-          <g className="mascot__eyes mascot__eyes--open">
-            <ellipse cx="94" cy="95" rx="5" ry="7" fill="#202126" />
-            <ellipse cx="126" cy="95" rx="5" ry="7" fill="#202126" />
-            <circle cx="96" cy="92" r="1.5" fill="#fff" />
-            <circle cx="128" cy="92" r="1.5" fill="#fff" />
-          </g>
-          <g className="mascot__eyes mascot__eyes--closed">
-            <path d="M87 96c4 5 10 5 14 0M119 96c4 5 10 5 14 0" />
-          </g>
-          <g className="mascot__eyes mascot__eyes--thinking">
-            <ellipse cx="94" cy="95" rx="5" ry="7" fill="#202126" />
-            <ellipse cx="126" cy="95" rx="5" ry="7" fill="#202126" />
-            <circle cx="96" cy="91" r="1.5" fill="#fff" />
-            <circle cx="128" cy="91" r="1.5" fill="#fff" />
+          <g className="mascot__gaze">
+            <g className="mascot__eyes mascot__eyes--open">
+              <ellipse cx="94" cy="95" rx="5" ry="7" fill="#202126" />
+              <ellipse cx="126" cy="95" rx="5" ry="7" fill="#202126" />
+              <circle cx="96" cy="92" r="1.5" fill="#fff" />
+              <circle cx="128" cy="92" r="1.5" fill="#fff" />
+            </g>
+            <g className="mascot__eyes mascot__eyes--closed">
+              <path d="M87 96c4 5 10 5 14 0M119 96c4 5 10 5 14 0" />
+            </g>
+            <g className="mascot__eyes mascot__eyes--thinking">
+              <ellipse cx="94" cy="95" rx="5" ry="7" fill="#202126" />
+              <ellipse cx="126" cy="95" rx="5" ry="7" fill="#202126" />
+              <circle cx="96" cy="91" r="1.5" fill="#fff" />
+              <circle cx="128" cy="91" r="1.5" fill="#fff" />
+            </g>
           </g>
 
           <path

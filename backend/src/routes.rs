@@ -156,6 +156,15 @@ macro_rules! assistant_direct_billing_routes {
                 )
             ),
             (
+                "/nyxagent/turns/idempotent",
+                "/api/v1/assistant/nyxagent/turns/idempotent",
+                "handlers::assistant_nyxagent::idempotent_turns",
+                post(handlers::assistant_nyxagent::idempotent_turns),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::route_inventory::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/nyxagent/conversations/{id}/steer",
                 "/api/v1/assistant/nyxagent/conversations/{id}/steer",
                 "handlers::assistant_nyxagent::steer",
@@ -2092,6 +2101,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::machine_desktop::contexts),
         )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
+        .route(
+            "/nyxagent/turn-admissions/{client_request_id}/resolve",
+            post(handlers::assistant_nyxagent::resolve_turn_admission),
+        )
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),

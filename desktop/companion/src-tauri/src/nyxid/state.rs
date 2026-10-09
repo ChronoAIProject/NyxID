@@ -1,13 +1,20 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::Utc;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_opener::OpenerExt;
+use zeroize::Zeroizing;
 
+use super::chat::{
+    NyxIdChatCommandError, NyxIdChatEvent, NyxIdChatHistory, NyxIdChatRecovery, NyxIdChatRequest,
+    consume_turn_response, valid_conversation_id,
+};
+use super::chat_outbox::{ChatOutboxError, ChatOutboxStore, PendingChatAdmission};
 use super::client::{
-    ClientError, ClientErrorKind, LoginChallenge, LogoutOutcome, NyxIdClient, PollOutcome,
-    next_retry_delay,
+    AssistantAdmissionLookup, AssistantStartError, AssistantStartErrorKind, ClientError,
+    ClientErrorKind, LoginChallenge, LogoutOutcome, NyxIdClient, PollOutcome, next_retry_delay,
 };
 use super::model::{
     CredentialBundle, NyxIdRetryAction, NyxIdView, PendingLoginRecovery, PendingLoginRecoveryPhase,
@@ -29,6 +36,7 @@ struct Shared {
     session_mutation: Arc<tokio::sync::Mutex<()>>,
     pending_revoke_memory: Mutex<Vec<CredentialBundle>>,
     pending_login_memory: Mutex<Option<PendingLoginRecovery>>,
+    chat_outbox: Mutex<ChatOutboxStore>,
 }
 
 struct StateData {
@@ -77,6 +85,15 @@ fn continued_poll_delay(outcome: &PollOutcome, current: Duration) -> Option<Dura
     }
 }
 
+fn chat_start_error(error: AssistantStartError) -> NyxIdChatCommandError {
+    match error.kind {
+        AssistantStartErrorKind::Network => NyxIdChatCommandError::admission_unknown(error.message),
+        AssistantStartErrorKind::Unauthorized | AssistantStartErrorKind::Rejected => {
+            NyxIdChatCommandError::rejected(error.message)
+        }
+    }
+}
+
 impl QueueRevokeResult {
     fn complete() -> Self {
         Self {
@@ -94,14 +111,31 @@ impl QueueRevokeResult {
 }
 
 impl NyxIdState {
-    pub fn system() -> Result<Self, reqwest::Error> {
-        Ok(Self::new(
+    pub fn system(app_data_dir: PathBuf) -> Result<Self, reqwest::Error> {
+        Ok(Self::new_with_chat_outbox(
             NyxIdClient::new()?,
             KeyringSessionStore::shared(),
+            ChatOutboxStore::in_directory(app_data_dir),
         ))
     }
 
+    #[cfg(test)]
     fn new(client: NyxIdClient, store: SharedSessionStore) -> Self {
+        Self::new_with_chat_outbox(
+            client,
+            store,
+            ChatOutboxStore::in_directory(std::env::temp_dir().join(format!(
+                "nyxid-companion-test-outbox-{}",
+                uuid::Uuid::new_v4()
+            ))),
+        )
+    }
+
+    fn new_with_chat_outbox(
+        client: NyxIdClient,
+        store: SharedSessionStore,
+        chat_outbox: ChatOutboxStore,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 data: Mutex::new(StateData {
@@ -116,6 +150,7 @@ impl NyxIdState {
                 session_mutation: Arc::new(tokio::sync::Mutex::new(())),
                 pending_revoke_memory: Mutex::new(Vec::new()),
                 pending_login_memory: Mutex::new(None),
+                chat_outbox: Mutex::new(chat_outbox),
             }),
         }
     }
@@ -141,6 +176,323 @@ impl NyxIdState {
 
     pub fn view(&self) -> NyxIdView {
         self.data().view.clone()
+    }
+
+    pub async fn send_chat(
+        &self,
+        app: AppHandle,
+        request: NyxIdChatRequest,
+    ) -> Result<NyxIdChatEvent, NyxIdChatCommandError> {
+        request
+            .validate()
+            .map_err(NyxIdChatCommandError::rejected)?;
+        let owner_user_id = self
+            .connected_owner_id()
+            .map_err(NyxIdChatCommandError::rejected)?;
+        let (access_token, session_id) = self
+            .chat_credential(&app)
+            .await
+            .map_err(NyxIdChatCommandError::rejected)?;
+        if self.connected_owner_id().as_deref() != Ok(owner_user_id.as_str()) {
+            return Err(NyxIdChatCommandError::rejected(
+                "NyxID 账号已发生变化，请重新发送。",
+            ));
+        }
+        let pending = PendingChatAdmission::new(
+            owner_user_id.clone(),
+            request.request_id.clone(),
+            request.conversation_id.clone(),
+        )
+        .map_err(|_| NyxIdChatCommandError::rejected("无法安全记录这条消息，请重试。"))?;
+        self.shared
+            .chat_outbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin(pending)
+            .map_err(chat_outbox_begin_error)?;
+        let mut response = match self
+            .shared
+            .client
+            .start_assistant_turn(access_token.as_str(), &request)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if error.kind == AssistantStartErrorKind::Unauthorized {
+                    self.clear_rejected_chat_session(&app, &session_id).await;
+                }
+                if error.kind != AssistantStartErrorKind::Network
+                    && self
+                        .clear_chat_outbox(&owner_user_id, &request.request_id)
+                        .is_err()
+                {
+                    return Err(NyxIdChatCommandError::admission_unknown(
+                        "消息没有执行，但本机状态暂时无法安全更新。",
+                    ));
+                }
+                return Err(chat_start_error(error));
+            }
+        };
+        let result = consume_turn_response(
+            &app,
+            &mut response,
+            &request.request_id,
+            request.conversation_id.as_deref(),
+            |conversation_id, turn_id| {
+                self.record_chat_receipt(
+                    &owner_user_id,
+                    &request.request_id,
+                    conversation_id,
+                    turn_id,
+                )
+            },
+        )
+        .await;
+        let completed = result.map_err(NyxIdChatCommandError::admission_unknown)?;
+        self.clear_chat_outbox(&owner_user_id, &request.request_id)
+            .map_err(|_| {
+                NyxIdChatCommandError::admission_unknown(
+                    "处理已经结束，但本机状态暂时无法安全更新。",
+                )
+            })?;
+        Ok(completed)
+    }
+
+    pub async fn chat_history(
+        &self,
+        app: AppHandle,
+        conversation_id: String,
+    ) -> Result<NyxIdChatHistory, String> {
+        if !valid_conversation_id(&conversation_id) {
+            return Err("NyxID 会话标识无效，请重新打开对话。".to_owned());
+        }
+        let (access_token, session_id) = self.chat_credential(&app).await?;
+        match self
+            .shared
+            .client
+            .get_assistant_history(access_token.as_str(), &conversation_id)
+            .await
+        {
+            Ok(history) => Ok(history),
+            Err(error) => {
+                if error.kind == AssistantStartErrorKind::Unauthorized {
+                    self.clear_rejected_chat_session(&app, &session_id).await;
+                }
+                Err(error.message.to_owned())
+            }
+        }
+    }
+
+    pub async fn recover_chat(&self, app: AppHandle) -> Result<Option<NyxIdChatRecovery>, String> {
+        let owner_user_id = self.connected_owner_id()?;
+        let pending = self
+            .shared
+            .chat_outbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_for_owner(&owner_user_id)
+            .map_err(|_| "无法读取本机待恢复的 NyxID 对话。".to_owned())?;
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let (access_token, session_id) = self.chat_credential(&app).await?;
+        if self.connected_owner_id().as_deref() != Ok(owner_user_id.as_str()) {
+            return Err("NyxID 账号已发生变化，请重新恢复。".to_owned());
+        }
+        match self
+            .recover_chat_with_credential(&owner_user_id, &pending, access_token.as_str())
+            .await
+        {
+            Ok(recovery) => Ok(recovery),
+            Err(error) => {
+                if error.kind == AssistantStartErrorKind::Unauthorized {
+                    self.clear_rejected_chat_session(&app, &session_id).await;
+                }
+                Err(error.message.to_owned())
+            }
+        }
+    }
+
+    async fn recover_chat_with_credential(
+        &self,
+        owner_user_id: &str,
+        pending: &PendingChatAdmission,
+        access_token: &str,
+    ) -> Result<Option<NyxIdChatRecovery>, AssistantStartError> {
+        let admission = match self
+            .shared
+            .client
+            .resolve_assistant_admission(access_token, &pending.request_id)
+            .await?
+        {
+            AssistantAdmissionLookup::ExplicitlyAbsent => {
+                self.clear_chat_outbox(owner_user_id, &pending.request_id)
+                    .map_err(|_| {
+                        assistant_recovery_local_error("无法安全清理未受理的 NyxID 对话。")
+                    })?;
+                return Ok(None);
+            }
+            AssistantAdmissionLookup::Found(admission) => admission,
+        };
+        self.record_chat_receipt(
+            owner_user_id,
+            &pending.request_id,
+            &admission.conversation_id,
+            &admission.turn_id,
+        )
+        .map_err(|_| assistant_recovery_local_error("NyxID 对话受理记录与本机状态不匹配。"))?;
+        if admission.conversation_deleted {
+            self.clear_chat_outbox(owner_user_id, &pending.request_id)
+                .map_err(|_| {
+                    assistant_recovery_local_error("对话已经删除，但本机状态暂时无法安全更新。")
+                })?;
+            return Ok(Some(deleted_conversation_recovery(
+                &admission.client_request_id,
+                &admission.conversation_id,
+                &admission.turn_id,
+            )));
+        }
+        let history = self
+            .shared
+            .client
+            .get_assistant_history(access_token, &admission.conversation_id)
+            .await?;
+        let history = history
+            .into_exact_admission_turn(&admission.turn_id, admission.active)
+            .map_err(|_| assistant_recovery_local_error("NyxID 对话记录仍在同步，请稍后重试。"))?;
+        if !history.conversation.active_turn {
+            self.clear_chat_outbox(owner_user_id, &pending.request_id)
+                .map_err(|_| {
+                    assistant_recovery_local_error("处理已经结束，但本机状态暂时无法安全更新。")
+                })?;
+        }
+        Ok(Some(NyxIdChatRecovery {
+            request_id: admission.client_request_id,
+            history,
+        }))
+    }
+
+    pub async fn stop_chat(&self, app: AppHandle, conversation_id: String) -> Result<(), String> {
+        if !valid_conversation_id(&conversation_id) {
+            return Err("NyxID 会话标识无效，请重新打开对话。".to_owned());
+        }
+        let (access_token, session_id) = self.chat_credential(&app).await?;
+        match self
+            .shared
+            .client
+            .stop_assistant_turn(access_token.as_str(), &conversation_id)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if error.kind == AssistantStartErrorKind::Unauthorized {
+                    self.clear_rejected_chat_session(&app, &session_id).await;
+                }
+                Err(error.message.to_owned())
+            }
+        }
+    }
+
+    fn connected_owner_id(&self) -> Result<String, String> {
+        match &self.data().view {
+            NyxIdView::Connected { user, .. } => Ok(user.id.clone()),
+            _ => Err("请先连接 NyxID 账号。".to_owned()),
+        }
+    }
+
+    fn record_chat_receipt(
+        &self,
+        owner_user_id: &str,
+        request_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+    ) -> Result<(), String> {
+        self.shared
+            .chat_outbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_receipt(owner_user_id, request_id, conversation_id, turn_id)
+            .map_err(|_| "无法安全记录 NyxID 对话受理状态。".to_owned())
+    }
+
+    fn clear_chat_outbox(&self, owner_user_id: &str, request_id: &str) -> Result<(), String> {
+        self.shared
+            .chat_outbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear(owner_user_id, request_id)
+            .map(|_| ())
+            .map_err(|_| "无法安全更新 NyxID 对话状态。".to_owned())
+    }
+
+    async fn chat_credential(
+        &self,
+        app: &AppHandle,
+    ) -> Result<(Zeroizing<String>, String), String> {
+        let _mutation = self.shared.session_mutation.lock().await;
+        let mut bundle = self
+            .shared
+            .store
+            .load()
+            .map_err(|_| "无法读取本机 NyxID 登录，请稍后重试。".to_owned())?
+            .ok_or_else(|| "请先连接 NyxID 账号。".to_owned())?;
+
+        if bundle.access_expires_at
+            <= Utc::now() + chrono::Duration::seconds(ACCESS_EXPIRY_SKEW_SECONDS)
+        {
+            let session_id = bundle.session_id.clone();
+            let refreshed = match self.shared.client.refresh(&bundle.refresh_token).await {
+                Ok(refreshed) => refreshed
+                    .for_session_id(session_id)
+                    .expect("stored session id is a UUID v4"),
+                Err(error) if error.kind == ClientErrorKind::Unauthorized => {
+                    let view = self.fail_closed_after_repeated_unauthorized().await;
+                    self.begin_operation(view, app);
+                    return Err("NyxID 登录已失效，请重新连接。".to_owned());
+                }
+                Err(_) => return Err("NyxID 登录暂时无法更新，请稍后重试。".to_owned()),
+            };
+            if self.shared.store.save(&refreshed).is_err() {
+                let revoke = self
+                    .queue_and_revoke_locked(refreshed, NyxIdRetryAction::Refresh)
+                    .await;
+                if revoke.source_may_clear {
+                    let _ = self.shared.store.clear();
+                }
+                self.begin_operation(
+                    revoke.result.err().unwrap_or_else(|| {
+                        NyxIdView::error(
+                            "credential_store_write_failed",
+                            "NyxID 登录已更新但无法安全保存，请重新连接。",
+                            Some(NyxIdRetryAction::Connect),
+                        )
+                    }),
+                    app,
+                );
+                return Err("无法安全保存更新后的 NyxID 登录，请重新连接。".to_owned());
+            }
+            bundle = refreshed;
+        }
+
+        Ok((
+            Zeroizing::new(bundle.access_token.to_string()),
+            bundle.session_id,
+        ))
+    }
+
+    async fn clear_rejected_chat_session(&self, app: &AppHandle, session_id: &str) {
+        let _mutation = self.shared.session_mutation.lock().await;
+        let matches = self
+            .shared
+            .store
+            .load()
+            .ok()
+            .flatten()
+            .is_some_and(|bundle| bundle.session_id == session_id);
+        if matches {
+            let view = self.fail_closed_after_repeated_unauthorized().await;
+            self.begin_operation(view, app);
+        }
     }
 
     pub async fn start_login(&self, app: AppHandle) -> NyxIdView {
@@ -1239,6 +1591,52 @@ impl NyxIdState {
     }
 }
 
+fn chat_outbox_begin_error(error: ChatOutboxError) -> NyxIdChatCommandError {
+    match error {
+        ChatOutboxError::PendingExists => NyxIdChatCommandError::rejected(
+            "这个 NyxID 账号还有一条状态未确认的消息，请先等待恢复。",
+        ),
+        _ => NyxIdChatCommandError::rejected("无法安全记录这条消息，请重试。"),
+    }
+}
+
+fn assistant_recovery_local_error(message: &'static str) -> AssistantStartError {
+    AssistantStartError {
+        kind: AssistantStartErrorKind::Network,
+        message,
+    }
+}
+
+fn deleted_conversation_recovery(
+    request_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+) -> NyxIdChatRecovery {
+    use super::chat::{
+        NyxIdChatHistoryConversation, NyxIdChatHistoryMessage, NyxIdChatMessageRole,
+        NyxIdChatMessageStatus,
+    };
+
+    NyxIdChatRecovery {
+        request_id: request_id.to_owned(),
+        history: NyxIdChatHistory {
+            conversation: NyxIdChatHistoryConversation {
+                id: conversation_id.to_owned(),
+                active_turn: false,
+            },
+            messages: vec![NyxIdChatHistoryMessage {
+                id: format!("recovery-{request_id}"),
+                seq: 1,
+                turn_id: turn_id.to_owned(),
+                role: NyxIdChatMessageRole::Assistant,
+                text: "这段 NyxID 对话已被删除，无法恢复处理结果。".to_owned(),
+                status: NyxIdChatMessageStatus::Failed,
+                error_code: Some("conversation_deleted".to_owned()),
+            }],
+        },
+    }
+}
+
 fn client_error_view(error: &ClientError, retry_action: NyxIdRetryAction) -> NyxIdView {
     NyxIdView::error(
         error.code,
@@ -1279,6 +1677,7 @@ mod tests {
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
 
+    use super::super::client::AssistantAdmissionProbeOutcome;
     use super::super::store::SessionStore;
     use super::super::store::StoreOperation;
     use super::super::store::tests_support::MemoryStore;
@@ -1291,6 +1690,144 @@ mod tests {
             attempt_id.to_owned(),
         )
         .unwrap()
+    }
+
+    fn pending_chat(store: &ChatOutboxStore) -> PendingChatAdmission {
+        let pending =
+            PendingChatAdmission::new("user-1".to_owned(), uuid::Uuid::new_v4().to_string(), None)
+                .unwrap();
+        store.begin(pending.clone()).unwrap();
+        pending
+    }
+
+    fn recovery_history(active: bool, include_assistant: bool) -> NyxIdChatHistory {
+        use super::super::chat::{
+            NyxIdChatHistoryConversation, NyxIdChatHistoryMessage, NyxIdChatMessageRole,
+            NyxIdChatMessageStatus,
+        };
+
+        let mut messages = vec![NyxIdChatHistoryMessage {
+            id: "recovery-user".to_owned(),
+            seq: 1,
+            turn_id: "turn-recovery-probe".to_owned(),
+            role: NyxIdChatMessageRole::User,
+            text: "public user message".to_owned(),
+            status: NyxIdChatMessageStatus::Completed,
+            error_code: None,
+        }];
+        if include_assistant {
+            messages.push(NyxIdChatHistoryMessage {
+                id: "recovery-assistant".to_owned(),
+                seq: 2,
+                turn_id: "turn-recovery-probe".to_owned(),
+                role: NyxIdChatMessageRole::Assistant,
+                text: "public result".to_owned(),
+                status: NyxIdChatMessageStatus::Completed,
+                error_code: None,
+            });
+        }
+        NyxIdChatHistory {
+            conversation: NyxIdChatHistoryConversation {
+                id: "nyxa-0123456789abcdef0123456789abcdef".to_owned(),
+                active_turn: active,
+            },
+            messages,
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_explicit_absence_clears_only_the_current_owners_pending_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let outbox = ChatOutboxStore::in_directory(directory.path());
+        let pending = pending_chat(&outbox);
+        let other =
+            PendingChatAdmission::new("user-2".to_owned(), uuid::Uuid::new_v4().to_string(), None)
+                .unwrap();
+        outbox.begin(other.clone()).unwrap();
+        let client = NyxIdClient::with_assistant_recovery_probe(
+            AssistantAdmissionProbeOutcome::ExplicitlyAbsent,
+            None,
+        );
+        let state = NyxIdState::new_with_chat_outbox(client, MemoryStore::shared(), outbox.clone());
+
+        assert!(
+            state
+                .recover_chat_with_credential("user-1", &pending, "test-token")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(outbox.pending_for_owner("user-1").unwrap().is_none());
+        assert_eq!(outbox.pending_for_owner("user-2").unwrap(), Some(other));
+    }
+
+    #[tokio::test]
+    async fn recovery_network_failure_keeps_the_pending_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let outbox = ChatOutboxStore::in_directory(directory.path());
+        let pending = pending_chat(&outbox);
+        let client = NyxIdClient::with_assistant_recovery_probe(
+            AssistantAdmissionProbeOutcome::Network,
+            None,
+        );
+        let state = NyxIdState::new_with_chat_outbox(client, MemoryStore::shared(), outbox.clone());
+
+        assert!(
+            state
+                .recover_chat_with_credential("user-1", &pending, "test-token")
+                .await
+                .is_err()
+        );
+        assert_eq!(outbox.pending_for_owner("user-1").unwrap(), Some(pending));
+    }
+
+    #[tokio::test]
+    async fn recovery_terminal_exact_turn_clears_the_pending_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let outbox = ChatOutboxStore::in_directory(directory.path());
+        let pending = pending_chat(&outbox);
+        let client = NyxIdClient::with_assistant_recovery_probe(
+            AssistantAdmissionProbeOutcome::Found {
+                active: false,
+                conversation_deleted: false,
+            },
+            Some(recovery_history(false, true)),
+        );
+        let state = NyxIdState::new_with_chat_outbox(client, MemoryStore::shared(), outbox.clone());
+
+        let recovered = state
+            .recover_chat_with_credential("user-1", &pending, "test-token")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!recovered.history.conversation.active_turn);
+        assert!(outbox.pending_for_owner("user-1").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deleted_conversation_tombstone_is_terminal_without_reposting() {
+        let directory = tempfile::tempdir().unwrap();
+        let outbox = ChatOutboxStore::in_directory(directory.path());
+        let pending = pending_chat(&outbox);
+        let client = NyxIdClient::with_assistant_recovery_probe(
+            AssistantAdmissionProbeOutcome::Found {
+                active: false,
+                conversation_deleted: true,
+            },
+            None,
+        );
+        let state = NyxIdState::new_with_chat_outbox(client, MemoryStore::shared(), outbox.clone());
+
+        let recovered = state
+            .recover_chat_with_credential("user-1", &pending, "test-token")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.history.messages[0].error_code.as_deref(),
+            Some("conversation_deleted")
+        );
+        assert!(outbox.pending_for_owner("user-1").unwrap().is_none());
     }
 
     #[test]
@@ -1337,6 +1874,29 @@ mod tests {
         assert_eq!(
             continued_poll_delay(&PollOutcome::Denied, Duration::from_secs(75)),
             None
+        );
+    }
+
+    #[test]
+    fn chat_start_errors_preserve_the_admission_boundary() {
+        let network = chat_start_error(AssistantStartError {
+            kind: AssistantStartErrorKind::Network,
+            message: "network",
+        });
+        let rejected = chat_start_error(AssistantStartError {
+            kind: AssistantStartErrorKind::Rejected,
+            message: "rejected",
+        });
+        let unauthorized = chat_start_error(AssistantStartError {
+            kind: AssistantStartErrorKind::Unauthorized,
+            message: "unauthorized",
+        });
+
+        assert_eq!(network, NyxIdChatCommandError::admission_unknown("network"));
+        assert_eq!(rejected, NyxIdChatCommandError::rejected("rejected"));
+        assert_eq!(
+            unauthorized,
+            NyxIdChatCommandError::rejected("unauthorized")
         );
     }
 

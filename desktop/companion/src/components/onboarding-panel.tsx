@@ -57,8 +57,8 @@ export function OnboardingPanel({
       className="panel panel--onboarding"
       aria-labelledby="onboarding-title"
     >
-      <div className="window-drag-strip" data-tauri-drag-region />
-      <div className="onboarding-mascot" data-tauri-drag-region>
+      <div className="window-drag-strip" data-window-drag-handle />
+      <div className="onboarding-mascot" data-window-drag-handle>
         <Mascot state={step === 1 ? "idle" : "hungry"} size={142} />
       </div>
 

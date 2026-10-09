@@ -16,11 +16,28 @@ import type {
   Unlisten,
   WindowMode,
 } from "./companion-runtime";
+import {
+  NYXID_CHAT_ADMISSION_UNKNOWN_MESSAGE,
+  NyxIdChatSendError,
+  nyxIdChatCommandErrorSchema,
+  nyxIdChatEventSchema,
+  nyxIdChatHistorySchema,
+  nyxIdChatRecoverySchema,
+  nyxIdChatRequestSchema,
+  type NyxIdChatCompletedEvent,
+  type NyxIdChatEvent,
+  type NyxIdChatHistory,
+  type NyxIdChatRecovery,
+  type NyxIdChatRequest,
+} from "./chat";
 import { nyxIdViewSchema, parseNyxIdView, type NyxIdView } from "./nyxid";
+import { windowDragEventSchema, type WindowDragEvent } from "./window-drag";
 
 const STATE_CHANGED_EVENT = "companion://state-changed";
 const MEAL_DUE_EVENT = "companion://meal-due";
+const WINDOW_DRAG_EVENT = "companion://window-drag";
 const NYXID_CHANGED_EVENT = "companion://nyxid-changed";
+const NYXID_CHAT_EVENT = "companion://nyxid-chat";
 
 async function invokeSnapshot(
   command: string,
@@ -89,6 +106,10 @@ export class TauriCompanionRuntime implements CompanionRuntime {
     await invoke("set_window_mode", { mode });
   }
 
+  async startWindowDrag(): Promise<void> {
+    await invoke("start_window_drag");
+  }
+
   async openNyxidAssistant(): Promise<void> {
     await invoke("open_nyxid_assistant");
   }
@@ -111,6 +132,49 @@ export class TauriCompanionRuntime implements CompanionRuntime {
 
   logoutNyxid(): Promise<NyxIdView> {
     return invokeNyxId("logout_nyxid");
+  }
+
+  async sendNyxIdChat(
+    request: NyxIdChatRequest,
+  ): Promise<NyxIdChatCompletedEvent> {
+    const parsedRequest = nyxIdChatRequestSchema.parse(request);
+    try {
+      const result = nyxIdChatEventSchema.parse(
+        await invoke<unknown>("send_nyxid_chat", { request: parsedRequest }),
+      );
+      if (result.kind !== "completed") {
+        throw new Error("NyxID 对话返回了无效的结束状态");
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof NyxIdChatSendError) throw error;
+      const parsedError = nyxIdChatCommandErrorSchema.safeParse(error);
+      if (parsedError.success) {
+        throw new NyxIdChatSendError(
+          parsedError.data.kind,
+          parsedError.data.message,
+        );
+      }
+      throw new NyxIdChatSendError(
+        "admission_unknown",
+        NYXID_CHAT_ADMISSION_UNKNOWN_MESSAGE,
+      );
+    }
+  }
+
+  async nyxIdChatHistory(conversationId: string): Promise<NyxIdChatHistory> {
+    return nyxIdChatHistorySchema.parse(
+      await invoke<unknown>("nyxid_chat_history", { conversationId }),
+    );
+  }
+
+  async recoverNyxIdChat(): Promise<NyxIdChatRecovery | null> {
+    const recovery = await invoke<unknown>("recover_nyxid_chat");
+    return recovery === null ? null : nyxIdChatRecoverySchema.parse(recovery);
+  }
+
+  async stopNyxIdChat(conversationId: string): Promise<void> {
+    await invoke("nyxid_chat_stop", { conversationId });
   }
 
   getLaunchAtLogin(): Promise<boolean> {
@@ -140,9 +204,29 @@ export class TauriCompanionRuntime implements CompanionRuntime {
     });
   }
 
+  onWindowDrag(listener: (event: WindowDragEvent) => void): Promise<Unlisten> {
+    return listen<unknown>(WINDOW_DRAG_EVENT, (event) => {
+      const parsed = windowDragEventSchema.safeParse(event.payload);
+      if (parsed.success) {
+        listener(parsed.data);
+      }
+    });
+  }
+
   onNyxidChanged(listener: (view: NyxIdView) => void): Promise<Unlisten> {
     return listen<unknown>(NYXID_CHANGED_EVENT, (event) => {
       const parsed = nyxIdViewSchema.safeParse(event.payload);
+      if (parsed.success) {
+        listener(parsed.data);
+      }
+    });
+  }
+
+  onNyxIdChatEvent(
+    listener: (event: NyxIdChatEvent) => void,
+  ): Promise<Unlisten> {
+    return listen<unknown>(NYXID_CHAT_EVENT, (event) => {
+      const parsed = nyxIdChatEventSchema.safeParse(event.payload);
       if (parsed.success) {
         listener(parsed.data);
       }

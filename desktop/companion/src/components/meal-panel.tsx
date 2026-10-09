@@ -60,7 +60,7 @@ export function MealPanel({
       aria-labelledby="meal-title"
       aria-busy={pending}
     >
-      <div className="panel-toolbar" data-tauri-drag-region>
+      <div className="panel-toolbar" data-window-drag-handle>
         <button
           type="button"
           className="bare-icon"

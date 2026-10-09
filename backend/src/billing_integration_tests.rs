@@ -420,6 +420,7 @@ async fn run_billing_route_coverage_smoke() {
     .await;
     exercised_routes.extend([
         "/api/v1/assistant/nyxagent/turns",
+        "/api/v1/assistant/nyxagent/turns/idempotent",
         "/api/v1/assistant/nyxagent/models",
         "/api/v1/assistant/nyxagent/conversations/{id}",
         "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
@@ -1577,6 +1578,24 @@ async fn exercise_nyxagent_routes(
         .unwrap()
         .remove(0);
     assert!(row.nyxagent_session_id.is_some());
+    let mut idempotent_turn = route_request(
+        Method::POST,
+        "/api/v1/assistant/nyxagent/turns/idempotent",
+        token,
+        Body::from(
+            serde_json::json!({
+                "conversation_id": &row.id,
+                "text": "billing route boundary",
+            })
+            .to_string(),
+        ),
+    );
+    idempotent_turn.headers_mut().insert(
+        "idempotency-key",
+        Uuid::new_v4().to_string().parse().unwrap(),
+    );
+    let idempotent_response = call_mounted_route(app, idempotent_turn).await;
+    assert!(String::from_utf8_lossy(&idempotent_response).contains("\"status\":\"completed\""));
     let models = call_mounted_route(
         app,
         route_request(
@@ -1651,8 +1670,8 @@ async fn exercise_nyxagent_routes(
         ),
     )
     .await;
-    // turns, models, capabilities, steer (capabilities cached) and delete.
-    assert_route_settled_count(db, &catalog.slug, BillingMetric::Requests, 5).await;
+    // legacy turn, idempotent turn, models, capabilities, steer (cached) and delete.
+    assert_route_settled_count(db, &catalog.slug, BillingMetric::Requests, 6).await;
 }
 
 const BILLING_STEER_SESSION: &str = "conv_33333333333333333333333333333333";

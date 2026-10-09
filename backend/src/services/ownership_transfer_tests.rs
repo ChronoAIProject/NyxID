@@ -2088,6 +2088,21 @@ async fn org_deletion_follows_current_catalog_owner_and_preserves_transferred_ro
         )
         .await
         .unwrap();
+    let admission_id = format!("{}:{}", &f.destination, Uuid::new_v4());
+    f.db.collection::<Document>(crate::models::assistant_turn_admission::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &admission_id,
+            "user_id": &f.destination,
+            "client_request_id": Uuid::new_v4().to_string(),
+            "payload_fingerprint": "sha256:test",
+            "conversation_id": "nyxa-0123456789abcdef0123456789abcdef",
+            "turn_id": Uuid::new_v4().to_string(),
+            "conversation_deleted": true,
+            "conversation_deleted_at": bson::DateTime::now(),
+            "created_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
     crate::services::org_service::delete_org_user(&f.db, &f.owner)
         .await
         .unwrap();
@@ -2101,6 +2116,13 @@ async fn org_deletion_follows_current_catalog_owner_and_preserves_transferred_ro
     crate::services::org_service::delete_org_user(&f.db, &f.destination)
         .await
         .unwrap();
+    assert!(
+        f.db.collection::<Document>(crate::models::assistant_turn_admission::COLLECTION_NAME)
+            .find_one(doc! {"_id": &admission_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         f.db.collection::<Document>(SERVICES)
             .find_one(doc! {"_id": &f.service.id})

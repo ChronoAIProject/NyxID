@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
+use super::chat::{
+    NyxIdChatAdmission, NyxIdChatAdmissionWire, NyxIdChatHistory, NyxIdChatHistoryWire,
+    NyxIdChatRequest, valid_conversation_id, valid_request_id,
+};
 use super::model::{
     CredentialBundle, NyxIdCapabilities, NyxIdService, NyxIdServiceState, NyxIdUser,
     valid_device_code,
@@ -21,6 +25,27 @@ const LOGIN_PATH: &str = "/login/device";
 const ERROR_BODY_LIMIT: usize = 64 * 1024;
 const PROFILE_BODY_LIMIT: usize = 256 * 1024;
 const KEYS_BODY_LIMIT: usize = 8 * 1024 * 1024;
+const ASSISTANT_HISTORY_BODY_LIMIT: usize = 8 * 1024 * 1024;
+const ASSISTANT_ADMISSION_BODY_LIMIT: usize = 64 * 1024;
+const ASSISTANT_TURN_TIMEOUT: Duration = Duration::from_secs(660);
+
+pub(crate) enum AssistantAdmissionLookup {
+    Found(NyxIdChatAdmission),
+    ExplicitlyAbsent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssistantStartErrorKind {
+    Unauthorized,
+    Network,
+    Rejected,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AssistantStartError {
+    pub(crate) kind: AssistantStartErrorKind,
+    pub(crate) message: &'static str,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientErrorKind {
@@ -186,6 +211,24 @@ pub(crate) struct AccountProbeHandles {
     pub(crate) capabilities_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum AssistantAdmissionProbeOutcome {
+    ExplicitlyAbsent,
+    Network,
+    Found {
+        active: bool,
+        conversation_deleted: bool,
+    },
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AssistantRecoveryProbe {
+    admission: AssistantAdmissionProbeOutcome,
+    history: Option<NyxIdChatHistory>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PollErrorClass {
     Pending,
@@ -213,6 +256,8 @@ pub(crate) struct NyxIdClient {
     cancel_probe: Option<CancelProbe>,
     #[cfg(test)]
     account_probe: Option<AccountProbe>,
+    #[cfg(test)]
+    assistant_recovery_probe: Option<AssistantRecoveryProbe>,
 }
 
 impl NyxIdClient {
@@ -238,6 +283,8 @@ impl NyxIdClient {
                 cancel_probe: None,
                 #[cfg(test)]
                 account_probe: None,
+                #[cfg(test)]
+                assistant_recovery_probe: None,
             })
     }
 
@@ -328,6 +375,16 @@ impl NyxIdClient {
                 capabilities_calls,
             },
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_assistant_recovery_probe(
+        admission: AssistantAdmissionProbeOutcome,
+        history: Option<NyxIdChatHistory>,
+    ) -> Self {
+        let mut client = Self::new().expect("test HTTP client");
+        client.assistant_recovery_probe = Some(AssistantRecoveryProbe { admission, history });
+        client
     }
 
     pub(crate) async fn request_login(&self) -> Result<LoginChallenge, ClientError> {
@@ -732,6 +789,266 @@ impl NyxIdClient {
         Ok(NyxIdCapabilities::from_services(services, Utc::now()))
     }
 
+    pub(crate) async fn start_assistant_turn(
+        &self,
+        access_token: &str,
+        request: &NyxIdChatRequest,
+    ) -> Result<Response, AssistantStartError> {
+        #[derive(Serialize)]
+        struct TurnBody<'a> {
+            conversation_id: Option<&'a str>,
+            text: &'a str,
+        }
+
+        let response = self
+            .assistant_turn_request(
+                access_token,
+                &request.request_id,
+                &TurnBody {
+                    conversation_id: request.conversation_id.as_deref(),
+                    text: &request.text,
+                },
+            )
+            .send()
+            .await
+            .map_err(|_| AssistantStartError {
+                kind: AssistantStartErrorKind::Network,
+                message: "暂时无法连接 NyxID 助手，请稍后重试。",
+            })?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+
+        let status = response.status();
+        let _ = read_bounded_json::<serde_json::Value>(response, ERROR_BODY_LIMIT).await;
+        Err(classify_assistant_turn_error(status))
+    }
+
+    fn assistant_turn_request<T: Serialize + ?Sized>(
+        &self,
+        access_token: &str,
+        request_id: &str,
+        body: &T,
+    ) -> reqwest::RequestBuilder {
+        self.http
+            .post(format!(
+                "{API_ORIGIN}/api/v1/assistant/nyxagent/turns/idempotent"
+            ))
+            .bearer_auth(access_token)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header("Idempotency-Key", request_id)
+            .timeout(ASSISTANT_TURN_TIMEOUT)
+            .json(body)
+    }
+
+    pub(crate) async fn resolve_assistant_admission(
+        &self,
+        access_token: &str,
+        request_id: &str,
+    ) -> Result<AssistantAdmissionLookup, AssistantStartError> {
+        if !valid_request_id(request_id) {
+            return Err(AssistantStartError {
+                kind: AssistantStartErrorKind::Rejected,
+                message: "NyxID 对话请求标识无效。",
+            });
+        }
+        #[cfg(test)]
+        if let Some(probe) = self.assistant_recovery_probe.as_ref() {
+            let _ = access_token;
+            return match probe.admission {
+                AssistantAdmissionProbeOutcome::ExplicitlyAbsent => {
+                    Ok(AssistantAdmissionLookup::ExplicitlyAbsent)
+                }
+                AssistantAdmissionProbeOutcome::Network => Err(AssistantStartError {
+                    kind: AssistantStartErrorKind::Network,
+                    message: "暂时无法确认 NyxID 对话状态，请稍后重试。",
+                }),
+                AssistantAdmissionProbeOutcome::Found {
+                    active,
+                    conversation_deleted,
+                } => Ok(AssistantAdmissionLookup::Found(NyxIdChatAdmission {
+                    client_request_id: request_id.to_owned(),
+                    conversation_id: "nyxa-0123456789abcdef0123456789abcdef".to_owned(),
+                    turn_id: "turn-recovery-probe".to_owned(),
+                    active,
+                    conversation_deleted,
+                })),
+            };
+        }
+        let response = self
+            .assistant_admission_request(access_token, request_id)
+            .send()
+            .await
+            .map_err(|_| AssistantStartError {
+                kind: AssistantStartErrorKind::Network,
+                message: "暂时无法确认 NyxID 对话状态，请稍后重试。",
+            })?;
+        if assistant_admission_explicitly_absent(response.status()) {
+            return Ok(AssistantAdmissionLookup::ExplicitlyAbsent);
+        }
+        if response.status() == StatusCode::OK {
+            let admission: NyxIdChatAdmissionWire =
+                read_bounded_json(response, ASSISTANT_ADMISSION_BODY_LIMIT)
+                    .await
+                    .map_err(|_| AssistantStartError {
+                        kind: AssistantStartErrorKind::Network,
+                        message: "NyxID 返回了无法识别的对话受理记录，请稍后重试。",
+                    })?;
+            return admission
+                .into_public(request_id)
+                .map(AssistantAdmissionLookup::Found)
+                .map_err(|_| AssistantStartError {
+                    kind: AssistantStartErrorKind::Network,
+                    message: "NyxID 返回了无法识别的对话受理记录，请稍后重试。",
+                });
+        }
+
+        let status = response.status();
+        let _ = read_bounded_json::<serde_json::Value>(response, ERROR_BODY_LIMIT).await;
+        let (kind, message) = match status {
+            StatusCode::UNAUTHORIZED => (
+                AssistantStartErrorKind::Unauthorized,
+                "NyxID 登录已失效，请重新连接。",
+            ),
+            _ => (
+                AssistantStartErrorKind::Network,
+                "暂时无法确认 NyxID 对话状态，请稍后重试。",
+            ),
+        };
+        Err(AssistantStartError { kind, message })
+    }
+
+    fn assistant_admission_request(
+        &self,
+        access_token: &str,
+        request_id: &str,
+    ) -> reqwest::RequestBuilder {
+        self.http
+            .post(format!(
+                "{API_ORIGIN}/api/v1/assistant/nyxagent/turn-admissions/{request_id}/resolve"
+            ))
+            .bearer_auth(access_token)
+    }
+
+    pub(crate) async fn get_assistant_history(
+        &self,
+        access_token: &str,
+        conversation_id: &str,
+    ) -> Result<NyxIdChatHistory, AssistantStartError> {
+        if !valid_conversation_id(conversation_id) {
+            return Err(AssistantStartError {
+                kind: AssistantStartErrorKind::Rejected,
+                message: "NyxID 会话标识无效，请重新打开对话。",
+            });
+        }
+
+        #[cfg(test)]
+        if let Some(probe) = self.assistant_recovery_probe.as_ref() {
+            let _ = access_token;
+            return probe.history.clone().ok_or(AssistantStartError {
+                kind: AssistantStartErrorKind::Network,
+                message: "暂时无法读取 NyxID 对话，请稍后重试。",
+            });
+        }
+
+        let response = self
+            .http
+            .get(format!(
+                "{API_ORIGIN}/api/v1/assistant/nyxagent/conversations/{conversation_id}"
+            ))
+            .query(&[("limit", 50_u8)])
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|_| AssistantStartError {
+                kind: AssistantStartErrorKind::Network,
+                message: "暂时无法读取 NyxID 对话，请稍后重试。",
+            })?;
+        if response.status() == StatusCode::OK {
+            let history: NyxIdChatHistoryWire =
+                read_bounded_json(response, ASSISTANT_HISTORY_BODY_LIMIT)
+                    .await
+                    .map_err(|error| {
+                        if error.kind == ClientErrorKind::Transient {
+                            AssistantStartError {
+                                kind: AssistantStartErrorKind::Network,
+                                message: "读取 NyxID 对话时连接中断，请稍后重试。",
+                            }
+                        } else {
+                            AssistantStartError {
+                                kind: AssistantStartErrorKind::Rejected,
+                                message: "NyxID 返回了无法识别的对话记录。",
+                            }
+                        }
+                    })?;
+            return history
+                .into_public(conversation_id)
+                .map_err(|_| AssistantStartError {
+                    kind: AssistantStartErrorKind::Rejected,
+                    message: "NyxID 返回了无法识别的对话记录。",
+                });
+        }
+
+        let status = response.status();
+        let _ = read_bounded_json::<serde_json::Value>(response, ERROR_BODY_LIMIT).await;
+        let (kind, message) = match status {
+            StatusCode::UNAUTHORIZED => (
+                AssistantStartErrorKind::Unauthorized,
+                "NyxID 登录已失效，请重新连接。",
+            ),
+            StatusCode::NOT_FOUND => (AssistantStartErrorKind::Rejected, "找不到这段 NyxID 对话。"),
+            _ => (
+                AssistantStartErrorKind::Rejected,
+                "NyxID 暂时无法读取这段对话。",
+            ),
+        };
+        Err(AssistantStartError { kind, message })
+    }
+
+    pub(crate) async fn stop_assistant_turn(
+        &self,
+        access_token: &str,
+        conversation_id: &str,
+    ) -> Result<(), AssistantStartError> {
+        if !valid_conversation_id(conversation_id) {
+            return Err(AssistantStartError {
+                kind: AssistantStartErrorKind::Rejected,
+                message: "NyxID 会话标识无效，请重新打开对话。",
+            });
+        }
+
+        let response = self
+            .http
+            .post(format!(
+                "{API_ORIGIN}/api/v1/assistant/nyxagent/conversations/{conversation_id}/stop"
+            ))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|_| AssistantStartError {
+                kind: AssistantStartErrorKind::Network,
+                message: "暂时无法停止 NyxID 对话，请稍后重试。",
+            })?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let _ = read_bounded_json::<serde_json::Value>(response, ERROR_BODY_LIMIT).await;
+        let (kind, message) = match status {
+            StatusCode::UNAUTHORIZED => (
+                AssistantStartErrorKind::Unauthorized,
+                "NyxID 登录已失效，请重新连接。",
+            ),
+            StatusCode::NOT_FOUND => (AssistantStartErrorKind::Rejected, "找不到这段 NyxID 对话。"),
+            _ => (
+                AssistantStartErrorKind::Rejected,
+                "NyxID 暂时无法停止这段对话。",
+            ),
+        };
+        Err(AssistantStartError { kind, message })
+    }
+
     pub(crate) async fn logout(&self, access_token: &str) -> LogoutOutcome {
         #[cfg(test)]
         if let Some(probe) = self.logout_probe.as_ref() {
@@ -754,6 +1071,10 @@ impl NyxIdClient {
             Ok(_) | Err(_) => LogoutOutcome::Retryable,
         }
     }
+}
+
+fn assistant_admission_explicitly_absent(status: StatusCode) -> bool {
+    status == StatusCode::NO_CONTENT
 }
 
 #[derive(Default, Deserialize)]
@@ -798,6 +1119,40 @@ fn classify_refresh_status(status: StatusCode) -> RefreshStatusClass {
     } else {
         RefreshStatusClass::Invalid
     }
+}
+
+fn classify_assistant_turn_error(status: StatusCode) -> AssistantStartError {
+    let (kind, message) = match status {
+        StatusCode::UNAUTHORIZED => (
+            AssistantStartErrorKind::Unauthorized,
+            "NyxID 登录已失效，请重新连接。",
+        ),
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => (
+            AssistantStartErrorKind::Rejected,
+            "这条消息未通过 NyxID 校验，没有执行。",
+        ),
+        StatusCode::FORBIDDEN => (
+            AssistantStartErrorKind::Rejected,
+            "当前账号没有权限发送这条消息。",
+        ),
+        StatusCode::PAYMENT_REQUIRED => (
+            AssistantStartErrorKind::Rejected,
+            "NyxID 余额不足，这次对话没有执行。",
+        ),
+        StatusCode::CONFLICT => (
+            AssistantStartErrorKind::Rejected,
+            "上一条消息仍在处理中，请稍后再发。",
+        ),
+        StatusCode::TOO_MANY_REQUESTS => (
+            AssistantStartErrorKind::Rejected,
+            "消息发送得太快了，请稍后再试。",
+        ),
+        _ => (
+            AssistantStartErrorKind::Network,
+            "无法确认 NyxID 是否已经接收这条消息，请不要重复发送。",
+        ),
+    };
+    AssistantStartError { kind, message }
 }
 
 fn classify_poll_error(error_code: Option<u32>, status: StatusCode) -> PollErrorClass {
@@ -1128,6 +1483,96 @@ mod tests {
         assert_eq!(
             classify_refresh_status(StatusCode::OK),
             RefreshStatusClass::Success
+        );
+    }
+
+    #[test]
+    fn assistant_turn_status_only_unlocks_proven_pre_admission_rejections() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::FORBIDDEN,
+            StatusCode::PAYMENT_REQUIRED,
+            StatusCode::CONFLICT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ] {
+            assert_eq!(
+                classify_assistant_turn_error(status).kind,
+                AssistantStartErrorKind::Rejected,
+                "{status}",
+            );
+        }
+        assert_eq!(
+            classify_assistant_turn_error(StatusCode::UNAUTHORIZED).kind,
+            AssistantStartErrorKind::Unauthorized,
+        );
+
+        for status in [
+            StatusCode::NOT_FOUND,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let error = classify_assistant_turn_error(status);
+            assert_eq!(error.kind, AssistantStartErrorKind::Network, "{status}");
+            assert!(error.message.contains("不要重复发送"), "{status}");
+        }
+    }
+
+    #[test]
+    fn assistant_admission_absence_requires_the_explicit_no_content_status() {
+        assert!(assistant_admission_explicitly_absent(
+            StatusCode::NO_CONTENT
+        ));
+        for ambiguous in [
+            StatusCode::NOT_FOUND,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(!assistant_admission_explicitly_absent(ambiguous));
+        }
+    }
+
+    #[test]
+    fn assistant_admission_resolution_uses_the_state_changing_post_route() {
+        let client = NyxIdClient::new().unwrap();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request = client
+            .assistant_admission_request("test-access-token", &request_id)
+            .build()
+            .unwrap();
+
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(
+            request.url().path(),
+            format!("/api/v1/assistant/nyxagent/turn-admissions/{request_id}/resolve")
+        );
+    }
+
+    #[test]
+    fn assistant_turn_request_uses_the_rollout_safe_route_and_uuid_v4_key() {
+        let client = NyxIdClient::new().unwrap();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request = client
+            .assistant_turn_request(
+                "test-access-token",
+                &request_id,
+                &serde_json::json!({"conversation_id": null, "text": "hello"}),
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("Idempotency-Key")
+                .and_then(|value| value.to_str().ok()),
+            Some(request_id.as_str())
+        );
+        assert_eq!(
+            request.url().path(),
+            "/api/v1/assistant/nyxagent/turns/idempotent"
         );
     }
 

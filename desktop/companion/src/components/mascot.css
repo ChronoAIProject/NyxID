@@ -1,5 +1,7 @@
 .mascot {
   --mascot-size: 168px;
+  --mascot-look-x: 0;
+  --mascot-look-y: 0;
   width: var(--mascot-size);
   height: var(--mascot-size);
   display: grid;
@@ -28,6 +30,24 @@
 .mascot__tail,
 .mascot__ears {
   transform-box: fill-box;
+}
+
+.mascot__face,
+.mascot__ears,
+.mascot__mouth,
+.mascot__gaze {
+  transform: translate(
+    calc(var(--mascot-look-x) * 1.6px),
+    calc(var(--mascot-look-y) * 1.2px)
+  );
+  transition: transform 90ms linear;
+}
+
+.mascot__gaze {
+  transform: translate(
+    calc(var(--mascot-look-x) * 4px),
+    calc(var(--mascot-look-y) * 3px)
+  );
 }
 
 .mascot__wing--left {
@@ -74,7 +94,10 @@
 .mascot--thinking .mascot__mouth--idle,
 .mascot--happy .mascot__mouth--idle,
 .mascot--happy .mascot__eyes--open,
-.mascot--thinking .mascot__eyes--open {
+.mascot--thinking .mascot__eyes--open,
+.mascot--running .mascot__mouth--idle,
+.mascot--running .mascot__eyes--open,
+.mascot--failed .mascot__mouth--idle {
   display: none;
 }
 
@@ -85,7 +108,12 @@
 .mascot--thinking .mascot__thinking-mark,
 .mascot--happy .mascot__mouth--happy,
 .mascot--happy .mascot__eyes--closed,
-.mascot--happy .mascot__happy-mark {
+.mascot--happy .mascot__happy-mark,
+.mascot--review .mascot__happy-mark,
+.mascot--running .mascot__mouth--thinking,
+.mascot--running .mascot__eyes--thinking,
+.mascot--running .mascot__thinking-mark,
+.mascot--failed .mascot__mouth--thinking {
   display: block;
 }
 
@@ -112,6 +140,41 @@
 
 .mascot--happy .mascot__tail {
   animation-duration: 0.75s;
+}
+
+.mascot--waving .mascot__wing--right {
+  animation: mascot-wave 0.72s ease-in-out infinite;
+}
+
+.mascot--jumping .mascot__float,
+.mascot--review .mascot__float {
+  animation: mascot-jump 0.72s ease-out infinite;
+}
+
+.mascot--running-left .mascot__float {
+  animation: mascot-run-left 0.34s ease-in-out infinite alternate;
+}
+
+.mascot--running-right .mascot__float {
+  animation: mascot-run-right 0.34s ease-in-out infinite alternate;
+}
+
+.mascot--running-left .mascot__tail,
+.mascot--running-right .mascot__tail {
+  animation-duration: 0.3s;
+}
+
+.mascot--waiting .mascot__eyes--open {
+  animation: mascot-waiting 1.8s ease-in-out infinite;
+}
+
+.mascot--running .mascot__thinking-mark {
+  transform-origin: 171px 75px;
+  animation: mascot-thought 1.1s linear infinite;
+}
+
+.mascot--failed .mascot__float {
+  animation: mascot-failed 0.48s ease-in-out 2;
 }
 
 @keyframes mascot-breathe {
@@ -198,13 +261,81 @@
   }
 }
 
+@keyframes mascot-wave {
+  0%,
+  100% {
+    transform: rotate(2deg);
+  }
+  50% {
+    transform: rotate(18deg);
+  }
+}
+
+@keyframes mascot-jump {
+  0%,
+  100% {
+    transform: translateY(1px);
+  }
+  45% {
+    transform: translateY(-11px) scaleY(1.02);
+  }
+}
+
+@keyframes mascot-run-left {
+  from {
+    transform: translate(-3px, 0) rotate(-3deg);
+  }
+  to {
+    transform: translate(3px, -5px) rotate(1deg);
+  }
+}
+
+@keyframes mascot-run-right {
+  from {
+    transform: translate(-3px, -5px) rotate(-1deg);
+  }
+  to {
+    transform: translate(3px, 0) rotate(3deg);
+  }
+}
+
+@keyframes mascot-waiting {
+  0%,
+  35%,
+  100% {
+    transform: translateX(0);
+  }
+  55%,
+  75% {
+    transform: translateX(3px);
+  }
+}
+
+@keyframes mascot-failed {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  30% {
+    transform: translateX(-5px) rotate(-2deg);
+  }
+  70% {
+    transform: translateX(5px) rotate(2deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mascot *,
   .mascot__float,
   .mascot__ground,
   .mascot__tail,
+  .mascot__face,
+  .mascot__ears,
+  .mascot__mouth,
+  .mascot__gaze,
   .mascot__thinking-mark,
   .mascot__eyes--thinking {
     animation: none !important;
+    transition: none !important;
   }
 }

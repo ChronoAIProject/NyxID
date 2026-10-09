@@ -18,7 +18,16 @@ import type {
   Unlisten,
   WindowMode,
 } from "./companion-runtime";
+import {
+  NyxIdChatSendError,
+  type NyxIdChatCompletedEvent,
+  type NyxIdChatEvent,
+  type NyxIdChatHistory,
+  type NyxIdChatRecovery,
+  type NyxIdChatRequest,
+} from "./chat";
 import type { NyxIdView } from "./nyxid";
+import type { WindowDragEvent } from "./window-drag";
 
 export const BROWSER_SNAPSHOT_KEY = "nyxid.companion.snapshot.v1";
 export const BROWSER_LAUNCH_AT_LOGIN_KEY = "nyxid.companion.launch-at-login.v1";
@@ -454,6 +463,8 @@ export class BrowserCompanionRuntime implements CompanionRuntime {
     void mode;
   }
 
+  async startWindowDrag(): Promise<void> {}
+
   async openNyxidAssistant(): Promise<void> {
     if (typeof window !== "undefined") {
       window.open(NYXID_ASSISTANT_URL, "_blank", "noopener,noreferrer");
@@ -478,6 +489,30 @@ export class BrowserCompanionRuntime implements CompanionRuntime {
 
   async logoutNyxid(): Promise<NyxIdView> {
     return { state: "unavailable" };
+  }
+
+  async sendNyxIdChat(
+    request: NyxIdChatRequest,
+  ): Promise<NyxIdChatCompletedEvent> {
+    void request;
+    throw new NyxIdChatSendError(
+      "rejected",
+      "请使用桌面版连接 NyxID 后再发送消息。",
+    );
+  }
+
+  async nyxIdChatHistory(conversationId: string): Promise<NyxIdChatHistory> {
+    void conversationId;
+    throw new Error("NyxID 对话需要在桌面应用中使用");
+  }
+
+  async recoverNyxIdChat(): Promise<NyxIdChatRecovery | null> {
+    return null;
+  }
+
+  async stopNyxIdChat(conversationId: string): Promise<void> {
+    void conversationId;
+    throw new Error("NyxID 对话需要在桌面应用中使用");
   }
 
   async getLaunchAtLogin(): Promise<boolean> {
@@ -513,7 +548,21 @@ export class BrowserCompanionRuntime implements CompanionRuntime {
     };
   }
 
+  async onWindowDrag(
+    listener: (event: WindowDragEvent) => void,
+  ): Promise<Unlisten> {
+    void listener;
+    return () => undefined;
+  }
+
   async onNyxidChanged(listener: (view: NyxIdView) => void): Promise<Unlisten> {
+    void listener;
+    return () => undefined;
+  }
+
+  async onNyxIdChatEvent(
+    listener: (event: NyxIdChatEvent) => void,
+  ): Promise<Unlisten> {
     void listener;
     return () => undefined;
   }

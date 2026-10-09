@@ -202,7 +202,7 @@ export function SettingsPanel({
       aria-busy={interactionPending}
       aria-labelledby="settings-title"
     >
-      <div className="panel-toolbar" data-tauri-drag-region>
+      <div className="panel-toolbar" data-window-drag-handle>
         <button
           type="button"
           className="bare-icon"

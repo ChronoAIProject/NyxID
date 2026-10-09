@@ -73,20 +73,39 @@ nyxid service add api-lark --oauth \
 
 `--scope` is **additive** — it adds to the provider's default scopes. To change the scopes of a connection you already have (including removing one), use `service scopes` below.
 
-### Lark / Feishu Approval forwarding
+### Lark / Feishu Approval tasks
 
-The user OAuth services `api-lark` and `api-feishu` expose native Lark Approval task listing (`approval_tasks_query`) and forwarding (`approval_task_forward`) through the catalog and MCP. The server's startup catalog sync publishes these tools after upgrading; refresh the MCP tool list afterward. Enable the user permissions `approval:task:read` and `approval:task:write` in your Lark/Feishu app, then connect with those additional scopes:
+The user OAuth services `api-lark` and `api-feishu` expose native Lark Approval task listing (`approval_tasks_query`), instance detail (`approval_instance_detail`), forwarding (`approval_task_forward`), and approval (`approval_task_approve`) through the catalog and MCP. The server's startup catalog sync publishes these tools after upgrading; refresh the MCP tool list afterward. Enable the user permissions `approval:task:read`, `approval:instance:read`, and `approval:task:write` in your Lark/Feishu app, then connect with those additional scopes:
 
 ```bash
 nyxid service add api-lark --oauth \
   --oauth-client-id cli_your_app_id \
   --oauth-client-secret-env LARK_APP_SECRET \
-  --scope "approval:task:read,approval:task:write"
+  --scope "approval:task:read,approval:instance:read,approval:task:write"
 ```
 
-For an existing connection, run `nyxid service scopes api-lark` and retain your current scopes while adding both Approval permissions. Reauthorization preserves the same connection. Substitute `api-feishu` for the China region. OAuth does not grant permissions that the app or tenant has not enabled.
+For an existing connection, run `nyxid service scopes api-lark` and retain your current scopes while adding all three Approval permissions. Reauthorization preserves the same connection. Substitute `api-feishu` for the China region. OAuth does not grant permissions that the app or tenant has not enabled.
 
-List pending tasks with `GET /api/v1/proxy/<SERVICE_ID>/approval/v4/tasks?topic=1`. Take `instance_code` and `task_id` from the same task, check `support_api_operate`, and forward it with:
+List pending tasks with `GET /api/v1/proxy/<SERVICE_ID>/approval/v4/tasks?topic=1`. Take `instance_code` and `task_id` from the same task, check `support_api_operate`, and read the authoritative instance state before any write:
+
+```http
+GET /api/v1/proxy/<SERVICE_ID>/approval/v4/instances/detail?instance_code=<INSTANCE_CODE>&user_id_type=open_id
+```
+
+The detail response's `form` field is a JSON-encoded string and can contain sensitive values. Parse it as structured input, avoid retaining free-form reasons or attachments, and fail closed when required fields, the expected definition, the current approver, or task state cannot be verified. Re-read the pending task immediately before changing it.
+
+To approve the exact task as the connected user:
+
+```http
+POST /api/v1/proxy/<SERVICE_ID>/approval/v4/tasks/pass
+Content-Type: application/json
+
+{"instance_code":"<INSTANCE_CODE>","task_id":"<TASK_ID>"}
+```
+
+Approval changes provider state and is marked as a destructive write requiring approval in the catalog. Automate it only behind a narrowly scoped, time-bounded policy based on stable structured fields, with an explicit approver/employee/leave-type allowlist and a duration limit. Unknown or changed data should require review; never turn an unmatched approval into an automatic rejection.
+
+To forward the task instead:
 
 ```http
 POST /api/v1/proxy/<SERVICE_ID>/approval/v4/tasks/forward?user_id_type=open_id
@@ -95,7 +114,7 @@ Content-Type: application/json
 {"instance_code":"<INSTANCE_CODE>","task_id":"<TASK_ID>","transfer_user_id":"ou_recipient","comment":"Please review this request"}
 ```
 
-Authenticate these proxy requests with your NyxID credentials. The recipient ID must match `user_id_type`; the forwarding tool requires that parameter explicitly. Forwarding changes the current approver and is marked as a destructive write in the catalog; configured NyxID approval policies still apply. The connected Lark user must be allowed to act on the task. Check the response's `code`: Lark can return a provider error with HTTP 200. Avoid blindly retrying if the task has already been processed or its state changed.
+Authenticate these proxy requests with your NyxID credentials. The recipient ID must match `user_id_type`; the forwarding tool requires that parameter explicitly. Both writes require the connected Lark user to be the current actionable approver, and configured NyxID approval policies still apply. Check the response's `code`: Lark can return a provider error with HTTP 200. After a timeout or lost response, read the task again and reconcile its state instead of blindly retrying a write that might already have succeeded.
 
 This uses the user OAuth `/tasks/forward` API. The older `/tasks/transfer` operation uses a tenant token and a different request body. No bot credentials are substituted for user OAuth. See the [Lark CLI's published API contract](https://github.com/larksuite/cli/blob/7beffb086d7fa3c5b843d8affa7c089f49cfc65e/internal/registry/catalog/services/approval.json) for the user routes and permissions.
 

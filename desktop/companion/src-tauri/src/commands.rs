@@ -4,7 +4,10 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::desktop::{emit_state_changed, present_due_prompt, sync_pause_item};
 use crate::model::{CompanionSettings, CompanionSnapshot, MealId, Mood};
-use crate::nyxid::{NyxIdState, NyxIdView};
+use crate::nyxid::{
+    NyxIdChatCommandError, NyxIdChatEvent, NyxIdChatHistory, NyxIdChatRecovery, NyxIdChatRequest,
+    NyxIdState, NyxIdView,
+};
 use crate::scheduler::DEFAULT_SNOOZE_MINUTES;
 use crate::state::CompanionState;
 use crate::window::{self, WindowMode};
@@ -140,6 +143,11 @@ pub fn set_window_mode(app: AppHandle, mode: WindowMode) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn start_window_drag(app: AppHandle) -> Result<(), String> {
+    window::start_drag(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_launch_at_login(app: AppHandle) -> Result<bool, String> {
     app.autolaunch()
         .is_enabled()
@@ -198,4 +206,43 @@ pub async fn logout_nyxid(
     state: State<'_, NyxIdState>,
 ) -> Result<NyxIdView, String> {
     Ok(state.inner().clone().logout(app).await)
+}
+
+#[tauri::command]
+pub async fn send_nyxid_chat(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+    request: NyxIdChatRequest,
+) -> Result<NyxIdChatEvent, NyxIdChatCommandError> {
+    state.inner().clone().send_chat(app, request).await
+}
+
+#[tauri::command]
+pub async fn recover_nyxid_chat(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+) -> Result<Option<NyxIdChatRecovery>, String> {
+    state.inner().clone().recover_chat(app).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn nyxid_chat_history(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+    conversation_id: String,
+) -> Result<NyxIdChatHistory, String> {
+    state
+        .inner()
+        .clone()
+        .chat_history(app, conversation_id)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn nyxid_chat_stop(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    state.inner().clone().stop_chat(app, conversation_id).await
 }
