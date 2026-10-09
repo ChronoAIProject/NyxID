@@ -61,11 +61,12 @@ RUN rm -rf backend/src cloud-auth/src service-adapters/src machine/src machine-u
     target/release/nyxid-server
 
 # Copy the real source code, build script, docs, prompts, and catalog spec overlays
-# (docs, prompts, and specs are embedded via include_str!)
+# (docs, prompts, specs, and assets are embedded via include_str!/include_bytes!)
 COPY backend/src backend/src
 COPY backend/build.rs backend/build.rs
 COPY backend/prompts backend/prompts
 COPY backend/specs backend/specs
+COPY backend/assets backend/assets
 COPY cloud-auth/src cloud-auth/src
 COPY service-adapters/src service-adapters/src
 COPY machine/src machine/src

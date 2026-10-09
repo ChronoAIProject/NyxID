@@ -2659,6 +2659,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
+        .route("/favicon.ico", get(handlers::brand_icons::favicon_ico))
+        .route("/favicon.svg", get(handlers::brand_icons::favicon_svg))
+        .route("/icon-512.png", get(handlers::brand_icons::icon_png))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .route(
