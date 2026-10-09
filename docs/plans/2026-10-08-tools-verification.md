@@ -605,3 +605,1010 @@ Each invocation ran exactly one test with 7,486 filtered out. Twenty-one passed 
 - CLI: `/tmp/nyxid-tools-phase1-cli-final.log`, exit 0.
 - Frontend: `/tmp/nyxid-tools-phase1-lint.log`, `/tmp/nyxid-tools-phase1-frontend-tests.log`, `/tmp/nyxid-tools-phase1-frontend-build.log`, all exit 0.
 - Manual proof: checked-in full transcript; final proof exit 0. The documented script invocation ran twice with the second run unchanged.
+
+
+## Review round 1
+Recorded 2026-10-09T02:11:30.601332+00:00. The Phase 1 scope remains unchanged. PR #1821 stays draft.
+### Commits and changed files
+
+<details><summary>d3aaf068 fix(tools): publish operations atomically and reject ambiguous drafts (2 files)</summary>
+
+```text
+backend/src/handlers/endpoints.rs
+backend/src/services/tool_publication_service.rs
+```
+
+</details>
+
+<details><summary>d2710d62 fix(tools): timestamp catalog twin provenance (2 files)</summary>
+
+```text
+backend/src/handlers/tools_tests.rs
+backend/src/services/tool_twin_service.rs
+```
+
+</details>
+
+<details><summary>633c5e02 refactor(tools): isolate transactional publication updates (1 files)</summary>
+
+```text
+backend/src/services/tool_publication_service.rs
+```
+
+</details>
+
+<details><summary>bdc3ab24 fix(tools): allow clearing supplier and import provenance (2 files)</summary>
+
+```text
+backend/src/handlers/services.rs
+backend/src/handlers/tools_tests.rs
+```
+
+</details>
+
+<details><summary>6315f4de fix(keys): include tool bindings through one authorized server query (5 files)</summary>
+
+```text
+backend/src/handlers/keys.rs
+backend/src/handlers/service_account_key_reads.rs
+backend/src/services/unified_key_service.rs
+frontend/src/hooks/use-keys.test.tsx
+frontend/src/hooks/use-keys.ts
+```
+
+</details>
+
+<details><summary>08ae70a0 fix(tools): list credential presence and represent disabled limits (4 files)</summary>
+
+```text
+backend/src/handlers/tools.rs
+backend/src/services/tools_service.rs
+frontend/src/pages/tools.tsx
+frontend/src/schemas/tools.ts
+```
+
+</details>
+
+<details><summary>4767dfe5 fix(cli): document tool commands and format offering tables (4 files)</summary>
+
+```text
+cli/src/cli.rs
+cli/src/commands/catalog_tools.rs
+cli/src/commands/service.rs
+cli/src/commands/service/catalog_admin.rs
+```
+
+</details>
+
+<details><summary>18605146 style(frontend): format tool changes without rewriting legacy files (14 files)</summary>
+
+```text
+frontend/src/components/assistant/assistant-platform-service-fields.tsx
+frontend/src/components/assistant/nyxbot-agent-forms.tsx
+frontend/src/components/cli-wizard/access-scope-card.tsx
+frontend/src/components/dashboard/api-key-create-dialog.tsx
+frontend/src/components/dashboard/api-key-detail/service-scope-card.tsx
+frontend/src/components/dashboard/endpoint-form-dialog.test.tsx
+frontend/src/components/dashboard/endpoint-list.tsx
+frontend/src/components/layout/dashboard-layout.tsx
+frontend/src/hooks/use-endpoints.ts
+frontend/src/lib/endpoint-changes.ts
+frontend/src/pages/api-key-detail.test.tsx
+frontend/src/pages/api-key-detail.tsx
+frontend/src/pages/keys.tsx
+frontend/src/schemas/endpoints.ts
+```
+
+</details>
+
+<details><summary>1b200d84 fix(frontend): integrate tool metadata into the service form (12 files)</summary>
+
+```text
+frontend/src/components/dashboard/endpoint-form-dialog.tsx
+frontend/src/components/services/catalog-tool-metadata.tsx
+frontend/src/components/services/service-tool-fields.tsx
+frontend/src/components/services/tool-publication.tsx
+frontend/src/pages/admin-edit-forms.test.tsx
+frontend/src/pages/admin-tools.tsx
+frontend/src/pages/service-edit.helpers.ts
+frontend/src/pages/service-edit.test.tsx
+frontend/src/pages/service-edit.tsx
+frontend/src/pages/tools.test.tsx
+frontend/src/schemas/services.ts
+frontend/src/types/api.ts
+```
+
+</details>
+
+<details><summary>3f74d359 fix(tools): own publication transaction inputs for async dispatch (1 files)</summary>
+
+```text
+backend/src/services/tool_publication_service.rs
+```
+
+</details>
+
+<details><summary>b65cbdb4 fix(keys): document tool binding opt-in and preserve default dispatch (2 files)</summary>
+
+```text
+backend/src/handlers/keys.rs
+backend/src/handlers/service_account_key_reads.rs
+```
+
+</details>
+
+<details><summary>deb681fe docs(tools): describe review updates to keys metadata and CLI output (2 files)</summary>
+
+```text
+docs/API.md
+docs/TOOLS.md
+```
+
+</details>
+
+<details><summary>8f72a891 merge: origin/main into enrich-ai-search-tools (691 files)</summary>
+
+```text
+.agents/plugins/marketplace.json
+.claude-plugin/marketplace.json
+.claude-plugin/plugin.json
+.github/workflows/ci.yml
+CLAUDE.md
+Cargo.lock
+DESIGN.md
+README.md
+backend/Cargo.toml
+backend/specs/catalog/chrono-sandbox.openapi.json
+backend/specs/catalog/cloudflare.openapi.json
+backend/specs/catalog/github.openapi.json
+backend/specs/catalog/lark.openapi.json
+backend/specs/catalog/railway.openapi.json
+backend/specs/catalog/stripe.openapi.json
+backend/specs/catalog/supabase-management.openapi.json
+backend/src/api_docs.rs
+backend/src/billing_integration_tests.rs
+backend/src/billing_integration_tests/usage.rs
+backend/src/crypto/jwt.rs
+backend/src/db.rs
+backend/src/errors/access_denial.rs
+backend/src/errors/mod.rs
+backend/src/errors/skill_draft.rs
+backend/src/handlers/admin.rs
+backend/src/handlers/admin_anonymous_endpoints.rs
+backend/src/handlers/admin_ownership.rs
+backend/src/handlers/agent_bindings.rs
+backend/src/handlers/agent_skills.rs
+backend/src/handlers/assistant_action_effects_endpoints.rs
+backend/src/handlers/assistant_action_effects_keys.rs
+backend/src/handlers/assistant_action_effects_services.rs
+backend/src/handlers/assistant_agent_learning.rs
+backend/src/handlers/assistant_group.rs
+backend/src/handlers/assistant_group_tests.rs
+backend/src/handlers/assistant_nyxagent.rs
+backend/src/handlers/assistant_nyxagent_steering.rs
+backend/src/handlers/assistant_nyxagent_steering_tests.rs
+backend/src/handlers/assistant_nyxagent_tests.rs
+backend/src/handlers/assistant_nyxagent_upload_tests.rs
+backend/src/handlers/assistant_team.rs
+backend/src/handlers/assistant_team_tests.rs
+backend/src/handlers/assistant_uploads.rs
+backend/src/handlers/assistant_voice.rs
+backend/src/handlers/async_service_operation_tests.rs
+backend/src/handlers/async_service_operations.rs
+backend/src/handlers/billing.rs
+backend/src/handlers/catalog.rs
+backend/src/handlers/channel_activity_tests.rs
+backend/src/handlers/channel_relay.rs
+backend/src/handlers/channel_x_public_tests.rs
+backend/src/handlers/delegation.rs
+backend/src/handlers/endpoints.rs
+backend/src/handlers/exact_service_approvals.rs
+backend/src/handlers/key_updates.rs
+backend/src/handlers/keys.rs
+backend/src/handlers/llm_gateway.rs
+backend/src/handlers/login_client_context.rs
+backend/src/handlers/machine_access.rs
+backend/src/handlers/machine_discovery_tests.rs
+backend/src/handlers/machine_mcp_tests.rs
+backend/src/handlers/machine_tools.rs
+backend/src/handlers/mcp.rs
+backend/src/handlers/mcp_chat_authority_tests.rs
+backend/src/handlers/mcp_config_routes_tests.rs
+backend/src/handlers/mcp_delegation_tests.rs
+backend/src/handlers/mcp_path_parameter_tests.rs
+backend/src/handlers/mcp_proxy_parity_tests.rs
+backend/src/handlers/mcp_transport.rs
+backend/src/handlers/mod.rs
+backend/src/handlers/nyxbot.rs
+backend/src/handlers/nyxbot_chats.rs
+backend/src/handlers/nyxbot_gateway_thread_tests.rs
+backend/src/handlers/nyxbot_gateway_threads.rs
+backend/src/handlers/nyxbot_late_delivery.rs
+backend/src/handlers/nyxbot_tests.rs
+backend/src/handlers/nyxbot_thread_controls.rs
+backend/src/handlers/nyxbot_thread_follow.rs
+backend/src/handlers/nyxbot_transport.rs
+backend/src/handlers/nyxbot_transport_tests.rs
+backend/src/handlers/oauth.rs
+backend/src/handlers/oauth_incremental_tests.rs
+backend/src/handlers/oauth_registration_tests.rs
+backend/src/handlers/org_group.rs
+backend/src/handlers/proxy.rs
+backend/src/handlers/proxy_concurrency_tests.rs
+backend/src/handlers/public_mcp.rs
+backend/src/handlers/public_proxy.rs
+backend/src/handlers/service_concurrency.rs
+backend/src/handlers/service_insights.rs
+backend/src/handlers/service_insights_tests.rs
+backend/src/handlers/service_pool_billing_tests.rs
+backend/src/handlers/service_pool_inspection_tests.rs
+backend/src/handlers/service_pool_proxy_tests.rs
+backend/src/handlers/service_preference.rs
+backend/src/handlers/service_preference_tests.rs
+backend/src/handlers/services.rs
+backend/src/handlers/ssh_exec.rs
+backend/src/handlers/ssh_tunnel.rs
+backend/src/handlers/ssh_web_terminal.rs
+backend/src/handlers/tools_tests.rs
+backend/src/handlers/trigger_scheduler.rs
+backend/src/handlers/trigger_scheduler_tests.rs
+backend/src/handlers/user_api_keys_external.rs
+backend/src/handlers/user_endpoints.rs
+backend/src/handlers/user_services_handler.rs
+backend/src/handlers/user_tokens.rs
+backend/src/handlers/users.rs
+backend/src/models/assistant_acknowledgement.rs
+backend/src/models/assistant_agent_learning.rs
+backend/src/models/assistant_conversation.rs
+backend/src/models/assistant_message.rs
+backend/src/models/assistant_voice.rs
+backend/src/models/async_service_operation.rs
+backend/src/models/downstream_service.rs
+backend/src/models/mcp_session.rs
+backend/src/models/mod.rs
+backend/src/models/nyxbot_channel.rs
+backend/src/models/oauth_client.rs
+backend/src/models/service_billing.rs
+backend/src/models/service_concurrency.rs
+backend/src/models/service_endpoint.rs
+backend/src/models/service_preference.rs
+backend/src/models/usage_meter.rs
+backend/src/models/usage_rollup_hourly.rs
+backend/src/models/user.rs
+backend/src/models/user_api_key.rs
+backend/src/mw/auth.rs
+backend/src/mw/auth_denial_tests.rs
+backend/src/routes.rs
+backend/src/services/admin_usage_service.rs
+backend/src/services/admin_usage_service/analytics.rs
+backend/src/services/admin_usage_service/tests.rs
+backend/src/services/admin_user_service.rs
+backend/src/services/agent_binding_service.rs
+backend/src/services/agent_operation_scope_service.rs
+backend/src/services/anonymous_endpoint_service.rs
+backend/src/services/assistant_account_tools.rs
+backend/src/services/assistant_acknowledgement_service.rs
+backend/src/services/assistant_agent_credential_service.rs
+backend/src/services/assistant_agent_learning.rs
+backend/src/services/assistant_agent_learning_review.rs
+backend/src/services/assistant_agent_learning_review_tests.rs
+backend/src/services/assistant_authority_tests.rs
+backend/src/services/assistant_group_service.rs
+backend/src/services/assistant_instruction_context.rs
+backend/src/services/assistant_learning_publication.rs
+backend/src/services/assistant_links.rs
+backend/src/services/assistant_live.rs
+backend/src/services/assistant_nyxagent.rs
+backend/src/services/assistant_nyxagent_tests.rs
+backend/src/services/assistant_oneshot_inference.rs
+backend/src/services/assistant_skill_authoring.rs
+backend/src/services/assistant_skill_authoring_tests.rs
+backend/src/services/assistant_skill_authoring_validation.rs
+backend/src/services/assistant_skill_authoring_validation_tests.rs
+backend/src/services/assistant_steering.rs
+backend/src/services/assistant_team_service.rs
+backend/src/services/assistant_team_tools.rs
+backend/src/services/assistant_title_service.rs
+backend/src/services/assistant_voice.rs
+backend/src/services/async_service_operation.rs
+backend/src/services/billing/funding.rs
+backend/src/services/billing/funding/target_tests.rs
+backend/src/services/billing/lago_client.rs
+backend/src/services/billing/meter.rs
+backend/src/services/billing/mod.rs
+backend/src/services/billing/reconcile.rs
+backend/src/services/billing/route_inventory.rs
+backend/src/services/billing/usage_rollup.rs
+backend/src/services/billing/usage_rollup/tests.rs
+backend/src/services/billing/webhook.rs
+backend/src/services/catalog_spec_registry.rs
+backend/src/services/catalog_spec_sync.rs
+backend/src/services/channel_thread_follow_service.rs
+backend/src/services/channel_thread_follow_service/turns.rs
+backend/src/services/channel_thread_service.rs
+backend/src/services/channel_thread_service/gateway.rs
+backend/src/services/channel_thread_service/resolution.rs
+backend/src/services/connect_link_service.rs
+backend/src/services/connection_expiry_service.rs
+backend/src/services/destination_approval_tests.rs
+backend/src/services/destination_routing_tests.rs
+backend/src/services/durable_operation_grant_service.rs
+backend/src/services/exact_service_approval_service.rs
+backend/src/services/feature_flag_service.rs
+backend/src/services/gcp_sa_service.rs
+backend/src/services/google_auto_activation_tests.rs
+backend/src/services/identity_service.rs
+backend/src/services/llm_usage_service.rs
+backend/src/services/machine_tools.rs
+backend/src/services/mcp_service.rs
+backend/src/services/mod.rs
+backend/src/services/oauth_app_source.rs
+backend/src/services/oauth_client_dcr_tests.rs
+backend/src/services/oauth_client_service.rs
+backend/src/services/oauth_flow.rs
+backend/src/services/oauth_resource_service.rs
+backend/src/services/oauth_revocation.rs
+backend/src/services/oauth_service.rs
+backend/src/services/openapi_parser.rs
+backend/src/services/operation_path.rs
+backend/src/services/org_group_service.rs
+backend/src/services/ownership_transfer_tests.rs
+backend/src/services/permission_policy_service.rs
+backend/src/services/permission_policy_service_tests.rs
+backend/src/services/platform_key_service/tests.rs
+backend/src/services/provider_service.rs
+backend/src/services/proxy_authorization.rs
+backend/src/services/proxy_service.rs
+backend/src/services/reporting_identity_service.rs
+backend/src/services/scope_catalog.rs
+backend/src/services/service_concurrency_service.rs
+backend/src/services/service_concurrency_service/tests.rs
+backend/src/services/service_endpoint_service.rs
+backend/src/services/service_history/projection.rs
+backend/src/services/service_history/tests.rs
+backend/src/services/service_insights_activity.rs
+backend/src/services/service_insights_billing.rs
+backend/src/services/service_pool_service.rs
+backend/src/services/service_preference_service.rs
+backend/src/services/ssh_service.rs
+backend/src/services/telegram_new_service.rs
+backend/src/services/tool_publication_service.rs
+backend/src/services/tools_service.rs
+backend/src/services/unified_key_service.rs
+backend/src/services/user_api_key_service.rs
+backend/src/services/user_credentials_service.rs
+backend/src/services/user_preferences_service.rs
+backend/src/services/user_service_service.rs
+backend/src/services/user_token_service.rs
+backend/src/services/voice/credentials.rs
+backend/src/services/voice/grok_runtime.rs
+backend/src/services/voice/receipt.rs
+backend/src/services/voice/runtime.rs
+backend/src/services/voice/tests.rs
+backend/src/services/voice/transcript.rs
+backend/src/test_utils.rs
+backend/tests/fixtures/skills/community-workflow-zh.md
+cli/Cargo.toml
+cli/src/api.rs
+cli/src/auth.rs
+cli/src/auth/login_exchange.rs
+cli/src/auth/login_exchange/tests.rs
+cli/src/auth/login_input.rs
+cli/src/auth/login_input/tests.rs
+cli/src/cli.rs
+cli/src/commands/ai_setup.rs
+cli/src/commands/service.rs
+cli/src/credential_guidance.rs
+cli/src/error_format.rs
+cli/src/main.rs
+cli/src/net_diagnostics.rs
+cli/src/wizard/assets/index.html
+cli/src/wizard/bundle-meta/index.hash
+cli/src/wizard/bundle-meta/index.manifest
+cli/tests/login_code_input.rs
+cli/tests/service_preference.rs
+cli/tests/service_preference_transport.rs
+docs/AGENT_ISOLATION.md
+docs/AGENT_LEARNING.md
+docs/AGENT_SKILLS.md
+docs/AI_SERVICES_ARCHITECTURE.md
+docs/API.md
+docs/API_DISCOVERY.md
+docs/BILLING_ANALYTICS.md
+docs/BILLING_EXACT_ACCOUNTING.md
+docs/BILLING_UI_GLOSSARY.md
+docs/CHANNEL_EVENT_GATEWAY.md
+docs/CHANNEL_THREAD_FOLLOW.md
+docs/CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md
+docs/CLAUDE_PLUGIN.md
+docs/CLOUD_PLATFORM_OAUTH.md
+docs/CODEX_PLUGIN.md
+docs/DEPLOYMENT.md
+docs/MACHINE_AGENT_ISOLATION.md
+docs/MACHINE_NODES.md
+docs/MANAGED_OAUTH_CONNECTORS.md
+docs/MCP_DELEGATION_FLOW.md
+docs/OIDC.md
+docs/ORG_AGENTS.md
+docs/PLUGINS.md
+docs/POSTHOG_CONNECTIONS.md
+docs/POSTHOG_OAUTH.md
+docs/SERVICE_CONCURRENCY_LIMITS.md
+docs/SERVICE_CONFIGURATION.md
+docs/SERVICE_POOL_ROUTING_PROOF.md
+docs/STRIPE_OAUTH.md
+docs/chat/08-nyxagent-engine.md
+docs/chat/09-nyxbot-orchestrator.md
+docs/chat/10-uploads.md
+docs/connecting-services/README.md
+docs/plans/ai-service-connection-user-flow.md
+docs/plans/consolidated-services-flow.md
+docs/plans/local-routing-preview.md
+docs/plans/posthog-oauth-fable-review.md
+docs/plans/posthog-oauth.md
+docs/plans/references/services-card-reference.html
+docs/plans/service-billing-labels.md
+docs/plans/service-route-resolution-flow.md
+docs/plans/service-tool-preference-order.md
+docs/plans/service-tool-preference-review.md
+docs/plans/services-consolidated-fable-review.md
+docs/plans/slug-connection-resolution-proposal.md
+docs/plans/slug-routing-fable-review.md
+docs/quickstarts/supabase.md
+docs/site/cli/getting-started/authenticate.md
+docs/site/cli/guides/connect-a-service.md
+docs/site/shared/concepts/oauth-oidc.md
+frontend/Dockerfile
+frontend/dev/routing-preview.ts
+frontend/e2e/assistant-account-menu.spec.ts
+frontend/e2e/assistant-mobile-layout.spec.ts
+frontend/e2e/billing-page.spec.ts
+frontend/e2e/nyxagent-authority.spec.ts
+frontend/e2e/service-card-scroll.spec.ts
+frontend/e2e/service-preference.spec.ts
+frontend/e2e/usage-token-breakdown.spec.ts
+frontend/e2e/wizard-scope.spec.ts
+frontend/nginx.conf.template
+frontend/package-lock.json
+frontend/package.json
+frontend/public/nyxid-coloured-icon.png
+frontend/scripts/build-version.ts
+frontend/src/app.css
+frontend/src/components/admin-credits/credit-pickers.tsx
+frontend/src/components/assistant/assistant-account-menu.tsx
+frontend/src/components/assistant/assistant-account-panel.tsx
+frontend/src/components/assistant/assistant-chat-page.tsx
+frontend/src/components/assistant/assistant-drawer-context.ts
+frontend/src/components/assistant/assistant-link-modals.test.tsx
+frontend/src/components/assistant/assistant-link-modals.tsx
+frontend/src/components/assistant/assistant-shell.tsx
+frontend/src/components/assistant/assistant-sidebar.test.tsx
+frontend/src/components/assistant/assistant-sidebar.tsx
+frontend/src/components/assistant/authored-skill-card.test.tsx
+frontend/src/components/assistant/authored-skill-card.tsx
+frontend/src/components/assistant/automation-preferences.tsx
+frontend/src/components/assistant/chat-composer.test.tsx
+frontend/src/components/assistant/chat-composer.tsx
+frontend/src/components/assistant/chat-message.tsx
+frontend/src/components/assistant/machine-capabilities.test.tsx
+frontend/src/components/assistant/machine-capabilities.tsx
+frontend/src/components/assistant/nyxagent-acknowledgement-card.tsx
+frontend/src/components/assistant/nyxagent-composer.test.tsx
+frontend/src/components/assistant/nyxagent-composer.tsx
+frontend/src/components/assistant/nyxbot-agent-details.test.tsx
+frontend/src/components/assistant/nyxbot-channel-chats.tsx
+frontend/src/components/assistant/nyxbot-channels.tsx
+frontend/src/components/assistant/nyxbot-group-view.tsx
+frontend/src/components/assistant/nyxbot-home.tsx
+frontend/src/components/assistant/nyxbot-settings-button.tsx
+frontend/src/components/assistant/nyxbot-settings-content.test.tsx
+frontend/src/components/assistant/nyxbot-settings-content.tsx
+frontend/src/components/assistant/nyxbot-settings-dialog.test.tsx
+frontend/src/components/assistant/nyxbot-settings-dialog.tsx
+frontend/src/components/assistant/upload-composer.test.tsx
+frontend/src/components/assistant/upload-composer.tsx
+frontend/src/components/auth/auth-flow.tsx
+frontend/src/components/auth/device-approval.tsx
+frontend/src/components/auth/mfa-setup-dialog.tsx
+frontend/src/components/auth/mfa-verify-form.tsx
+frontend/src/components/billing-analytics/analytics-canvas.tsx
+frontend/src/components/billing-analytics/controls.test.tsx
+frontend/src/components/billing-analytics/sample-data.ts
+frontend/src/components/billing-analytics/token-metric-picker.test.tsx
+frontend/src/components/billing-analytics/token-metric-picker.tsx
+frontend/src/components/billing-analytics/token-metrics.ts
+frontend/src/components/billing-analytics/token-usage-value.test.tsx
+frontend/src/components/billing-analytics/token-usage-value.tsx
+frontend/src/components/billing-route-guard.test.tsx
+frontend/src/components/billing/billing-activity.tsx
+frontend/src/components/billing/billing-allowance-details.tsx
+frontend/src/components/billing/billing-benefits-card.tsx
+frontend/src/components/billing/billing-benefits.test.tsx
+frontend/src/components/billing/billing-funding-chart.test.tsx
+frontend/src/components/billing/billing-funding-chart.tsx
+frontend/src/components/billing/billing-metric-picker.tsx
+frontend/src/components/billing/billing-multi-select.tsx
+frontend/src/components/billing/billing-page.css
+frontend/src/components/billing/billing-quantity-chart.tsx
+frontend/src/components/billing/billing-usage-details.tsx
+frontend/src/components/billing/billing-usage-explorer.tsx
+frontend/src/components/billing/credits-denied-dialog.tsx
+frontend/src/components/billing/credits-denied-host.tsx
+frontend/src/components/billing/credits-denied.test.tsx
+frontend/src/components/build-update-banner.test.tsx
+frontend/src/components/build-update-banner.tsx
+frontend/src/components/cli-wizard/access-scope-mode-a.test.tsx
+frontend/src/components/cli-wizard/client.ts
+frontend/src/components/cli-wizard/shell.tsx
+frontend/src/components/dashboard/add-key-dialog.test.tsx
+frontend/src/components/dashboard/add-key-dialog.tsx
+frontend/src/components/dashboard/agent-plugins-section.test.tsx
+frontend/src/components/dashboard/agent-plugins-section.tsx
+frontend/src/components/dashboard/api-key-detail/bindings-card.tsx
+frontend/src/components/dashboard/api-key-detail/callback-url-card.tsx
+frontend/src/components/dashboard/api-key-detail/details-card.tsx
+frontend/src/components/dashboard/api-key-detail/node-scope-card.tsx
+frontend/src/components/dashboard/api-key-detail/platform-card.tsx
+frontend/src/components/dashboard/api-key-detail/rate-limit-card.tsx
+frontend/src/components/dashboard/api-key-detail/service-scope-card.tsx
+frontend/src/components/dashboard/api-key-detail/usage-stats-card.tsx
+frontend/src/components/dashboard/api-key-detail/verify-key-card.tsx
+frontend/src/components/dashboard/api-key-dialog.tsx
+frontend/src/components/dashboard/connection-delete-action.test.tsx
+frontend/src/components/dashboard/connection-delete-action.tsx
+frontend/src/components/dashboard/device-code-dialog.tsx
+frontend/src/components/dashboard/grouped-service-cards.tsx
+frontend/src/components/dashboard/notification-setup-card.tsx
+frontend/src/components/dashboard/pool-connections-editor.tsx
+frontend/src/components/dashboard/pool-controls.tsx
+frontend/src/components/dashboard/pool-editor.tsx
+frontend/src/components/dashboard/pool-health-dialog.tsx
+frontend/src/components/dashboard/pool-labels.ts
+frontend/src/components/dashboard/provider-card.test.tsx
+frontend/src/components/dashboard/provider-card.tsx
+frontend/src/components/dashboard/routing-section.tsx
+frontend/src/components/dashboard/sa-device-code-dialog.tsx
+frontend/src/components/dashboard/service-agent-order-panel.tsx
+frontend/src/components/dashboard/service-avatar-stack.test.tsx
+frontend/src/components/dashboard/service-avatar-stack.tsx
+frontend/src/components/dashboard/service-billing-summary.test.tsx
+frontend/src/components/dashboard/service-billing-summary.tsx
+frontend/src/components/dashboard/service-card-motion.tsx
+frontend/src/components/dashboard/service-connection-table.tsx
+frontend/src/components/dashboard/service-filter-multiselect.tsx
+frontend/src/components/dashboard/service-history.tsx
+frontend/src/components/dashboard/service-insight-panels.tsx
+frontend/src/components/dashboard/service-insights.test.tsx
+frontend/src/components/dashboard/service-order-actions.tsx
+frontend/src/components/dashboard/service-order-keyboard.ts
+frontend/src/components/dashboard/service-order-rows.tsx
+frontend/src/components/dashboard/service-owner-avatar.tsx
+frontend/src/components/dashboard/service-pool-cards.tsx
+frontend/src/components/dashboard/service-pool-icons.tsx
+frontend/src/components/dashboard/service-pool-routing-panel.test.tsx
+frontend/src/components/dashboard/service-pool-routing-panel.tsx
+frontend/src/components/dashboard/service-pool-summary.tsx
+frontend/src/components/dashboard/service-pools-tab.tsx
+frontend/src/components/dashboard/service-routing-preview.test.tsx
+frontend/src/components/dashboard/service-routing-preview.tsx
+frontend/src/components/dashboard/service-saved-views.test.tsx
+frontend/src/components/dashboard/service-saved-views.tsx
+frontend/src/components/dashboard/service-view-toolbar.tsx
+frontend/src/components/dashboard/sidebar.tsx
+frontend/src/components/dashboard/user-credentials-dialog.tsx
+frontend/src/components/data-table/data-table-columns.tsx
+frontend/src/components/data-table/data-table-controls.tsx
+frontend/src/components/developer-apps/developer-app-detail.test.tsx
+frontend/src/components/developer-apps/developer-app-detail.tsx
+frontend/src/components/layout/breadcrumb-context.test.tsx
+frontend/src/components/layout/breadcrumb-context.ts
+frontend/src/components/layout/dashboard-layout.tsx
+frontend/src/components/layout/studio-breadcrumb-trail.test.tsx
+frontend/src/components/layout/studio-breadcrumb-trail.tsx
+frontend/src/components/orgs/org-developer-apps-tab.tsx
+frontend/src/components/providers/codex-connection.tsx
+frontend/src/components/service-accounts/service-account-detail.test.tsx
+frontend/src/components/service-accounts/service-account-detail.tsx
+frontend/src/components/service-icon.test.tsx
+frontend/src/components/service-icons/_shared.tsx
+frontend/src/components/service-icons/api-airtable.tsx
+frontend/src/components/service-icons/api-asana.tsx
+frontend/src/components/service-icons/api-attio.tsx
+frontend/src/components/service-icons/api-bitbucket.tsx
+frontend/src/components/service-icons/api-box.tsx
+frontend/src/components/service-icons/api-calendly.tsx
+frontend/src/components/service-icons/api-capsule-crm.tsx
+frontend/src/components/service-icons/api-clickup.tsx
+frontend/src/components/service-icons/api-cloudflare.tsx
+frontend/src/components/service-icons/api-crowdin.tsx
+frontend/src/components/service-icons/api-dialpad.tsx
+frontend/src/components/service-icons/api-dropbox.tsx
+frontend/src/components/service-icons/api-eventbrite.tsx
+frontend/src/components/service-icons/api-figma.tsx
+frontend/src/components/service-icons/api-gitlab.tsx
+frontend/src/components/service-icons/api-hubspot.tsx
+frontend/src/components/service-icons/api-intercom.tsx
+frontend/src/components/service-icons/api-jira.tsx
+frontend/src/components/service-icons/api-linear.tsx
+frontend/src/components/service-icons/api-miro.tsx
+frontend/src/components/service-icons/api-pagerduty.tsx
+frontend/src/components/service-icons/api-posthog-eu.tsx
+frontend/src/components/service-icons/api-posthog.tsx
+frontend/src/components/service-icons/api-productboard.tsx
+frontend/src/components/service-icons/api-railway.tsx
+frontend/src/components/service-icons/api-sentry.tsx
+frontend/src/components/service-icons/api-shippo.tsx
+frontend/src/components/service-icons/api-square.tsx
+frontend/src/components/service-icons/api-supabase-management.tsx
+frontend/src/components/service-icons/api-supabase.tsx
+frontend/src/components/service-icons/api-todoist.tsx
+frontend/src/components/service-icons/api-zoom.tsx
+frontend/src/components/service-icons/index.tsx
+frontend/src/components/services/service-concurrency.test.tsx
+frontend/src/components/services/service-concurrency.tsx
+frontend/src/components/settings/display-settings.test.tsx
+frontend/src/components/settings/display-settings.tsx
+frontend/src/components/shared/add-cta-button.tsx
+frontend/src/components/shared/copyable-url-callout.tsx
+frontend/src/components/shared/machine-settings.test.tsx
+frontend/src/components/shared/machine-settings.tsx
+frontend/src/components/shared/machine-summary.tsx
+frontend/src/components/shared/status-badge.tsx
+frontend/src/components/shared/twitter-oauth-guidance.tsx
+frontend/src/components/ui/button.test.tsx
+frontend/src/components/ui/button.tsx
+frontend/src/components/ui/date-picker.tsx
+frontend/src/components/ui/dialog-focus-return.tsx
+frontend/src/components/ui/dialog.tsx
+frontend/src/components/ui/input.tsx
+frontend/src/components/ui/select.tsx
+frontend/src/components/ui/tabs.tsx
+frontend/src/features/blog/blog-index-page.tsx
+frontend/src/features/blog/components/article-body.tsx
+frontend/src/features/blog/components/article-card.tsx
+frontend/src/features/blog/components/article-not-found.tsx
+frontend/src/features/blog/components/article-view.tsx
+frontend/src/hooks/service-order-transport.test.tsx
+frontend/src/hooks/use-account-panel.test.tsx
+frontend/src/hooks/use-account-panel.ts
+frontend/src/hooks/use-agent-bindings.ts
+frontend/src/hooks/use-api-keys.ts
+frontend/src/hooks/use-assistant-viewport.test.tsx
+frontend/src/hooks/use-assistant-viewport.ts
+frontend/src/hooks/use-billing.ts
+frontend/src/hooks/use-build-updates.test.tsx
+frontend/src/hooks/use-build-updates.ts
+frontend/src/hooks/use-card-sequence.ts
+frontend/src/hooks/use-feature-flag.ts
+frontend/src/hooks/use-keys-identity.test.tsx
+frontend/src/hooks/use-keys.test.tsx
+frontend/src/hooks/use-keys.ts
+frontend/src/hooks/use-service-concurrency.ts
+frontend/src/hooks/use-service-group-order.test.tsx
+frontend/src/hooks/use-service-group-order.ts
+frontend/src/hooks/use-service-insights.ts
+frontend/src/hooks/use-service-preference.test.tsx
+frontend/src/hooks/use-service-preference.ts
+frontend/src/hooks/use-service-routing-pools.test.tsx
+frontend/src/hooks/use-service-routing-pools.ts
+frontend/src/hooks/use-service-view.test.tsx
+frontend/src/hooks/use-service-view.ts
+frontend/src/hooks/use-theme.test.tsx
+frontend/src/hooks/use-usage-analytics.test.tsx
+frontend/src/hooks/use-usage-analytics.ts
+frontend/src/lib/agent-grant.test.ts
+frontend/src/lib/agent-grant.ts
+frontend/src/lib/agent-plugins.ts
+frontend/src/lib/api-client.ts
+frontend/src/lib/assistant/account-panel-availability.ts
+frontend/src/lib/assistant/account-panel-search.test.ts
+frontend/src/lib/assistant/account-panel-search.ts
+frontend/src/lib/assistant/assistant-link-target.test.ts
+frontend/src/lib/assistant/assistant-link-target.ts
+frontend/src/lib/assistant/chat-types.ts
+frontend/src/lib/assistant/nyxagent-http-fixtures.ts
+frontend/src/lib/assistant/nyxagent-steering.ts
+frontend/src/lib/assistant/nyxagent-transport.test.ts
+frontend/src/lib/assistant/nyxagent-transport.ts
+frontend/src/lib/assistant/panel-focus.ts
+frontend/src/lib/assistant/search.ts
+frontend/src/lib/assistant/shell-routes.ts
+frontend/src/lib/assistant/uploads.ts
+frontend/src/lib/billing-plain.test.ts
+frontend/src/lib/billing-plain.ts
+frontend/src/lib/build-update-navigation.test.ts
+frontend/src/lib/build-update-navigation.ts
+frontend/src/lib/build-updates.test.ts
+frontend/src/lib/build-updates.ts
+frontend/src/lib/build-version.ts
+frontend/src/lib/connection-access.ts
+frontend/src/lib/credits-denial.test.ts
+frontend/src/lib/credits-denial.ts
+frontend/src/lib/feature-flags.test.ts
+frontend/src/lib/feature-flags.ts
+frontend/src/lib/mock-data.ts
+frontend/src/lib/overlay-layer.ts
+frontend/src/lib/provider-branding.ts
+frontend/src/lib/routing-preview-gateway.test.ts
+frontend/src/lib/service-billing-config.ts
+frontend/src/lib/service-card-summary.test.ts
+frontend/src/lib/service-card-summary.ts
+frontend/src/lib/service-groups.ts
+frontend/src/lib/service-insights-compat.test.tsx
+frontend/src/lib/service-insights-compat.ts
+frontend/src/lib/service-insights.ts
+frontend/src/lib/service-pool-display.test.ts
+frontend/src/lib/service-pool-display.ts
+frontend/src/lib/service-preference.ts
+frontend/src/lib/service-routing-preview.test.ts
+frontend/src/lib/service-routing-preview.ts
+frontend/src/lib/service-usage.test.ts
+frontend/src/lib/service-usage.ts
+frontend/src/lib/service-view.test.ts
+frontend/src/lib/service-view.ts
+frontend/src/lib/studio-breadcrumbs.test.ts
+frontend/src/lib/studio-breadcrumbs.ts
+frontend/src/lib/url-tabs.ts
+frontend/src/main.tsx
+frontend/src/pages/admin-audit-log.test.tsx
+frontend/src/pages/admin-audit-log.tsx
+frontend/src/pages/admin-credits-safety.test.tsx
+frontend/src/pages/admin-credits.tsx
+frontend/src/pages/admin-edit-forms.test.tsx
+frontend/src/pages/admin-invite-codes.tsx
+frontend/src/pages/admin-oauth-clients.test.tsx
+frontend/src/pages/ai-setup.tsx
+frontend/src/pages/api-key-detail.tsx
+frontend/src/pages/assistant-workspace.router.test.tsx
+frontend/src/pages/assistant.tsx
+frontend/src/pages/automations.tsx
+frontend/src/pages/billing.test.tsx
+frontend/src/pages/billing.tsx
+frontend/src/pages/channel-conversation-detail.tsx
+frontend/src/pages/dashboard.tsx
+frontend/src/pages/developer-apps.tsx
+frontend/src/pages/key-detail.test.tsx
+frontend/src/pages/key-detail.tsx
+frontend/src/pages/keys.test.tsx
+frontend/src/pages/keys.tsx
+frontend/src/pages/lazy.ts
+frontend/src/pages/login.tsx
+frontend/src/pages/nyxbot-onboarding.test.tsx
+frontend/src/pages/oauth-consent-access.tsx
+frontend/src/pages/oauth-consent-preview-data.ts
+frontend/src/pages/oauth-consent-preview.tsx
+frontend/src/pages/oauth-consent.test.tsx
+frontend/src/pages/oauth-consent.tsx
+frontend/src/pages/org-developer-app-detail.tsx
+frontend/src/pages/org-service-account-detail.tsx
+frontend/src/pages/provider-edit.tsx
+frontend/src/pages/service-detail.tsx
+frontend/src/pages/service-edit.test.tsx
+frontend/src/pages/service-edit.tsx
+frontend/src/pages/service-overview.test.tsx
+frontend/src/pages/service-overview.tsx
+frontend/src/pages/settings.test.tsx
+frontend/src/pages/settings.tsx
+frontend/src/pages/triggers.tsx
+frontend/src/router.tsx
+frontend/src/schemas/admin-usage.test.ts
+frontend/src/schemas/admin-usage.ts
+frontend/src/schemas/agent-skills.ts
+frontend/src/schemas/assistant-nyxagent.ts
+frontend/src/schemas/billing.ts
+frontend/src/schemas/machine-access.ts
+frontend/src/schemas/machines.ts
+frontend/src/schemas/service-concurrency.test.ts
+frontend/src/schemas/service-concurrency.ts
+frontend/src/schemas/service-insights.ts
+frontend/src/schemas/service-preference.test.ts
+frontend/src/schemas/service-preference.ts
+frontend/src/schemas/service-view.ts
+frontend/src/stores/auth-store.ts
+frontend/src/stores/build-update-store.test.ts
+frontend/src/stores/build-update-store.ts
+frontend/src/stores/service-card-view-store.ts
+frontend/src/stores/theme-store.test.ts
+frontend/src/stores/theme-store.ts
+frontend/src/test-setup.ts
+frontend/src/test/admin-usage-fixture.ts
+frontend/src/test/billing-fixture.ts
+frontend/src/types/admin.ts
+frontend/src/types/api.ts
+frontend/src/types/keys.ts
+frontend/test/build-version.test.ts
+frontend/test/routing-preview-gateway.test.ts
+frontend/vite.config.ts
+integrations/claude-plugin/.claude-plugin/plugin.json
+integrations/claude-plugin/.mcp.json
+integrations/claude-plugin/LICENSE
+integrations/claude-plugin/README.md
+integrations/claude-plugin/assets/icon.svg
+integrations/claude-plugin/skills/nyxid/SKILL.md
+integrations/codex-plugin/LICENSE
+integrations/codex-plugin/README.md
+integrations/codex-plugin/assets/composer-icon.svg
+integrations/codex-plugin/assets/logo.svg
+integrations/codex-plugin/mcp.json
+integrations/codex-plugin/plugin.json
+integrations/codex-plugin/skills/nyxid/SKILL.md
+integrations/plugin-source/README.md
+integrations/plugin-source/plugin.json
+integrations/plugin-source/skills/nyxid/SKILL.md
+scripts/build-codex-plugin.sh
+scripts/check-catalog-spec-drift.py
+scripts/sync-plugins.py
+scripts/validate-claude-plugin.py
+skills/INSTALL.md
+```
+
+</details>
+
+### Main merge resolution
+- `CLAUDE.md`: Kept main’s discovery-preference rule and Tools execution rule; restored main’s released concurrency reservation and assigned the next free block to tool publication in review round 2.
+- `backend/src/handlers/delegation.rs`: Kept main’s consent behavior and async endpoint field alongside all defaulted Tools endpoint fields.
+- `backend/src/handlers/endpoints.rs`: Kept hosted async discovery contracts and Tools admin authorization, draft defaults, metadata and transactional publication.
+- `backend/src/handlers/keys.rs`: Kept editable-configuration metadata and authorized discovery ranks; combined them with offering_kind and the scoped include_tool_bindings query.
+- `backend/src/handlers/mcp_chat_authority_tests.rs`: Kept main’s authority tests and async endpoint field, adding the Tools endpoint defaults to fixtures.
+- `backend/src/handlers/mcp_transport.rs`: Kept main’s read-only, concurrency and discovery behavior alongside unpublished Tool rejection and combined endpoint fixtures.
+- `backend/src/handlers/mod.rs`: Registered both main’s preference/concurrency handlers and Tools handlers.
+- `backend/src/models/downstream_service.rs`: Combined main’s optional concurrency policy with defaulted offering kind, topics, supplier and import provenance.
+- `backend/src/models/service_endpoint.rs`: Combined main’s optional async operation contract with defaulted Tools data scope, cost class, execution and publication.
+- `backend/src/services/catalog_spec_sync.rs`: Kept URL-aware hosted async contracts and Tools additive draft discovery; remote Tool documents cannot enable hosted-only async contracts.
+- `backend/src/services/destination_routing_tests.rs`: Kept routing tests and async fixtures alongside Tools default fields.
+- `backend/src/services/durable_operation_grant_service.rs`: Kept main’s grant logic and async field alongside Tools endpoint defaults.
+- `backend/src/services/mcp_service.rs`: Kept main’s discovery preference/read-only behavior and Tools discovery/publication filtering; combined endpoint fixtures.
+- `backend/src/services/mod.rs`: Registered main’s async/preference services alongside all four Tools services.
+- `backend/src/services/proxy_service.rs`: Combined catalog concurrency policy and offering kind in loaded authorization; preserved both during target materialization.
+- `backend/src/services/service_endpoint_service.rs`: Kept async-contract generation comparisons/updates alongside Tools metadata, draft inserts and preserved publication.
+- `cli/src/wizard/assets/index.html`: Regenerated with npm run build:wizard from the combined frontend; did not hand-merge generated HTML.
+- `cli/src/wizard/bundle-meta/index.hash`: Regenerated with npm run build:wizard from the combined source closure.
+- `frontend/src/components/layout/dashboard-layout.tsx`: Kept main’s shared breadcrumb architecture; moved Tools breadcrumb labels into studio-breadcrumbs.ts.
+- `frontend/src/hooks/use-keys.ts`: Kept main’s acting-identity request guard and query enablement; added Tool inclusion to the query key and single guarded server request.
+- `frontend/src/pages/keys.tsx`: Kept main’s named views, grouping, preferences and reconnect components; carried Tool BYOK labels into shared cards and connection tables.
+- `frontend/src/pages/service-edit.test.tsx`: Kept concurrency mocks/tests alongside Tools topic mocks and integrated-form tests.
+- `frontend/src/pages/service-edit.tsx`: Kept main’s concurrency editor alongside Tools fields in the existing form and admin-only transport/credential/pricing controls.
+- `frontend/src/types/keys.ts`: Kept main’s configuration-edit permission and preference fields alongside offering_kind.
+
+The merge has two parents and includes origin/main at db0cee5f. The imported release versions are main’s versions; this review adds no separate version bump. The initial merge incorrectly moved the released concurrency code. Review round 2 restores the released concurrency code and assigns the next free block to tool publication.
+
+### Verification
+Checks use the isolated MongoDB 7 replica set at localhost:27049 (toolsfinalrs), one Rust test thread. The original detached build used one Cargo job; subsequent CLI, binary and round-2 runs use default Cargo parallelism. Frontend tests use two workers to bound local resource contention.
+
+- `cargo fmt --all -- --check`: exit 0.
+
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.    Compiling nyxid-cli v0.68.0 (/Users/chronoai/Library/Application Support/heca/worktrees/ea204fe1/solar-spruce/cli)
+   Compiling nyxid v0.68.0 (/Users/chronoai/Library/Application Support/heca/worktrees/ea204fe1/solar-spruce/backend)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 19s
+
+- `cargo test -p nyxid -- handlers::keys handlers::endpoints handlers::mcp_transport services::mcp_service services::proxy_service services::service_endpoint_service services::catalog_spec_sync handlers::tools_tests services::tools_service services::unified_key_service services::tool_publication_service handlers::proxy::proxy_resolution_integration_tests services::service_concurrency_service models::service_endpoint models::downstream_service --test-threads=1`: exit 0. test result: ok. 785 passed; 0 failed; 0 ignored; 0 measured; 6956 filtered out; finished in 269.06s
+
+- `cargo test -p nyxid-cli`: exit 0. test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s; test result: ok. 1455 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 9.75s; test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.49s; test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.21s; test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s; test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s; test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s; test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s; test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.54s; test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s; test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s; test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s; test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s; test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+- `cd frontend && npm run lint`: exit 0. Zero errors, 29 existing warnings.
+
+- `cd frontend && npm test -- --maxWorkers=2`: exit 0. Test Files  485 passed (485); Tests  5033 passed (5033); Duration  260.96s (transform 22.41s, setup 59.02s, import 96.08s, tests 216.45s, environment 84.81s)
+
+- `cd frontend && npm run build`: exit 0.
+✓ built in 69ms
+Mock scenario footprint assertion passed; credential-accept output is present.
+
+- `cd frontend && npm run build:wizard`: exit 0; generated HTML, 174-file manifest and source hash installed.
+- Focused keys/account-switch/Mode A transport tests: 3 files, 26 tests passed. Service editor: 1 file, 6 tests passed.
+
+### Affected manual proof
+The transcript is appended under Review rounds 1 and 2 in `docs/plans/2026-10-08-tools-manual-proof.txt`. A fresh backend uses rebuilt binaries, disabled per-user limits, dummy vendor credentials and a new isolated database. Default /keys hides platform Tool bindings; include_tool_bindings=true includes them; both retain the same BYOK UUID. CLI list/show use formatted pricing, limits, topics and operation rows; JSON retains raw shapes. Supplier and provenance null clears and the missing-source CLI error are also exercised.
+
+### Review clarifications and deviations
+- The first full post-merge frontend attempt had 2 failed / 5031 passed tests in 485 files: a Mode A cache assertion and global form-count assertion. Both were corrected to preserve main’s default guarded cache and separate concurrency form; focused reruns passed before the final full rerun. Initial merge type checks also caught an MCP session signature change, frozen legacy fixture fields, a Value/Arc comparison and a redundant URL borrow; all were corrected before final checks. The first MCP run had 167 passes and one failure: Tools preflight canonicalized non-Tool paths and rejected main’s valid GitHub trailing-slash root path. Canonicalization now happens only after selecting an eligible Tool row; the final batched run repeats all requested modules.
+- B6 required a real change: `platform_key_service::credential_configured` decrypts at backend/src/services/platform_key_service.rs:23; Tools listing now checks only encrypted-byte presence.
+- C1’s CatalogCommands::Endpoint/Discover/Publish/Topics variants already had /// help in the reviewed source (cli/src/cli.rs:846,851,857,867 in a613883c). Their fields and formatting were corrected along with the remaining requested help text; no item was skipped.
+- B7’s CLI wording and C3’s exact table format conflict. The UI uses "No per-user rate limit"; the CLI uses C3’s explicitly requested "none". Both consume limits=null.
+- The numeric-code resolution in the merge was incorrect and is superseded by review round 2. No Phase 2 code or seeds were added.
+
+Requested post-merge module coverage (all passed):
+
+- `handlers::keys`: 74 tests.
+- `handlers::endpoints`: 6 tests.
+- `handlers::mcp_transport`: 168 tests.
+- `services::mcp_service`: 149 tests.
+- `services::proxy_service`: 132 tests.
+- `services::service_endpoint_service`: 20 tests.
+- `services::catalog_spec_sync`: 11 tests.
+- `handlers::tools_tests`: 2 tests.
+- `services::tools_service`: 2 tests.
+- `services::unified_key_service`: 170 tests.
+
+The full CLI rerun completed during round 2 after correcting the test-only PID-file readiness race described below. It passed 1,533 tests across all targets, with six ignored. The first CLI attempt had 1,454 passes, one failure and six ignored in its binary target before stopping.
+
+
+## Review round 2
+Recorded 2026-10-09T02:17:45.650452+00:00. PR #1821 remains draft and mergeable.
+
+### Commits and changed files
+
+- 171fb61d fix(tools): preserve released concurrency error code: `CLAUDE.md`, `backend/src/errors/mod.rs`, `backend/src/handlers/mcp_transport.rs`, `backend/src/handlers/proxy.rs`, `backend/src/handlers/proxy_concurrency_tests.rs`, `backend/src/handlers/tools_tests.rs`, `docs/API.md`, `docs/SERVICE_CONCURRENCY_LIMITS.md`, `docs/TOOLS.md`, `docs/plans/2026-10-08-tools-implementation-plan.md`.
+
+- f9a37612 style(frontend): restore admin form test formatting: `frontend/src/pages/admin-edit-forms.test.tsx`.
+
+- 8cb74d44 test(cli): wait for driver PID before takeover: `cli/src/node/machine/runtime.rs`.
+
+- f65cd4ae docs(tools): append review keys CLI and publication proof: `docs/plans/2026-10-08-tools-manual-proof.txt`.
+
+- This verification-record commit changes only `docs/plans/2026-10-08-tools-verification.md` and appends both missing review sections. Every review commit includes the requested Co-Authored-By trailer.
+
+### Error-code compatibility and repository audit
+Concurrency retains the released `ServiceConcurrencyLimited` code **12600**, HTTP 429 and Retry-After behavior. Tool publication uses `ToolOperationNotPublished` code **12700**, HTTP 404. The reserved-code rule, active API/Tools documentation, implementation plan, HTTP/MCP literals and regression assertions agree.
+
+`rg -n "12600|12700" backend cli frontend docs scripts CLAUDE.md` was run after the correction. All current implementation and contract references match those allocations. The original transcript lines 640, 644 and 894 and verification line 408 still contain obsolete publication numbers because the user explicitly required append-only historical records. These are archived observed outputs, superseded by the appended proof; they do not describe the current API. No historical output was rewritten to manufacture a passing result.
+
+### Verification
+Default Cargo build parallelism was used for every new round-2 run. The isolated MongoDB 7 replica set remains on localhost:27049; GitHub CI uses MongoDB 8 and is authoritative for the full suite.
+
+- `cargo fmt --all -- --check`: exit 0. Passed.
+
+- `cargo test -p nyxid -- handlers::tools_tests handlers::proxy_concurrency_tests handlers::mcp_transport handlers::public_proxy handlers::llm_gateway::tests::assistant_operation_scope_denies_llm_passthrough_gateway_and_inference_alias --test-threads=1`: exit 0. test result: ok. 181 passed; 0 failed; 0 ignored; 0 measured; 7560 filtered out; finished in 190.66s
+
+- `cargo test -p nyxid assistant_operation_scope_denies_llm_passthrough_gateway_and_inference_alias -- --test-threads=1`: exit 0. test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7740 filtered out; finished in 3.54s
+
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0. Passed.
+
+- `cd frontend && npx prettier --check src/pages/admin-edit-forms.test.tsx`: exit 0. Passed.
+
+The combined round-2 command had a nonexistent `llm_gateway::tests` selector. The real test lives in `llm_gateway::agent_operation_tests`; the separate exact-function run above selected and passed it, exercising both provider passthrough and gateway publication gates. Combined results: **182 passed, zero failed**.
+
+- `cargo test -p nyxid-cli`: exit 0; **1,533 passed, zero failed, six ignored** across all targets, including the wizard freshness integration test.
+- `cargo build -p nyxid -p nyxid-cli`: exit 0; rebuilt the server and CLI used in the fresh proof.
+
+The first local CLI run exposed a PID-marker race in `takeover_cancels_a_thirty_second_cua_action_and_discards_its_result`: creating the file and writing the PID are separate observable events, so takeover could kill the driver between them. The test now waits for a parseable PID before triggering takeover; cancellation and process-exit assertions remain intact. The first binary target had 1,454 passes, one failure and six ignored. The full rerun passed as reported above. No production CLI behavior was changed.
+
+### Manual proof
+`docs/plans/2026-10-08-tools-manual-proof.txt` now appends 597 lines of command/output transcript under **Review rounds 1 and 2**, without rewriting prior records. The rebuilt server runs on localhost:4313 against a fresh isolated database, with limits disabled and dummy vendor credentials. Authentication tokens and passwords are omitted and the transcript was scanned for their presence before commit.
+
+- `GET /api/v1/keys` excludes platform Tool bindings; `GET /api/v1/keys?include_tool_bindings=true` includes them with offering_kind=tool and credential_binding=platform. Both retain the same BYOK UUID and credential_binding=user.
+- `nyxid tools list` and `nyxid tools show tools-firecrawl` use table mode: Free pricing, none for disabled limits, comma-joined topics, and one row per published operation. JSON output still reports limits=null and raw operation arrays.
+- Draft Firecrawl proxy execution returns HTTP 404 with error_code=12700; `nyx__call_tool` returns HTTP 200 with isError=true and embedded error_code=12700.
+- Supplier/provenance null clears and the local missing-source CLI validation also pass.
+
+### CI monitoring
+
+Snapshot before pushing the appended records:
+
+- [Backend Image Inputs](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841016): IN_PROGRESS.
+- [Rust Clippy](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841137): SUCCESS.
+- [Coverage (CLI)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840933): SUCCESS.
+- [Coverage (Frontend)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841065): IN_PROGRESS.
+- [Frontend](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840967): IN_PROGRESS.
+- [Rust Features (aws-kms,gcp-kms)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840976): SUCCESS.
+- [Coverage (Backend Base)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841043): SUCCESS.
+- [Coverage (Backend)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840955): IN_PROGRESS.
+- [CLI Wizard Bundle Freshness](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841007): SUCCESS.
+- [Rust Features (gcp-kms)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841054): SUCCESS.
+- [Rust Features (aws-kms)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840989): SUCCESS.
+- [CLI Test](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840982): SUCCESS.
+- [Machine Container E2E](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841071): IN_PROGRESS.
+- [Backend Billing Smoke](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840947): IN_PROGRESS.
+- [Backend Test](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841019): IN_PROGRESS.
+- [Claude Plugin Validate](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840787): SUCCESS.
+- [Rust Format](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635840806): SUCCESS.
+- [SDK Build](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635842385): SKIPPED.
+- [Oracle Worker Test](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635841914): SKIPPED.
+- [Codex Plugin Validate](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635842430): SKIPPED.
+- [Google Permissions](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635842257): SKIPPED.
+- [Cursor Plugin Validate](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635842285): SKIPPED.
+- [Mobile](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635842008): SKIPPED.
+- [Detect Changes](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635645162): SUCCESS.
+- [CodeQL](https://github.com/ChronoAIProject/NyxID/runs/113635754101): NEUTRAL.
+- [Workflow Permissions](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042446/job/113635645040): SUCCESS.
+- [CodeQL (javascript-typescript)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042570/job/113635554528): SUCCESS.
+- [CodeQL (actions)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042570/job/113635554386): SUCCESS.
+- [CodeQL (rust)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042570/job/113635554235): IN_PROGRESS.
+- [CodeQL (python)](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042570/job/113635554431): SUCCESS.
+- [host](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042441/job/113635434267): SKIPPED.
+- [announce](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042441/job/113635434498): SKIPPED.
+- [Release Integrity Manifest](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042441/job/113635335602): SUCCESS.
+- [build-global-artifacts](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042441/job/113635337006): SKIPPED.
+- [build-local-artifacts (${{ join(matrix.targets, ', ') }})](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042441/job/113635336591): SKIPPED.
+- [plan](https://github.com/ChronoAIProject/NyxID/actions/runs/37873042441/job/113635206413): SUCCESS.
+
+After pushing this round, `gh pr checks 1821` is watched to completion; any failing job is investigated and fixed forward. The final response reports the final pushed-head outcome. The PR remains draft.
