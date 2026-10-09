@@ -115,9 +115,11 @@ pub async fn list_keys(
     Query(query): Query<super::keys::ListKeysQuery>,
 ) -> AppResult<Response> {
     if auth.auth_method != AuthMethod::ServiceAccount {
-        let Json(response) =
-            super::keys::list_keys_with_tool_bindings(state, auth, query.include_tool_bindings)
-                .await?;
+        let Json(response) = if query.include_tool_bindings {
+            super::keys::list_keys_with_tool_bindings(state, auth, true).await?
+        } else {
+            super::keys::list_keys(State(state), auth).await?
+        };
         return Ok(Json(KeyListReadResponse::User(response)).into_response());
     }
     if method != Method::GET || headers.contains_key(axum::http::header::UPGRADE) {
