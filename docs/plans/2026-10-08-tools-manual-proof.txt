@@ -2179,3 +2179,606 @@ $ nyxid catalog publish tools-date-metadata --operation health --output json
 $ GET /api/v1/tools/tools-date-metadata [normal user]
 HTTP 200 {"kind": "manual", "reference": "date-proof", "version": null, "imported_at": "2026-10-09T00:00:00+00:00"}
 Phase 1 manual proof passed; tools-x second run made no endpoint metadata changes.
+
+
+## Review rounds 1 and 2
+
+The earlier transcript above is historical. Its original publication codes are superseded by this rebuilt-server proof; concurrency retains its released code and tool publication uses the next free block. The earlier outputs are preserved verbatim.
+
+Review rounds 1 and 2: fresh isolated local backend on port 4313, MongoDB replica set on 27049; limits disabled. Authentication secrets omitted; dummy vendor credentials only.
+$ POST /api/v1/auth/setup; POST /api/v1/auth/login [admin, password and token omitted]
+HTTP 200
+$ POST /api/v1/admin/users; POST /api/v1/auth/login [normal user, secrets omitted]
+HTTP 200
+$ nyxid service add --catalog-admin --twin-of api-firecrawl --slug tools-firecrawl --offering-kind tool --topic web-search --topic page-fetch --supplier Firecrawl --output json
+{
+  "offering_kind": "tool",
+  "topics": [
+    "web-search",
+    "page-fetch"
+  ],
+  "supplier": "Firecrawl",
+  "import_source": {
+    "kind": "catalog_twin",
+    "reference": "api-firecrawl",
+    "version": "2026-10-09T02:15:41.830+00:00",
+    "imported_at": "2026-10-09T02:15:55.673+00:00"
+  },
+  "provider_config_id": null,
+  "credential_configured": false,
+  "id": "2d760857-0681-4daf-ba3a-135f2f46a468",
+  "name": "tools-firecrawl",
+  "slug": "tools-firecrawl",
+  "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+  "base_url": "https://api.firecrawl.dev",
+  "service_type": "http",
+  "visibility": "public",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "auth_key_name": "Authorization",
+  "is_active": true,
+  "oauth_client_id": null,
+  "openapi_spec_url": "http://127.0.0.1:4313/api/v1/catalog-specs/firecrawl/openapi.json",
+  "api_spec_url": "http://127.0.0.1:4313/api/v1/catalog-specs/firecrawl/openapi.json",
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
+  "ssh_config": null,
+  "service_category": "internal",
+  "requires_user_credential": false,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
+  "forward_access_token": false,
+  "inject_delegation_token": false,
+  "delegation_token_scope": "llm:proxy",
+  "homepage_url": "https://www.firecrawl.dev",
+  "capabilities": {
+    "supports_proxy_read": true,
+    "supports_proxy_write": true,
+    "supports_proxy_binary_upload": false,
+    "supports_direct_downstream_auth": true,
+    "supports_authoring_via_nyx": false,
+    "supports_websocket": false,
+    "supports_streaming": true,
+    "supports_realtime_voice": false
+  },
+  "inference": null,
+  "platform_key": {
+    "enabled": true,
+    "audience": "public",
+    "allowed_owner_ids": []
+  },
+  "legacy_public_master": false,
+  "effective_platform_metric": "requests",
+  "allowance_metrics": [
+    "requests"
+  ],
+  "auth_notes": "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
+  "known_limitations": "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+  "skills_revision": 0,
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "recommended_skill_refs": null,
+  "ws_frame_injections": [],
+  "anonymous_endpoints": [],
+  "created_by": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "owner_user_id": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "created_at": "2026-10-09T02:15:55.675+00:00",
+  "updated_at": "2026-10-09T02:15:55.675+00:00",
+  "your_binding_count": 0
+}
+$ POST /api/v1/proxy/s/tools-firecrawl/v2/search {"query":"NyxID"} [draft]
+HTTP 404 {"error": "tool_operation_not_published", "error_code": 12700, "message": "Tool operation is not published"}
+$ POST /mcp initialize
+HTTP 200; session identifier omitted
+$ POST /mcp nyx__call_tool tools-firecrawl__search [draft]
+HTTP 200 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{\"error\":\"tool_operation_not_published\",\"error_code\":12700,\"message\":\"Tool operation is not published\"}"}], "isError": true}}
+$ nyxid catalog publish tools-firecrawl --operation search --operation scrape --output json
+{
+  "endpoints": [
+    {
+      "publication": "published",
+      "data_scope": null,
+      "cost_class": null,
+      "execution": "http_operation",
+      "id": "25791b03-c1e3-4094-bca6-c1c5a528f38e",
+      "service_id": "2d760857-0681-4daf-ba3a-135f2f46a468",
+      "name": "search",
+      "description": "Search the web",
+      "method": "POST",
+      "path": "/v2/search",
+      "parameters": null,
+      "request_body_schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "scrapeOptions": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "request_content_type": "application/json",
+      "request_body_required": true,
+      "response_description": null,
+      "response": {
+        "content_types": [
+          "application/json"
+        ],
+        "binary_artifact": false
+      },
+      "risk": "write",
+      "supports_idempotency_key": false,
+      "is_active": true,
+      "created_at": "2026-10-09T02:15:55.678+00:00",
+      "updated_at": "2026-10-09T02:15:55.841+00:00"
+    },
+    {
+      "publication": "published",
+      "data_scope": null,
+      "cost_class": null,
+      "execution": "http_operation",
+      "id": "e9b2df16-6b3c-485d-80a6-01698915bfd5",
+      "service_id": "2d760857-0681-4daf-ba3a-135f2f46a468",
+      "name": "scrape",
+      "description": "Scrape a single URL",
+      "method": "POST",
+      "path": "/v2/scrape",
+      "parameters": null,
+      "request_body_schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "formats": {
+            "type": "array",
+            "description": "e.g. markdown, html, links.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "onlyMainContent": {
+            "type": "boolean"
+          }
+        }
+      },
+      "request_content_type": "application/json",
+      "request_body_required": true,
+      "response_description": null,
+      "response": {
+        "content_types": [
+          "application/json"
+        ],
+        "binary_artifact": false
+      },
+      "risk": "write",
+      "supports_idempotency_key": false,
+      "is_active": true,
+      "created_at": "2026-10-09T02:15:55.678+00:00",
+      "updated_at": "2026-10-09T02:15:55.842+00:00"
+    }
+  ]
+}
+$ nyxid service update --catalog-admin tools-firecrawl --credential-env NYXID_REVIEW_DUMMY --output json
+{
+  "offering_kind": "tool",
+  "topics": [
+    "web-search",
+    "page-fetch"
+  ],
+  "supplier": "Firecrawl",
+  "import_source": {
+    "kind": "catalog_twin",
+    "reference": "api-firecrawl",
+    "version": "2026-10-09T02:15:41.830+00:00",
+    "imported_at": "2026-10-09T02:15:55.673+00:00"
+  },
+  "provider_config_id": null,
+  "credential_configured": true,
+  "id": "2d760857-0681-4daf-ba3a-135f2f46a468",
+  "name": "tools-firecrawl",
+  "slug": "tools-firecrawl",
+  "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+  "base_url": "https://api.firecrawl.dev",
+  "service_type": "http",
+  "visibility": "public",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "auth_key_name": "Authorization",
+  "is_active": true,
+  "oauth_client_id": null,
+  "openapi_spec_url": "http://127.0.0.1:4313/api/v1/catalog-specs/firecrawl/openapi.json",
+  "api_spec_url": "http://127.0.0.1:4313/api/v1/catalog-specs/firecrawl/openapi.json",
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
+  "ssh_config": null,
+  "service_category": "internal",
+  "requires_user_credential": false,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
+  "forward_access_token": false,
+  "inject_delegation_token": false,
+  "delegation_token_scope": "llm:proxy",
+  "homepage_url": "https://www.firecrawl.dev",
+  "capabilities": {
+    "supports_proxy_read": true,
+    "supports_proxy_write": true,
+    "supports_proxy_binary_upload": false,
+    "supports_direct_downstream_auth": true,
+    "supports_authoring_via_nyx": false,
+    "supports_websocket": false,
+    "supports_streaming": true,
+    "supports_realtime_voice": false
+  },
+  "inference": null,
+  "platform_key": {
+    "enabled": true,
+    "audience": "public",
+    "allowed_owner_ids": []
+  },
+  "legacy_public_master": false,
+  "effective_platform_metric": "requests",
+  "allowance_metrics": [
+    "requests"
+  ],
+  "auth_notes": "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
+  "known_limitations": "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+  "skills_revision": 0,
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "recommended_skill_refs": null,
+  "ws_frame_injections": [],
+  "anonymous_endpoints": [],
+  "created_by": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "owner_user_id": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "created_at": "2026-10-09T02:15:55.675+00:00",
+  "updated_at": "2026-10-09T02:15:55.937+00:00",
+  "your_binding_count": 0
+}
+$ nyxid service add --catalog-admin --slug chrono-llm-public --label Chrono LLM public --endpoint-url https://api.chronoai.net --auth-method bearer --service-category internal --platform-key-enabled true --platform-key-audience public --credential-env NYXID_REVIEW_CHRONO --output json
+{
+  "offering_kind": "ai_service",
+  "topics": [],
+  "supplier": null,
+  "import_source": null,
+  "provider_config_id": null,
+  "credential_configured": true,
+  "id": "5fecd8ad-33d8-4f2f-ab65-2edd7f4e7939",
+  "name": "Chrono LLM public",
+  "slug": "chrono-llm-public",
+  "description": null,
+  "base_url": "https://api.chronoai.net",
+  "service_type": "http",
+  "visibility": "public",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "auth_key_name": "Authorization",
+  "is_active": true,
+  "oauth_client_id": null,
+  "openapi_spec_url": null,
+  "api_spec_url": null,
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
+  "ssh_config": null,
+  "service_category": "internal",
+  "requires_user_credential": false,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
+  "forward_access_token": false,
+  "inject_delegation_token": false,
+  "delegation_token_scope": "llm:proxy",
+  "inference": null,
+  "platform_key": {
+    "enabled": true,
+    "audience": "public",
+    "allowed_owner_ids": []
+  },
+  "legacy_public_master": false,
+  "effective_platform_metric": "requests",
+  "allowance_metrics": [
+    "requests"
+  ],
+  "skills_revision": 0,
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "recommended_skill_refs": null,
+  "ws_frame_injections": [],
+  "anonymous_endpoints": [],
+  "created_by": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "owner_user_id": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "created_at": "2026-10-09T02:15:55.983+00:00",
+  "updated_at": "2026-10-09T02:15:55.983+00:00",
+  "your_binding_count": 0
+}
+$ nyxid catalog endpoint add chrono-llm-public --name list_models --method GET --path /v1/models --output json
+{
+  "publication": "published",
+  "data_scope": null,
+  "cost_class": null,
+  "execution": "http_operation",
+  "id": "ec563e6a-33ef-49a6-a0c9-ed90f36aff99",
+  "service_id": "5fecd8ad-33d8-4f2f-ab65-2edd7f4e7939",
+  "name": "list_models",
+  "description": null,
+  "method": "GET",
+  "path": "/v1/models",
+  "parameters": null,
+  "request_body_schema": null,
+  "request_content_type": null,
+  "request_body_required": false,
+  "response_description": null,
+  "response": {
+    "content_types": [],
+    "binary_artifact": null
+  },
+  "risk": null,
+  "supports_idempotency_key": false,
+  "is_active": true,
+  "created_at": "2026-10-09T02:15:56.089421+00:00",
+  "updated_at": "2026-10-09T02:15:56.089421+00:00"
+}
+$ nyxid service update --catalog-admin chrono-llm-public --offering-kind tool --output json
+{
+  "offering_kind": "tool",
+  "topics": [],
+  "supplier": null,
+  "import_source": null,
+  "provider_config_id": null,
+  "credential_configured": true,
+  "id": "5fecd8ad-33d8-4f2f-ab65-2edd7f4e7939",
+  "name": "Chrono LLM public",
+  "slug": "chrono-llm-public",
+  "description": null,
+  "base_url": "https://api.chronoai.net",
+  "service_type": "http",
+  "visibility": "public",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "auth_key_name": "Authorization",
+  "is_active": true,
+  "oauth_client_id": null,
+  "openapi_spec_url": null,
+  "api_spec_url": null,
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
+  "ssh_config": null,
+  "service_category": "internal",
+  "requires_user_credential": false,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
+  "forward_access_token": false,
+  "inject_delegation_token": false,
+  "delegation_token_scope": "llm:proxy",
+  "inference": null,
+  "platform_key": {
+    "enabled": true,
+    "audience": "public",
+    "allowed_owner_ids": []
+  },
+  "legacy_public_master": false,
+  "effective_platform_metric": "requests",
+  "allowance_metrics": [
+    "requests"
+  ],
+  "skills_revision": 0,
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "recommended_skill_refs": null,
+  "ws_frame_injections": [],
+  "anonymous_endpoints": [],
+  "created_by": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "owner_user_id": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "created_at": "2026-10-09T02:15:55.983+00:00",
+  "updated_at": "2026-10-09T02:15:56.264+00:00",
+  "your_binding_count": 0
+}
+$ GET /api/v1/keys [normal user; selected nonsecret response fields]
+HTTP 200 {
+  "keys": [
+    {
+      "id": "1878b05c-9266-4602-a63c-4d849c0bb901",
+      "slug": "chrono-llm-public",
+      "catalog_service_id": "5fecd8ad-33d8-4f2f-ab65-2edd7f4e7939",
+      "offering_kind": "tool",
+      "credential_binding": "user"
+    }
+  ]
+}
+$ GET /api/v1/keys?include_tool_bindings=true [normal user; selected nonsecret response fields]
+HTTP 200 {
+  "keys": [
+    {
+      "id": "0f20d467-0a99-4152-824a-bf793f2e52f3",
+      "slug": "tools-firecrawl",
+      "catalog_service_id": "2d760857-0681-4daf-ba3a-135f2f46a468",
+      "offering_kind": "tool",
+      "credential_binding": "platform"
+    },
+    {
+      "id": "1878b05c-9266-4602-a63c-4d849c0bb901",
+      "slug": "chrono-llm-public",
+      "catalog_service_id": "5fecd8ad-33d8-4f2f-ab65-2edd7f4e7939",
+      "offering_kind": "tool",
+      "credential_binding": "user"
+    }
+  ]
+}
+Both listings retain the same BYOK UUID. Default hides platform Tool bindings; the explicit flag includes them with offering_kind=tool and credential_binding=platform.
+$ nyxid tools list
+┌───────────────────┬───────────────────┬───────────┬────────────────────────┬─────────┬────────┐
+│ Slug              ┆ Name              ┆ Supplier  ┆ Topics                 ┆ Pricing ┆ Limits │
+╞═══════════════════╪═══════════════════╪═══════════╪════════════════════════╪═════════╪════════╡
+│ chrono-llm-public ┆ Chrono LLM public ┆ -         ┆                        ┆ Free    ┆ none   │
+│ tools-firecrawl   ┆ tools-firecrawl   ┆ Firecrawl ┆ web-search, page-fetch ┆ Free    ┆ none   │
+└───────────────────┴───────────────────┴───────────┴────────────────────────┴─────────┴────────┘
+$ nyxid tools show tools-firecrawl
+┌─────────────────┬─────────────────┬───────────┬─────────┬────────┬────────────────────────┐
+│ Slug            ┆ Name            ┆ Supplier  ┆ Pricing ┆ Limits ┆ Topics                 │
+╞═════════════════╪═════════════════╪═══════════╪═════════╪════════╪════════════════════════╡
+│ tools-firecrawl ┆ tools-firecrawl ┆ Firecrawl ┆ Free    ┆ none   ┆ web-search, page-fetch │
+└─────────────────┴─────────────────┴───────────┴─────────┴────────┴────────────────────────┘
+┌────────┬────────┬────────────┬───────┬────────────┬────────────┐
+│ Name   ┆ Method ┆ Path       ┆ Risk  ┆ Data scope ┆ Cost class │
+╞════════╪════════╪════════════╪═══════╪════════════╪════════════╡
+│ scrape ┆ POST   ┆ /v2/scrape ┆ write ┆ -          ┆ -          │
+│ search ┆ POST   ┆ /v2/search ┆ write ┆ -          ┆ -          │
+└────────┴────────┴────────────┴───────┴────────────┴────────────┘
+$ nyxid tools show tools-firecrawl --output json
+{
+  "id": "2d760857-0681-4daf-ba3a-135f2f46a468",
+  "slug": "tools-firecrawl",
+  "name": "tools-firecrawl",
+  "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+  "offering_kind": "tool",
+  "supplier": "Firecrawl",
+  "topics": [
+    "web-search",
+    "page-fetch"
+  ],
+  "import_source": {
+    "kind": "catalog_twin",
+    "reference": "api-firecrawl",
+    "version": "2026-10-09T02:15:41.830+00:00",
+    "imported_at": "2026-10-09T02:15:55.673+00:00"
+  },
+  "homepage_url": "https://www.firecrawl.dev",
+  "provider_label": "Firecrawl",
+  "access": {
+    "platform": true,
+    "byok": true
+  },
+  "pricing": {
+    "platform": "free",
+    "byok": "free"
+  },
+  "limits": null,
+  "operations": [
+    {
+      "name": "scrape",
+      "description": "Scrape a single URL",
+      "method": "POST",
+      "path": "/v2/scrape",
+      "data_scope": null,
+      "cost_class": null,
+      "execution": "http_operation",
+      "risk": "write"
+    },
+    {
+      "name": "search",
+      "description": "Search the web",
+      "method": "POST",
+      "path": "/v2/search",
+      "data_scope": null,
+      "cost_class": null,
+      "execution": "http_operation",
+      "risk": "write"
+    }
+  ],
+  "credential_configured": true
+}
+$ nyxid service update --catalog-admin tools-firecrawl --clear-supplier --output json
+{
+  "offering_kind": "tool",
+  "topics": [
+    "web-search",
+    "page-fetch"
+  ],
+  "supplier": null,
+  "import_source": {
+    "kind": "catalog_twin",
+    "reference": "api-firecrawl",
+    "version": "2026-10-09T02:15:41.830+00:00",
+    "imported_at": "2026-10-09T02:15:55.673+00:00"
+  },
+  "provider_config_id": null,
+  "credential_configured": true,
+  "id": "2d760857-0681-4daf-ba3a-135f2f46a468",
+  "name": "tools-firecrawl",
+  "slug": "tools-firecrawl",
+  "description": "Firecrawl API connector for scrape, crawl, search, map, extract, and asynchronous agent workflows. Store a Firecrawl API key once and NyxID injects it as `Authorization: Bearer <key>` on every proxied request.",
+  "base_url": "https://api.firecrawl.dev",
+  "service_type": "http",
+  "visibility": "public",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "auth_key_name": "Authorization",
+  "is_active": true,
+  "oauth_client_id": null,
+  "openapi_spec_url": "http://127.0.0.1:4313/api/v1/catalog-specs/firecrawl/openapi.json",
+  "api_spec_url": "http://127.0.0.1:4313/api/v1/catalog-specs/firecrawl/openapi.json",
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
+  "ssh_config": null,
+  "service_category": "internal",
+  "requires_user_credential": false,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
+  "forward_access_token": false,
+  "inject_delegation_token": false,
+  "delegation_token_scope": "llm:proxy",
+  "homepage_url": "https://www.firecrawl.dev",
+  "capabilities": {
+    "supports_proxy_read": true,
+    "supports_proxy_write": true,
+    "supports_proxy_binary_upload": false,
+    "supports_direct_downstream_auth": true,
+    "supports_authoring_via_nyx": false,
+    "supports_websocket": false,
+    "supports_streaming": true,
+    "supports_realtime_voice": false
+  },
+  "inference": null,
+  "platform_key": {
+    "enabled": true,
+    "audience": "public",
+    "allowed_owner_ids": []
+  },
+  "legacy_public_master": false,
+  "effective_platform_metric": "requests",
+  "allowance_metrics": [
+    "requests"
+  ],
+  "auth_notes": "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
+  "known_limitations": "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+  "skills_revision": 0,
+  "skills_manifest_digest": "v1:443da5e27e816a8df4f4e357d30320e5b23d8cdc7db45c89397a698960159a4f",
+  "recommended_skill_refs": null,
+  "ws_frame_injections": [],
+  "anonymous_endpoints": [],
+  "created_by": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "owner_user_id": "3b93b93d-dc7e-4e92-9065-7c073d9552a1",
+  "created_at": "2026-10-09T02:15:55.675+00:00",
+  "updated_at": "2026-10-09T02:15:56.541+00:00",
+  "your_binding_count": 0
+}
+$ GET /api/v1/services/2d760857-0681-4daf-ba3a-135f2f46a468 [supplier clear]
+HTTP 200; supplier=null
+$ PUT /api/v1/services/2d760857-0681-4daf-ba3a-135f2f46a468 {"import_source":null}; GET same row
+HTTP 200; import_source=null
+$ nyxid service add --catalog-admin --slug missing-source
+Error: Catalog creation requires --endpoint-url or --twin-of
+Review rounds 1 and 2 affected manual proof passed.
