@@ -247,7 +247,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
 }
 
 fn normalize_scopes(scopes: &[String]) -> AppResult<Vec<String>> {
-    // Parse the whole request together so the shared count limit applies across entries.
+    // Parse the whole request together so the shared byte bound applies across entries.
     let mut scopes = user_token_service::parse_additional_scopes(Some(&scopes.join(" ")))?;
     let mut seen = std::collections::HashSet::new();
     scopes.retain(|scope| seen.insert(scope.clone()));
@@ -1693,17 +1693,25 @@ mod tests {
     }
 
     #[test]
-    fn scopes_reuse_shared_character_length_and_total_count_limits() {
+    fn scopes_reuse_shared_character_length_and_total_byte_limits() {
         for raw in [
             vec!["bad<scope>".to_string()],
             vec!["x".repeat(257)],
-            (0..101).map(|i| format!("scope{i}")).collect(),
+            vec!["x".repeat(256); 64],
         ] {
             assert!(matches!(
                 normalize_scopes(&raw),
                 Err(AppError::ValidationError(_))
             ));
         }
+    }
+
+    #[test]
+    fn scopes_accept_large_selections_and_dedupe_in_order() {
+        let expected: Vec<String> = (0..101).map(|i| format!("scope{i}")).collect();
+        let mut raw = expected.clone();
+        raw.push("scope0,scope100".to_string());
+        assert_eq!(normalize_scopes(&raw).unwrap(), expected);
     }
 
     #[tokio::test]
@@ -1905,7 +1913,8 @@ mod tests {
                 };
                 let Json(completed) = context::scope(
                     context,
-                    handlers::complete_connect_link(
+                    // Keep the endpoint future off the smaller test-harness stack.
+                    Box::pin(handlers::complete_connect_link(
                         State(state.clone()),
                         test_auth_user(&actor),
                         ConnectInfo("127.0.0.1:43210".parse().unwrap()),
@@ -1919,7 +1928,7 @@ mod tests {
                             oauth_client_secret: None,
                             device_state: None,
                         }),
-                    ),
+                    )),
                 )
                 .await
                 .unwrap();
@@ -1946,7 +1955,7 @@ mod tests {
                     assert_eq!(history.actor.app_id.as_deref(), Some(app_id.as_str()));
                     assert_eq!(history.actor.person_id.as_deref(), Some(actor.as_str()));
                     if attempt == 0 {
-                        let redirect = user_tokens::generic_oauth_callback(
+                        let redirect = Box::pin(user_tokens::generic_oauth_callback(
                             State(state.clone()),
                             crate::mw::auth::OptionalAuthUser(None),
                             Query(user_tokens::GenericOAuthCallbackQuery {
@@ -1955,7 +1964,7 @@ mod tests {
                                 error: Some("access_denied".to_string()),
                                 error_description: None,
                             }),
-                        )
+                        ))
                         .await;
                         use axum::response::IntoResponse;
                         let redirect = redirect.into_response();

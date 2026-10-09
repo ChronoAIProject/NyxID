@@ -29,6 +29,7 @@ use wiremock::{
 fn proposal(started: bool) -> AssistantAgentLearningProposal {
     let now = Utc::now();
     AssistantAgentLearningProposal {
+        source: Default::default(),
         id: Uuid::new_v4().to_string(),
         agent_id: "agent".into(),
         owner_id: "owner".into(),
@@ -676,6 +677,7 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                steering: None,
                 voice: None,
                 execution_pending: false,
                 id: Uuid::new_v4().to_string(),
@@ -776,6 +778,7 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
         .db
         .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
         .insert_one(AssistantAgentLearningProposal {
+            source: Default::default(),
             id: id.clone(),
             agent_id: agent.id.clone(),
             owner_id: fixture.owner.clone(),
@@ -886,6 +889,7 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            authored_skill: None,
             machine_context: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
@@ -1065,6 +1069,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            authored_skill: None,
             machine_context: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
@@ -1149,4 +1154,17 @@ impl OrnnReader for TestReader {
         }
         Err(AppError::ServicePoolInfrastructureUnavailable)
     }
+}
+
+#[tokio::test]
+async fn authored_org_skill_refuses_personal_fallback() {
+    let (f, agent, _, _) = org_review_fixture("authored_org_refusal").await;
+    let input = serde_json::from_value(json!({"agent":agent.id,"name":"team-review","description":"Review team work","skill_md":"# Review"})).unwrap();
+    let error = crate::services::assistant_skill_authoring::create(&f.state, &f.chat, input)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AppError::Conflict(message) if message.contains("owner_binding_unavailable") && message.contains("maintainer"))
+    );
+    f.state.db.drop().await.unwrap();
 }

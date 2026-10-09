@@ -156,6 +156,20 @@ macro_rules! assistant_direct_billing_routes {
                 )
             ),
             (
+                "/nyxagent/conversations/{id}/steer",
+                "/api/v1/assistant/nyxagent/conversations/{id}/steer",
+                "handlers::assistant_nyxagent::steer",
+                post(handlers::assistant_nyxagent::steer),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
+                "/nyxagent/conversations/{id}/capabilities",
+                "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
+                "handlers::assistant_nyxagent::capabilities",
+                get(handlers::assistant_nyxagent::capabilities),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
                 "/nyxagent/models",
                 "/api/v1/assistant/nyxagent/models",
                 "handlers::assistant_nyxagent::models",
@@ -540,6 +554,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
+        .route(
+            "/me/preferences/services",
+            put(handlers::users::save_services_view),
+        )
+        .route(
+            "/me/preferences/service-views",
+            put(handlers::users::save_service_views),
+        )
         // Assistant postcondition evidence. These MUST be mounted on the
         // production router: a browser journey that proves success by a 404
         // cannot distinguish "resource absent" from "route absent", so an
@@ -632,6 +654,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let service_routes = Router::new()
+        .route(
+            "/{service_id}/concurrency",
+            get(handlers::service_concurrency::get).put(handlers::service_concurrency::put),
+        )
         .route("/", get(handlers::services::list_services))
         .route("/", post(handlers::services::create_service_request))
         .route("/{service_id}", get(handlers::services::get_service))
@@ -1364,6 +1390,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/", post(handlers::keys::create_key))
         .route("/{key_id}", delete(handlers::keys::delete_key));
 
+    let service_preference_reads = Router::new()
+        .route(
+            "/service-preferences",
+            get(handlers::service_preference::get),
+        )
+        .layer(middleware::from_fn(reject_service_account_tokens));
+    let service_preference_writes = Router::new()
+        .route(
+            "/service-preferences/groups/{group}",
+            put(handlers::service_preference::put_group),
+        )
+        .route(
+            "/service-preferences/hidden",
+            delete(handlers::service_preference::release_hidden),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::services::service_preference_service::MAX_REQUEST_BYTES,
+        ))
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_api_key_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let key_update_routes = Router::new()
         .route("/keys/{key_id}", put(handlers::key_updates::update_key))
         .layer(middleware::from_fn(reject_delegated_tokens))
@@ -1667,6 +1716,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             )),
         )
         .route(
+            "/thread-reply",
+            post(handlers::channel_relay::async_thread_reply).layer(DefaultBodyLimit::max(
+                crate::services::channel_media_service::request_body_limit(
+                    router_state
+                        .as_ref()
+                        .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
+                            state.config.channel_media_max_bytes
+                        }),
+                ),
+            )),
+        )
+        .route(
             "/messages/{message_id}/attachments/{index}",
             get(handlers::channel_relay::fetch_attachment),
         )
@@ -1940,6 +2001,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
         .route(
+            "/service-insights",
+            get(handlers::service_insights::get_insights),
+        )
+        .route(
             "/assistant-attachments/{id}/content",
             get(handlers::assistant_uploads::thread_image),
         )
@@ -1949,6 +2014,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_account_key_reads::get_key),
         )
         .merge(service_inventory_read_routes)
+        .merge(service_preference_reads)
         // General API keys may discover templates without proxy scope;
         // AuthUser still rejects scheduled keys. Unlike MCP discover_services,
         // catalog detail uses OwnerGrants::load, which requires a User actor
@@ -2096,7 +2162,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
-            axum::routing::put(handlers::assistant_agent_learning::edit),
+            get(handlers::assistant_agent_learning::authored_preview)
+                .put(handlers::assistant_agent_learning::edit),
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",
@@ -2538,6 +2605,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .merge(api_v1_shared)
         .merge(api_v1_human_only)
         .merge(key_update_routes)
+        .merge(service_preference_writes)
         .merge(ownership_routes);
 
     let well_known_routes = Router::new()

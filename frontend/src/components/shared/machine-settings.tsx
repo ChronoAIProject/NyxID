@@ -18,6 +18,7 @@ import {
 } from "@/hooks/use-nyxbot-agents";
 import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
 import { SINGLE_USER_WARNING } from "@/schemas/machines";
+import { SEPARATED_SETUP_NOTE } from "@/schemas/machine-access";
 import type { NodeInfo } from "@/types/nodes";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -180,6 +181,16 @@ export function MachineSettings({
               Workspace roots: {machine.roots.join(", ")}
             </p>
             <MachineIsolationDetails machine={machine} />
+            <p className="text-muted-foreground">
+              Agents configured for Shared legacy can run granted commands and
+              file tools in shared mode, even when separation is unavailable.
+              A separated assignment refuses execution if its separate workspace
+              is unavailable; it never falls back to shared mode.
+            </p>
+            {!machine.separated?.available ? <div className="space-y-1 text-muted-foreground">
+              <p>{SEPARATED_SETUP_NOTE}</p>
+              {machine.separated?.reason ? <details><summary className="cursor-pointer">Separate workspace diagnostics</summary><p>{machine.separated.reason}</p></details> : null}
+            </div> : null}
           </SettingsSection>
           {machine.computer || machine.browser ? (
             <SettingsSection title="Live desktop">

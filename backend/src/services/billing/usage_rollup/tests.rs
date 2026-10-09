@@ -52,6 +52,55 @@ fn bootstrap_increment(at: DateTime<Utc>, partitions: usize) -> UsageRollupHourl
     bson::from_document(document).unwrap()
 }
 
+#[tokio::test]
+async fn exact_connections_remain_distinct_through_rollup_and_legacy_stays_unknown() {
+    let db = connect_test_database("rollup_exact_connection")
+        .await
+        .unwrap();
+    let at = hour(Utc::now());
+    let mut rows = vec![row(at), row(at), row(at)];
+    rows[0].insert("user_service_id", "connection-a");
+    rows[1].insert("user_service_id", "connection-b");
+    for row in &mut rows {
+        row.insert("wallet_id", "wallet");
+    }
+    let ids: Vec<_> = rows
+        .iter()
+        .map(|r| r.get_str("_id").unwrap().to_owned())
+        .collect();
+    db.collection::<Document>(METERS)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let increments = raw_increments(&db, &ids, 1).await.unwrap();
+    assert_eq!(increments.len(), 1);
+    let connections: std::collections::HashSet<_> = increments[0]
+        .cost_partitions
+        .values()
+        .map(|p| p.key.get_str("user_service_id").ok())
+        .collect();
+    assert_eq!(
+        connections,
+        std::collections::HashSet::from([Some("connection-a"), Some("connection-b"), None])
+    );
+    let daily = daily_increments(&increments).unwrap();
+    assert_eq!(daily.len(), 1);
+    let daily_connections: std::collections::HashSet<_> = daily[0]
+        .cost_partitions
+        .values()
+        .map(|p| p.key.get_str("user_service_id").ok())
+        .collect();
+    assert_eq!(daily_connections, connections);
+    // Both replay bucket identities stay identical to legacy-shaped input.
+    db.collection::<Document>(METERS)
+        .update_many(doc! {}, doc! { "$unset": { "user_service_id": "" } })
+        .await
+        .unwrap();
+    let legacy = raw_increments(&db, &ids, 1).await.unwrap();
+    assert_eq!(legacy[0].id, increments[0].id);
+    assert_eq!(daily_increments(&legacy).unwrap()[0].id, daily[0].id);
+}
+
 #[test]
 fn bootstrap_byte_budget_splits_oversized_increments_and_counts_exact_bson_size() {
     let increment = bootstrap_increment(hour(Utc::now()), 64);
@@ -946,6 +995,22 @@ async fn covering_index_upgrade_retires_only_superseded_definitions() {
                 (name, value.clone())
             })
             .collect();
+        let mut v5_keys = v4_keys.clone();
+        v5_keys.insert("audio_input_tokens", 1);
+        v5_keys.insert("audio_output_tokens", 1);
+        summaries
+            .create_index(
+                IndexModel::builder()
+                    .keys(v5_keys)
+                    .options(
+                        IndexOptions::builder()
+                            .name("usage_rollup_reduce_window_exact_v5".to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
         summaries
             .create_index(
                 IndexModel::builder()
@@ -1017,7 +1082,8 @@ async fn covering_index_upgrade_retires_only_superseded_definitions() {
         assert!(!names.contains(&"usage_rollup_reduce_window"));
         assert!(!names.contains(&"usage_rollup_reduce_window_exact_v3"));
         assert!(!names.contains(&"usage_rollup_reduce_window_exact_v4"));
-        assert!(names.contains(&"usage_rollup_reduce_window_exact_v5"));
+        assert!(!names.contains(&"usage_rollup_reduce_window_exact_v5"));
+        assert!(names.contains(&"usage_rollup_reduce_window_exact_v6"));
         assert!(names.contains(&"custom_service_lookup"));
     }
     db.drop().await.unwrap();

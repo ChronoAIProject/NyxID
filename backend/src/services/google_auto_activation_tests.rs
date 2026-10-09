@@ -756,6 +756,7 @@ async fn google_service_disabled_403_passes_through_rest_and_mcp_distinct_from_a
 
 fn copy_upload_endpoint(endpoint: &mcp_service::McpToolEndpoint) -> mcp_service::McpToolEndpoint {
     mcp_service::McpToolEndpoint {
+        async_operation: None,
         name: endpoint.name.clone(),
         method: endpoint.method.clone(),
         path: endpoint.path.clone(),
@@ -1087,6 +1088,7 @@ async fn google_generic_mcp_cannot_set_multipart_content_type() {
         .unwrap();
     service.is_generic_proxy = true;
     let endpoint = mcp_service::McpToolEndpoint {
+        async_operation: None,
         endpoint_id: mcp_service::GENERIC_PROXY_ENDPOINT_ID.into(),
         ..Default::default()
     };

@@ -175,8 +175,8 @@ function NavItem({
       />
       <span
         className={cn(
-          "truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
-          collapsed ? "max-w-0 opacity-0" : "max-w-[160px] opacity-100",
+          "min-w-0 flex-1 truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
+          collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
         {item.label}
@@ -218,15 +218,15 @@ export function AssistantNavEntry({
       />
       <span
         className={cn(
-          "truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
-          collapsed ? "max-w-0 opacity-0" : "max-w-[160px] opacity-100",
+          "min-w-0 flex-1 truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
+          collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
         Assistant
       </span>
       <span
         className={cn(
-          "ml-auto rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-9 font-semibold text-nyx-secondary-400",
+          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-9 font-semibold text-nyx-secondary-400",
           collapsed && "hidden",
         )}
       >

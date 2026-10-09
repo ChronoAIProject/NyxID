@@ -260,6 +260,7 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            steering: None,
             voice: None,
             execution_pending: false,
             id: Uuid::new_v4().to_string(),
@@ -279,8 +280,12 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
         })
         .collect();
     let row = stale_test_row(Utc::now());
-    let base = base_prompt(&row, None);
-    let prompt = instructions(&row, None, &messages);
+    let context = crate::services::assistant_instruction_context::Prepared::new(
+        &[2; 32], &row, None, &messages,
+    )
+    .unwrap();
+    let base = context.instructions(&[], false);
+    let prompt = context.instructions(&messages, true);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
     assert!(prompt.contains("Prior conversation history"));
     assert!(prompt.contains("marker29"));
@@ -496,10 +501,12 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         model: DEFAULT_MODEL.into(),
         access_mode: Default::default(),
         nyxagent_session_id: Some("old-session".into()),
+        nyxagent_instruction_binding: None,
         nyxagent_last_response_id: None,
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            running_response: None,
             channel_event_id: None,
             initiating_message_seq: None,
             voice_request_id: None,
@@ -507,6 +514,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             continuations: 0,
             tool_progress: Default::default(),
             lease_expires_at: None,
+            heartbeat_at: None,
             trigger_run_id: None,
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -549,6 +557,7 @@ async fn expire_turn(db: &Database, row: &AssistantConversation) {
                 "active_turn.started_at": bson::DateTime::from_chrono(
                     Utc::now() - chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
                 ),
+                "active_turn.heartbeat_at": bson::Bson::Null,
                 "nyxagent_session_id": "old-session",
             }},
         )
@@ -652,6 +661,163 @@ async fn stale_fences_allow_rename_delete_and_stop_is_a_noop() {
         Err(AppError::NotFound(_))
     ));
     assert!(messages(&db, "owner", &row.id, 100, None).await.is_err());
+}
+
+#[tokio::test]
+async fn legacy_stop_keeps_the_existing_lease_fence() {
+    let db = connect_transaction_test_database("nyxa_legacy_stop").await;
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "legacy question"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$unset": {"active_turn.heartbeat_at": ""}},
+        )
+        .await
+        .unwrap();
+    request_stop(&db, "owner", &row.id).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let saved = get(&db, "owner", &row.id).await.unwrap();
+    assert!(saved.active_turn.is_some());
+    assert!(saved.active_turn.unwrap().stop_requested);
+}
+
+#[tokio::test]
+async fn dead_worker_stop_is_forced_within_grace_and_late_settlement_is_fenced() {
+    let db = connect_transaction_test_database("nyxa_forced_stop").await;
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "question"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let credential =
+        credentials::load_for_conversation(&db, &state.encryption_keys, "owner", &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    request_stop(&db, "owner", &row.id).await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(STOP_SETTLEMENT_GRACE_SECS + 2),
+        async {
+            loop {
+                if get(&db, "owner", &row.id)
+                    .await
+                    .unwrap()
+                    .active_turn
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        },
+    )
+    .await
+    .expect("forced stop did not settle within grace");
+    let settled = get(&db, "owner", &row.id).await.unwrap();
+    assert_eq!(settled.nyxagent_session_id, None);
+    assert_eq!(
+        messages(&db, "owner", &row.id, 10, None)
+            .await
+            .unwrap()
+            .last()
+            .and_then(|message| message.error_code.as_deref()),
+        Some("cancelled")
+    );
+    let late = finish_turn(
+        &db,
+        &row,
+        &credential.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: "late response".into(),
+            session_id: Some("late-session".into()),
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    assert!(matches!(late, Err(AppError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns() {
+    let db = connect_transaction_test_database("nyxa_heartbeat_sweep").await;
+    let state = test_app_state(db.clone());
+    let stale = begin_turn(
+        &db,
+        "owner",
+        &request(None, "stale"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let fresh = begin_turn(
+        &db,
+        "owner",
+        &request(None, "fresh"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let legacy = begin_turn(
+        &db,
+        "owner",
+        &request(None, "legacy"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let old = bson::DateTime::from_chrono(
+        Utc::now() - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS + 1),
+    );
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &stale.id},
+            doc! {"$set": {"active_turn.heartbeat_at": old}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &legacy.id},
+            doc! {"$unset": {"active_turn.heartbeat_at": ""}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(sweep_orphaned_turns(&db).await.unwrap(), 1);
+    assert!(
+        get(&db, "owner", &stale.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
+    );
+    assert!(
+        get(&db, "owner", &fresh.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
+    assert!(
+        get(&db, "owner", &legacy.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
 }
 
 #[test]
@@ -1446,4 +1612,109 @@ async fn voice_queue_bounds_concurrent_admission_and_never_replays_lost_claims()
         ));
     })
     .await;
+}
+
+#[test]
+fn instruction_fingerprint_covers_configuration_and_audience_without_database_access() {
+    use crate::models::{
+        assistant_agent::{AssistantAgent, MemoryNote},
+        catalog_skill_revision::SkillReference,
+    };
+    use crate::services::assistant_instruction_context::Prepared;
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    row.role = AgentRole::Subagent;
+    row.nyxagent_session_id = None;
+    let mut agent: AssistantAgent = bson::from_document(doc! {
+        "_id":"agent", "user_id":&row.user_id, "kind":"specialist", "name":"helper",
+        "description":"Track releases", "created_by":"user", "model":DEFAULT_MODEL,
+        "created_at":bson::DateTime::from_chrono(now), "updated_at":bson::DateTime::from_chrono(now)
+    })
+    .unwrap();
+    let initial = Prepared::new(&[2; 32], &row, Some(&agent), &[]).unwrap();
+    let mut binding = initial.binding.clone();
+    binding.session_id = "bound-session".into();
+    row.nyxagent_session_id = Some(binding.session_id.clone());
+    row.nyxagent_instruction_binding = Some(binding);
+    // All preparation below is synchronous with no database argument: no
+    // fingerprint-specific reads can be introduced on the hot path.
+    let prepare = |r: &AssistantConversation, a: &AssistantAgent| {
+        Prepared::new(&[2; 32], r, Some(a), &[]).unwrap()
+    };
+    row.active_turn.as_mut().unwrap().note = Some("A different sender/context".into());
+    row.active_turn
+        .as_mut()
+        .unwrap()
+        .events
+        .push(crate::services::assistant_team_service::event(
+            "message",
+            "Current news".into(),
+            None,
+        ));
+    agent.updated_at = now + chrono::Duration::hours(1);
+    agent.grants.service_ids.push("another-service".into());
+    assert!(!prepare(&row, &agent).reset);
+    for field in [
+        "description",
+        "persona",
+        "display_name",
+        "name",
+        "memory",
+        "skills",
+        "machines",
+        "owner",
+    ] {
+        let mut changed = agent.clone();
+        match field {
+            "description" => changed.description = "A different role".into(),
+            "persona" => changed.persona = Some("A different tone".into()),
+            "display_name" => changed.display_name = Some("Different display".into()),
+            "name" => changed.name = "helper-renamed".into(),
+            "memory" => changed.memory.push(MemoryNote {
+                id: "note".into(),
+                text: "Current preferences".into(),
+                created_at: now,
+                updated_at: now,
+            }),
+            "skills" => changed.skills.push(SkillReference {
+                source: "ornn".into(),
+                skill_id: "skill".into(),
+                name: "Release planning".into(),
+                version: "1.0.0".into(),
+                sha256: "a".repeat(64),
+                dependencies: vec![],
+            }),
+            "machines" => changed.machine_node_ids.push("machine".into()),
+            "owner" => changed.user_id = "organization".into(),
+            _ => unreachable!(),
+        }
+        let prepared = prepare(&row, &changed);
+        assert!(
+            prepared.reset,
+            "stable field {field} must invalidate the binding"
+        );
+        assert!(prepared.binding.marker != initial.binding.marker);
+    }
+    row.guest_turn = true;
+    assert!(prepare(&row, &agent).reset);
+    row.guest_turn = false;
+    // An old replica may bind another session while retaining stale metadata.
+    // Do not mistake the old marker for that session's initial instructions.
+    row.nyxagent_session_id = Some("old-replica-replacement".into());
+    // The replacement was established after this profile update.
+    row.context_reset_at = Some(agent.updated_at);
+    let adopted = prepare(&row, &agent);
+    assert!(!adopted.reset && adopted.binding.marker.is_none());
+    row.context_reset_at = None;
+    // With no establishment clock, conversation creation is the conservative
+    // lower bound: repair pre-upgrade profile edits for either audience once.
+    for guest in [false, true] {
+        row.guest_turn = guest;
+        assert!(prepare(&row, &agent).reset);
+        row.context_reset_at = Some(agent.updated_at);
+        assert!(!prepare(&row, &agent).reset);
+        row.context_reset_at = Some(agent.updated_at - chrono::Duration::seconds(1));
+        assert!(prepare(&row, &agent).reset);
+        row.context_reset_at = None;
+    }
 }

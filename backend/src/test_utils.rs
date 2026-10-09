@@ -2647,6 +2647,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         capabilities: None,
         inference: None,
         git_http: None,
+        concurrency_policy: None,
         inference_admin_modified: false,
         billing: None,
         auth_notes: None,

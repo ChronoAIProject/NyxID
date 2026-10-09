@@ -72,7 +72,7 @@ describe("useThemeStore", () => {
       JSON.stringify({
         state: {
           mode: "sepia",
-          density: 9,
+          density: "wide",
           motion: "wild",
           sidebarMode: "floating",
           sidebarWidths: { dashboard: "wide", assistant: 5000 },
@@ -91,20 +91,44 @@ describe("useThemeStore", () => {
     });
   });
 
-  it("persists the text size alongside the mode", () => {
-    useThemeStore.getState().setTextScale(1.25);
-    expect(useThemeStore.getState().textScale).toBe(1.25);
+  it("persists independent text size and spacing alongside the mode", () => {
+    useThemeStore.getState().setTextScale(1.17);
+    useThemeStore.getState().setDensity(1.37);
+    expect(useThemeStore.getState().textScale).toBe(1.17);
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}").state).toMatchObject({
       mode: "system",
-      textScale: 1.25,
+      textScale: 1.17,
+      density: 1.37,
     });
   });
 
-  it("ignores a persisted text size outside the supported scale", async () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { mode: "dark", textScale: 3 }, version: 1 }));
+  it.each([0.5, 1.17, 1.83, 2])("restores granular display multipliers of %s", async (scale) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { mode: "dark", textScale: scale, density: scale }, version: 1 }));
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState()).toMatchObject({ textScale: scale, density: scale });
+  });
+
+  it("rounds old density presets to the nearest slider step", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { density: 0.875 }, version: 1 }));
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState().density).toBe(0.88);
+  });
+
+  it("bounds display multipliers and defaults nonfinite values", () => {
+    const { setTextScale, setDensity } = useThemeStore.getState();
+    setTextScale(9);
+    setDensity(0.1);
+    expect(useThemeStore.getState()).toMatchObject({ textScale: 2, density: 0.5 });
+    setTextScale(Number.NaN);
+    setDensity(Number.POSITIVE_INFINITY);
+    expect(useThemeStore.getState()).toMatchObject({ textScale: 1, density: 1 });
+  });
+
+  it("caps a previously saved larger text size at the new maximum", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { mode: "dark", textScale: 2.5 }, version: 1 }));
     await useThemeStore.persist.rehydrate();
     expect(useThemeStore.getState().mode).toBe("dark");
-    expect(useThemeStore.getState().textScale).toBe(1);
+    expect(useThemeStore.getState().textScale).toBe(2);
   });
 
   it("defaults to follow-system", () => {

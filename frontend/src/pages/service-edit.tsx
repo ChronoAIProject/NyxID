@@ -1,4 +1,5 @@
 import { ServiceToolFields } from "@/components/services/service-tool-fields";
+import { ServiceConcurrency } from "@/components/services/service-concurrency";
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
 import {
   serviceFormPatch,
@@ -43,6 +44,7 @@ import { flattenRowErrors, flattenRowFieldErrors } from "@/lib/form-errors";
 import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 import { IdentityPropagationConfig } from "@/components/dashboard/identity-propagation-config";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -75,6 +77,7 @@ import { toast } from "sonner";
 export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const { data: service, isLoading, error, refetch } = useService(serviceId);
+  useBreadcrumbLabel(service?.name);
   if (isLoading && !service) return <Skeleton className="h-96 w-full" />;
   if (!service)
     return (
@@ -1157,6 +1160,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
           </fieldset>
           </form>
         </Form>
+        {user?.is_admin && <ServiceConcurrency key={serviceId} serviceId={serviceId} />}
       </div>
     </div>
   );

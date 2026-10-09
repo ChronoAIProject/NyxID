@@ -686,7 +686,7 @@ describe("ChatComposer measured layout", () => {
       ),
     ).not.toBeInTheDocument();
     expect(composer).toHaveClass("flex", "items-start");
-    expect(composer.closest("[data-composer-input]")).toHaveClass("ml-[30px]");
+    expect(composer.closest("[data-composer-input]")).toHaveClass("sm:ml-[30px]");
     expect(button).toHaveClass("h-8");
     expect(textarea).toHaveClass("min-h-8", "px-0");
   });

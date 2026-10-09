@@ -52,6 +52,7 @@ fn destination_normalization_and_error_contract() {
         LoginError::Unavailable,
         LoginError::Unsupported,
         LoginError::Storage,
+        LoginError::InputUnavailable,
     ];
     let codes: std::collections::HashSet<_> = errors.iter().map(|e| e.exit_code()).collect();
     let names: std::collections::HashSet<_> = errors.iter().map(|e| e.code()).collect();

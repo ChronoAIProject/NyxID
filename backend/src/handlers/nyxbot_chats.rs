@@ -56,15 +56,16 @@ pub(super) async fn adopt_relay_chat(
     if sender_id.is_empty() {
         return Ok(());
     }
-    let legacy = direct_partition(chat_id, sender_id, thread_id);
+    let relay_partition = direct_partition(chat_id, sender_id, thread_id);
     let threads = state.db.collection::<NyxbotThread>(THREADS);
-    if threads
-        .find_one(doc! {"channel_id": &row.id, "partition": &legacy})
+    let Some(legacy) = threads
+        .find_one(doc! {"channel_id": &row.id, "$or": [
+        {"partition": &relay_partition}, {"relay_partition": &relay_partition, "kind": "private"}]})
         .await?
-        .is_none()
-    {
+    else {
         return Ok(());
-    }
+    };
+    let legacy = legacy.partition;
     // The gateway conversation carries no chat of its own yet (only its
     // placeholder from `put_conversation`).
     if threads
@@ -85,7 +86,8 @@ pub(super) async fn adopt_relay_chat(
         match threads
             .update_one(
                 doc! {"channel_id": &row.id, "partition": &legacy},
-                doc! {"$set": {"partition": partition, "updated_at": bson::DateTime::now()}},
+                doc! {"$set": {"partition": partition, "relay_partition": &relay_partition,
+                "updated_at": bson::DateTime::now()}},
             )
             .await
         {
@@ -112,6 +114,27 @@ pub(super) async fn adopt_relay_chat(
             .await?;
     }
     Ok(())
+}
+
+/// Reuse a gateway-era private chat only with the exact sender/chat/topic
+/// mapping supplied by a verified provider event. Ordinary relay bots do no
+/// additional reads. Legacy unmapped gateway history stays isolated.
+pub(super) async fn partition_after_gateway(
+    state: &AppState,
+    row: &NyxbotChannel,
+    relay_partition: String,
+) -> AppResult<String> {
+    if row.relay_attempted_at.is_none() {
+        return Ok(relay_partition);
+    }
+    Ok(state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(
+            doc! {"channel_id": &row.id, "relay_partition": &relay_partition, "kind": "private"},
+        )
+        .await?
+        .map_or(relay_partition, |chat| chat.partition))
 }
 
 /// The shared thread of a group, channel or topic.
@@ -709,16 +732,20 @@ pub(super) async fn sync_gateway_groups(
         return Ok(None);
     }
     // Compare with the stored admission as of now, not the caller's copy.
-    let row = &load_channel(state, &row.user_id, &row.id).await?;
+    let mut current = load_channel(state, &row.user_id, &row.id).await?;
+    super::gateway_threads::discover(state, &mut current).await?;
+    let row = &current;
     if row.status != "active" {
         return Ok(None);
     }
     let wanted = wanted_groups(state, row).await?;
+    let threads = super::gateway_threads::desired(state, row).await?;
     if row
         .gateway_groups
         .as_deref()
         .unwrap_or(GATEWAY_GROUPS_DEFAULT)
         == wanted
+        && threads == row.gateway_threads
     {
         return Ok(None);
     }
@@ -729,7 +756,7 @@ pub(super) async fn sync_gateway_groups(
     {
         return Ok(Some("gateway_retry_pending"));
     }
-    let code = push_gateway_groups(state, row, wanted).await?;
+    let code = push_gateway_groups(state, row, wanted, &threads).await?;
     let update = match code {
         None => doc! {"$unset": {"gateway_groups_retry_at": ""}},
         Some(_) => doc! {"$set": {"gateway_groups_retry_at": bson::DateTime::from_chrono(
@@ -747,6 +774,7 @@ async fn push_gateway_groups(
     state: &AppState,
     row: &NyxbotChannel,
     wanted: &'static str,
+    threads: &crate::models::nyxbot_channel::GatewayThreadSupport,
 ) -> AppResult<Option<&'static str>> {
     let (Some(channel_id), Some(version), Some(route_id)) = (
         row.gateway_channel_id.as_deref(),
@@ -758,6 +786,11 @@ async fn push_gateway_groups(
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
     let creator = creator_bearer(state, &row.user_id)?;
     let mut update = gateway_policy(state, row, &bot, &[route_id.to_owned()], wanted);
+    if threads.version == Some(1) {
+        update["reply"]["thread_contract"] = super::gateway_threads::policy(threads);
+    } else if let Some(reply) = update["reply"].as_object_mut() {
+        reply.remove("thread_contract");
+    }
     update["expected_version"] = json!(version);
     let response = gateway_call(
         state,
@@ -770,6 +803,14 @@ async fn push_gateway_groups(
     .await;
     match response {
         Ok(response) if response.status == 200 => {
+            if threads.version == Some(1)
+                && response
+                    .body
+                    .pointer("/definition/reply/thread_contract/version")
+                    != Some(&json!(1))
+            {
+                return Ok(Some("gateway_thread_contract_unavailable"));
+            }
             let version = response.body["version"].as_i64().unwrap_or(version + 1);
             state
                 .db
@@ -777,6 +818,7 @@ async fn push_gateway_groups(
                 .update_one(
                     doc! {"_id": &row.id},
                     doc! {"$set": {"gateway_version": version, "gateway_groups": wanted,
+                    "gateway_threads": bson::to_bson(threads).map_err(|_| crate::services::channel_thread_follow_service::not_found())?,
                     "updated_at": bson::DateTime::now()}},
                 )
                 .await?;

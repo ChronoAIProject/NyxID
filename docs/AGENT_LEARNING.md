@@ -542,3 +542,69 @@ are preserved and rechecked rather than replayed blindly.
 Each PR is independently deployable with the flag off and has a rollback that
 disables the flag before binaries are reverted. Neither PR changes grants,
 operation scopes, approvals, memory visibility or existing B2 pins.
+
+## Owner-requested skill authoring
+
+`draft_agent_skill` is NyxBot-only: it drafts for review, never publishes on a
+model's authority. It reuses the default-off `assistant:agent-learning` flag,
+encrypted proposal store, and the one-card fenced publication saga. The additive
+proposal source defaults to `learned`; `authored` proposals do not require
+automatic learning enrollment or conversation evidence. Flag discovery skips
+membership resolution when no relevant rollout is enabled. Only owner NyxBot
+chats read the authoring flag during tool discovery; a failed lookup hides only
+the drafting tool. Guests and specialists cannot draft; specialists can ask
+NyxBot with `request_agent_skills`.
+
+Build agents from description (role/scope), persona (tone/style), and Ornn skills
+(repeatable procedures, checklists, references, templates and workflows). Search,
+preview and propose attaching existing skills before drafting uncovered procedures.
+Never package or publish through Ornn Playground, sandboxes, machines or raw
+Ornn upload APIs. NyxID validates bounded text, rejects credential shapes, encrypts
+the draft and shows all proposed files on one owner approval card. The card stores
+only IDs/revisions; its human review view reads the encrypted proposal.
+
+Approval uses the existing server ZIP builder and signed approving-person Ornn
+identity, verifies the returned exact version/hash and pins transactionally.
+Improvements require an existing exact attached, private, person-owned base and
+use PUT/new-version publication. Denial or expiry cannot publish. As in L1 PR-2,
+org publication refuses `owner_binding_unavailable`: maintainers should attach an
+existing approved skill until Ornn supports org ownership. No personal fallback.
+
+Authored cards require a first-party human content review. Chat-code replies,
+voice decisions and NyxBot permission decisions cannot approve publication.
+The package's generated frontmatter and every text file are displayed verbatim,
+as inert text. Retry uses the same card and publication operation; it never
+replays an uncertain POST/PUT. The initiating model turn may already have ended
+when the human approves. The current chat key, owner, proposal/skill revisions
+and publication lease still fence the action.
+
+Authored validation is separate from learned L1 validation at creation, editing,
+review and publication. Authored fields reject credential shapes (provider keys,
+secret assignments, private keys, bearer/JWT tokens, URL passwords and credential
+query parameters). Ordinary reference URLs, paths, versions, example IDs/email
+addresses and long checksums are allowed for owner review. The telemetry scrubber
+is not an authoring policy: its query-URL, email, UUID and unbounded `basic`/`token`
+matches reject ordinary prose. L1 additionally rejects long token-like runs and
+retains all of its existing redaction and validation rules unchanged.
+
+Authored caps count Unicode scalar characters: name 64 (Ornn ASCII slug),
+description 400, SKILL.md 7,500, optional paths 160 and file contents 2,000 each,
+at most eight extra files, rationale/safety notes 1,000 each. The total serialized
+proposal, including metadata and JSON escaping, stays at 7,500 characters with a
+30,000-byte ceiling (four bytes per character). L1 keeps its 8,000-byte ceiling.
+No script or binary files are allowed. The deterministic ZIP adds bounded
+frontmatter and nine entries at most; NyxID's existing 4 MiB archive limit remains.
+[Ornn's upload defaults](https://github.com/ChronoAIProject/Ornn/blob/c93036d6be7cb19c7ca3294da930594978714fd6/ornn-api/src/infra/config.ts#L132)
+are 50 MiB uploaded/expanded, 25 MiB per entry and 1,000 entries; remote format
+validation still applies. Envelope encryption adds at most 1,056 bytes (including
+the bounded wrapped DEK), far below MongoDB's 16 MiB document bound.
+
+Refusals retain `validation_error` / 1008 and include safe `details`, for example
+`{"rule":"credential_shape","field":"files[2].content","line":14}`. Lines are
+one-based within the original field; fields are fixed schema names with zero-based
+array indices, never supplied filenames. Size errors use `too_large`, `field`,
+`limit`, `actual` and `unit` (`characters`, `bytes` or `items`); total-budget errors
+use `field: "draft"`. Other fixed rules cover required text, slug/path constraints,
+duplicates, text-only content, input/schema/kind shape and base matching. Unknown
+JSON keys report their containing object. No matched text or raw parser errors
+enter diagnostics, logs or audit. No new permission or publication path is added.

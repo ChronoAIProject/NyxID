@@ -4,6 +4,8 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { ServiceAccountDetail } from "./service-account-detail";
 const mock = vi.hoisted(() => ({
   update: vi.fn(),
+  navigate: vi.fn(),
+  accountMissing: false,
   isAdmin: false,
   account: {
     id: "sa-1",
@@ -28,11 +30,11 @@ vi.mock("@/stores/auth-store", () => ({
     select({ user: { is_admin: mock.isAdmin } }),
 }));
 vi.mock("@tanstack/react-router", () => ({
-  useNavigate: () => vi.fn(),
+  useNavigate: () => mock.navigate,
   useSearch: () => ({}),
 }));
 vi.mock("@/hooks/use-service-accounts", () => ({
-  useServiceAccount: () => ({ data: mock.account, isLoading: false }),
+  useServiceAccount: () => ({ data: mock.accountMissing ? undefined : mock.account, isLoading: false }),
   useUpdateServiceAccount: () => ({
     mutateAsync: mock.update,
     isPending: false,
@@ -68,6 +70,7 @@ vi.mock("@/hooks/use-options", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mock.isAdmin = false;
+  mock.accountMissing = false;
   mock.account = {
     ...mock.account,
     id: "sa-1",
@@ -79,6 +82,17 @@ beforeEach(() => {
     platform_protected: false,
     is_active: true,
   };
+});
+
+it("returns to the organization's Service Accounts tab", async () => {
+  mock.accountMissing = true;
+  render(<ServiceAccountDetail saId="sa-1" backTo={{
+    to: "/orgs/org-1", label: "Engineering", search: { tab: "service-accounts" },
+  }} />);
+  await userEvent.click(screen.getByRole("button", { name: "Back to Engineering" }));
+  const options = mock.navigate.mock.calls.at(-1)![0];
+  expect(options.to).toBe("/orgs/org-1");
+  expect(options.search({ provider_status: "success" })).toEqual({ tab: "service-accounts" });
 });
 
 it("grants unchanged catalog scopes through ordinary save without roles or activation", async () => {

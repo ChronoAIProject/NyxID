@@ -1,5 +1,5 @@
 import { useOrg } from "@/hooks/use-orgs";
-import type { FeatureFlag } from "@/lib/feature-flags";
+import { userHasFeature, type FeatureFlag } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 
 /**
@@ -15,9 +15,8 @@ import { useAuthStore } from "@/stores/auth-store";
  * For a declarative gate, use `<Feature>` from `@/components/shared/feature-gate`.
  */
 export function useFeature(flag: FeatureFlag, orgId?: string): boolean {
-  const personal = useAuthStore((s) => s.user?.capabilities?.enabled_features);
+  const personal = useAuthStore((s) => userHasFeature(s.user, flag));
   // `useOrg("")` is disabled (no fetch) when there's no org in context.
   const { data: org } = useOrg(orgId ?? "");
-  const enabled = orgId ? org?.enabled_features : personal;
-  return enabled?.includes(flag) ?? false;
+  return orgId ? (org?.enabled_features?.includes(flag) ?? false) : personal;
 }

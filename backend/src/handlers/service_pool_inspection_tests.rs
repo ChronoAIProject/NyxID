@@ -11,9 +11,9 @@ async fn inspect(fixture: &Fixture, query: Value, health: bool) -> handler::Pool
         Query(serde_json::from_value(query).unwrap()),
     );
     let Json(result) = if health {
-        handler::health(args.0, args.1, args.2, args.3).await
+        Box::pin(handler::health(args.0, args.1, args.2, args.3)).await
     } else {
-        handler::pool_candidates(args.0, args.1, args.2, args.3).await
+        Box::pin(handler::pool_candidates(args.0, args.1, args.2, args.3)).await
     }
     .unwrap();
     result
@@ -615,6 +615,8 @@ async fn pool_inspection_node_platform_and_noauth_do_not_require_server_user_cre
 fn pool_credential_unavailability_is_narrowly_classified() {
     use crate::errors::AppError;
     use crate::services::service_pool_service::member_unavailable;
+    assert!(member_unavailable(&AppError::Forbidden("policy".into())));
+    assert!(member_unavailable(&AppError::insufficient_scope("policy")));
     assert!(member_unavailable(&AppError::CredentialUnavailable(
         "failed".into()
     )));

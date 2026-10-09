@@ -620,6 +620,8 @@ pub struct KeyView {
     /// re-typing the credential. `None` otherwise. The client_secret is
     /// never surfaced (write-only across the API).
     pub oauth_client_id: Option<String>,
+    /// Resolved OAuth app source, including legacy provider-token metadata.
+    pub oauth_app_source: Option<String>,
     /// Scopes currently granted on this OAuth connection, parsed from the
     /// backing `UserApiKey.token_scopes`. Lets the connect UIs pre-select and
     /// lock the existing grant when adding scopes to an existing connection
@@ -1531,6 +1533,7 @@ async fn create_key_inner(
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -2592,6 +2595,8 @@ pub async fn list_keys_read_only_with_tool_bindings(
         .await?
     };
     let ak_map: HashMap<&str, &UserApiKey> = api_keys.iter().map(|k| (k.id.as_str(), k)).collect();
+    let app_sources =
+        super::oauth_app_source::load(db, &api_keys.iter().collect::<Vec<_>>()).await?;
 
     // Batch-load catalog services (for names + SSH config).
     let catalog_ids: Vec<&str> = tagged
@@ -2667,6 +2672,11 @@ pub async fn list_keys_read_only_with_tool_bindings(
     // present. Sequential await is fine — N is bounded by the user's
     // key count and decrypt is fast.
     for view in views.iter_mut() {
+        view.oauth_app_source = view
+            .api_key_id
+            .as_ref()
+            .and_then(|id| app_sources.get(id))
+            .map(|source| source.as_str().to_owned());
         if let Some(catalog) = view
             .catalog_service_id
             .as_deref()
@@ -2765,6 +2775,13 @@ pub async fn get_key(
         &app_name_map,
         user_service_service::CredentialSource::Personal,
     );
+
+    let app_sources = super::oauth_app_source::load(db, &ak.iter().collect::<Vec<_>>()).await?;
+    view.oauth_app_source = view
+        .api_key_id
+        .as_ref()
+        .and_then(|id| app_sources.get(id))
+        .map(|source| source.as_str().to_owned());
 
     if let Some(catalog) = catalog_ds.as_ref() {
         let provider = if let Some(id) = &catalog.provider_config_id {
@@ -4588,6 +4605,9 @@ fn build_key_view(
         // `EncryptionKeys` operations are async and `build_key_view`
         // is intentionally sync.
         oauth_client_id: None,
+        oauth_app_source: ak
+            .and_then(super::oauth_app_source::from_key)
+            .map(|source| source.as_str().to_owned()),
         // OAuth providers echo scopes using either spaces or commas. Normalize
         // both forms at the read boundary while preserving the raw provider
         // response in storage and the first-occurrence display order.
@@ -4888,6 +4908,7 @@ mod tests {
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
@@ -5120,6 +5141,7 @@ mod tests {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -6401,6 +6423,29 @@ mod tests {
         // Label also flows from the same source on both paths (the api_key's
         // label when present, else the endpoint label). Pin both.
         assert_eq!(list_view.label, show_view.label);
+    }
+
+    #[test]
+    fn oauth_app_metadata_key_view_exposes_observed_modern_oauth() {
+        let service = sample_service("oauth2");
+        let mut key = sample_api_key("oauth2");
+        key.connection_id = Some("connection".into());
+        key.provider_config_id = Some("provider".into());
+        key.access_token_encrypted = Some(vec![1]);
+        key.oauth_app_observation = Some(
+            super::super::oauth_app_source::OAuthAppSource::Platform
+                .observation(key.credential_epoch),
+        );
+        let view = build_key_view(
+            &service,
+            &sample_endpoint(),
+            Some(&key),
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+        assert_eq!(view.oauth_app_source.as_deref(), Some("platform"));
+        assert!(view.oauth_client_id.is_none());
     }
 
     /// Companion guard: when the service has no api key (auto-provisioned
@@ -8284,6 +8329,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: stripped_key_id.clone(),
                 user_id: user_id.clone(),

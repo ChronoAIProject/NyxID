@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import { analyticsPath, filterError } from "@/lib/usage-analytics";
 import {
   analyticsResponseSchema,
@@ -55,8 +55,8 @@ export function useAnalyticsOptions(
         return { options, total: options.length };
       }
       const types = kind === "owners" ? ["org", "person"] : ["person"];
-      const results = await Promise.all(
-        types.map(async (type) => {
+      const results = await Promise.all([
+        ...types.map(async (type) => {
           const result = await api.get<{
             users: { id: string; display_name: string | null; email: string }[];
             total: number;
@@ -72,7 +72,22 @@ export function useAnalyticsOptions(
             total: result.total,
           };
         }),
-      );
+        api
+          .get<{
+            service_accounts: { id: string; name: string }[];
+            total: number;
+          }>(
+            `/admin/service-accounts?${new URLSearchParams({ page: "1", per_page: "50", search })}`,
+          )
+          .then((result) => ({
+            options: result.service_accounts.map((account) => ({
+              id: account.id,
+              label: account.name,
+              detail: "Service account",
+            })),
+            total: result.total,
+          })),
+      ]);
       return {
         options: results.flatMap((result) => result.options),
         total: results.reduce((sum, result) => sum + result.total, 0),
@@ -123,10 +138,21 @@ export function useAnalyticsLabels(
   const identities = useQueries({
     queries: ids.map((id) => ({
       queryKey: ["analytics-identity", userId, id],
-      queryFn: () =>
-        api.get<{ display_name: string | null; email: string }>(
-          `/admin/users/${id}`,
-        ),
+      queryFn: async () => {
+        try {
+          const user = await api.get<{
+            display_name: string | null;
+            email: string;
+          }>(`/admin/users/${id}`);
+          return user.display_name || user.email;
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.status !== 404) throw error;
+          const account = await api.get<{ name: string }>(
+            `/admin/service-accounts/${id}`,
+          );
+          return account.name;
+        }
+      },
       enabled: !sample,
       staleTime: 60_000,
       retry: false,
@@ -146,7 +172,7 @@ export function useAnalyticsLabels(
       const identity = identities[ids.indexOf(id)]?.data;
       labels[kind][id] =
         sample?.[kind].find((option) => option.id === id)?.label ??
-        (identity?.display_name || identity?.email) ??
+        identity ??
         id;
     }
   }

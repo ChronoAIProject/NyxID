@@ -1570,6 +1570,7 @@ async fn create_service_inner(
         issues_url: body.issues_url.clone(),
         capabilities: body.capabilities.clone(),
         inference: body.inference.clone(),
+        concurrency_policy: None,
         inference_admin_modified: body.inference.is_some(),
         billing: body.billing.clone(),
         auth_notes: body.auth_notes.clone(),

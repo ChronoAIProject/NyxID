@@ -252,6 +252,7 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
         .map(|t| {
             let mut tool = json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema});
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
+                tool["title"] = annotations["title"].clone();
                 tool["annotations"] = annotations;
             }
             tool

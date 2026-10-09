@@ -1,17 +1,18 @@
+import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { BillingFundingChart } from "./billing-funding-chart";
+import { BillingQuantityChart } from "./billing-quantity-chart";
 import { billingMetricLabel } from "@/lib/billing-units";
 import type { BillingUsageRow, BillingUsageTotals } from "@/schemas/billing";
 import {
   creditsLabel,
   number,
-  serviceName,
   serviceCategory,
   type BillingCatalog,
 } from "@/lib/billing-display";
 import {
   dimensions,
   groupRows,
-  layerName,
   metricTotals,
   metricFamily,
   usageStatus,
@@ -65,8 +66,7 @@ export function FundingDetails({ rows }: { rows: BillingUsageRow[] }) {
                 {unpriced} charged {records} {were} metered under a price that
                 is no longer available, so {their} gross, wallet and allowance
                 costs cannot be estimated. Amounts marked ≥ are lower bounds.
-                Credit-grant funding is still exact. Expand the records to see
-                which values are available.
+                Credit-grant funding is still exact.
               </>
             )}
           </dd>
@@ -175,137 +175,11 @@ export function DetailedUsage({
 }) {
   return (
     <div className="detailed-usage">
-      <div className="detail-intro">
-        <section>
-          <h4>Metered quantities</h4>
-          <dl className="split-facts">
-            {metricTotals(rows).map(([metric, quantity]) => (
-              <div key={metric}>
-                <dt className="capitalize">{billingMetricLabel(metric)}</dt>
-                <dd>{number(quantity)}</dd>
-              </div>
-            ))}
-          </dl>
-        </section>
-        <section>
-          <h4>Funding</h4>
-          <FundingDetails rows={rows} />
-        </section>
+      <div className="usage-visual-grid">
+        <BillingQuantityChart rows={rows} catalog={catalog} />
+        <BillingFundingChart rows={rows} />
       </div>
-      <details className="records-disclosure">
-        <summary>
-          <ChevronRight size={13} className="disclosure-arrow" />
-          <strong>Models, agents & billing layers</strong>
-          <span>
-            {rows.length} {rows.length === 1 ? "record" : "records"}
-          </span>
-        </summary>
-        <div className="meter-records">
-          {rows.map((row, index) => (
-            <article className="meter-record" key={index}>
-              <header>
-                <strong>{serviceName(catalog, row.service_slug)}</strong>
-                <span>
-                  {row.billable
-                    ? row.lago_acked
-                      ? "Acknowledged"
-                      : "Settlement pending"
-                    : "Free"}
-                </span>
-              </header>
-              <dl className="split-facts">
-                <div>
-                  <dt>Model</dt>
-                  <dd>{row.model ?? "No model recorded"}</dd>
-                </div>
-                <div>
-                  <dt>Agent</dt>
-                  <dd>
-                    {row.api_key_name ??
-                      (row.api_key_id
-                        ? "Unnamed agent key"
-                        : "No agent key recorded")}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Billing layer</dt>
-                  <dd>{layerName(row.layer)}</dd>
-                </div>
-                <div>
-                  <dt className="capitalize">
-                    {billingMetricLabel(row.metric)}
-                  </dt>
-                  <dd>{number(row.quantity)}</dd>
-                </div>
-              </dl>
-              <details className="record-details">
-                <summary>
-                  Full metering & funding details{" "}
-                  <ChevronDown size={12} className="disclosure-arrow" />
-                </summary>
-                <FundingDetails rows={[row]} />
-                <dl className="split-facts">
-                  <div>
-                    <dt>Reported requests</dt>
-                    <dd>{number(row.requests)}</dd>
-                  </div>
-                  <div>
-                    <dt>Reported bytes</dt>
-                    <dd>{number(row.bytes)}</dd>
-                  </div>
-                  <div>
-                    <dt>Meter events</dt>
-                    <dd>{number(row.events)}</dd>
-                  </div>
-                  <div>
-                    <dt>Allowance-covered {billingMetricLabel(row.metric)}</dt>
-                    <dd>
-                      {row.allowance_quantity == null
-                        ? "Unavailable"
-                        : number(row.allowance_quantity)}
-                    </dd>
-                  </div>
-                  {row.token_breakdown ? (
-                    <>
-                      <div>
-                        <dt>Captured input tokens</dt>
-                        <dd>{number(row.token_breakdown.prompt_tokens)}</dd>
-                      </div>
-                      <div>
-                        <dt>Captured output tokens</dt>
-                        <dd>{number(row.token_breakdown.completion_tokens)}</dd>
-                      </div>
-                      <div>
-                        <dt>Captured cache-read tokens</dt>
-                        <dd>{number(row.token_breakdown.cached_tokens)}</dd>
-                      </div>
-                      <div>
-                        <dt>Captured cache-write tokens</dt>
-                        <dd>
-                          {number(row.token_breakdown.cache_creation_tokens)}
-                        </dd>
-                      </div>
-                    </>
-                  ) : (
-                    <div>
-                      <dt>Token breakdown</dt>
-                      <dd>Not recorded</dd>
-                    </div>
-                  )}
-                  <div>
-                    <dt>Meter code</dt>
-                    <dd>{row.lago_metric_code}</dd>
-                  </div>
-                  <div>
-                    <dt>Agent key ID</dt>
-                    <dd>{row.api_key_id ?? "Not recorded"}</dd>
-                  </div>
-                </dl>
-              </details>
-            </article>
-          ))}
-        </div>
-      </details>
+      <UsageMetricsDisclosure rows={rows} />
     </div>
   );
 }
@@ -320,6 +194,7 @@ export function ExpandableUsage({
   dimension?: Dimension;
   search?: string;
 }) {
+  const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set());
   const groups = groupRows(catalog, rows, dimension).filter((group) =>
     group.name.toLowerCase().includes(search.trim().toLowerCase()),
   );
@@ -336,7 +211,20 @@ export function ExpandableUsage({
         <span>Estimated cost</span>
       </div>
       {groups.map((group) => (
-        <details className="expandable-service" key={group.key}>
+        <details
+          className="expandable-service"
+          key={group.key}
+          onToggle={(event) => {
+            const open = event.currentTarget.open;
+            setOpenGroups((current) => {
+              if (current.has(group.key) === open) return current;
+              const next = new Set(current);
+              if (open) next.add(group.key);
+              else next.delete(group.key);
+              return next;
+            });
+          }}
+        >
           <summary>
             <ChevronRight size={14} className="disclosure-arrow" />
             <span className="expandable-name">
@@ -362,7 +250,9 @@ export function ExpandableUsage({
               </span>
             </span>
           </summary>
-          <DetailedUsage catalog={catalog} rows={group.rows} />
+          {openGroups.has(group.key) && (
+            <DetailedUsage catalog={catalog} rows={group.rows} />
+          )}
         </details>
       ))}
     </div>

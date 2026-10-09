@@ -24,6 +24,26 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "stripe",
+        include_str!("../../specs/catalog/stripe.openapi.json"),
+    ),
+    (
+        "chrono-sandbox",
+        include_str!("../../specs/catalog/chrono-sandbox.openapi.json"),
+    ),
+    (
+        "cloudflare",
+        include_str!("../../specs/catalog/cloudflare.openapi.json"),
+    ),
+    (
+        "supabase-management",
+        include_str!("../../specs/catalog/supabase-management.openapi.json"),
+    ),
+    (
+        "railway",
+        include_str!("../../specs/catalog/railway.openapi.json"),
+    ),
+    (
         "ifttt-mcp",
         include_str!("../../specs/catalog/ifttt-mcp.openapi.json"),
     ),
@@ -171,12 +191,17 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("chrono-sandbox", "chrono-sandbox"),
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
     ("api-notion", "notion"),
+    ("api-stripe", "stripe"),
     ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
+    ("api-cloudflare", "cloudflare"),
+    ("api-supabase-management", "supabase-management"),
+    ("api-railway", "railway"),
     ("api-elevenlabs", "elevenlabs"),
     ("api-facebook", "facebook"),
     ("api-feishu", "lark"),
@@ -471,7 +496,8 @@ mod tests {
         .unwrap();
         for slug in ["api-google-drive", "api-google-workspace"] {
             let spec = spec_for_slug(slug).unwrap();
-            let parsed = crate::services::openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let parsed =
+                crate::services::openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
             assert_eq!(
                 parsed.len(),
                 if slug.ends_with("workspace") { 38 } else { 22 }
@@ -629,6 +655,56 @@ mod tests {
     use crate::services::openapi_parser;
 
     #[test]
+    fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {
+        for slug in ["api-lark", "api-feishu"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let list = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_tasks_query")
+                .unwrap();
+            assert_eq!(list.method, "GET");
+            assert_eq!(list.path, "/approval/v4/tasks");
+            assert_eq!(
+                list.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            let forward = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_task_forward")
+                .unwrap();
+            assert_eq!(forward.method, "POST");
+            assert_eq!(forward.path, "/approval/v4/tasks/forward");
+            assert!(forward.request_body_required);
+            assert_eq!(
+                forward.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let schema = forward.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["instance_code", "task_id", "transfer_user_id"])
+            );
+            assert_eq!(schema["additionalProperties"], false);
+            let parameters = forward.parameters.as_ref().unwrap().as_array().unwrap();
+            assert_eq!(parameters[0]["name"], "user_id_type");
+            assert_eq!(parameters[0]["required"], true);
+            assert_eq!(
+                parameters[0]["schema"]["enum"],
+                serde_json::json!(["open_id", "union_id", "user_id", "user_key"])
+            );
+            assert!(forward.destructive);
+            assert_eq!(forward.changes_existing, Some(true));
+            assert_eq!(
+                operation_marks(slug, "POST", &forward.path, "renamed").changes_existing,
+                Some(true)
+            );
+            assert!(operation_marks(slug, "POST", &forward.path, "renamed").destructive);
+            assert!(spec["paths"].get("/approval/v4/tasks/transfer").is_none());
+        }
+    }
+
+    #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
         for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");
@@ -636,7 +712,7 @@ mod tests {
                 spec.get("openapi").is_some(),
                 "spec '{key}' missing openapi version"
             );
-            let endpoints = openapi_parser::parse_openapi_spec_value(&spec)
+            let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec)
                 .unwrap_or_else(|error| panic!("spec '{key}' failed to parse: {error:?}"));
             assert!(!endpoints.is_empty(), "spec '{key}' has no operations");
         }
@@ -657,13 +733,13 @@ mod tests {
         );
         assert_eq!(workspace["servers"][0]["url"], "https://www.googleapis.com");
         assert_eq!(
-            openapi_parser::parse_openapi_spec_value(&drive)
+            openapi_parser::parse_hosted_openapi_spec_value(&drive)
                 .unwrap()
                 .len(),
             22
         );
         assert_eq!(
-            crate::services::openapi_parser::parse_openapi_spec_value(&workspace)
+            crate::services::openapi_parser::parse_hosted_openapi_spec_value(&workspace)
                 .unwrap()
                 .len(),
             38

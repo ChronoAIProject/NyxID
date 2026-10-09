@@ -39,10 +39,12 @@ import { canAdminWrite, hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
+import { validateSettingsSearch, withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
+import { ADMIN_CREDITS_TABS, KEY_DETAIL_TABS, isValidTab } from "@/lib/url-tabs";
 
 import {
   LandingPage,
@@ -112,6 +114,7 @@ import {
   KeysPage,
   BillingPage,
   KeyDetailPage,
+  ServiceOverviewPage,
   ChannelBotsPage,
   ChannelBotSetupPage,
   ChannelBotSetupLinksPage,
@@ -405,6 +408,7 @@ const assistantRoute = createRoute({
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
+  validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="plugins" />,
 });
@@ -412,6 +416,7 @@ const assistantPluginsRoute = createRoute({
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
+  validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="approvals" />,
 });
@@ -598,9 +603,7 @@ const settingsRoute = createRoute({
   path: "/settings",
   getParentRoute: () => dashboardLayout,
   component: SettingsPage,
-  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
-    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
-  }),
+  validateSearch: validateSettingsSearch,
 });
 
 const devicesBindRoute = createRoute({
@@ -693,7 +696,7 @@ const assistantAutomationsRoute = createRoute({
   path: "/assistant/automations",
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
-  validateSearch: parseAutomationSearch,
+  validateSearch: withAccountPanelSearch(parseAutomationSearch),
   component: () => <AssistantPage view="automations" />,
 });
 
@@ -701,7 +704,7 @@ const assistantMachinesRoute = createRoute({
   path: "/assistant/machines",
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
-  validateSearch: parseMachinesSearch,
+  validateSearch: withAccountPanelSearch(parseMachinesSearch),
   component: () => <AssistantPage view="machines" />,
 });
 
@@ -775,14 +778,14 @@ const machineSetupRoute = createRoute({
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-setup" />,
-  validateSearch: parseMachineSetupSearch,
+  validateSearch: withAccountPanelSearch(parseMachineSetupSearch),
 });
 const machinePairRoute = createRoute({
   path: "/assistant/machines/pair",
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-pair" />,
-  validateSearch: parseMachinePairSearch,
+  validateSearch: withAccountPanelSearch(parseMachinePairSearch),
 });
 
 const nodeDetailRoute = createRoute({
@@ -806,7 +809,8 @@ const keysRoute = createRoute({
   // service scope in the Agent Key create dialog.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string; action?: string; service?: string } => ({
+  ): { tab?: string; slug?: string; action?: string; service?: string; view?: string; pool?: string; org?: string } => ({
+    ...(import.meta.env.DEV && search.view === "routing" ? { view: "routing" } : {}),
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
       ? { slug: search.slug }
@@ -815,6 +819,10 @@ const keysRoute = createRoute({
     ...(typeof search.service === "string" && search.service.length > 0
       ? { service: search.service }
       : {}),
+    ...(typeof search.pool === "string" && search.pool.length > 0 && search.pool.length <= 128
+      ? { pool: search.pool } : {}),
+    ...(typeof search.org === "string" && search.org.length > 0 && search.org.length <= 128
+      ? { org: search.org } : {}),
   }),
   component: KeysPage,
 });
@@ -837,10 +845,21 @@ const billingRoute = createRoute({
   ),
 });
 
+const serviceOverviewRoute = createRoute({
+  path: "/keys/services/$groupId",
+  getParentRoute: () => dashboardLayout,
+  component: ServiceOverviewPage,
+});
+
 const keyDetailRoute = createRoute({
   path: "/keys/$keyId",
   getParentRoute: () => dashboardLayout,
   component: KeyDetailPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string; provider_status?: string; message?: string } => ({
+    ...(isValidTab(search.tab, KEY_DETAIL_TABS) ? { tab: search.tab } : {}),
+    ...(typeof search.provider_status === "string" ? { provider_status: search.provider_status } : {}),
+    ...(typeof search.message === "string" ? { message: search.message } : {}),
+  }),
 });
 
 const apiKeyDetailRoute = createRoute({
@@ -1098,6 +1117,9 @@ const adminCreditsRoute = createRoute({
   path: "credits",
   getParentRoute: () => adminLayout,
   component: AdminCreditsPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    ...(isValidTab(search.tab, ADMIN_CREDITS_TABS) ? { tab: search.tab } : {}),
+  }),
 });
 
 const adminInviteCodesRoute = createRoute({
@@ -1209,6 +1231,7 @@ const routeTree = rootRoute.addChildren([
     approvalGrantsRoute,
     keysRoute,
     billingRoute,
+    serviceOverviewRoute,
     keyDetailRoute,
     apiKeyDetailRoute,
     nodesRoute,

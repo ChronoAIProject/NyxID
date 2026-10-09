@@ -67,11 +67,19 @@ Most endpoints require authentication. NyxID supports three active authenticatio
 3. **API Key** -- `X-API-Key: <key>` header
 
 Endpoints marked **Auth: None** do not require authentication.
-Endpoints marked **Auth: Required** require any of the above.
+Endpoints marked **Auth: Required** require one of the above, subject to the route's credential-type restrictions.
 Endpoints marked **Auth: Admin** require an authenticated user with `is_admin = true`.
 Endpoints marked **Auth: None** may still require a grant-specific credential in the request body, such as a refresh token.
 
 **Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
+
+### Channel management and agent discovery
+
+`GET /api/v1/channel-bots` (`nyxid channel-bot list`) and `GET /api/v1/channel-conversations` (`nyxid channel-event channel list`, filtered to device channels) are human account management lists. Use a human session cookie or account access token. Personal lists are owner-scoped; `org_id` / CLI `--org` requires org-admin access. API keys (including Agent Key logins), delegated, relay and service-account tokens cannot use these lists. Existing OAuth-client account access remains subject to the route's current policy; separate first-party-only routes also reject OAuth-client tokens.
+
+Recovery is explicit: a human can run `nyxid login` and choose account access, or select an existing human account profile. Neither the CLI nor an agent should automatically switch identity, create credentials or widen permissions after a denial.
+
+For existing read-only agent discovery, use `GET /api/v1/channel-relay/conversations?page=1&per_page=50` with the assigned active API key. It returns only active conversations assigned to that exact key, including device channels (`platform=device`); it grants no bot inventory or management access. There is no separate channel-event discovery endpoint. A key without assignments receives an empty list. The management lists remain closed to API keys.
 
 ---
 
@@ -99,6 +107,35 @@ The `session_token` field is only present when `error_code` is `2002` (MFA requi
 ```
 
 Internal errors never leak implementation details. The `message` for error codes `1006` and `1007` is always `"An internal error occurred"`.
+
+Credential-type denials add fixed, metadata-only `details`; the existing HTTP status, error key, numeric code and message remain unchanged:
+
+```json
+{
+  "error": "forbidden",
+  "error_code": 1002,
+  "message": "Forbidden: API keys cannot access this endpoint",
+  "details": {
+    "reason": "credential_type_unsupported",
+    "credential_type": "api_key",
+    "accepted": ["user_session"],
+    "hint": "Ask a human to run `nyxid login` and choose account access, or use an existing human account profile. Do not switch identity automatically."
+  }
+}
+```
+
+`credential_type` is one of `api_key`, `delegated`, `relay`, `service_account`, or `oauth_client`. `accepted: ["user_session"]` names the supported recovery credential (a human account cookie or account access token), not an exhaustive route ACL or a permission grant. Ownership and scope checks still apply. Guidance never includes credentials, caller identifiers, resource IDs or content.
+
+| Status | `details.reason` | Meaning / next step |
+| --- | --- | --- |
+| 403 | `credential_type_unsupported` | This route excludes the supplied credential type; ask a human to choose the supported account access explicitly. |
+| 403 | `insufficient_scope` | A scope gate refused access; ask the owner to review only the required scopes. Changing identity is not an automatic remedy. |
+| 401 | `authentication_failed` | Authentication failed (including invalid credentials); this is not a credential-type permission denial. |
+| 401 | `credential_expired` | The authenticator reported expiry; this is not a credential-type permission denial. |
+
+Resource permission denials retain their existing errors and are not labelled `credential_type_unsupported`. Older servers may omit `details`; clients must preserve their existing fallback. Credential-type middleware intentionally performs deny-only checks before authentication: its 403 does **not** certify that a credential is valid. For example, an expired API-key-shaped token still hits that early 403 on an excluded management route; on the assigned-conversation route it reaches authentication and returns 401. This ordering is unchanged.
+
+CLI text errors preserve the existing `Error: ...` line and append the accepted credential and manual next step. JSON errors preserve the `http_error` wrapper, original `path` (including query parameters) and complete server `body`, and only add a `guidance` object with the stable reason and safe next steps. The added guidance contains no request identifiers or credentials. For the two channel lists, guidance includes the assigned-conversation alternative. No login, refresh, identity fallback or credential creation is triggered by these 403 responses.
 
 ---
 
@@ -3182,6 +3219,66 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
+#### Agent discovery order per service group
+
+`GET /api/v1/service-preferences` returns only `{ "groups": [{ "group":
+"catalog:<catalog UUID>", "ordered": ["<UserService UUID>"] }], "version": 3,
+"updated_at": "<RFC3339>" }`. A missing document returns `groups: []`, version 0
+and a null timestamp. IDs are filtered through live owner, organization and
+service-scope visibility before grouping. Custom `connection:` singleton groups
+are omitted. No stored, hidden or capacity counts are returned. General API keys
+and delegated exact `account:read` GETs may read authorized metadata; service
+accounts and relay tokens cannot read this route.
+
+`PUT /api/v1/service-preferences/groups/{group}` accepts only `{ "ordered": [...],
+"expected_version": 3 }`. `group` must be `catalog:<canonical lowercase RFC-variant UUID>` with a recognized version (1–8, including the existing v4/v5 catalogs); nil/max and unknown versions are rejected;
+connection IDs must be canonical lowercase RFC4122 UUID v4 strings, unique,
+authorized members of that group and at most 200. `ordered: []` explicitly resets
+this group's currently authorized order to default. A nonempty submission appends
+any stored, currently authorized group IDs omitted by a stale draft in their
+previous relative order. The server replaces only this group's visible occupied
+slots; additional IDs follow its last slot. All unrelated, hidden and stale IDs
+and their relative order remain unchanged. A logically identical group order is a
+no-op even when its stored IDs are interleaved with other groups.
+
+The resulting account document may contain at most 200 IDs across all services.
+Capacity returns an actionable generic 400: reset another service or explicitly
+release unavailable preferences. It reveals no hidden IDs or counts. Resets work
+at capacity. No save or read automatically prunes storage.
+
+`DELETE /api/v1/service-preferences/hidden` accepts only `{ "expected_version": 3 }`
+and explicitly releases stored IDs outside the actor's current authorized
+inventory, including deleted or lost-access organization connections. Accessible
+custom singleton IDs and disabled rows are retained, as are every visible group's
+relative order. If access returns, released orders must be set again. The CLI and
+inline capacity banner require explicit confirmation before this action.
+
+Both writes require a verified first-party human session/access token. API keys,
+delegated tokens, service accounts, relay and OAuth application tokens cannot
+write. Both enforce 16 KiB bodies, reject unknown fields and accept expected
+versions 0 through 9007199254740990. Invalid input returns 400; stale versions or
+insert/CAS races return 409 (`Conflict`, code 1004). Changed writes increment the
+version with BSON-millisecond timestamps and chained audits: scoped saves include
+only `{group, count, version}`; releases include only `{released_hidden, version}`.
+No-op writes retain metadata and produce no audit.
+
+`GET /keys` and `GET /keys/{id_or_slug}` add `preference_rank`, a dense 1-based rank
+within the authorized active HTTP catalog group, and `preference_position`, the
+saved position among authorized stored group IDs including disabled rows. Both
+are null for custom singleton groups; disabled rows have a null discovery rank.
+The CLI hidden-release command requires verified HTTPS remotely, refuses
+redirects on reads, refresh and DELETE (including retry), and preserves its
+existing profile/identity and caller-selected-credential fences. Local HTTP is
+limited to exact localhost/127.0.0.1/[::1] destinations, bypasses proxies and pins
+localhost to loopback. Other transport helpers retain their existing behavior.
+
+The UI shows `Discovery #n` and `Saved #p · disabled` separately. Restricted MCP
+callers see dense ranks over their own fully scoped discovery inventory, which
+can differ from the owner's REST pills. Preference never changes named execution,
+retries, pools, grants, approvals, authority digests, billing or `/mcp/config`.
+Part A also leaves implicit LLM gateway connection selection unchanged.
+
+
 The unified keys API auto-provisions UserEndpoint + UserApiKey + UserService records from a single request. This is the primary entry point for users connecting external services.
 
 #### POST /api/v1/keys
@@ -3491,7 +3588,7 @@ Content-Type: application/json
 
 Treat `connect_url` as a single-use secret and hand it only to the browser. The authenticated app ID and display name are recorded on the link; a request-body `requested_by` value cannot override that identity.
 
-`scopes` is an optional array of additional OAuth scopes (default `[]`). Each entry may contain comma- or whitespace-separated scopes; NyxID trims and deduplicates them in order, preserving case. The shared OAuth scope limits apply across the entire request: at most 32 scopes before deduplication, at most 256 characters per scope, and only `[A-Za-z0-9._:/~+*=-]` characters. Scopes supplement the provider defaults for OAuth and RFC 8628 device-code flows; they do not replace defaults, and the provider decides which permissions to grant. Stored scopes survive provider denial and retry.
+`scopes` is an optional array of additional OAuth scopes (default `[]`). Each entry may contain comma- or whitespace-separated scopes; NyxID trims and deduplicates them in order, preserving case. The shared OAuth scope limits apply across the entire request: at most 16 KiB before trimming or deduplication (including the spaces inserted between array entries), at most 256 bytes per scope, and only `[A-Za-z0-9._:/~+*=-]` characters. There is no scope-count cap. Scopes supplement the provider defaults for OAuth and RFC 8628 device-code flows; they do not replace defaults, and the provider decides which permissions to grant. Stored scopes survive provider denial and retry. OAuth initiation uses query parameters; proxy request-line limits and upstream authorization-URL limits can reject large scope lists below the parser's byte bound.
 
 `endpoint_url` is an optional HTTP(S) service URL prefill for connectors that require a gateway URL. It appears as an editable Service URL on the hosted page; the user confirms the final value during completion. It is ignored when the user selects a NyxID platform key.
 The CLI accepts the same value through `nyxid connect <service_slug> --endpoint-url <url>`.

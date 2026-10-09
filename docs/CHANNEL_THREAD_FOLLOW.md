@@ -1106,3 +1106,14 @@ The review corrections are ready for review with no commits. The v0.57.0 merge
 remains resolved and uncommitted on `feat/channel-thread-follow-email`.
 At completion, target is 20 GiB, incremental cache is empty, and free disk
 is 47 GiB. The feature flag remains default-off.
+
+## Gateway parity follow-up (after T1)
+
+The earlier T1 gateway deferral is superseded for Lark/Feishu only by the
+opt-in [gateway contract 1](CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md).
+NyxID reuses direct-relay follow selection, live authority, child identity,
+other-mention silence, bounded history and native thread replies after explicit
+CMA capability negotiation. Unsupported/older gateways keep legacy behavior.
+Other platforms, gateway media and edits remain follow-up work; see the
+[gap table](CHANNEL_EVENT_GATEWAY.md#agent-gateway-group-thread-parity).
+No deployed gateway or live-platform verification is implied by fixture tests.

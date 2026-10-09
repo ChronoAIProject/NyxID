@@ -111,8 +111,12 @@ result below NyxAgent's 10,000-character ceiling. It requires the active thread'
 actual assistant credential, and a message-bound upload in that conversation or
 its current owner-controlled group. A specialist's unrelated thread has no access.
 
-Turn instructions list only that message's attachment IDs, safe names, verified
-types, sizes and page/section counts. File content, names and image text are
+The per-turn input context lists only that message's attachment IDs, safe names,
+verified types, sizes and page/section counts, including on resumed sessions and
+attachment-only messages. It uses the session marker contract in
+[08](08-nyxagent-engine.md#session-instructions-and-per-turn-context), never stored
+user text. Expiry and unsupported-image notices travel in that same context,
+once per request, including continuations and recovery. File content, names and image text are
 untrusted data: they cannot alter instructions, confer grants or approve actions.
 Documents are read on demand, not pasted wholesale into prompts.
 
@@ -143,6 +147,12 @@ resolved or removed. Text is optional when files are attached. Conversation
 switches must not send another draft's attachments. Transcripts show safe metadata
 and owner-authenticated downloads/previews with `nosniff`, sandbox CSP and private
 caching. Follow DESIGN.md; unsupported engines show no misleading attach control.
+The picker does not filter by browser MIME or suffix: extensionless text must be
+selectable too. Sniffing and case-insensitive extensions on the server classify
+the file; browser MIME is ignored. Plain text accepts `.txt`, `.text` and no
+extension, and Markdown accepts `.md` and `.markdown`.
+Unsupported types return an actionable server error shown beside that file in
+the composer; sending stays blocked until the rejected file is removed.
 
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,

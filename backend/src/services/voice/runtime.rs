@@ -71,6 +71,12 @@ pub async fn start(
             "Invalid voice offer or voice selection".into(),
         )));
     }
+    let concurrency = crate::services::service_concurrency_service::acquire_policy(
+        &state.db,
+        resolved.concurrency_policy.as_ref(),
+        user,
+    )
+    .await?;
     preferences.voice = Some(resolved.voice);
     let provider = openai::OpenAi::new(resolved.key).map_err(|e| Stage::Transport.error(e))?;
     Box::pin(start_with_provider(
@@ -85,6 +91,7 @@ pub async fn start(
         resolved.identity,
         resolved.billing,
         provider,
+        concurrency,
     ))
     .await
 }
@@ -103,6 +110,7 @@ pub(super) async fn start_with_provider(
     identity: String,
     billing: crate::services::billing::BillingRouteContext,
     provider: openai::OpenAi,
+    concurrency: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Started> {
     let StartInput {
         user,
@@ -202,7 +210,7 @@ pub(super) async fn start_with_provider(
             let state = state.clone();
             let running = call.clone();
             tokio::spawn(Box::pin(async move {
-                run(state, running, Some(provider), socket, billing).await;
+                run(state, running, Some(provider), socket, billing, concurrency).await;
             }));
             Ok(Started { session: call, sdp })
         }
@@ -358,6 +366,7 @@ pub(super) async fn run(
     provider: Option<openai::OpenAi>,
     mut socket: Transport,
     billing: crate::services::billing::BillingRouteContext,
+    concurrency: Option<crate::services::service_concurrency_service::Lease>,
 ) {
     let mut coordinator = Coordinator::new();
     let actor = call.user_id.clone();
@@ -377,20 +386,26 @@ pub(super) async fn run(
         ));
         tokio::pin!(work);
         let mut renew = tokio::time::interval(std::time::Duration::from_secs(3));
-        loop {
-            tokio::select! {
-                result=&mut work => break result,
-                _=renew.tick() => {
-                    match session::refresh(&state.db,&lease).await {
-                        Err(e)=>break Err(e),
-                        Ok(current)=>{
-                            if current.end_requested {break Ok("user_ended")}
-                            if Utc::now()>=current.deadline {break Ok("time_limit")}
-                            if (Utc::now()-current.heartbeat_at).num_seconds()>=crate::models::assistant_voice_session::HEARTBEAT_SECONDS {break Ok("client_lost")}
+        let session_work = async {
+            loop {
+                tokio::select! {
+                    result=&mut work => break result,
+                    _=renew.tick() => {
+                        match session::refresh(&state.db,&lease).await {
+                            Err(e)=>break Err(e),
+                            Ok(current)=>{
+                                if current.end_requested {break Ok("user_ended")}
+                                if Utc::now()>=current.deadline {break Ok("time_limit")}
+                                if (Utc::now()-current.heartbeat_at).num_seconds()>=crate::models::assistant_voice_session::HEARTBEAT_SECONDS {break Ok("client_lost")}
+                            }
                         }
                     }
                 }
             }
+        };
+        match &concurrency {
+            Some(lease) => lease.run(session_work).await,
+            None => session_work.await,
         }
     };
     let reason = result.unwrap_or("voice_connection_lost");
@@ -1038,6 +1053,7 @@ async fn task_updates(
             && let Some(message)=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{
                 "conversation_id":request.task_conversation_id.as_deref().unwrap_or(&call.conversation_id),
                 "user_id":&call.user_id,"turn_id":&request.turn_id,"role":"assistant","execution_pending":{"$ne":true}}).await? {
+                let message = super::super::assistant_voice::settled_result(&request, message);
                 let _ = super::super::assistant_voice::publish_result(&state.db, &request, &message).await?;
                 // Persist the result immediately, but wait to claim its spoken
                 // announcement until the authoritative input transcript is
@@ -1203,19 +1219,26 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
             }
             let provider =
                 openai::OpenAi::new(resolved.key).map_err(|e| Stage::Transport.error(e))?;
+            let concurrency = crate::services::service_concurrency_service::acquire_policy(
+                &state.db,
+                resolved.concurrency_policy.as_ref(),
+                &call.user_id,
+            )
+            .await?;
             let socket = provider.attach(&id).await?;
             let call = session::write(&state.db, &call, doc! {"state":"active"}).await?;
-            Ok::<_, AppError>((provider, socket, call, resolved.billing))
+            Ok::<_, AppError>((provider, socket, call, resolved.billing, concurrency))
         })
         .await;
         match resumed {
-            Ok((provider, socket, resumed_call, billing)) => {
+            Ok((provider, socket, resumed_call, billing, concurrency)) => {
                 tokio::spawn(Box::pin(run(
                     state.clone(),
                     resumed_call,
                     Some(provider),
                     Transport::Openai(Box::new(socket)),
                     billing,
+                    concurrency,
                 )));
             }
             Err(_) => {

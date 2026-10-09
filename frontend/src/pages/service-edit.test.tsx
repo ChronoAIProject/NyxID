@@ -19,6 +19,18 @@ vi.mock("@/hooks/use-tools", () => ({
     data: [{ slug: "web-search", label: "Web Search" }],
   }),
 }));
+
+vi.mock("@/hooks/use-service-concurrency", () => ({
+  useServiceConcurrency: () => ({
+    data: { policy: null },
+    isPending: false,
+    isError: false,
+  }),
+  useUpdateServiceConcurrency: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+}));
 vi.mock("@/hooks/use-services", () => ({
   useService: () => ({
     ...source,
@@ -144,8 +156,15 @@ describe("service editor curation concurrency", () => {
       import_source: { kind: "manual", reference: "review-proof" },
     });
     const user = userEvent.setup();
-    const view = render(<ServiceEditPage />);
-    expect(view.container.querySelectorAll("form")).toHaveLength(1);
+    render(<ServiceEditPage />);
+    const serviceForm = screen
+      .getByRole("button", { name: "Save Changes" })
+      .closest("form");
+    expect(screen.getByLabelText("Supplier").closest("form")).toBe(serviceForm);
+    expect(
+      screen.getByRole("combobox", { name: "Offering kind" }).closest("form"),
+    ).toBe(serviceForm);
+    expect(serviceForm?.querySelectorAll("form")).toHaveLength(0);
     expect(screen.getByText(/Import source: manual/)).toBeInTheDocument();
     await user.clear(screen.getByLabelText("Supplier"));
     await user.click(screen.getByRole("button", { name: "Web Search" }));

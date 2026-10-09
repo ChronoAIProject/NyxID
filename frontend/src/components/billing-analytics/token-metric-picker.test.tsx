@@ -51,7 +51,7 @@ it("adds selected token counts and labels multi-selections as custom", async () 
     }),
   );
   expect(await screen.findByRole("tooltip")).toHaveTextContent(
-    "Selected input and output counts are shown but not added again.",
+    "Selected input, output, and cache counts are shown but not added again;",
   );
 
   await user.click(screen.getByRole("checkbox", { name: "Output tokens" }));
@@ -60,7 +60,7 @@ it("adds selected token counts and labels multi-selections as custom", async () 
     screen.getByRole("checkbox", { name: "Cache-write tokens" }),
   );
   expect(picker).toHaveTextContent("Custom (5)");
-  expect(screen.getByLabelText("Selected token sum")).toHaveTextContent("155");
+  expect(screen.getByLabelText("Selected token sum")).toHaveTextContent("120");
 
   await user.click(screen.getByRole("checkbox", { name: "Total tokens" }));
   expect(picker).toHaveTextContent("Custom (4)");
@@ -75,5 +75,5 @@ it("adds input and output when Total is absent, with cache counts added separate
   expect(sumTokenMetrics(usage, ["prompt_tokens", "cached_tokens"])).toBe(130);
   expect(
     sumTokenMetrics(usage, ["total_tokens", "prompt_tokens", "cached_tokens"]),
-  ).toBe(150);
+  ).toBe(120);
 });

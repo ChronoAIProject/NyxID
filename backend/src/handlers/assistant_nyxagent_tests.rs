@@ -38,6 +38,14 @@ async fn setup_script(
     delay: Duration,
     failures: Vec<&'static str>,
 ) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
+    setup_options(error, delay, failures, false).await
+}
+async fn setup_options(
+    error: Option<(u16, &'static str)>,
+    delay: Duration,
+    failures: Vec<&'static str>,
+    images: bool,
+) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database("nyxa_http").await;
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
@@ -58,6 +66,13 @@ async fn setup_script(
                     sink.lock().await.push(Capture { uri, headers, body });
                     let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                     let failure = failures.get(attempt).copied();
+                    if failure == Some("http_not_found") {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({"error":{"code":"not_found"}})),
+                        )
+                            .into_response();
+                    }
                     if attempt == 0
                         && let Some((status, code)) = error
                     {
@@ -102,6 +117,23 @@ async fn setup_script(
                 }
             },
         ),
+    );
+    let upstream = upstream.route(
+        "/v1/capabilities",
+        axum::routing::get(move || async move {
+            if images {
+                Json(
+                    json!({"protocol":"nyxagent-input-image-v1", "input_image": {
+                        "version":1, "sources":["nyxid_attachment_url"], "max_images":8,
+                        "max_image_bytes":5_000_000, "max_total_bytes":20_000_000,
+                        "content_types":["image/png", "image/jpeg", "image/gif", "image/webp"]
+                    }}),
+                )
+                .into_response()
+            } else {
+                StatusCode::NOT_FOUND.into_response()
+            }
+        }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -194,11 +226,19 @@ async fn browser_disconnect_does_not_cancel_detached_turn_and_headers_are_server
     assert_eq!(call.headers["idempotency-key"], messages[0].turn_id);
     assert_eq!(call.body["input"], "hello");
     assert!(call.body.get("previous_response_id").is_none());
+    let dto = serde_json::to_string(&ConversationResponse::from(row.clone())).unwrap();
+    assert!(!dto.contains(key.raw_key.as_str()));
     assert!(
-        !serde_json::to_string(&ConversationResponse::from(row))
-            .unwrap()
-            .contains(key.raw_key.as_str())
+        !dto.contains(
+            row.nyxagent_instruction_binding
+                .as_ref()
+                .unwrap()
+                .marker
+                .as_deref()
+                .unwrap()
+        )
     );
+    assert!(!dto.contains("nyxagent_instruction_binding"));
     server.abort();
 }
 
@@ -612,13 +652,18 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
     tokio::time::timeout(
         Duration::from_secs(2),
         complete_turn(
+            &state.db,
             &row,
             &row.active_turn.as_ref().unwrap().turn_id,
             "message",
             "block",
             &result,
             permit,
-            Events { sender, cursor: 0 },
+            Events {
+                sender,
+                cursor: 0,
+                reset_notified: false,
+            },
             Duration::from_millis(450),
             || {
                 attempts.fetch_add(1, Ordering::SeqCst);
@@ -654,7 +699,11 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
 async fn lagged_browser_subscription_keeps_full_text_and_terminal_event() {
     let (sender, receiver) = broadcast::channel(256);
     let response = subscribe_events(receiver);
-    let mut events = Events { sender, cursor: 0 };
+    let mut events = Events {
+        sender,
+        cursor: 0,
+        reset_notified: false,
+    };
     // A slow reader does not poll until more than the entire channel capacity
     // has arrived. The initial recv reports Lagged, not Closed.
     for _ in 0..1024 {
@@ -1070,6 +1119,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        authored_skill: None,
         voice_request_id: None,
         continuation_receipt_id: None,
         skill_selection: None,
@@ -1116,7 +1166,17 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .insert_many([&stale, &service, &account, &action, &pending])
         .await
         .unwrap();
-    engine::finish_turn(
+    let agent = crate::services::assistant_team_service::agent_for_conversation(&state.db, &row)
+        .await
+        .unwrap();
+    let prepared = crate::services::assistant_instruction_context::Prepared::new(
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+        &row,
+        Some(&agent),
+        &[],
+    )
+    .unwrap();
+    engine::finish_turn_with_instructions(
         &state.db,
         &row,
         &key.api_key_id,
@@ -1127,6 +1187,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
             response_id: Some(RESPONSE.into()),
             error: None,
         },
+        Some(&prepared.binding),
     )
     .await
     .unwrap();
@@ -1145,33 +1206,31 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
     }
     let calls = calls.lock().await;
     assert_eq!(calls.len(), 2);
-    let first = calls[0].body["instructions"].as_str().unwrap();
-    assert!(first.starts_with(engine::SYSTEM_PROMPT), "{first}");
+    let first = calls[0].body["input"].as_str().unwrap();
     assert!(
-        first.contains("Chat card decisions the user made since your previous reply"),
-        "{first}"
+        calls[0].body["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with(engine::SYSTEM_PROMPT)
     );
-    assert!(first.contains("\n- allowed: service github"), "{first}");
-    assert!(first.contains("\n- denied: account management"), "{first}");
-    assert!(
-        first.contains(&format!(
-            "\n- allowed: action nyxid__delete_agent_key (acknowledgement_id {})",
-            action.id
-        )),
-        "{first}"
-    );
+    assert!(first.contains("Chat card decisions the user made since your previous reply"));
+    assert!(first.contains(prepared.binding.marker.as_deref().unwrap()));
+    assert!(calls[0].body["conversation"].as_str() == Some(SESSION));
+    assert!(first.contains("\n- allowed: service github"));
+    assert!(first.contains("\n- denied: account management"));
+    assert!(first.contains(&format!(
+        "\n- allowed: action nyxid__delete_agent_key (acknowledgement_id {})",
+        action.id
+    )));
     assert_eq!(
         first.matches("\n- ").count(),
         3,
-        "stale and pending excluded: {first}"
+        "stale and pending excluded"
     );
-    assert!(
-        !first.contains("IGNORE") && !first.contains("Summary text"),
-        "{first}"
-    );
+    assert!(!first.contains("IGNORE") && !first.contains("Summary text"));
     // The next turn does not repeat decisions it has already been told about.
-    let second = calls[1].body["instructions"].as_str().unwrap();
-    assert!(!second.contains("Chat card decisions"), "{second}");
+    let second = calls[1].body["input"].as_str().unwrap();
+    assert!(!second.contains("Chat card decisions"));
     server.abort();
 }
 
@@ -1240,7 +1299,7 @@ async fn budget_and_time_limits_continue_the_same_session_without_reset_or_extra
             calls[0].headers["authorization"],
             calls[1].headers["authorization"]
         );
-        assert_eq!(calls[0].body["instructions"], calls[1].body["instructions"]);
+        assert!(calls[0].body["instructions"] == calls[1].body["instructions"]);
         assert!(
             calls[1].headers["idempotency-key"]
                 .to_str()
@@ -1357,16 +1416,22 @@ async fn attachments_on_old_nyxagent_persist_fallback_and_do_not_reset_context()
     assert_eq!(captured.len(), 2);
     assert_eq!(captured[1].body["conversation"], SESSION);
     assert!(
-        captured[1].body["instructions"]
+        captured[1].body["input"]
             .as_str()
             .unwrap()
             .contains("cannot view")
     );
+    let input = captured[1].body["input"].as_str().unwrap();
+    assert!(input.contains("attachments"));
+    assert!(input.contains("Unviewable attachment IDs:"));
+    assert!(input.contains(&attachment.id));
+    assert_eq!(input.matches("Message attachments (").count(), 1);
+    assert_eq!(input.matches("Unviewable attachment IDs:").count(), 1);
     assert!(
-        captured[1].body["input"]
+        !captured[1].body["instructions"]
             .as_str()
             .unwrap()
-            .contains("attachments")
+            .contains("Unviewable attachment IDs:")
     );
     let messages = engine::messages(&state.db, OWNER, id, 20, None)
         .await
@@ -1623,7 +1688,11 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     });
     let auth = test_auth_user(OWNER);
     let (sender, _receiver) = broadcast::channel(256);
-    let mut events = Events { sender, cursor: 0 };
+    let mut events = Events {
+        sender,
+        cursor: 0,
+        reset_notified: false,
+    };
     for origin in [TurnOrigin::Channel, TurnOrigin::Event] {
         row.active_turn.as_mut().unwrap().origin = origin;
         let result = Box::pin(execute_turn(
@@ -1636,6 +1705,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
             &mut events,
             "block",
             &mut String::new(),
+            &mut None,
         ))
         .await;
         assert!(matches!(result, Err(error) if error.code == "assistant_unavailable"));
@@ -1656,6 +1726,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
         &mut events,
         "block",
         &mut String::new(),
+        &mut None,
     ))
     .await
     .unwrap();
@@ -1663,3 +1734,374 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     assert_eq!(calls.lock().await.len(), 1);
     server.abort();
 }
+
+#[tokio::test]
+async fn resumed_image_input_keeps_marked_context_and_image_parts() {
+    let (state, calls, server) = setup_options(None, Duration::ZERO, Vec::new(), true).await;
+    drop(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap(),
+    );
+    let first = settled(&state).await;
+    let marker = first
+        .nyxagent_instruction_binding
+        .as_ref()
+        .unwrap()
+        .marker
+        .as_deref()
+        .unwrap();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::new(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let attachment = crate::services::assistant_upload_service::upload(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        &first.id,
+        "diagram.png",
+        png.into_inner(),
+    )
+    .await
+    .unwrap();
+    let mut request = Request::builder().method("POST").body(Body::from(
+        json!({"conversation_id":first.id,"text":"Read this diagram", "attachment_ids":[attachment.id]}).to_string()
+    )).unwrap();
+    request.extensions_mut().insert(SERVER_TURN_POLICY);
+    drop(
+        turns(State(state.clone()), test_auth_user(OWNER), request)
+            .await
+            .unwrap(),
+    );
+    settled(&state).await;
+    let calls = calls.lock().await;
+    let body = &calls.last().unwrap().body;
+    assert!(body["conversation"].as_str() == Some(SESSION));
+    let content = body["input"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "input_text");
+    let input = content[0]["text"].as_str().unwrap();
+    assert!(input.starts_with(&format!("[NYXID_CONTEXT:{marker}]")));
+    assert!(input.contains("diagram.png"));
+    assert!(input.contains(&attachment.id));
+    assert!(input.contains("nyx__attachment_read"));
+    assert_eq!(input.matches("Message attachments (").count(), 1);
+    assert!(input.ends_with("Read this diagram"));
+    assert_eq!(content[1]["type"], "input_image");
+    assert!(
+        content[1]["image_url"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/assistant-attachments/{}/content", attachment.id))
+    );
+    let messages = engine::messages(&state.db, OWNER, &first.id, 10, None)
+        .await
+        .unwrap();
+    let user = messages.iter().rev().find(|m| m.role == "user").unwrap();
+    assert_eq!(user.text, "Read this diagram");
+    assert_eq!(user.attachments[0].image_input.as_deref(), Some("sent"));
+    server.abort();
+}
+
+#[test]
+fn instruction_refresh_and_upstream_recovery_emit_only_one_reset_notice() {
+    let (sender, mut receiver) = broadcast::channel(8);
+    let mut events = Events {
+        sender,
+        cursor: 0,
+        reset_notified: false,
+    };
+    events.notice();
+    events.notice();
+    assert_eq!(receiver.try_recv().unwrap()["code"], "context_reset");
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn json_attachment_only_input_is_visible_on_first_and_resumed_turns() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let draft = super::super::assistant_uploads::draft(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(super::super::assistant_uploads::Draft { agent_id: None }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let id = draft["id"].as_str().unwrap();
+    for attempt in 0..2 {
+        let attachment = crate::services::assistant_upload_service::upload(
+            &state.db,
+            &state.encryption_keys,
+            OWNER,
+            id,
+            "data.json",
+            br#"{"topic":"current attachment"}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+        let mut request = Request::builder()
+            .method("POST")
+            .body(Body::from(
+                json!({"conversation_id":id,"text":"", "attachment_ids":[attachment.id]})
+                    .to_string(),
+            ))
+            .unwrap();
+        request.extensions_mut().insert(SERVER_TURN_POLICY);
+        drop(
+            turns(State(state.clone()), test_auth_user(OWNER), request)
+                .await
+                .unwrap(),
+        );
+        let row = settled(&state).await;
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), attempt + 1);
+        let body = &calls[attempt].body;
+        assert_eq!(body.get("conversation").is_some(), attempt != 0);
+        let input = body["input"].as_str().unwrap();
+        let marker = row
+            .nyxagent_instruction_binding
+            .as_ref()
+            .unwrap()
+            .marker
+            .as_deref()
+            .unwrap();
+        assert!(input.starts_with(&format!("[NYXID_CONTEXT:{marker}]")));
+        assert!(input.contains(&attachment.id));
+        assert!(input.contains("nyx__attachment_read"));
+        assert_eq!(input.matches("Message attachments (").count(), 1);
+        assert!(
+            !body["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(&attachment.id)
+        );
+        let messages = engine::messages(&state.db, OWNER, id, 20, None)
+            .await
+            .unwrap();
+        let user = messages.iter().rev().find(|m| m.role == "user").unwrap();
+        assert!(user.text.is_empty());
+        assert_eq!(user.attachments[0].id, attachment.id);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn attachment_context_occurs_once_on_continuation_and_recovery_requests() {
+    for (error, failures) in [
+        (None, vec!["tool_budget_exhausted"]),
+        (None, vec!["tool_budget_exhausted", "http_not_found"]),
+        (Some((404, "not_found")), Vec::new()),
+        (Some((401, "agent_key_required")), Vec::new()),
+    ] {
+        let reset_after_continuation = failures.contains(&"http_not_found");
+        let (state, calls, server) = setup_script(error, Duration::ZERO, failures).await;
+        let draft = super::super::assistant_uploads::draft(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Json(super::super::assistant_uploads::Draft { agent_id: None }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id = draft["id"].as_str().unwrap();
+        const TURN_FACT: &str = "Context needed after session recovery";
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"pending_events":[{
+                    "id":Uuid::new_v4().to_string(), "kind":"message", "text":TURN_FACT,
+                    "created_at":mongodb::bson::DateTime::now()
+                }]}},
+            )
+            .await
+            .unwrap();
+        // Simulate an old bound session for the lost-session recovery case.
+        if error.is_some() {
+            state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .update_one(
+                    doc! {"_id":id},
+                    doc! {"$set":{"nyxagent_session_id":SESSION}},
+                )
+                .await
+                .unwrap();
+        }
+        let attachment = crate::services::assistant_upload_service::upload(
+            &state.db,
+            &state.encryption_keys,
+            OWNER,
+            id,
+            "data.json",
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap();
+        let mut request = Request::builder()
+            .method("POST")
+            .body(Body::from(
+                json!({"conversation_id":id,"text":"", "attachment_ids":[attachment.id]})
+                    .to_string(),
+            ))
+            .unwrap();
+        request.extensions_mut().insert(SERVER_TURN_POLICY);
+        drop(
+            turns(State(state.clone()), test_auth_user(OWNER), request)
+                .await
+                .unwrap(),
+        );
+        let row = settled(&state).await;
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), if reset_after_continuation { 3 } else { 2 });
+        for (index, call) in calls.iter().enumerate() {
+            let input = call.body["input"].as_str().unwrap();
+            assert_eq!(input.matches("Message attachments (").count(), 1);
+            assert_eq!(
+                input.matches(TURN_FACT).count(),
+                usize::from(index == 0 || call.body.get("conversation").is_none())
+            );
+            assert!(input.contains(&attachment.id));
+            assert!(input.contains("nyx__attachment_read"));
+            assert!(
+                !call.body["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&attachment.id)
+            );
+        }
+        let marker = row
+            .nyxagent_instruction_binding
+            .as_ref()
+            .unwrap()
+            .marker
+            .as_deref()
+            .unwrap();
+        assert!(
+            calls.last().unwrap().body["input"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("[NYXID_CONTEXT:{marker}]"))
+        );
+        if error.is_none() {
+            assert!(
+                calls[1].body["input"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(crate::services::assistant_continuation::INSTRUCTION)
+            );
+            assert!(calls[0].body["instructions"] == calls[1].body["instructions"]);
+        }
+        if error.is_some() || reset_after_continuation {
+            assert!(calls.last().unwrap().body.get("conversation").is_none());
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn attachment_expiring_after_admission_is_announced_in_input() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    drop(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap(),
+    );
+    let previous = settled(&state).await;
+    let attachment = crate::services::assistant_upload_service::upload(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        &previous.id,
+        "expired.json",
+        b"{}".to_vec(),
+    )
+    .await
+    .unwrap();
+    let request = serde_json::from_value::<engine::TurnRequest>(json!({
+        "conversation_id":previous.id, "text":"", "attachment_ids":[attachment.id]
+    }))
+    .unwrap();
+    let row = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    // The upload was available at admission, but retention now expires it
+    // before preparing the resumed upstream request.
+    state.db.collection::<mongodb::bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .update_one(doc! {"_id":&attachment.id}, doc! {"$set":{
+            "bound_at":mongodb::bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::days(366))
+        }}).await.unwrap();
+    let mut credential =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let (sender, _receiver) = broadcast::channel(256);
+    let mut events = Events {
+        sender,
+        cursor: 0,
+        reset_notified: false,
+    };
+    let result = Box::pin(execute_turn(
+        &state,
+        &test_auth_user(OWNER),
+        &row,
+        "",
+        &mut credential,
+        Some(SERVER_TURN_POLICY),
+        &mut events,
+        "block",
+        &mut String::new(),
+        &mut None,
+    ))
+    .await
+    .unwrap();
+    assert!(result.error.is_none());
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 2);
+    let body = &calls[1].body;
+    assert_eq!(body["conversation"], SESSION);
+    let input = body["input"].as_str().unwrap();
+    assert!(input.contains(&attachment.id));
+    assert_eq!(
+        input
+            .matches("Attachments expired per retention policy")
+            .count(),
+        1
+    );
+    assert_eq!(input.matches("Message attachments (").count(), 1);
+    assert!(input.contains("nyx__attachment_read"));
+    assert!(
+        !body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Attachments expired per retention policy")
+    );
+    server.abort();
+}
+
+#[path = "assistant_nyxagent_upload_tests.rs"]
+mod upload_matrix;
+
+#[path = "assistant_nyxagent_steering_tests.rs"]
+mod steering_tests;

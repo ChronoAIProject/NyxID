@@ -195,7 +195,7 @@ pub(crate) async fn settled(state: &AppState, event_id: &str) {
 async fn process_selected(state: &AppState, event_id: &str, gateway_only: bool) {
     match Box::pin(process_inner(state, event_id, gateway_only)).await {
         Ok(()) => {}
-        Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+        Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => {
             let _ = refuse(state, event_id).await;
         }
         Err(_) => {
@@ -451,7 +451,7 @@ async fn dispatch(
     conversation: &AssistantConversation,
     text: &str,
 ) -> AppResult<bool> {
-    if d.origin.thread.is_some() {
+    if d.origin.thread.is_some() && d.transport == "direct" {
         thread_follow::send(state, &event.user_id, &d.origin, &conversation.id, text).await?;
         return Ok(true);
     }
@@ -488,12 +488,16 @@ async fn dispatch(
             None,
         )
     };
+    let mut message = json!({"text": text});
+    if d.origin.thread.is_some() {
+        message["thread_reply"] = json!(true);
+    }
     let response = gateway_call(
         state,
         reqwest::Method::POST,
         &path,
         &key,
-        Some(&json!({"text": text})),
+        Some(&message),
         idempotency,
     )
     .await?;

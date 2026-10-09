@@ -522,7 +522,7 @@ pub async fn list_catalog_endpoints(
         // The URL comes only from the admin catalog row. This cache contains
         // public template specs and is shared by URL, never caller credentials.
         let spec = api_docs_service::fetch_spec_json(spec_url).await?;
-        let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+        let parsed = openapi_parser::parse_openapi_spec_for_url(&spec, spec_url)?;
         let endpoints: Vec<CatalogEndpointResponse> = parsed
             .into_iter()
             .filter(|endpoint| {
@@ -591,7 +591,7 @@ pub async fn list_catalog_endpoints(
     };
 
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &user_endpoint.user_id).await?;
-    let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+    let parsed = openapi_parser::parse_openapi_spec_for_url(&spec, spec_url)?;
     let endpoints: Vec<CatalogEndpointResponse> = parsed
         .into_iter()
         .filter(|endpoint| {

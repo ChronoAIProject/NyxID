@@ -88,6 +88,12 @@ pub async fn serve(
             .mark_forwarded(&meter)
             .await
             .map_err(|e| Stage::BillingReservation.error(e))?;
+        let concurrency = crate::services::service_concurrency_service::acquire_policy(
+            &state.db,
+            resolved.concurrency_policy.as_ref(),
+            &call.user_id,
+        )
+        .await?;
         let (socket, started) = grok::connect(
             &resolved.key,
             &call.preferences.model,
@@ -107,10 +113,12 @@ pub async fn serve(
             .started_at(started),
         )));
         call = session::write(&state.db, &call, doc! {"state":"active"}).await?;
-        Ok::<_, AppError>((transport, resolved.billing))
+        Ok::<_, AppError>((transport, resolved.billing, concurrency))
     };
     match tokio::time::timeout(std::time::Duration::from_secs(12), Box::pin(setup)).await {
-        Ok(Ok((transport, billing))) => runtime::run(state, call, None, transport, billing).await,
+        Ok(Ok((transport, billing, concurrency))) => {
+            runtime::run(state, call, None, transport, billing, concurrency).await
+        }
         failed => {
             let error = match failed {
                 Ok(Err(e)) => e,

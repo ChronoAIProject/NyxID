@@ -83,3 +83,15 @@ export const previewSearch = new URLSearchParams({
 for (const service of previewServices) {
   previewSearch.append("preselect_service_ids", service.id);
 }
+
+/** An agent app (MCP client) sign-in: service access with no preselection. */
+export const previewAgentSearch = new URLSearchParams({
+  response_type: "code",
+  client_id: "preview-agent-client",
+  client_name: "Claude",
+  redirect_uri: "https://claude.ai/api/mcp/auth_callback",
+  scope: "openid profile email roles groups proxy offline_access",
+  code_challenge: "preview-only",
+  code_challenge_method: "S256",
+  consent_request: "preview-only",
+});

@@ -1,0 +1,85 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Supabase Management",
+    "version": "v1-nyxid-overlay",
+    "description": "Supabase Management API OAuth access. Configure organization and project read permissions on the registered OAuth app. This token does not replace a project Data API key."
+  },
+  "servers": [
+    {
+      "url": "https://api.supabase.com/v1"
+    }
+  ],
+  "externalDocs": {
+    "url": "https://supabase.com/docs/reference/api/introduction"
+  },
+  "paths": {
+    "/organizations": {
+      "get": {
+        "operationId": "list_organizations",
+        "summary": "List Supabase organizations",
+        "description": "List organizations available to the connected OAuth app. Requires Organizations Read permission.",
+        "x-aevatar-tool": {
+          "name": "list_organizations",
+          "description": "List organizations available to the connected OAuth app. Requires Organizations Read permission.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream API response."
+          }
+        }
+      }
+    },
+    "/projects": {
+      "get": {
+        "operationId": "list_projects",
+        "summary": "List Supabase projects",
+        "description": "List projects available to the connected OAuth app. Requires Projects Read permission.",
+        "x-aevatar-tool": {
+          "name": "list_projects",
+          "description": "List projects available to the connected OAuth app. Requires Projects Read permission.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream API response."
+          }
+        }
+      }
+    },
+    "/projects/{ref}": {
+      "get": {
+        "operationId": "get_project",
+        "summary": "Get a Supabase project",
+        "description": "Read metadata for an accessible Supabase project. Requires Projects Read permission.",
+        "x-aevatar-tool": {
+          "name": "get_project",
+          "description": "Read metadata for an accessible Supabase project. Requires Projects Read permission.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream API response."
+          }
+        },
+        "parameters": [
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

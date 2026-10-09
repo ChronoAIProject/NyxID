@@ -95,7 +95,7 @@ pub async fn authorize(
         org::resolve_key_access(db, actor, Some(&group.user_id))
             .await
             .map_err(|e| match e {
-                AppError::Forbidden(_) => missing(),
+                error if error.is_forbidden() => missing(),
                 other => other,
             })?
             .ok_or_else(missing)?
@@ -139,7 +139,7 @@ pub async fn list(db: &Database, actor: &str) -> AppResult<Vec<Access>> {
         if is_org(&row) && !snapshots.contains_key(&row.user_id) {
             let access = match org::resolve_key_access(db, actor, Some(&row.user_id)).await {
                 Ok(access) => access,
-                Err(AppError::Forbidden(_)) => None,
+                Err(error) if error.is_forbidden() => None,
                 Err(error) => return Err(error),
             };
             snapshots.insert(row.user_id.clone(), access);
@@ -422,6 +422,13 @@ pub async fn update(
     if access.group.participant_user_ids.is_empty() {
         // Last-person leave has the same active-turn fence and complete cascade
         // as explicit deletion. The original participant list fences races.
+        if threads(db, &before)
+            .await?
+            .iter()
+            .any(|row| super::assistant_nyxagent::live_turn(row, Utc::now()).is_some())
+        {
+            return Err(AppError::AssistantTurnActive);
+        }
         Box::pin(delete_contents(db, &before, Some(&access.actor))).await?;
         audit(db, &access.actor, &before, "last_participant_left").await;
         return Ok(access);
@@ -529,6 +536,11 @@ pub async fn threads(
 
 pub async fn delete(db: &Database, access: &Access) -> AppResult<()> {
     access.require_manage()?;
+    for row in threads(db, &access.group).await? {
+        if super::assistant_nyxagent::live_turn(&row, Utc::now()).is_some() {
+            super::assistant_nyxagent::request_stop(db, &row.user_id, &row.id).await?;
+        }
+    }
     delete_contents(db, &access.group, Some(&access.actor)).await?;
     audit(db, &access.actor, &access.group, "deleted").await;
     Ok(())
@@ -619,9 +631,10 @@ async fn delete_threads_in_session(
         .await?;
     let rows: Vec<assistant_conversation::AssistantConversation> =
         cursor.stream(&mut *session).try_collect().await?;
-    if rows
-        .iter()
-        .any(|r| super::assistant_nyxagent::live_turn(r, Utc::now()).is_some())
+    if actors.is_some()
+        && rows
+            .iter()
+            .any(|r| super::assistant_nyxagent::live_turn(r, Utc::now()).is_some())
     {
         return Err(AppError::AssistantTurnActive);
     }
@@ -635,6 +648,7 @@ async fn delete_threads_in_session(
         )
         .await?;
         for collection in [
+            crate::models::async_service_operation::COLLECTION_NAME,
             assistant_agent_credential::COLLECTION_NAME,
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             crate::models::assistant_message::COLLECTION_NAME,

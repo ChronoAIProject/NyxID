@@ -111,6 +111,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            steering: None,
             id: id.clone(),
             conversation_id: call.conversation_id.clone(),
             user_id: call.user_id.clone(),
@@ -229,6 +230,7 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            async_operation_pending: false,
             id: id.into(),
             user_id: "owner".into(),
             conversation_id: "thread".into(),
@@ -261,6 +263,7 @@ mod tests {
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                steering: None,
                 voice: None,
                 execution_pending: true,
                 id: "m1".into(),

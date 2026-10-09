@@ -79,6 +79,8 @@ pub struct ServiceEndpoint {
     pub execution: ExecutionKind,
     #[serde(default)]
     pub publication: PublicationState,
+    #[serde(default)]
+    pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     #[serde(rename = "_id")]
     pub id: String,
     pub service_id: String,
@@ -140,6 +142,7 @@ mod tests {
             cost_class: None,
             execution: Default::default(),
             publication: Default::default(),
+            async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

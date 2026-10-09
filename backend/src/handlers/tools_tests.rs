@@ -38,7 +38,7 @@ async fn tool_publication_gates_all_discovery_and_proxy() {
     let mcp_session = f
         .state
         .mcp_sessions
-        .create_with_proxy_access(&f.owner, true)
+        .create_with_proxy_access(&f.owner, true, false)
         .await
         .unwrap()
         .unwrap();

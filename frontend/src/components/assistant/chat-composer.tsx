@@ -108,6 +108,8 @@ interface ChatComposerProps {
   /** Keep the composer writable while a typed actor task accepts steering. */
   readonly allowActiveInput?: boolean;
   readonly sending: boolean;
+  readonly activePlaceholder?: string;
+  readonly sendLabel?: string;
   readonly disabled?: boolean;
   readonly stopDisabled?: boolean;
   readonly ownerUserId: string | null;
@@ -152,6 +154,8 @@ function DraftedChatComposer({
   active,
   allowActiveInput = false,
   sending,
+  activePlaceholder,
+  sendLabel,
   disabled = false,
   stopDisabled = false,
   ownerUserId,
@@ -581,7 +585,9 @@ function DraftedChatComposer({
     try {
       await onSend(message);
     } catch {
-      updateContent(message);
+      // Guidance can be sent while the field remains editable. Preserve any
+      // newer draft typed while the request was in flight.
+      if (!contentRef.current) updateContent(message);
       scheduleDraftSave();
     }
   }
@@ -639,7 +645,7 @@ function DraftedChatComposer({
         className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
       />
       <div
-        className="mx-auto w-full max-w-[758px] px-4 pt-2 sm:px-6"
+        className="mx-auto w-full max-w-[758px] px-3 pt-2 sm:px-6"
         style={{ paddingBottom: "max(1rem, var(--sab))" }}
       >
         {controls}
@@ -676,7 +682,7 @@ function DraftedChatComposer({
               if (!locked && !disabled && !sending) onFiles(Array.from(event.clipboardData.files));
             }
           }}
-          className={cn("relative ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
+          className={cn("relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
         >
           {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium">Drop files to attach</div>}
           {attachments}
@@ -728,8 +734,9 @@ function DraftedChatComposer({
           ) : null}
           <span
             ref={textMeasureRef}
+            data-composer-text-measure
             aria-hidden
-            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-13 leading-relaxed"
+            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
           >
             {content}
           </span>
@@ -776,10 +783,10 @@ function DraftedChatComposer({
                   : disabled
                     ? "This conversation is read-only."
                     : allowActiveInput
-                     ? "Steer active task..."
+                     ? (activePlaceholder ?? "Steer active task...")
                      : (placeholder ?? "Message NyxID Assistant...")
               }
-              className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+              className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
             />
             <div
               aria-hidden
@@ -798,6 +805,12 @@ function DraftedChatComposer({
             ref={controlsRef}
             className={`flex shrink-0 items-center ${multiline ? "self-end" : ""}`}
           >
+            {active && allowActiveInput && (
+              <Button type="button" variant="outline" size="icon" onClick={() => void onStop()}
+                disabled={stopDisabled} aria-label="Stop assistant turn">
+                <Square className="fill-current" />
+              </Button>
+            )}
             {locked ? (
               <Button
                 type="button"
@@ -809,7 +822,7 @@ function DraftedChatComposer({
               >
                 <Square className="fill-current" />
               </Button>
-            ) : onVoice && !content.trim() && !hasAttachments && !uploadBlocked ? (
+            ) : onVoice && !active && !content.trim() && !hasAttachments && !uploadBlocked ? (
               <Button type="button" variant="primary" size="icon" disabled={sending || disabled}
                 onClick={onVoice} aria-label="Open voice call"><Mic /></Button>
             ) : (
@@ -820,9 +833,9 @@ function DraftedChatComposer({
                 disabled={(!content.trim() && !hasAttachments) || uploadBlocked || sending || disabled}
                 onClick={() => void submit()}
                 aria-label={
-                  allowActiveInput
+                  sendLabel ?? (allowActiveInput
                     ? "Send steering instruction"
-                    : "Send message"
+                    : "Send message")
                 }
               >
                 <Send />

@@ -38,6 +38,12 @@ request snapshot; the next request is refused with `assistant_turn_required`.
 Voice delegation must enter through `begin_turn` on the same thread and must
 not call tools with the bare key after the voice session or turn ends.
 
+Trusted async service watches have a separate, narrowly bound background reader:
+it may call only the declared status/result/cancel operations with the saved ID,
+using the original key and live authority. It never fabricates a live turn. Results
+resume the thread through event admission; see
+[asynchronous service results](09-nyxbot-orchestrator.md#asynchronous-service-results).
+
 The flag is default-off for rollout safety: deploy every auth, MCP, proxy, LLM
 and worker replica with fence support, then enable `assistant:live-turn-gate`.
 Rollback disables the flag before rolling back binaries. Existing fences are
@@ -256,7 +262,7 @@ queues the continuation and sends one visible turn covering every card allowed
 during that turn as soon as it settles; nothing is sent if the user pressed Stop.
 **Deny** sends nothing.
 
-Independently, every turn's instructions end with a note listing the cards the
+Independently, every turn's input context includes a note listing the cards the
 user allowed or denied since the previous user message, oldest first and at most
 ten (`- allowed: service <slug>`, `- denied: account management`,
 `- allowed: action <tool> (acknowledgement_id <id>)`). Only identifiers are
@@ -345,10 +351,10 @@ NyxID starts turns itself: specialist work in the agent's home thread
 wake-ups (`origin: event`) and channel messages (`origin: channel`), with the
 owner's identity and billing. A NyxBot-assigned or event-resumed specialist turn
 reports to `report_to` as a `subagent_settled` event; a direct chat does not wake
-NyxBot and is listed in its next turn's instructions instead. A specialist's
+NyxBot and is listed in its next turn's input context instead. A specialist's
 permission request goes to `report_to` or NyxBot's home thread. Events queue on
 the thread (at most 20) and one event turn drains them when it is idle; other
-turns carry drained events in their instructions. Loop guards: at most 20 event
+turns carry drained events in their input context. Loop guards: at most 20 event
 turns per owner per hour, and a NyxBot thread stops after 3 consecutive event
 turns without a user message. Specialist and event turns draw from an owner pool
 of `max_concurrent_subagent_turns` (default 3, at most 8) plus one for NyxBot; a
@@ -408,8 +414,10 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `GET /conversations` | `limit` 1–100 (default 50), optional `cursor`, optional `agent_id` | `{conversations,next_cursor}` |
 | `GET /conversations/{id}` | `limit` 1–100 (default 50), optional positive `before_seq` | `{conversation,messages,acknowledgements,approvals,before_seq}` |
 | `PATCH /conversations/{id}` | closed `{title}`; trimmed nonempty, max 200 Unicode scalars | conversation DTO |
-| `DELETE /conversations/{id}` | no body | 204; local hard delete, best-effort upstream session delete |
-| `POST /conversations/{id}/stop` | no body | 204; owner-only, no active turn is a no-op |
+| `DELETE /conversations/{id}` | no body | 204; stops/cancels active work, then locally hard-deletes, with best-effort upstream session delete |
+| `POST /conversations/{id}/stop` | no body | 204; owner-only, idempotent for an idle turn |
+| `GET /conversations/{id}/capabilities` | no body | `{steer: null \| {max_chars,max_per_turn}}` |
+| `POST /conversations/{id}/steer` | closed `{text,turn_id,clientRequestId}` | `{client_request_id,outcome,code}` on acceptance; safe error code on refusal/uncertainty |
 | `PATCH /conversations/{id}/access-mode` | ignored | `410 Gone` (`access_mode_retired`) |
 | `GET` / `POST /agents` | `POST`: closed `{name,description,services?,account_read?}` | `{agents,limits}` / `201 {id,name,home_conversation_id}` |
 | `GET` / `PATCH` / `DELETE /agents/{id}` | `PATCH`: `{name?,description?}`; `DELETE` only after destroy | `{agent,memory,threads}` / agent / 204 |
@@ -428,9 +436,10 @@ Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message
 pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel`.
 `access_mode` is always `full`; `agent` is `{id,kind,name,destroyed}` (a destroyed
 agent's threads are read-only).
-`active_turn` is null or `{turn_id,started_at,activities}`.
+`active_turn` is null or `{turn_id,started_at,activities,response_id,steering_allowed,stop_requested}`.
 Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`,
-where `role` is `user`, `assistant`, `orchestrator` (an instruction the orchestrator
+The optional `steering` field is `{client_request_id,outcome,code}`.
+Here `role` is `user`, `assistant`, `orchestrator` (an instruction the orchestrator
 sent a subagent) or `event` (a NyxID-authored wake-up notice).
 Acknowledgement DTO adds `decider`, `decided_by` and `reason`.
 `active_turn` also carries `attachments`. An attachment is
@@ -471,8 +480,9 @@ Turn text is nonblank and at most 32,768 Unicode scalars; ingress is capped at
 256 KiB. Profiles use `nyxagent/` plus 1–64 lowercase letters, digits, hyphens or
 underscores. Default is `nyxagent/chat`. The first send fixes the conversation's
 profile; later sends always reuse the stored value. Title is the first 40 Unicode
-scalars of the trimmed initial message. Rename and Delete reject an active turn
-with HTTP 409 `turn_active` (the numeric code is indexed in CLAUDE.md).
+scalars of the trimmed initial message. Rename rejects an active turn with HTTP 409
+`turn_active`; Delete stops/cancels the active turn before removing the thread (the
+numeric code is indexed in CLAUDE.md).
 
 Models use authenticated `GET /v1/models` through the admin proxy, a 60-second
 server cache of successful upstream lists and an uncached fallback
@@ -481,9 +491,87 @@ Discovery does not provision a key: users without one initially see the default
 profile. The browser refreshes profiles after a send, so provisioning makes the
 upstream list available immediately. No new NyxID environment variable is introduced.
 
+## Steering a running web turn (0.68.0)
+
+The owner can send text guidance to the same running response without starting
+another turn. The original SSE stream and event types do not change. This uses
+NyxAgent's `nyxagent-steer-v1` contract (`origin/main` at `fe97457`,
+`docs/api.md`, “Steering an active turn”).
+
+`GET /assistant/nyxagent/conversations/{id}/capabilities` returns
+`{"steer":{"max_chars":32000,"max_per_turn":20}}`, or `{"steer":null}`.
+The authenticated upstream capability lookup shares a bounded 60-second cache
+with image capability discovery, keyed by database, catalog service and base URL.
+Only metadata is cached; every operation still checks live owner/key authority.
+No additional upstream lookup runs on ordinary text turns. Missing/unknown
+steering capability preserves the existing blocked composer and `turn_active`
+response. Existing image protocol fields are unchanged.
+
+`POST /assistant/nyxagent/conversations/{id}/steer` accepts only
+`{"text":"new direction","turn_id":"<NyxID turn UUID>","clientRequestId":"<stable client ID>"}`.
+It requires a first-party human and exact acting-person conversation ownership.
+Text must be nonblank and at most 32,000 Unicode characters (or the advertised
+lower limit); images and unknown fields are rejected. The client ID is 1–256
+printable ASCII bytes and is forwarded unchanged as `Idempotency-Key`.
+The handler loads the conversation's existing encrypted thread credential;
+it never provisions/replaces a key or accepts a caller destination/session.
+Calls use the same catalog-controlled proxy destination as `/v1/responses`.
+
+The worker records `active_turn.running_response` (response and session IDs) as
+soon as it decodes `response.created`. The write is fenced by the turn ID and
+Stop flag. Every automatic continuation clears it before dispatch and writes
+its new response ID on creation; the last committed response head is never
+used for steering. A missing ID returns `409 starting` with `Retry-After: 1`.
+Stop-pending turns return `409 stop_pending`, and expired leases or stale
+heartbeats refuse guidance. Steering does not acquire or bypass a Stop fence.
+
+A valid dispatched steer is appended as a user transcript row on the original
+turn, with an additive `steering` receipt and no new turn/admission/event budget.
+The receipt is reserved transactionally before proxy dispatch. A unique index
+on conversation + client request ID and the conversation write serialize
+replicas; changed text or turn under the same ID returns
+`409 idempotency_conflict`. Concurrent retries wait for the durable outcome,
+without forwarding again. A process crash after reservation conservatively
+leaves `may_not_have_applied`; it never becomes a new request after restart or
+continuation. Receipts are removed with the conversation's ordinary transcript.
+
+Only a validated upstream `200 accepted` records `applied`. Upstream 400/404,
+409 `no_active_turn`/`response_mismatch`/`idempotency_conflict`, and 429
+`steer_limit` record `refused` with their safe code. A 503, network failure,
+unrecognized response or the bounded 15-second request deadline records
+`may_not_have_applied`. No upstream error prose, credentials or request bodies
+enter metadata audit/logs. Local validation, unsupported scope and `starting`
+refusals do not reserve a receipt or dispatch.
+
+The composer keeps Stop available alongside Send guidance. It shows acceptance,
+retains definitely refused drafts, refreshes state on a response mismatch, and
+offers an explicit **Send as new message** action for `no_active_turn` once idle.
+Uncertain guidance is shown as such and never automatically resent under a new
+key. Persisted outcomes remain visible on the steering message after reload.
+
+Steering rows are not later user instructions or previous-message anchors.
+Acknowledgement windows, events since the previous turn, channel thread facts,
+specialist activity summaries, learning evidence and title generation exclude
+them. A recap after a context reset may include the text as quoted history,
+labelled `steering` and its outcome. The upstream stored thread already contains
+accepted guidance, so normal later turns do not replay it.
+
+Scope is the web composer, including event/automation work on an eligible owner
+thread; steering preserves its existing turn origin, guards and delivery. Group member threads are deliberately
+unsupported: they are hidden execution contexts and need an explicit member
+selection plus a corresponding shared transcript action. Channel and voice steering remain unsupported. Group targeting and channel/voice
+steering are follow-ups; no new NyxID environment variables are required.
+
 ## User uploads
 
 [10 — Assistant uploads](10-uploads.md) defines owner uploads for conversations and groups. Documents are read through `nyx__attachment_read`; user images use the advertised `nyxagent-input-image-v1` protocol and the exact thread key. Older deployments explicitly report that images cannot be viewed. This does not change tool-image delivery below.
+
+Upload classification uses sniffed bytes and case-insensitive filename extensions,
+never the browser's MIME guess. The picker has no restrictive `accept` filter, so
+`.text` and extensionless UTF-8 files reach the same server validation as paste
+and drop. Markdown accepts both `.md` and `.markdown`; JSON and CSV are validated
+before their verbatim text is retained. Empty MIME, `application/octet-stream`
+and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
 
 ## Tool images
 
@@ -536,7 +624,9 @@ polled `active_turn.attachments`). A failed fetch shows "Image unavailable".
 
 `assistant_conversations` stores owner, title, model, access mode, upstream session/last
 response IDs, credential key ID, message count, optional active turn, reset
-reason/time and creation/update dates. Index: owner + descending update + ID.
+reason/time and creation/update dates. Active turns written by current workers carry a
+`heartbeat_at`; old rows may omit it. Indexes include owner + descending update + ID and
+active heartbeat time for the orphan sweep.
 `assistant_messages` stores UUID, owner, conversation, monotonic seq, turn ID,
 role, text, completed/failed status, optional stable error and date. Unique index:
 conversation + seq. All dates use the repository BSON date helpers.
@@ -544,12 +634,17 @@ conversation + seq. All dates use the repository BSON date helpers.
 Before egress, a transaction writes the user message and claims `active_turn`.
 A competing send gets `turn_active` while the fence is live. A fence initially expires at
 `started_at + ACTIVE_TURN_TTL_SECS` (1800 seconds execution + 300 seconds settlement
-grace). Automatic continuation refreshes `lease_expires_at` on that same turn. One shared `live_turn` check governs admission, Rename, Delete, Stop and
-DTOs; an expired fence appears as `active_turn: null`. The next send transactionally
+grace). Automatic continuation refreshes `lease_expires_at` on that same turn. The
+detached worker renews `heartbeat_at` every ten seconds through execution, continuation
+gaps and settlement. Current rows use the heartbeat for orphan detection and authoritative
+Stop; the existing `live_turn` lease/TTL check remains the admission and DTO fence. Legacy
+rows without it keep the same lease/TTL behavior. The next send transactionally
 inserts an empty failed reply for the lost turn (`error_code=turn_lost`), clears
 the binding with `turn_failed`, inserts the new user message and claims its fence.
-Rename/Delete also work after expiry; Stop is a no-op. Late settlement matches the
-old turn ID and cannot overwrite a reclaimed turn. No uncertain operation is replayed.
+A 15-second cross-replica sweep reclaims only rows whose heartbeat is at least 75 seconds old,
+through the same fenced settlement path; a fresh long-running turn is never swept.
+Delete stops and cancels before removing the row, and a late worker settlement against
+the deleted row is a quiet no-op. All late settlement is fenced by the exact turn ID.
 
 A detached task owns the shared
 `DirectChatPermit`, upstream stream and settlement. Browser SSE is a broadcast
@@ -569,8 +664,11 @@ malformed or wrong-owner requests do not consume the user's turn allowance.
 Stop sets a durable flag on the exact active turn. Its worker polls every 250 ms,
 drops the upstream stream, saves partial text as failed/error `cancelled`, clears
 the binding with `turn_failed`, then emits `turn.completed(cancelled)`. A Stop
-committed before settlement wins the transaction race. There is no NyxAgent Stop
-API: stream cancellation is the supported upstream cancellation mechanism.
+committed before settlement wins the transaction race. If the worker is gone, or has
+not settled within five seconds, NyxID runs the same fenced settlement itself; a stale
+heartbeat can trigger that settlement immediately. This keeps voice acknowledgement
+state, machine activity and normal completion signaling consistent. There is no NyxAgent
+Stop API: stream cancellation is the supported upstream cancellation mechanism.
 Stop also signs a conversation-scoped node cancel: cua, process groups and
 gateway streams stop immediately, and stopped-turn machine calls are refused.
 A standalone desktop Stop applies to all agent activity on that machine.
@@ -578,7 +676,7 @@ A standalone desktop Stop applies to all agent activity on that machine.
 Upstream request, rebuilt entirely by NyxID:
 
 ```json
-{"model":"nyxagent/chat","input":"current user text","stream":true,"store":true,"instructions":"server prompt and optional recap","conversation":"conv_... when bound"}
+{"model":"nyxagent/chat","input":"marked NyxID context preamble, then current user text","stream":true,"store":true,"instructions":"stable server prompt, binding marker and optional recap","conversation":"conv_... when bound"}
 ```
 
 Only `conversation` is optional; it is omitted when unbound. NyxID never sends
@@ -595,6 +693,96 @@ help with bots/keys/nodes/approvals, never solicit raw credentials, and use the
 user's language. Recaps contain the most recent 20 stored messages with at most
 8 KiB including recap delimiters, UTF-8 safe, explicitly labeled as prior history. Failed partial
 messages are labeled. The current user message is excluded from the recap.
+
+## Session instructions and per-turn context
+
+The deployed NyxAgent passes `instructions` to Codex as `developerInstructions`.
+Codex exposes those instructions in the initial session context, but does not
+make replacements model-visible on an ordinary resume. NyxID MUST therefore
+separate stable session instructions from volatile turn facts:
+
+| Contributor | Placement |
+| --- | --- |
+| NyxBot/system, specialist and scheduling prompts | Stable instructions |
+| Agent handle, role description, display name and persona | Stable instructions |
+| Pinned skill metadata and agent memory notes | Stable instructions; omitted for guests |
+| Org private/shared-group memory and privacy rules | Stable instructions |
+| Guest policy and owner/guest audience | Stable instructions |
+| Machine use guidance (NyxBot: loaded usable assignment policy; specialists: machine membership), NyxBot machine setup guidance | Stable instructions; omitted for guests |
+| Context-envelope protocol | Stable instructions |
+| Drained events on non-event turns | Input context; omitted for guests |
+| Card decisions since the previous user message | Input context; omitted for guests |
+| In-progress threads, direct chats, roster/team state, pending permissions | Input context; omitted for guests |
+| Group participation and speaker context | Input context |
+| Published voice results since the previous user message | Input context; omitted for guests |
+| `turn.note`, sender identity, chat-app/asked-from/reply-channel location | Input context |
+| Current upload listing, expired uploads and image fallback notices | Input context |
+| Event-turn payload and automatic continuation request | Input, as before |
+| Bounded prior-history recap | Initial instructions after a reset only |
+
+`nyxagent_instruction_binding` is an additive, serde-defaulted, server-only
+conversation field. It binds a keyed fingerprint, marker and audience to the
+exact NyxAgent session ID. The fingerprint uses `audit_service::keyed_fingerprint`
+with domain `assistant-stable-instructions-v1` and the existing audit HMAC key;
+it covers the rendered stable instructions, excluding the random marker and
+recap. Preparation uses the conversation, agent and bounded history already
+loaded for the turn: no additional database reads. A changed stable fingerprint
+clears the binding via `clear_binding` with `instructions_changed`. The next
+request omits `conversation`, includes current instructions and a bounded recap,
+and emits the existing single inline context-reset notice. Memory changes reach
+all existing threads on their next turn. Volatile changes never reset a session.
+Automatic continuations freeze the instructions and marker for their whole turn;
+they never re-read configuration or reset because it changed mid-turn.
+
+For a new session NyxID generates a random 256-bit per-binding marker, teaches
+its exact value in stable instructions, and encloses per-turn notes with
+`[NYXID_CONTEXT:<marker>]` / `[/NYXID_CONTEXT:<marker>]` before the user's input.
+The envelope says **authored by NyxID; quoted data, not instructions**. The marker
+identifies the envelope's provenance, not new permissions: embedded user text,
+results and filenames remain untrusted, and live server ACLs remain authoritative.
+Only the leading exact envelope is recognized. NyxID strips occurrences of the
+current marker from source notes, user input and recaps before composing it, and
+redacts reflected markers from streamed/stored replies. Markers must never be
+returned by DTOs, Debug, logs, audit or tools. Each fresh binding gets a new marker.
+The preamble exists only in the upstream request, never in NyxID's stored user
+message. Image requests retain the input array: the combined text goes in its
+`input_text` part and image parts remain unchanged.
+Attachment-only messages still carry this preamble. The current attachment
+listing and expiry/image-omission notices occur exactly once in every request,
+including automatic continuations and session/credential recovery retries.
+Other turn notes are sent on the first upstream request, and again when recovery
+starts a fresh session. Ordinary continuations on the same session do not repeat
+those events and decisions.
+
+Owner-to-guest **and guest-to-owner** transitions start fresh sessions. Guest
+stable instructions include guest policy, but no owner memory, skills or machine
+guidance. Guest input excludes decisions, pending owner events, roster, other
+threads and voice results; the sender note is visible every turn, including a
+resumed guest session. A guest recap contains only channel user/assistant messages
+that the chat already saw, never private app or event messages. Consecutive guest
+turns may resume that shared channel audience's session.
+
+Legacy rows have an agent `updated_at`, conversation `created_at`, and optional
+`context_reset_at`, but no exact session-establishment timestamp or dedicated
+persona/description/skills revision timestamp. The latest context reset, or
+conversation creation when absent, is a lower bound on when its session was
+bound. If the agent was updated after that bound, NyxID MUST reset the legacy
+session once, including guest sessions. This repairs pre-deployment persona edits
+even when later replies continued using stale instructions. Grant-only edits can
+also cause this conservative one-time reset. Memory timestamps newer than the
+latest assistant reply remain an additional reset signal for owner sessions.
+Otherwise NyxID adopts the fingerprint without resetting. Once stored, only the
+fingerprint/audience comparison applies; timestamps cannot repeatedly reset it.
+A legacy session also has no marker in its
+initial context: without resetting it, NyxID cannot install one securely. Until
+its next natural reset, its input notes are explicitly
+`UNTRUSTED_LEGACY_CONTEXT`, with no authenticated-provenance claim. They remain
+model-visible quoted data. This is the migration exception to marked envelopes;
+there is no mass reset on deployment. Stale metadata naming a different session
+is treated as legacy. Settlement persists instruction metadata with the returned
+session in the existing fenced transaction; rotation, failure and destruction
+clear it with the binding. Old replicas ignore the additive field safely, but
+only upgraded replicas refresh prompts or deliver per-turn envelopes.
 
 ## Stream and recovery
 
@@ -990,3 +1178,10 @@ proposes owner-reviewed widening; it cannot approve its own request. A v2 node
 receives signed, 45-second authority renewed every ten seconds, and stops work on revocation
 or lease expiry even after socket loss. Legacy assignments remain visibly shared;
 context IDs in this phase do not isolate files or browser sessions.
+
+Chat-key discovery rows carry dense authorized `preference_rank` and follow the
+owner's saved same-catalog connection order by refilling only that group's occupied slots within equal relevance buckets; search also reports `executable`. Execution targets and approval
+authority are unchanged. Guest connected search/list includes only granted
+UserManaged and Platform connections and drops Internal catalog entries before
+ranking. Native `nyxid` virtual tools remain subject to their separate guest
+authorization; including that virtual catalog does not grant execution access.

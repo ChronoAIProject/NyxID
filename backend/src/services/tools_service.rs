@@ -201,6 +201,8 @@ mod tests {
             .await
             .unwrap();
         let input = super::super::service_endpoint_service::EndpointInput {
+            async_operation: None,
+
             name: "read".into(),
             description: None,
             method: "GET".into(),

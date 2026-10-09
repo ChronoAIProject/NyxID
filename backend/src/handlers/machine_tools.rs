@@ -78,6 +78,10 @@ pub async fn call(
             .into_iter()
             .map(|(node, assignment)| {
                 let mut row = machines::metadata(&node);
+                row["execution_note"] = json!(tools::execution_note(
+                    &assignment.mode,
+                    node.machine.as_ref().and_then(|p| p.separated.as_ref()).is_some_and(|s| s.available),
+                ));
                 if assignment.mode == "separated" {
                     row["machine"]["roots"] = json!(["."]);
                     row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");

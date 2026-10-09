@@ -52,6 +52,10 @@
         // AI Services (unified key management)
         crate::handlers::keys::create_key,
         crate::handlers::keys::list_keys,
+        crate::handlers::service_insights::get_insights,
+        crate::handlers::service_preference::get,
+        crate::handlers::service_preference::put_group,
+        crate::handlers::service_preference::release_hidden,
         crate::handlers::keys::get_key,
         crate::handlers::keys::get_key_authorization,
         crate::handlers::keys::update_key,
@@ -210,6 +214,10 @@
             crate::handlers::keys::KeyResponse,
             crate::handlers::keys::KeyAuthorizationEvidenceResponse,
             crate::handlers::keys::KeyListResponse,
+            crate::handlers::service_preference::ServicePreferenceRequest,
+            crate::handlers::service_preference::ServicePreferenceResponse,
+            crate::handlers::service_preference::ServicePreferenceGroup,
+            crate::handlers::service_preference::ReleaseHiddenPreferenceRequest,
             crate::handlers::keys::DeleteKeyResponse,
             // Hosted Connect Links
             crate::handlers::connect_links::CreateConnectLinkRequest,

@@ -335,6 +335,16 @@ pub(crate) async fn dispatch(
             "Automatic learning is managed from the owner's NyxBot".into(),
         ));
     }
+    if name == "draft_agent_skill" {
+        let input = crate::services::assistant_skill_authoring::parse_input(args)?;
+        return Ok((
+            Box::pin(crate::services::assistant_skill_authoring::create(
+                state, chat, input,
+            ))
+            .await?,
+            true,
+        ));
+    }
     let reader = Reader {
         state,
         person: &chat.user_id,

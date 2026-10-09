@@ -13,6 +13,7 @@ use crate::models::user_provider_token::{
 };
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 use crate::services::agent_binding_service;
+use crate::services::oauth_app_source::OAuthAppSource;
 
 fn credential_epoch_add_expr() -> mongodb::bson::Document {
     doc! {
@@ -21,6 +22,17 @@ fn credential_epoch_add_expr() -> mongodb::bson::Document {
             1i64
         ]
     }
+}
+
+fn oauth_app_observation_expr(source: Option<OAuthAppSource>, now: bson::DateTime) -> bson::Bson {
+    source.map_or(bson::Bson::Null, |source| {
+        doc! {
+            "source": source.as_str(),
+            "credential_epoch": credential_epoch_add_expr(),
+            "observed_at": now,
+        }
+        .into()
+    })
 }
 
 /// Maximum credential length in bytes to prevent abuse.
@@ -241,6 +253,7 @@ pub async fn build_api_key(
     };
 
     let api_key = UserApiKey {
+        oauth_app_observation: None,
         credential_source,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -335,6 +348,10 @@ pub(crate) fn api_key_from_provider_token(
     let now = Utc::now();
 
     let api_key = UserApiKey {
+        oauth_app_observation: (credential_type == "oauth2").then(|| {
+            OAuthAppSource::from_credential_owner(provider_token.credential_user_id.as_deref())
+                .observation(default_credential_epoch())
+        }),
         credential_source: None,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -523,6 +540,13 @@ async fn sync_provider_token_to_api_keys_impl(
                 "last_used_at": optional_datetime_bson(token.last_used_at),
                 "error_message": optional_string_bson(token.error_message.as_deref()),
                 "updated_at": &now,
+                "oauth_app_observation": if token.token_type == "oauth2" {
+                    doc! {
+                        "source": OAuthAppSource::from_credential_owner(token.credential_user_id.as_deref()).as_str(),
+                        "credential_epoch": key.credential_epoch,
+                        "observed_at": &now,
+                    }.into()
+                } else { bson::Bson::Null },
             }
         } else {
             doc! {
@@ -552,6 +576,20 @@ async fn sync_provider_token_to_api_keys_impl(
                 literal_set.insert(field, doc! { "$literal": value });
             }
             literal_set.insert("credential_epoch", credential_epoch_add_expr());
+            literal_set.insert(
+                "oauth_app_observation",
+                oauth_app_observation_expr(
+                    provider_token
+                        .as_ref()
+                        .filter(|token| token.token_type == "oauth2")
+                        .map(|token| {
+                            OAuthAppSource::from_credential_owner(
+                                token.credential_user_id.as_deref(),
+                            )
+                        }),
+                    now,
+                ),
+            );
             crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
                 .update_one(doc! { "_id": &key.id }, vec![doc! { "$set": literal_set }])
                 .await?;
@@ -589,6 +627,7 @@ async fn sync_provider_token_to_api_keys_impl(
 /// - `AppError::NotFound` if no `UserApiKey` matches the connection_id
 ///   (e.g. the user deleted the pending placeholder mid-flow).
 /// - Encryption / database errors bubble up unchanged.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_oauth_tokens_to_key(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -597,6 +636,7 @@ pub async fn write_oauth_tokens_to_key(
     refresh_token: Option<&str>,
     token_scopes: Option<&str>,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    app_source: Option<OAuthAppSource>,
 ) -> AppResult<()> {
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
@@ -640,6 +680,10 @@ pub async fn write_oauth_tokens_to_key(
     // mask the new access_token at proxy time.
     set_doc.insert("credential_encrypted", bson::Bson::Null);
     set_doc.insert("credential_epoch", credential_epoch_add_expr());
+    set_doc.insert(
+        "oauth_app_observation",
+        oauth_app_observation_expr(app_source, now),
+    );
 
     // Exclude terminal-status rows from the write. `revoked` / `failed`
     // are terminal by design (matching `sync_provider_token_to_api_keys`
@@ -688,6 +732,7 @@ pub async fn write_chat_oauth_tokens_to_key(
     refresh_token: Option<&str>,
     token_scopes: Option<&str>,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    app_source: Option<OAuthAppSource>,
 ) -> AppResult<bool> {
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
@@ -715,6 +760,10 @@ pub async fn write_chat_oauth_tokens_to_key(
     }
     set_doc.insert("credential_encrypted", bson::Bson::Null);
     set_doc.insert("credential_epoch", credential_epoch_add_expr());
+    set_doc.insert(
+        "oauth_app_observation",
+        oauth_app_observation_expr(app_source, now),
+    );
 
     let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
@@ -1789,6 +1838,7 @@ mod tests {
 
     fn sample_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
@@ -1870,6 +1920,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: api_key_id.clone(),
                 user_id: org_id.clone(),
@@ -2506,6 +2557,7 @@ mod tests {
             Some("fresh-refresh"),
             Some("openid"),
             None,
+            Some(super::OAuthAppSource::Platform),
         )
         .await
         .unwrap();
@@ -2513,6 +2565,28 @@ mod tests {
         assert_eq!(updated.status, "active");
         assert!(updated.access_token_encrypted.is_some());
         assert_eq!(updated.credential_epoch, 2);
+        let observed = updated.oauth_app_observation.as_ref().unwrap();
+        assert_eq!(observed.source, "platform");
+        assert_eq!(observed.credential_epoch, updated.credential_epoch);
+        assert_eq!(Some(observed.observed_at), updated.last_authorized_at);
+        assert_eq!(updated.credential_source, key.credential_source);
+
+        // An unstamped replacement must clear the previous observation.
+        write_oauth_tokens_to_key(
+            &db,
+            &enc,
+            &connection_id,
+            "replacement",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let replaced = get_key(&db, &key.id).await;
+        assert_eq!(replaced.credential_epoch, 3);
+        assert!(replaced.oauth_app_observation.is_none());
     }
 
     fn live_oauth_state(user_id: &str, provider_id: &str) -> OAuthState {
@@ -2983,6 +3057,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: user_id.clone(),
@@ -3020,6 +3095,7 @@ mod tests {
             Some("refresh-token-456"),
             Some("openid profile"),
             Some(expires),
+            None,
         )
         .await
         .unwrap();
@@ -3525,6 +3601,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
@@ -3564,6 +3641,7 @@ mod tests {
             Some(""),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3599,6 +3677,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
@@ -3634,6 +3713,7 @@ mod tests {
             &encryption_keys,
             &connection_id,
             "new-access-token",
+            None,
             None,
             None,
             None,
@@ -3823,6 +3903,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3850,6 +3931,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
@@ -3883,6 +3965,7 @@ mod tests {
             &encryption_keys,
             &connection_id,
             "access-token",
+            None,
             None,
             None,
             None,
@@ -3924,6 +4007,7 @@ mod tests {
         for (key_id, conn_id) in [(&key_a, &conn_a), (&key_b, &conn_b)] {
             db.collection::<UserApiKey>(super::COLLECTION_NAME)
                 .insert_one(UserApiKey {
+                    oauth_app_observation: None,
                     credential_source: None,
                     id: key_id.clone(),
                     user_id: user_id.clone(),
@@ -3959,6 +4043,7 @@ mod tests {
             &encryption_keys,
             &conn_a,
             "token-for-A",
+            None,
             None,
             None,
             None,
@@ -5519,6 +5604,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -5540,6 +5626,7 @@ mod tests {
                 "fresh-token",
                 None,
                 Some("read:user"),
+                None,
                 None,
             )
             .await
@@ -5647,6 +5734,7 @@ mod tests {
                 "replacement-access",
                 Some("replacement-refresh"),
                 Some("read:user"),
+                None,
                 None,
             )
             .await
@@ -5783,6 +5871,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -5799,6 +5888,7 @@ mod tests {
             "legacy-success",
             None,
             Some("legacy-scope"),
+            None,
             None,
         )
         .await
@@ -5817,6 +5907,7 @@ mod tests {
                 &connection_id,
                 &attempt_b,
                 "stale-after-success",
+                None,
                 None,
                 None,
                 None,

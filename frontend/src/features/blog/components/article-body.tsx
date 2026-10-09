@@ -29,7 +29,7 @@ const COMPONENTS: Components = {
       href={href}
       target={href?.startsWith("http") ? "_blank" : undefined}
       rel={href?.startsWith("http") ? "noopener noreferrer" : undefined}
-      className="text-primary decoration-primary/40 underline-offset-4 transition-colors hover:text-nyx-200 hover:decoration-nyx-200 underline"
+      className="text-primary-text decoration-primary/40 underline-offset-4 transition-colors hover:text-nyx-200 hover:decoration-nyx-200 underline"
     >
       {children}
     </a>
@@ -46,7 +46,7 @@ const COMPONENTS: Components = {
     </blockquote>
   ),
   ul: ({ children }) => (
-    <ul className="mb-5 list-disc space-y-2 pl-6 leading-relaxed text-gray-300 marker:text-primary">
+    <ul className="mb-5 list-disc space-y-2 pl-6 leading-relaxed text-gray-300 marker:text-primary-text">
       {children}
     </ul>
   ),

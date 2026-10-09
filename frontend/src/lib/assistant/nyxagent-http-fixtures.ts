@@ -1426,6 +1426,9 @@ export class NyxAgentHttpFixtures {
       this.save();
       return json(acknowledgement);
     }
+    if (/\/conversations\/(nyxa-[a-f0-9]{32})\/capabilities$/.test(url.pathname) && method === "GET") {
+      return json({ steer: null });
+    }
     const match = /\/conversations\/(nyxa-[a-f0-9]{32})(\/stop)?$/.exec(url.pathname);
     if (match) {
       const row = this.rows.get(match[1]!);

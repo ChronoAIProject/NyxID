@@ -668,7 +668,8 @@
             "schema": {
               "type": "string"
             },
-            "description": "File or directory path in the repository."
+            "description": "File or directory path in the repository. Use / between directory segments; an empty value reads the repository root.",
+            "x-nyxid-path-segments": true
           },
           {
             "name": "ref",

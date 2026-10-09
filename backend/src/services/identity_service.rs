@@ -10,6 +10,33 @@ use crate::models::downstream_service::DownstreamService;
 use crate::models::service_account::ServiceAccount;
 use crate::models::user::User;
 
+/// Sign the delegation token with the downstream's canonical catalog identity.
+///
+/// UserService slugs may be disambiguated aliases, while downstream services
+/// validate `act.sub` against the catalog service they implement. Custom and
+/// legacy services have no separate catalog identity and keep their own slug.
+pub fn generate_proxy_delegation_token(
+    keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
+    user_id: &uuid::Uuid,
+    scope: &str,
+    service_slug: &str,
+    catalog_service_slug: Option<&str>,
+    restrictions: Option<&crate::crypto::jwt::TokenRestrictionClaims>,
+) -> AppResult<String> {
+    let acting_service_slug = catalog_service_slug.unwrap_or(service_slug);
+
+    crate::crypto::jwt::generate_delegated_access_token(
+        keys,
+        config,
+        user_id,
+        scope,
+        acting_service_slug,
+        crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        restrictions,
+    )
+}
+
 /// A propagation principal — a human user OR a service account — reduced to the
 /// fields the identity path needs (subject, optional email/name, and the role/
 /// group ids used for RBAC). Lets identity headers and the identity assertion be

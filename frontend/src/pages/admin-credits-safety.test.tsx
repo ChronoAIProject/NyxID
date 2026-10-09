@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AdminCreditsPage } from "./admin-credits";
+import { useSyncExternalStore } from "react";
 const mock = vi.hoisted(() => ({
   allowanceActive: true,
   extraDisabled: false,
@@ -10,6 +11,24 @@ const mock = vi.hoisted(() => ({
   scheduleActive: true,
   updateAllowance: vi.fn(),
   updateSchedule: vi.fn(),
+  navigate: vi.fn(),
+  search: {} as Record<string, unknown>,
+  listeners: new Set<() => void>(),
+}));
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tanstack/react-router")>(),
+  useSearch: () => useSyncExternalStore(
+    (listener) => {
+      mock.listeners.add(listener);
+      return () => { mock.listeners.delete(listener); };
+    },
+    () => mock.search,
+  ),
+  useNavigate: () => (options: { search: Record<string, unknown> }) => {
+    mock.navigate(options);
+    mock.search = options.search;
+    mock.listeners.forEach((listener) => listener());
+  },
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (select: (s: unknown) => unknown) =>
@@ -112,6 +131,18 @@ beforeEach(() => {
   mock.extraDisabled = false;
   mock.targetKind = "all_users";
   mock.scheduleActive = true;
+  mock.search = {};
+});
+
+it("opens a linked credit subsection and writes its tab on navigation", async () => {
+  mock.search = { tab: "schedules" };
+  render(<AdminCreditsPage />);
+  expect(screen.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
+  await userEvent.click(screen.getByRole("tab", { name: "Free allowances" }));
+  expect(mock.navigate).toHaveBeenLastCalledWith({
+    to: "/admin/credits", search: { tab: "allowances" }, replace: true,
+  });
+  expect(screen.getByRole("tab", { name: "Free allowances" })).toHaveAttribute("aria-selected", "true");
 });
 it("reviews allowance disabling and sends only status after confirmation", async () => {
   const user = userEvent.setup();

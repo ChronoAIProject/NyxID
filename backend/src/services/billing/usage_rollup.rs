@@ -62,10 +62,13 @@ pub const MEASURES: &[&str] = &[
     "cache_creation_tokens",
     "audio_input_tokens",
     "audio_output_tokens",
+    "image_input_tokens",
+    "image_output_tokens",
     "rows_folded",
 ];
 /// Metered-only measures added after the v4 covering indexes.
 const AUDIO_MEASURES: &[&str] = &["audio_input_tokens", "audio_output_tokens"];
+const IMAGE_MEASURES: &[&str] = &["image_input_tokens", "image_output_tokens"];
 pub const DIMENSIONS: &[&str] = &[
     "actor",
     "owner",
@@ -165,20 +168,25 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             let mut legacy_keys = keys.clone();
             let mut nested_keys = keys.clone();
             let mut v4_keys = keys.clone();
+            let mut v5_keys = keys.clone();
             for field in MEASURES.iter().filter(|field| **field != "rows_folded") {
                 // Retired definitions predate the audio measures.
-                let historical = !AUDIO_MEASURES.contains(field);
+                let historical = !AUDIO_MEASURES.contains(field) && !IMAGE_MEASURES.contains(field);
                 if historical {
                     legacy_keys.insert(legacy_measure(field), 1);
                 }
                 if money_measure(field) {
                     nested_keys.insert(format!("query_costs.{field}"), 1);
                     v4_keys.insert(format!("query_{field}"), 1);
+                    v5_keys.insert(format!("query_{field}"), 1);
                     keys.insert(format!("query_{field}"), 1);
                 } else {
                     if historical {
                         nested_keys.insert(*field, 1);
                         v4_keys.insert(*field, 1);
+                    }
+                    if !IMAGE_MEASURES.contains(field) {
+                        v5_keys.insert(*field, 1);
                     }
                     keys.insert(*field, 1);
                 }
@@ -193,7 +201,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                         .keys(keys)
                         .options(
                             IndexOptions::builder()
-                                .name(format!("{name}_exact_v5"))
+                                .name(format!("{name}_exact_v6"))
                                 .build(),
                         )
                         .build(),
@@ -204,6 +212,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 (name.to_owned(), legacy_keys),
                 (format!("{name}_exact_v3"), nested_keys),
                 (format!("{name}_exact_v4"), v4_keys),
+                (format!("{name}_exact_v5"), v5_keys),
             ] {
                 let obsolete = indexes.iter().any(|index| {
                     index.options.as_ref().and_then(|o| o.name.as_deref()) == Some(&old_name)
@@ -475,6 +484,10 @@ async fn raw_increments(
         doc! { "$dateTrunc": { "date": "$created_at", "unit": "hour", "timezone": "UTC" } },
     );
     key.insert("exact", "$exact");
+    key.insert(
+        "user_service_id",
+        doc! { "$ifNull": ["$user_service_id", null] },
+    );
     group.insert("rows_folded", doc! { "$sum": 1_i64 });
     let mut groups: Vec<Document> = db
         .collection::<Document>(METERS)
@@ -492,8 +505,12 @@ async fn raw_increments(
             return Err(AppError::Internal("Missing usage group key".into()));
         };
         let mut partition_key = Document::new();
-        for field in ["api_key", "acked"] {
-            if let Some(value) = key.remove(field) {
+        // Keep replay identities stable across replicas. Exact connection is
+        // additive partition metadata, like the API key, not a new bucket key.
+        for field in ["api_key", "acked", "user_service_id"] {
+            if let Some(value) = key.remove(field)
+                && (field != "user_service_id" || !matches!(value, Bson::Null))
+            {
                 partition_key.insert(field, value);
             }
         }

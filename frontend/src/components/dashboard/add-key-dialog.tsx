@@ -72,6 +72,23 @@ import type { OAuthFlowKind } from "@/types/oauth-popup";
 
 const POPUP_CLOSED_POLL_MS = 1_000;
 
+function postHogRegion(entry: CatalogEntry): "US" | "EU" | null {
+  if (entry.provider_type !== "oauth2" || !/^PostHog(?:\s|$)/i.test(entry.name)) {
+    return null;
+  }
+  try {
+    const url = new URL(entry.base_url);
+    if (url.protocol !== "https:" || url.port || url.username || url.password) {
+      return null;
+    }
+    if (url.hostname === "us.posthog.com") return "US";
+    if (url.hostname === "eu.posthog.com") return "EU";
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 type WizardStep =
   | "binding"
   | "catalog"
@@ -391,11 +408,21 @@ function CatalogGrid({
   const { data: entries, isLoading } = useCatalog();
   const [search, setSearch] = useState("");
 
-  const filtered = entries?.filter(
-    (e) =>
-      e.name.toLowerCase().includes(search.toLowerCase()) ||
-      e.slug.toLowerCase().includes(search.toLowerCase()),
-  );
+  const [choosingPostHogRegion, setChoosingPostHogRegion] = useState(false);
+  const postHogEntries = entries?.filter((entry) => postHogRegion(entry)) ?? [];
+  const consolidatePostHog =
+    postHogEntries.length === 2 &&
+    new Set(postHogEntries.map(postHogRegion)).size === 2;
+  const postHogRepresentative = consolidatePostHog ? postHogEntries[0] : null;
+  const matchesSearch = (entry: CatalogEntry) =>
+    entry.name.toLowerCase().includes(search.toLowerCase()) ||
+    entry.slug.toLowerCase().includes(search.toLowerCase());
+  const filtered = entries?.filter((entry) => {
+    if (postHogRepresentative && postHogRegion(entry)) {
+      return entry === postHogRepresentative && postHogEntries.some(matchesSearch);
+    }
+    return matchesSearch(entry);
+  });
 
   if (isLoading) {
     return (
@@ -403,6 +430,47 @@ function CatalogGrid({
         {Array.from({ length: 9 }, (_, i) => (
           <Skeleton key={i} className="h-[7.5rem] rounded-lg" />
         ))}
+      </div>
+    );
+  }
+
+  if (choosingPostHogRegion && consolidatePostHog) {
+    return (
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={() => setChoosingPostHogRegion(false)}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="h-3 w-3" />
+          Back to catalog
+        </button>
+        <StepHeader
+          slug={postHogRepresentative?.slug}
+          title="Connect PostHog"
+          description="Choose where your existing PostHog project is hosted."
+        />
+        <div className="grid grid-cols-2 gap-3">
+          {[...postHogEntries]
+            .sort((a, b) =>
+              Number(postHogRegion(b) === "US") - Number(postHogRegion(a) === "US"),
+            )
+            .map((entry) => (
+              <button
+                key={entry.slug}
+                type="button"
+                onClick={() => onSelect(entry)}
+                className="flex flex-col gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-hairline-strong hover:bg-accent/40"
+              >
+                <span className="text-12 font-medium">
+                  {postHogRegion(entry) === "US" ? "United States" : "European Union"}
+                </span>
+                <span className="text-11 text-muted-foreground">
+                  {new URL(entry.base_url).hostname}
+                </span>
+              </button>
+            ))}
+        </div>
       </div>
     );
   }
@@ -442,7 +510,11 @@ function CatalogGrid({
           <button
             key={entry.slug}
             type="button"
-            onClick={() => onSelect(entry)}
+            onClick={() =>
+              entry === postHogRepresentative
+                ? setChoosingPostHogRegion(true)
+                : onSelect(entry)
+            }
             className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
           >
             <div className="flex w-full items-start justify-between gap-2">
@@ -471,10 +543,12 @@ function CatalogGrid({
               </div>
             </div>
             <span className="line-clamp-1 w-full text-12 font-medium">
-              {entry.name}
+              {entry === postHogRepresentative ? "PostHog" : entry.name}
             </span>
             <span className="line-clamp-2 w-full text-11 leading-snug text-muted-foreground">
-              {entry.description ?? entry.base_url}
+              {entry === postHogRepresentative
+                ? "Connect projects and analytics in the US or EU."
+                : (entry.description ?? entry.base_url)}
             </span>
           </button>
         ))}
@@ -773,7 +847,7 @@ function KeyForm({
           href={catalogEntry.api_key_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
         >
           Get API key
           <ExternalLink className="h-3 w-3" />
@@ -1356,7 +1430,7 @@ function NodeSetupStep({
 
       <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
         <div className="flex items-center gap-2">
-          <Terminal className="h-4 w-4 text-primary" />
+          <Terminal className="h-4 w-4 text-primary-text" />
           <p className="text-12 font-medium">Node Setup Instructions</p>
         </div>
 
@@ -1390,7 +1464,7 @@ function NodeSetupStep({
                 href={catalogEntry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
               >
                 Get API key
                 <ExternalLink className="h-3 w-3" />
@@ -2609,7 +2683,7 @@ function DeviceCodeStep({
           Your code
         </p>
         <div className="flex items-center gap-3">
-          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary">
+          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
             {userCode}
           </code>
           <Button
@@ -2734,7 +2808,7 @@ function OAuthCredentialsStep({
           href={catalogEntry.documentation_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
         >
           How to create an OAuth app
           <ExternalLink className="h-3 w-3" />

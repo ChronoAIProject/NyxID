@@ -123,6 +123,9 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// The running response, not the previous committed response head.
+    #[serde(default)]
+    pub running_response: Option<Box<RunningResponse>>,
     /// Server-only event binding for durable channel answer delivery.
     #[serde(default)]
     pub channel_event_id: Option<String>,
@@ -140,6 +143,9 @@ pub struct ActiveTurn {
     pub tool_progress: ToolProgress,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Worker liveness marker. Absent on turns written before heartbeat support.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub heartbeat_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
     pub turn_id: String,
@@ -203,6 +209,10 @@ pub struct AssistantConversation {
     #[serde(default)]
     pub access_mode: AccessMode,
     pub nyxagent_session_id: Option<String>,
+    /// Server-only instruction state, committed with the upstream session.
+    /// Older rows/replicas may omit it. Never expose its marker in a DTO or Debug.
+    #[serde(default)]
+    pub nyxagent_instruction_binding: Option<InstructionBinding>,
     pub nyxagent_last_response_id: Option<String>,
     pub credential_api_key_id: String,
     pub message_count: i64,
@@ -277,6 +287,21 @@ pub struct AssistantConversation {
     pub guest_turn: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct InstructionBinding {
+    pub session_id: String,
+    pub fingerprint: String,
+    /// None when adopting a legacy session whose initial context had no marker.
+    pub marker: Option<String>,
+    pub guest: bool,
+}
+
+impl std::fmt::Debug for InstructionBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstructionBinding").finish_non_exhaustive()
+    }
+}
+
 impl AssistantConversation {
     pub fn is_subagent(&self) -> bool {
         self.role == AgentRole::Subagent
@@ -288,6 +313,24 @@ impl std::fmt::Debug for AssistantConversation {
         f.debug_struct("AssistantConversation")
             .field("id", &self.id)
             .field("message_count", &self.message_count)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningResponse {
+    /// Key generation that owns this response; server-only.
+    #[serde(default)]
+    pub credential_api_key_id: String,
+    pub response_id: String,
+    pub session_id: String,
+}
+
+impl std::fmt::Debug for RunningResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningResponse")
+            .field("response_id", &self.response_id)
+            .field("session_id", &self.session_id)
             .finish_non_exhaustive()
     }
 }

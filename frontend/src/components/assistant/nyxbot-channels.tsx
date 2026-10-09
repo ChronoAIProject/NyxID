@@ -169,7 +169,7 @@ export function ChannelBotsManager({
             const status = channelStatus[row.status];
             return (
               <li key={row.id} className="space-y-2 rounded-lg border border-border px-3 py-2.5">
-                <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start justify-between gap-3 @max-[480px]/channel-bots:flex-col">
                   <div className="min-w-0 space-y-1">
                     <p className="truncate text-12 font-medium text-foreground">
                       {row.bot_label}
@@ -241,7 +241,7 @@ export function ChannelBotsManager({
                     </Button>
                   </div>
                 ) : (
-                  <div className="flex justify-end gap-1.5">
+                  <div className="flex justify-end gap-1.5 @max-[480px]/channel-bots:flex-wrap">
                     <Button
                       size="sm"
                       variant="outline"
@@ -288,7 +288,7 @@ export function ChannelBotsManager({
             return (
               <li
                 key={bot.id}
-                className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2.5"
+                className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2.5 @max-[480px]/channel-bots:flex-col @max-[480px]/channel-bots:items-start"
               >
                 <div className="min-w-0">
                   <p className="truncate text-12 font-medium text-foreground">{bot.label}</p>
@@ -297,7 +297,7 @@ export function ChannelBotsManager({
                     {bot.user_id !== currentUserId ? ` · ${orgName(bot.user_id) ?? ""}` : ""}
                   </p>
                 </div>
-                <div className="flex shrink-0 items-center gap-1.5">
+                <div className="flex shrink-0 items-center gap-1.5 @max-[480px]/channel-bots:flex-wrap">
                   {agent ? null : (
                     <AgentSelect
                       agents={targets}
@@ -364,7 +364,7 @@ function OwnerLink({
         </Button>
       ) : null}
       <CopyableField label="Link code" value={link.code} size="sm" />
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between gap-3 @max-[480px]/channel-bots:flex-wrap">
         <p className="text-11 text-text-tertiary">
           Single use. Expires {formatDateTime(link.expires_at)}.
         </p>

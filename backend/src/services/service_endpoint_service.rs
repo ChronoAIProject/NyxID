@@ -16,6 +16,7 @@ pub struct EndpointInput {
     pub cost_class: Option<crate::models::service_endpoint::CostClass>,
     pub execution: crate::models::service_endpoint::ExecutionKind,
 
+    pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     pub name: String,
     pub description: Option<String>,
     pub method: String,
@@ -222,6 +223,7 @@ pub async fn create_endpoint(
         cost_class: input.cost_class,
         execution: input.execution,
         publication,
+        async_operation: input.async_operation.clone(),
         target_id: input.target_id.clone(),
         id: Uuid::new_v4().to_string(),
         service_id: service_id.to_string(),
@@ -616,7 +618,8 @@ async fn reconcile_existing_endpoint(
         EndpointSyncActivation::ForceActive => true,
         EndpointSyncActivation::PreserveExisting => existing.is_active,
     };
-    let unchanged = existing.description == input.description
+    let unchanged = existing.async_operation == input.async_operation
+        && existing.description == input.description
         && existing.method == input.method.to_uppercase()
         && existing.path == input.path
         && existing.target_id == input.target_id
@@ -689,6 +692,11 @@ async fn reconcile_existing_endpoint(
         }
     }
     set_doc.insert("supports_idempotency_key", input.supports_idempotency_key);
+    set_doc.insert(
+        "async_operation",
+        bson::to_bson(&input.async_operation)
+            .map_err(|_| AppError::Internal("Invalid async contract".into()))?,
+    );
 
     let mut filter = doc! { "_id": &existing.id, "service_id": service_id };
     filter.extend(writable_operation_generation_filter());
@@ -719,6 +727,7 @@ async fn insert_endpoint_or_reconcile(
         cost_class: input.cost_class,
         execution: input.execution,
         publication,
+        async_operation: input.async_operation.clone(),
         target_id: input.target_id.clone(),
         id: Uuid::new_v4().to_string(),
         service_id: service_id.to_string(),
@@ -990,6 +999,7 @@ mod tests {
             data_scope: None,
             cost_class: None,
             execution: Default::default(),
+            async_operation: None,
             target_id: None,
             name: name.to_string(),
             description: Some(format!("{name} endpoint")),

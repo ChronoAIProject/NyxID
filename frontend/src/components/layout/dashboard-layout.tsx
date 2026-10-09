@@ -16,6 +16,10 @@ import { normalizeScreenKey } from "@/lib/assistant/screen-context";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
+import { BreadcrumbLabelContext } from "./breadcrumb-context";
+import { buildStudioBreadcrumbs } from "@/lib/studio-breadcrumbs";
+import { StudioBreadcrumbTrail } from "./studio-breadcrumb-trail";
+export { useBreadcrumbLabel } from "./breadcrumb-context";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import {
   DropdownMenu,
@@ -23,7 +27,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ChevronLeft, ChevronRight, LogOut, Menu, Search, Settings, User, Github, X } from "lucide-react";
+import { ChevronLeft, LogOut, Menu, Search, Settings, User, Github, X } from "lucide-react";
 
 type RightPanelContextType = {
   setRightPanel: (node: React.ReactNode) => void;
@@ -37,25 +41,6 @@ export function useRightPanel() {
   return useContext(RightPanelContext);
 }
 
-type BreadcrumbLabelContextType = {
-  label: string | null;
-  setLabel: (label: string | null) => void;
-};
-
-const BreadcrumbLabelContext = createContext<BreadcrumbLabelContextType>({
-  label: null,
-  setLabel: () => {},
-});
-
-export function useBreadcrumbLabel(label: string | undefined | null) {
-  const { setLabel } = useContext(BreadcrumbLabelContext);
-  const stableLabel = label ?? null;
-  useEffect(() => {
-    setLabel(stableLabel);
-    return () => setLabel(null);
-  }, [stableLabel, setLabel]);
-}
-
 export function DashboardLayout() {
   // Keep an active /users/me observer for every dashboard session: its
   // queryFn syncs the auth store, so server-side capability changes (feature
@@ -65,7 +50,26 @@ export function DashboardLayout() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
-  const [breadcrumbLabel, setBreadcrumbLabel] = useState<string | null>(null);
+  const [breadcrumbLabels, setBreadcrumbLabels] = useState<Record<string, string>>({});
+  const [breadcrumbSections, setBreadcrumbSections] = useState<Record<string, string>>({});
+  const setBreadcrumbSection = useCallback((path: string, section: string | null) => {
+    setBreadcrumbSections((current) => {
+      if (current[path] === section || (!section && !(path in current))) return current;
+      const next = { ...current };
+      if (section) next[path] = section;
+      else delete next[path];
+      return next;
+    });
+  }, []);
+  const setBreadcrumbLabel = useCallback((path: string, label: string | null) => {
+    setBreadcrumbLabels((current) => {
+      if (current[path] === label || (!label && !(path in current))) return current;
+      const next = { ...current };
+      if (label) next[path] = label;
+      else delete next[path];
+      return next;
+    });
+  }, []);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   // Applies the resolved theme class to <html> on mount, reverts to dark on
@@ -95,11 +99,11 @@ export function DashboardLayout() {
   // Shared channel onboarding must stay reachable through setup and bot routing.
   const isChannelBotRoute = pathname === "/channel-bots" || pathname.startsWith("/channel-bots/");
   if (onboarding.status === "loading") return null;
-  if (onboarding.status === "show" && !isChannelBotRoute) return <OnboardingTakeover />;
+  if (onboarding.status === "show" && !isChannelBotRoute && !(import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1")) return <OnboardingTakeover />;
 
   return (
     <RightPanelContext.Provider value={{ setRightPanel }}>
-    <BreadcrumbLabelContext.Provider value={{ label: breadcrumbLabel, setLabel: setBreadcrumbLabel }}>
+    <BreadcrumbLabelContext.Provider value={{ pathname, labels: breadcrumbLabels, setLabel: setBreadcrumbLabel, sections: breadcrumbSections, setSection: setBreadcrumbSection }}>
       <div
         className="flex flex-col h-dvh overflow-hidden bg-background"
         style={{
@@ -178,121 +182,11 @@ function sectionTitleFor(pathname: string): string {
   return SECTION_TITLES[first] ?? "dashboard";
 }
 
-const SIDEBAR_ITEMS: Record<string, string> = {
-  "/dashboard": "Dashboard",
-  "/billing": "Billing & Usage",
-  "/keys": "Services & Credentials",
-  "/tools": "Tools",
-  "/admin/tools": "Tools",
-  "/orgs": "Organizations",
-  "/nodes": "Credential Nodes",
-  "/channel-bots": "Channel Bots",
-  "/settings": "Account Settings",
-  "/settings/consents": "Access & Authorizations",
-  "/guide": "Setup Guide",
-  "/approvals/settings": "Notification Settings",
-  "/approvals/history": "Approval History",
-  "/approvals/grants": "Active Grants",
-  "/developer/apps": "Developer Apps",
-  "/ai-setup": "AI Setup Guide",
-  "/integration-guide": "Integration & SDK Guide",
-  "/admin/users": "Users",
-  "/admin/audit-log": "Audit Log",
-  "/admin/usage": "Usage",
-  "/admin/integrity": "Integrity",
-  "/admin/credits": "Credits",
-  "/admin/service-accounts": "Service Accounts",
-  "/admin/oauth-clients": "OAuth Clients",
-  "/admin/roles": "Roles",
-  "/admin/groups": "Groups",
-  "/admin/invite-codes": "Invite Codes",
-  "/admin/feature-flags": "Feature Flags",
-  "/admin/platform-credentials": "Platform Credentials",
-  "/admin/upload-retention": "Upload retention",
-  "/admin/nodes": "Nodes",
-  "/admin/ownership": "Ownership transfers",
-  "/admin/services": "Services",
-  "/admin/providers": "Providers",
-  "/design-system": "Design System",
-};
-
-const SEGMENT_LABELS: Record<string, string> = {
-  "cli-auth": "CLI Auth",
-};
-
-const SKIP_BREADCRUMB_SEGMENTS = new Set(["api-key"]);
-
-const SKIP_SEGMENTS = new Set(["conversations"]);
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const ROUTE_LINK_OVERRIDES: Record<string, string> = {};
-
-const PARENT_LINK_OVERRIDES: Record<string, string> = {
-  "api-key": "/keys?tab=nyxid",
-};
-
-
 function TopBarBreadcrumbs() {
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const { label: detailLabel } = useContext(BreadcrumbLabelContext);
-  const segments = pathname.split("/").filter(Boolean);
-
-  if (segments.length === 0) return null;
-
-  const accPaths: string[] = [];
-  let acc = "";
-  for (const segment of segments) {
-    acc += `/${segment}`;
-    accPaths.push(acc);
-  }
-
-  const crumbs: { label: string; to?: string }[] = [];
-  for (const [i, segment] of segments.entries()) {
-    const segPath = accPaths[i]!;
-    const isLast = i === segments.length - 1;
-    if (UUID_RE.test(segment)) {
-      if (isLast && detailLabel) {
-        crumbs.push({ label: detailLabel });
-      }
-      continue;
-    }
-    if (SKIP_SEGMENTS.has(segment)) continue;
-    if (SKIP_BREADCRUMB_SEGMENTS.has(segment)) {
-      const override = PARENT_LINK_OVERRIDES[segment];
-      const last = crumbs[crumbs.length - 1];
-      if (override && last) {
-        last.to = override;
-      }
-      continue;
-    }
-
-    const laterIsSidebarItem = accPaths.slice(i + 1).some((p) => p in SIDEBAR_ITEMS);
-    if (laterIsSidebarItem) continue;
-
-    const label = segPath === "/channel-bots/connect"
-      ? "Setup links"
-      : SIDEBAR_ITEMS[segPath] ?? SEGMENT_LABELS[segment] ?? segment;
-    const linkTo = isLast ? undefined : (ROUTE_LINK_OVERRIDES[segPath] ?? segPath);
-    crumbs.push({ label, to: linkTo });
-  }
-
-  return (
-    <nav aria-label="Breadcrumb" className="hidden md:flex items-center gap-1 text-12 min-w-0">
-      {crumbs.map((crumb, i) => (
-        <div key={crumb.label + String(i)} className="flex items-center gap-1 min-w-0">
-          {i > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-text-tertiary/60" />}
-          {crumb.to ? (
-            <Link to={crumb.to} className="text-text-tertiary truncate transition-colors duration-200 hover:text-foreground">
-              {crumb.label}
-            </Link>
-          ) : (
-            <span className="text-muted-foreground truncate">{crumb.label}</span>
-          )}
-        </div>
-      ))}
-    </nav>
-  );
+  const { pathname, labels, sections } = useContext(BreadcrumbLabelContext);
+  const search = useRouterState({ select: (s) => s.location.search });
+  const crumbs = buildStudioBreadcrumbs(pathname, labels, search, sections?.[pathname]);
+  return <StudioBreadcrumbTrail crumbs={crumbs} />;
 }
 
 function TopBar({

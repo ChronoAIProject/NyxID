@@ -1,3 +1,4 @@
+import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AutomationsPage } from "@/pages/automations";
 import { MachinesPage } from "@/pages/machines";
 import { MachineSetupPage, MachinePairPage } from "@/pages/machine-setup";
@@ -19,7 +20,7 @@ import {
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
-import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-dialog";
+import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
 import { useDirectAssistantChat } from "@/hooks/use-assistant-direct";
@@ -138,15 +139,23 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
       className="h-full overflow-y-auto px-4 py-6 sm:px-6 lg:px-10"
       style={{ paddingBottom: "max(2rem, var(--sab))" }}
     >
-      {view === "automations" ? (
-        <AutomationsPage />
-      ) : view === "machines" ? (
-        <MachinesPage />
-      ) : view === "machine-setup" ? (
-        <MachineSetupPage />
-      ) : (
-        <MachinePairPage />
-      )}
+      <Suspense
+        fallback={
+          <p role="status" className="text-12 text-text-tertiary">
+            Loading {workspaceTitles[view]}...
+          </p>
+        }
+      >
+        {view === "automations" ? (
+          <AutomationsPage />
+        ) : view === "machines" ? (
+          <MachinesPage />
+        ) : view === "machine-setup" ? (
+          <MachineSetupPage />
+        ) : (
+          <MachinePairPage />
+        )}
+      </Suspense>
     </div>
   );
 }
@@ -175,17 +184,17 @@ function AssistantWorkspacePage({
   );
 
   function createNewChat() {
-    void navigate({
-      to: "/assistant" as never,
-      search: { draft: true } as never,
-    });
+    void navigateWithBuildUpdate(() => navigate({
+      to: "/assistant",
+      search: { draft: true },
+    }));
   }
 
   function selectConversation(conversationId: string) {
-    void navigate({
-      to: "/assistant" as never,
-      search: { c: conversationId } as never,
-    });
+    void navigateWithBuildUpdate(() => navigate({
+      to: "/assistant",
+      search: { c: conversationId },
+    }));
   }
 
   async function deleteConversation(conversationId: string) {
@@ -248,7 +257,7 @@ function AssistantWorkspacePage({
 function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
   const navigate = useNavigate();
   function openAssistant(search: { c?: string } = {}) {
-    void navigate({ to: "/assistant" as never, search: search as never });
+    void navigateWithBuildUpdate(() => navigate({ to: "/assistant", search: search }));
   }
   return (
     <AssistantShell

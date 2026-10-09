@@ -1211,6 +1211,7 @@ mod tests {
             cost_class: None,
             execution: Default::default(),
             publication: Default::default(),
+            async_operation: None,
             target_id: None,
             id: id.to_string(),
             service_id: service_id.to_string(),
@@ -1653,7 +1654,7 @@ mod tests {
     ) -> AppResult<
         AxumJson<crate::services::exact_service_approval_service::ExactServiceApprovalResult>,
     > {
-        Box::pin(exact_service_approvals::redeem_request(
+        let response = Box::pin(exact_service_approvals::redeem_request(
             State(state.clone()),
             Extension(
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -1664,7 +1665,13 @@ mod tests {
             Path(created.request_id.clone()),
             AxumJson(fence),
         ))
-        .await
+        .await?;
+        let body = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .expect("read exact redemption response");
+        Ok(AxumJson(
+            serde_json::from_slice(&body).expect("decode exact redemption response"),
+        ))
     }
 
     /// Crosses the production token-exchange grant path and the actual
@@ -2183,28 +2190,10 @@ mod tests {
         .await
         .expect("approve per-request exact request");
 
-        let AxumJson(redeemed) = Box::pin(exact_service_approvals::redeem_request(
-            State(state.clone()),
-            Extension(
-                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                    crate::services::billing::route_inventory::BillingIngress::Mcp,
-                ),
-            ),
-            delegated_auth.clone(),
-            Path(created.request_id.clone()),
-            AxumJson(
-                crate::services::exact_service_approval_service::ExactServiceApprovalFence {
-                    catalog_digest: created.catalog_digest.clone(),
-                    exact_view_digest: created.exact_view_digest.clone(),
-                    operation_digest: created.operation_digest.clone(),
-                    operation_id: created.operation_id.clone(),
-                    operation_generation: created.operation_generation,
-                    idempotency_key: created.idempotency_key.clone(),
-                },
-            ),
-        ))
-        .await
-        .expect("real exact redeem handler");
+        let AxumJson(redeemed) =
+            redeem_exact(&state, &delegated_auth, &created, exact_fence(&created))
+                .await
+                .expect("real exact redeem handler");
         assert_eq!(
             redeemed.state,
             crate::services::exact_service_approval_service::ExactServiceApprovalState::Redeemed
@@ -2353,26 +2342,12 @@ mod tests {
             "provider identity must move the exact-view fence"
         );
 
-        let AxumJson(provider_drifted) = Box::pin(exact_service_approvals::redeem_request(
-            State(state),
-            Extension(
-                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                    crate::services::billing::route_inventory::BillingIngress::Mcp,
-                ),
-            ),
-            delegated_auth,
-            Path(provider_bound.request_id.clone()),
-            AxumJson(
-                crate::services::exact_service_approval_service::ExactServiceApprovalFence {
-                    catalog_digest: provider_bound.catalog_digest.clone(),
-                    exact_view_digest: provider_bound.exact_view_digest.clone(),
-                    operation_digest: provider_bound.operation_digest.clone(),
-                    operation_id: provider_bound.operation_id.clone(),
-                    operation_generation: provider_bound.operation_generation,
-                    idempotency_key: provider_bound.idempotency_key.clone(),
-                },
-            ),
-        ))
+        let AxumJson(provider_drifted) = redeem_exact(
+            &state,
+            &delegated_auth,
+            &provider_bound,
+            exact_fence(&provider_bound),
+        )
         .await
         .expect("provider binding drift returns a typed fail-closed result");
         assert_eq!(
@@ -3019,6 +2994,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 label: "full-router credential".to_string(),
@@ -3501,6 +3477,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 label: "ac5 credential".to_string(),
@@ -3666,6 +3643,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 id: "00000000-0000-4000-8000-000000000713".to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 label: "oauth refresh canary".to_string(),

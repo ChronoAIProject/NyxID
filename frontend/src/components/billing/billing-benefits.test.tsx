@@ -7,6 +7,7 @@ import {
   billingGrant,
   billingAllowance,
   billingCatalog,
+  billingExpandedAllowances,
 } from "@/test/billing-fixture";
 import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
@@ -159,6 +160,118 @@ it("groups allowances by display name, shows only consumed usage, and expands ex
   ).toBe(true);
 });
 
+it("selects multiple allowance metrics without hiding separate limits, exhaustion, or reservations", async () => {
+  mocks.grants.mockReturnValue({ ...query(null), data: { grants: [] } });
+  mocks.allowances.mockReturnValue({
+    ...query(null),
+    data: { allowances: billingExpandedAllowances() },
+  });
+  render(<BillingBenefits catalog={billingCatalog} />);
+  await userEvent.click(screen.getByText("Example LLM"));
+  const inspector = screen.getByRole("region", {
+    name: "Selected allowance balances",
+  });
+  expect(within(inspector).getByText("input tokens")).toBeVisible();
+  expect(within(inspector).getAllByText("Limit")).toHaveLength(2);
+  expect(
+    within(inspector).getAllByText("1,000,000", { selector: "dd" }),
+  ).toHaveLength(2);
+  expect(within(inspector).getByText("100,000,000")).toBeVisible();
+  expect(within(inspector).getByText("95,250,308")).toBeVisible();
+  expect(within(inspector).getByText("536,202")).toBeVisible();
+  expect(
+    within(inspector).getByRole("meter", {
+      name: "input tokens allowance 1 used",
+    }),
+  ).toHaveAttribute("aria-valuenow", "100");
+  expect(
+    within(inspector).getByRole("meter", {
+      name: "input tokens allowance 2 used",
+    }),
+  ).toHaveAttribute("aria-valuenow", "4.21349");
+  expect(
+    within(inspector).getByRole("meter", {
+      name: "input tokens allowance 2 used",
+    }),
+  ).toHaveAttribute("aria-valuetext", "4.21% used; 536,202 reserved");
+  expect(within(inspector).getAllByText("Resets / expires")).toHaveLength(1);
+  expect(
+    within(inspector).queryByText("output tokens"),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Filter metrics" }));
+  const picker = within(screen.getByRole("dialog"));
+  const output = picker.getByRole("checkbox", { name: /^output tokens/ });
+  await userEvent.click(output);
+  expect(output).toBeChecked();
+  expect(within(inspector).getByText("output tokens")).toBeVisible();
+  await userEvent.click(picker.getByRole("button", { name: "Done" }));
+  expect(within(inspector).getByText("output tokens")).toBeVisible();
+  expect(within(inspector).getByText("input tokens")).toBeVisible();
+  expect(within(inspector).getAllByText("Limit")).toHaveLength(4);
+  await userEvent.click(screen.getByRole("button", { name: "Filter metrics" }));
+  await userEvent.click(
+    within(screen.getByRole("dialog")).getByRole("checkbox", {
+      name: /^images/,
+    }),
+  );
+  await userEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Done",
+    }),
+  );
+  expect(within(inspector).getByText("images")).toBeVisible();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Remove metric: images" }),
+  );
+  expect(within(inspector).queryByText("images")).not.toBeInTheDocument();
+});
+
+it("keeps different allowance windows separate and pages large groups", async () => {
+  const base = billingAllowance();
+  mocks.grants.mockReturnValue({ ...query(null), data: { grants: [] } });
+  mocks.allowances.mockReturnValue({
+    ...query(null),
+    data: {
+      allowances: [
+        ...Array.from({ length: 7 }, (_, index) => ({
+          ...base,
+          allowance: { ...base.allowance, id: `daily-${index}` },
+        })),
+        {
+          ...base,
+          period_end: null,
+          allowance: {
+            ...base.allowance,
+            id: "one-time",
+            recurrence: "one_time",
+          },
+        },
+      ],
+    },
+  });
+  render(<BillingBenefits catalog={billingCatalog} />);
+  await userEvent.click(screen.getByText("Example LLM"));
+  const inspector = screen.getByRole("region", {
+    name: "Selected allowance balances",
+  });
+  expect(within(inspector).getAllByText("Limit")).toHaveLength(5);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Next allowances" }),
+  );
+  expect(within(inspector).getAllByText("Limit")).toHaveLength(2);
+  expect(within(inspector).getByText("Allowance 6")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Filter metrics" }));
+  const picker = within(screen.getByRole("dialog"));
+  await userEvent.click(picker.getByRole("button", { name: "Clear" }));
+  await userEvent.click(
+    picker.getByRole("checkbox", { name: /^input tokens · one time/ }),
+  );
+  await userEvent.click(picker.getByRole("button", { name: "Done" }));
+  expect(within(inspector).getAllByText("Limit")).toHaveLength(1);
+  expect(within(inspector).getByText("No reset or expiry")).toBeVisible();
+  expect(within(inspector).queryByText("7,000")).not.toBeInTheDocument();
+});
+
 it("stacks allowances into one bar whose segments and legend swatches match", () => {
   const allowance = (
     metric: Parameters<typeof billingAllowance>[0],
@@ -244,11 +357,6 @@ it("stacks allowances into one bar whose segments and legend swatches match", ()
   expect(service).not.toHaveClass("stack-warning");
   expect(service).not.toHaveClass("stack-exhausted");
   expect(items[4]).toHaveClass("is-exhausted");
-  // Details rows carry the same swatches.
-  const rows = [...service.querySelectorAll(".benefit-unit .stack-swatch")];
-  expect(rows.map((swatch) => swatch.className)).toEqual(
-    [0, 1, 2, 3, 4].map((step) => `stack-swatch stack-step-${step}`),
-  );
 
   // Grants: proportional to consumed credits over all original credits.
   const grants = screen.getByText("Credit grants").closest("details")!;

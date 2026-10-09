@@ -27,6 +27,7 @@ import type {
   ChatSessionState,
 } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
+import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import { MachineToolCard } from "./machine-tool-card";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
@@ -158,6 +159,9 @@ export function ChatMessageBubble({
   if (message.role === "user") {
     return (
       <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+        {message.steering && <p className="mb-1 text-11 text-muted-foreground" role="note">
+          Steering · {steeringNotice(message.steering.code, message.steering.outcome)}
+        </p>}
         {content}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
@@ -338,6 +342,17 @@ export function ChatMessageList({
   const previousConversationRef = useRef<string | undefined>(undefined);
   const previousUserMessageRef = useRef<string | undefined>(undefined);
   const messages = session?.messages ?? EMPTY_MESSAGES;
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (!followingRef.current) return;
+      element.scrollTop = element.scrollHeight;
+      lastScrollTopRef.current = element.scrollTop;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const terminalAssistant = messages.at(-1);
   const emptyTerminal = Boolean(
     session &&
@@ -366,7 +381,7 @@ export function ChatMessageList({
 
   const latestUserMessageId = [...messages]
     .reverse()
-    .find((message) => message.role === "user")?.id;
+    .find((message) => message.role === "user" && !message.steering)?.id;
   useLayoutEffect(() => {
     const conversationChanged =
       previousConversationRef.current !== session?.conversationId;
@@ -404,7 +419,7 @@ export function ChatMessageList({
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="min-h-0 flex-1 overflow-y-auto px-4 sm:px-6"
+      className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
     >
       <div
         className="mx-auto flex min-h-full w-full max-w-[758px] flex-col gap-4 pt-6"

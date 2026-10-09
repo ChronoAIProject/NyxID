@@ -17,6 +17,14 @@
    on the never-themed public pages. */
 @custom-variant light (&:where(.theme-light, .theme-light *));
 
+@utility min-h-control {
+  min-height: calc(1lh + var(--spacing) * 2);
+}
+
+@utility min-h-input {
+  min-height: calc(1lh + var(--spacing) * 3 + 2px);
+}
+
 @theme {
   /* ── NyxID Brand Primary ── */
   --color-nyx-50: #EDE5FE;
@@ -56,6 +64,7 @@
 
   /* ── Primary / Accent ── */
   --color-primary: #5A2AF1;
+  --color-primary-text: var(--color-primary);
   --color-primary-foreground: #FFFFFF;
   --color-secondary: #A672FB10;
   --color-secondary-foreground: #A3A3A3;
@@ -217,6 +226,10 @@ html.theme-dark {
   --color-popover-foreground: #EFEFF1;
   --color-sidebar: #141416;
   --color-surface: #222225;
+
+  /* Text needs a lighter accent than solid button fills.
+     Derive it from primary so custom accent colors still apply. */
+  --color-primary-text: color-mix(in srgb, var(--color-primary) 45%, #FFFFFF);
 
   --color-secondary-foreground: #BABAC1;
   --color-accent-foreground: #EFEFF1;
@@ -406,6 +419,7 @@ input[type="number"] {
   input,
   select,
   textarea,
+  [data-composer-text-measure],
   [role="combobox"],
   [role="option"] {
     font-size: 16px !important;
@@ -867,4 +881,66 @@ html.theme-dark .assistant-halo--visible {
 .hover-glow:hover {
   border-color: rgba(255, 255, 255, 0.15);
   box-shadow: 0 0 24px rgba(255, 255, 255, 0.03);
+}
+
+.service-filter-pills {
+  --service-filter-pill-height: 2.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px;
+  max-height: calc(2 * var(--service-filter-pill-height) + 10px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-snap-type: y mandatory;
+  scroll-padding-block: 2px;
+}
+
+.service-filter-pills > * {
+  height: var(--service-filter-pill-height);
+  min-height: var(--service-filter-pill-height);
+  flex-shrink: 0;
+  scroll-snap-align: start;
+}
+
+@media (min-width: 768px) {
+  .service-filter-controls form > div,
+  .service-filter-controls > div:first-child > div button,
+  .service-filter-controls > div:first-child > button {
+    height: 2rem;
+  }
+  .service-filter-pills {
+    --service-filter-pill-height: 1.75rem;
+  }
+}
+
+/* Blur passing card outlines and fade the cover together at the lower edge. */
+.service-filter-toolbar[data-stuck="true"]::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  top: -100vh;
+  height: calc(100vh + var(--service-filters-height, 0px) + var(--spacing) * 2);
+  left: calc(-1 * var(--service-filter-gutter-left, 0px));
+  right: calc(-1 * var(--service-filter-gutter-right, 0px));
+  background: var(--color-background);
+  backdrop-filter: blur(8px);
+  mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - var(--spacing) * 2),
+    rgb(0 0 0 / 0.6) calc(100% - var(--spacing)),
+    transparent
+  );
+}
+
+.service-card-header[data-stuck="true"]::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  top: -100vh;
+  bottom: 0;
+  left: calc(-1 * var(--service-filter-gutter-left, 0px));
+  right: calc(-1 * var(--service-filter-gutter-right, 0px));
+  background: var(--color-background);
 }

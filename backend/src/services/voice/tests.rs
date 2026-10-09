@@ -486,6 +486,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
+            steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: task_id,
             user_id: call.user_id.clone(),
@@ -571,6 +572,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 crate::models::assistant_message::COLLECTION_NAME,
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
+                steering: None,
                 id: result_id.clone(),
                 conversation_id: thread.id.clone(),
                 user_id: call.user_id.clone(),
@@ -923,7 +925,7 @@ async fn provider_fixture_reserves_before_create_attaches_before_sdp_and_closes_
     let id=Uuid::new_v4().to_string();
     let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,
         preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,
-        openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address)).await.unwrap();
+        openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await.unwrap();
     assert!(attached.load(Ordering::SeqCst),"Sideband must attach before the SDP answer is exposed");
     assert!(result.sdp.starts_with("v=0"));
     // The fixture credential has no real catalog authority. Its next recheck
@@ -1148,7 +1150,7 @@ async fn voice_attach_failure_is_audited_and_recovery_retries_close_without_recr
         let server=tokio::spawn(async move{axum::serve(listener,app).await.unwrap()});
         let billing=BillingRouteContext::new(BillingIngress::LlmProvider,Uuid::new_v4().to_string(),old.user_id.clone(),old.user_id.clone(),None,None,None,None,NodeIntent::Direct,"bearer".into(),CredentialClass::UserOwned,BillingMetric::VoiceSeconds,None,false);
         let id=Uuid::new_v4().to_string();
-        let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address)).await;
+        let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await;
         let result=diagnostics::finish(&state.db,&old.user_id,result,crate::errors::voice_start::Stage::Transport).await;
         let error=result.err().unwrap();
         assert_eq!(error.response_body().details.unwrap()["reason"],"transport:503");

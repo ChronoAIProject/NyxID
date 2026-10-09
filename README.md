@@ -71,6 +71,8 @@ vendor retirement](docs/SERVICE_CONFIGURATION.md).
 
 ## What NyxID Does
 
+- **Connect Stripe to agents** — [Stripe Apps OAuth](docs/STRIPE_OAUTH.md) supports a managed account connection and read-only customer, invoice, payment, and subscription tools.
+
 - **Connect email to agents** — [Aurinko Email](docs/AURINKO_INTEGRATION.md) provides an AI Service for mailbox API/MCP operations and an email channel bot for signed incoming notifications and replies. Connect with an account token; the channel additionally uses the application's signing secret.
 - **Create a Telegram channel bot** — [Telegram New](docs/TELEGRAM_NEW.md) uses a platform-managed creation flow so customers can create and connect a bot without copying a token. The existing Telegram option still connects bots using their current tokens. Administrators configure a dedicated manager before enabling Telegram New.
 - **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH (Secure Shell) tunneling (`nyxid ssh`) reaches remote hosts. No VPN (Virtual Private Network), no port forwarding.
@@ -81,6 +83,10 @@ vendor retirement](docs/SERVICE_CONFIGURATION.md).
 - **Add service access when needed** — applications can request [incremental OAuth consent](docs/site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally), showing new services separately while preserving existing access in refresh tokens and broker bindings.
 
 ## See It in Action
+
+The web app checks for frontend updates every ten minutes. Assistant updates
+apply on safe chat or view switches; updates still pending after two hours show
+a refresh reminder. See [deployment behavior](docs/DEPLOYMENT.md#frontend).
 
 The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 
@@ -143,16 +149,25 @@ After the CLI is installed, choose where it should log in:
 >
 > The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) end-to-end. It should use the CLI installer by default and only run the Docker backend setup if you explicitly ask to self-host.
 
-> **Prefer a plugin install?** If your agent has a plugin marketplace, add the NyxID skill that way instead of copying files — it stays in sync with the repo on update. The skill still calls the `nyxid` CLI (installed above), so keep that step.
+> **Prefer a plugin install?** The Claude Code and Codex plugins connect your agent to NyxID's hosted MCP server and bundle an MCP-first NyxID skill; they need no CLI. The last command opens NyxID sign-in. When you approve the app, choose the services it may use (or all services). Connect a service afterwards to expose its tools.
 >
 > **Claude Code**
 >
-> ```
-> /plugin marketplace add ChronoAIProject/NyxID
-> /plugin install nyxid@nyxid
+> ```bash
+> claude plugin marketplace add ChronoAIProject/NyxID
+> claude plugin install nyxid@nyxid
+> claude mcp login plugin:nyxid:nyxid
 > ```
 >
-> **Codex / Cursor** — point the runtime at `https://github.com/ChronoAIProject/NyxID`; it reads `.codex-plugin/plugin.json` / `.cursor-plugin/plugin.json` and loads the bundled skills from `skills/`.
+> **Codex**
+>
+> ```bash
+> codex plugin marketplace add ChronoAIProject/NyxID
+> codex plugin add nyxid@nyxid
+> codex mcp login nyxid
+> ```
+>
+> `claude mcp login` needs Claude Code 2.1.284 or later; on older versions run `/mcp` inside Claude Code to sign in. The same Claude marketplace also offers `nyxid-cli@nyxid`, the CLI edition that bundles every skill in `skills/` (it calls the `nyxid` CLI installed above). **Cursor**: see [`integrations/cursor-plugin/`](integrations/cursor-plugin/). Maintainers: see [`docs/PLUGINS.md`](docs/PLUGINS.md).
 
 #### Hosted (Recommended)
 
@@ -218,6 +233,7 @@ With NyxID running and an Agent Key in hand, pick the workflow that matches what
 | [**Reach a Localhost API from a Cloud-Hosted Agent**](docs/quickstarts/node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
 | [**Wrap a REST API as MCP Tools**](docs/quickstarts/mcp-wrapping.md) | An OpenAPI spec is exposed as typed MCP tools to Claude Code / Cursor / VS Code / Codex with no MCP server code. | OpenAPI → MCP auto-wrap |
 | [**Use Supabase as an AI Agent Database**](docs/quickstarts/supabase.md) | A Supabase project becomes a credential-brokered PostgREST database for scoped AI agents. | Per-user endpoint + encrypted API key |
+| [**Connect Cloudflare, Supabase Management, or Railway**](docs/CLOUD_PLATFORM_OAUTH.md) | Connect a cloud account through a shared or BYO OAuth app for scoped management API access. | PKCE OAuth, encrypted tokens, and refresh |
 
 > For a per-interface reference walkthrough that ends with `HTTP/1.1 200` from your first proxied call (Web UI · CLI · AI-driven · Direct API), see the [Connecting AI Services hub](docs/connecting-services/).
 

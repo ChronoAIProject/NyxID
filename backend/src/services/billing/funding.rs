@@ -1524,6 +1524,7 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             actor_user_id: owner_id.to_string(),
             api_key_id: None,
+            user_service_id: None,
             service_id: Some(service_id.to_string()),
             service_slug: Some(service_slug.to_string()),
             metric: BillingMetric::Requests,
@@ -1532,6 +1533,7 @@ mod tests {
             model: None,
             token_breakdown: None,
             audio_tokens: None,
+            image_tokens: None,
             reserved_credits: crate::models::credits::Credits::from_whole(0),
             funding: Some(UsageFunding {
                 credits_per_unit_micros: 500_000,

@@ -967,7 +967,7 @@ function AnonymousEndpointsSection({
     <DetailSection title="Anonymous endpoints">
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
-          <Globe2 className="h-4 w-4 text-primary" />
+          <Globe2 className="h-4 w-4 text-primary-text" />
           <span className="text-13 font-medium">Public proxy rules</span>
         </div>
 
@@ -1342,7 +1342,7 @@ function YourRoutingSection({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Router className="h-4 w-4 text-primary" />
+            <Router className="h-4 w-4 text-primary-text" />
             <CardTitle className="text-15">Your Routing</CardTitle>
           </div>
           <Button

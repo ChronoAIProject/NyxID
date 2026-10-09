@@ -68,7 +68,7 @@ Light mode uses exactly two neutral tones (zinc grey page, white cards) with no 
 - **Loading:** Google Fonts CDN
 
 ### Scale (in-app)
-Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (87.5–125% via the root font size); spacing is px (`--spacing: 4px`), so only text scales. Display → Density scales `--spacing` instead (3.5/4/4.5px), so use spacing utilities rather than fixed `[Npx]` paddings/heights. `text-12` is 12px at the default 100%.
+Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (0.5×–2× in 0.01× steps via the root font size). Display → Spacing independently scales the default 4px `--spacing` unit from 0.5×–2× in 0.01× steps, so use spacing utilities rather than fixed `[Npx]` paddings/heights. Both sliders show a draft multiplier while dragging, then apply and save on release; native keyboard adjustments apply as the value changes. `text-12` is 12px at the default 1×.
 
 | Size | Use |
 |------|-----|
@@ -85,6 +85,21 @@ Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`)
 > **Off-scale sizes in use** (not endorsed; reconcile when touching the file): `text-2xl` on `StatCard` values in `developer-apps.tsx`; `text-22 font-bold` on node-detail metric values; `text-3xl md:text-5xl font-normal` on the `developer-app-detail` not-found heading; `text-base` on `ApprovalSetupWizard` `CardTitle`; `text-9` badges on `channel-conversation-detail`. New code should snap to the scale above.
 
 ## Components
+
+### Service pool and routing icons
+
+Use `ServicePoolIcon` and `PoolStrategyIcon` from
+`components/dashboard/service-pool-icons.tsx` for pools and their routing
+strategies. Priority routing is the default visual reference: each load is a
+hollow circle, connected by a rounded stroke. All variants share Lucide's 24×24
+viewBox, 2-unit stroke, rounded caps and joins, and `currentColor`. Load nodes
+share a 3-unit circle radius. Weighted routing uses a tilted balance beam with
+circular loads at different heights; round robin arranges three loads around a
+cycle with separated clockwise arrows and visible gaps before each node; the
+service-pool mark is a circular ring with five evenly spaced load nodes.
+Each strategy must have a distinct silhouette at the 14px inline size. Reuse this
+family in cards, tables, summaries, route panels, and routing controls so the same
+shapes retain their meaning.
 
 ### Buttons
 - **Height:** default `h-8`, sm `h-7`, lg `h-9`, icon `h-8 w-8`
@@ -220,7 +235,7 @@ Top bar spans full width. Sidebar + content sit below it. The right panel is **o
 - **Border:** `border-b border-border/60`
 - **Logo zone (desktop):** width tracks the sidebar (`var(--sidebar-width)`), 16px left padding, NyxID icon (`h-5 w-5`), links to `/dashboard`
 - **Logo zone (mobile):** when not on a root page, replaced with a back arrow (`window.history.back()`); otherwise the icon links to `/dashboard`
-- **Breadcrumbs:** rendered inline left of the actions on `md+`. `text-12`; intermediate crumbs are links (`text-text-tertiary` → `text-foreground` on hover), the last crumb is plain `text-muted-foreground`. Detail pages register their own label via `useBreadcrumbLabel(label)`.
+- **Breadcrumbs:** rendered inline left of the actions on `md+`. `text-12`; intermediate crumbs are links (`text-text-tertiary` → `text-foreground` on hover), the last crumb is plain `text-muted-foreground` with `aria-current="page"`. `lib/studio-breadcrumbs.ts` resolves each Studio route and its URL-selected subsection. Parent links explicitly select the appropriate `tab` or `view` and clear unrelated action/callback parameters. Detail pages register their entity name via `useBreadcrumbLabel(label)`; parent entity names can be registered with an explicit path. Permission-dependent tabs publish the visible section via `useBreadcrumbSection(tab)`.
 - **Actions (right):** Search trigger (opens command palette, shows `/` keybind hint), profile dropdown (icon button → menu with name/email/Settings/Log out), GitHub link. All actions use the same `border-hairline` chrome.
 - **Mobile:** profile dropdown + hamburger (`Menu`) that opens the full-screen `MobileNav`
 
@@ -235,7 +250,7 @@ Triggered by the search button or `/` key. Searches all sidebar destinations plu
 - **Collapsed mode:** label is replaced with a short divider line (`mx-auto w-3 border-t border-border/40`) so the visual separation survives.
 - **Active nav item:** `bg-overlay-strong font-medium text-foreground`, icon: `text-nyx-secondary-400`
 - **Hover:** `bg-overlay`
-- **Nav item:** `text-13`, icon `h-[16px] w-[16px]`, `py-2` height, `gap-3 px-3` when expanded / `justify-center px-0 gap-0` when collapsed. Label transitions via `max-width: 0 → 160px` and `opacity: 0 → 1` (animated, never conditionally rendered, so layout never jumps).
+- **Nav item:** `text-13`, icon `h-[16px] w-[16px]`, `py-2` height, `gap-3 px-3` when expanded / `justify-center px-0 gap-0` when collapsed. Labels use the remaining row width and truncate only when their text exceeds it. Collapse transitions via `max-width: 0 → 100%` and `opacity: 0 → 1` (animated, never conditionally rendered, so layout never jumps).
 - **Sidebar control:** bottom popover with 3 mode options, active option indicated by purple-filled `Circle` dot
 - **Expand on hover:** outer `<aside>` is 52px in document flow, inner `<div>` is absolutely positioned and transitions width with shadow on the expanded state. 120ms enter delay, 250ms leave delay (via refs) to prevent flicker. Content is never blocked.
 
@@ -270,20 +285,33 @@ Sidebar organized into 3 groups (4 with admin) separated by labeled section head
 
 **Admin** (visible only to users with admin or operator role; admin pages share the same dashboard chrome — there is no separate admin layout. Operators see admin pages read-only.) — Users, Invite Codes, Audit Log, Service Accounts, Roles, Groups, Node Registry, Services, Providers
 
+The assistant shell has its own workspace navigation and a shared account menu
+in the sidebar user row and header profile button. Settings, Billing & Usage and
+NyxBot settings open as URL-driven modals (`?panel=settings|billing|nyxbot`) over
+the current assistant view, never as in-shell pages. Namespaced `panelTab` and
+billing filter keys preserve the underlying view's search. NyxBot settings links
+target these panel URLs; the header gear opens the same NyxBot panel. Billing is
+capability-gated and NyxBot settings requires the NyxAgent engine. Notification
+settings links to Studio at `/approvals/settings` with a visible Studio hint.
+Open Studio and Log out complete both menus. Studio `/settings` and `/billing`
+retain their pages and chrome. Lago checkout returns to Studio `/billing`.
+Panels push on open and explicit close (Back after close reopens); Settings tabs
+replace, while Billing user changes push and automatic cleanup replaces.
+
 ### Naming reconciliation
 The sidebar label and page title can drift; track this when writing breadcrumbs or copy:
 
 | Sidebar | Page title (`PageHeader`) | Tabs (if any) |
 |---------|---------------------------|---------------|
-| AI Services | Services & Credentials (`keys.tsx`) | External Services, Agent Keys |
+| AI Services | Services & Credentials (`keys.tsx`) | External Services, Service Pools, Agent Keys |
 | Access & Auth | Access & Authorizations (`consents.tsx`) | Authorized Apps, Authorizations |
-| Settings | Account Settings (`settings.tsx`) | Profile, Security, Sessions, MCP, Privacy |
+| Settings | Account Settings (`settings.tsx`) | Profile, Security, Sessions, MCP, Display, Privacy |
 | Nodes | Credential Nodes (`nodes.tsx`) | — |
 | Guide | Setup Guide (`guide.tsx`) | — |
 | Integration | Integration & SDK Guide (`integration-guide.tsx`) | — |
 | AI Setup | AI Setup Guide (`ai-setup.tsx`) | — |
 
-The breadcrumb labels in `dashboard-layout.tsx` (`SIDEBAR_ITEMS`) and the command-palette entries in `command-palette.tsx` (`ALL_ITEMS`) should match the page-title column above, not the sidebar column.
+The breadcrumb labels in `lib/studio-breadcrumbs.ts` and the command-palette entries in `command-palette.tsx` (`ALL_ITEMS`) should match the page-title column above, not the sidebar column.
 
 ## Motion
 - **Approach:** Minimal-functional
@@ -306,7 +334,7 @@ Every content page starts with `<PageHeader title description? actions? leading?
 - `leading` slot: 32–48px avatar/icon to the left of the title (`OrgAvatar`, status dot, color chip)
 - `description`: `text-12 text-muted-foreground` directly below the title group
 - `actions` slot: right-aligned, `flex items-center gap-2 shrink-0`. Most pages put their `AddCtaButton` here; filter pages put a `Select` here; multi-action pages may stack a couple of icon buttons.
-- A few legacy pages (`provider-list`, `developer-apps`, `settings`, `guide`, `ai-setup`) still hand-roll a header. They typically also miss the `text-22 sm:text-28` responsive downshift (e.g. `provider-list.tsx:129` and `ai-setup.tsx:266` both hardcode `text-28`), so on mobile their titles overflow. New code uses `PageHeader`; when touching a legacy page, migrate it.
+- A few legacy pages (`provider-list`, `developer-apps`, `guide`, `ai-setup`) still hand-roll a header. They typically also miss the `text-22 sm:text-28` responsive downshift (e.g. `provider-list.tsx:129` and `ai-setup.tsx:266` both hardcode `text-28`), so on mobile their titles overflow. New code uses `PageHeader`; when touching a legacy page, migrate it.
 
 ### List page
 The default shape for any "list of N things" page (`keys`, `nodes`, `channel-bots`, `orgs`, `developer-apps`, all admin lists, approval lists, sessions inside Settings):

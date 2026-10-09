@@ -341,17 +341,38 @@ impl TokenRestrictionClaims {
     }
 
     pub fn from_auth_user(auth_user: &crate::mw::auth::AuthUser) -> Self {
-        let catalog_authority = auth_user.has_scope(crate::mw::auth::MCP_CATALOG_READ_SCOPE);
+        Self::from_authenticated_scope(
+            &auth_user.scope,
+            auth_user.resource_uris.as_deref(),
+            auth_user.allow_all_services,
+            &auth_user.allowed_service_ids,
+            auth_user.allow_all_nodes,
+            &auth_user.allowed_node_ids,
+        )
+    }
+
+    /// Shared projection for REST AuthUser and the manually authenticated MCP
+    /// transport. Inputs must come from authentication, never tool arguments.
+    pub fn from_authenticated_scope(
+        scope: &str,
+        resources: Option<&[String]>,
+        allow_all_services: bool,
+        allowed_service_ids: &[String],
+        allow_all_nodes: bool,
+        allowed_node_ids: &[String],
+    ) -> Self {
+        let catalog_authority = scope
+            .split_whitespace()
+            .any(|scope| scope == crate::mw::auth::MCP_CATALOG_READ_SCOPE);
         Self {
-            resources: auth_user
-                .resource_uris
-                .clone()
+            resources: resources
+                .map(<[String]>::to_vec)
                 .or_else(|| catalog_authority.then(Vec::new)),
-            allowed_service_ids: (catalog_authority || !auth_user.allow_all_services)
-                .then(|| auth_user.allowed_service_ids.clone()),
-            allow_all_services: Some(auth_user.allow_all_services),
-            allowed_node_ids: Some(auth_user.allowed_node_ids.clone()),
-            allow_all_nodes: Some(auth_user.allow_all_nodes),
+            allowed_service_ids: (catalog_authority || !allow_all_services)
+                .then(|| allowed_service_ids.to_vec()),
+            allow_all_services: Some(allow_all_services),
+            allowed_node_ids: Some(allowed_node_ids.to_vec()),
+            allow_all_nodes: Some(allow_all_nodes),
         }
     }
 }

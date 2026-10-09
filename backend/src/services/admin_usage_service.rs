@@ -24,6 +24,8 @@ const TOKEN_FIELDS: &[&str] = &[
     "cache_creation_tokens",
     "audio_input_tokens",
     "audio_output_tokens",
+    "image_input_tokens",
+    "image_output_tokens",
 ];
 const COST_FIELDS: &[&str] = &["gross_cost", "wallet_cost", "grant_cost", "allowance_cost"];
 const COUNT_FIELDS: &[&str] = &[
@@ -52,7 +54,7 @@ pub struct AdminUsageQuery {
     pub metric: Option<String>,
     /// quantity, requests, cost, total_tokens, prompt_tokens, completion_tokens,
     /// cached_tokens, cache_creation_tokens, audio_input_tokens, or
-    /// audio_output_tokens (descending).
+    /// audio_output_tokens, image_input_tokens, or image_output_tokens (descending).
     pub sort: Option<String>,
     pub page: Option<u64>,
     pub per_page: Option<u64>,
@@ -80,6 +82,11 @@ pub struct UsageStats {
     pub audio_input_tokens: i64,
     #[serde(default)]
     pub audio_output_tokens: i64,
+    /// Provider-reported image subsets, already included in input/output.
+    #[serde(default)]
+    pub image_input_tokens: i64,
+    #[serde(default)]
+    pub image_output_tokens: i64,
     /// Prompt + completion, following provider accounting. Cache counts may
     /// overlap prompt counts and must not be added to this total.
     pub total_tokens: i64,
@@ -366,6 +373,8 @@ fn token_source(field: &str) -> String {
     match field {
         "audio_input_tokens" => "$audio_tokens.input_tokens".into(),
         "audio_output_tokens" => "$audio_tokens.output_tokens".into(),
+        "image_input_tokens" => "$image_tokens.input_tokens".into(),
+        "image_output_tokens" => "$image_tokens.output_tokens".into(),
         _ => format!("$token_breakdown.{field}"),
     }
 }
@@ -643,17 +652,8 @@ async fn get_usage_inner(
             service_slugs.insert(slug);
         }
     }
-    // Exactly one batched, projected user lookup, including selected filter and
-    // org owners. No full User/model is serialized into the API.
-    let users = async {
-        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-            .find(doc! { "_id": { "$in": user_ids.into_iter().collect::<Vec<_>>() } })
-            .projection(doc! { "display_name": 1, "email": 1, "user_type": 1 })
-            .max_time(QUERY_TIMEOUT)
-            .await?
-            .try_collect::<Vec<Document>>()
-            .await
-    };
+    let user_ids: Vec<_> = user_ids.into_iter().collect();
+    let users = crate::services::reporting_identity_service::resolve(db, &user_ids, QUERY_TIMEOUT);
     let services = async {
         db.collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
             .find(doc! { "$or": [{ "_id": { "$in": service_ids.into_iter().collect::<Vec<_>>() } }, { "slug": { "$in": service_slugs.into_iter().collect::<Vec<_>>() } }] })
@@ -661,30 +661,15 @@ async fn get_usage_inner(
             .await?.try_collect::<Vec<Document>>().await
     };
     let (users, services) = tokio::try_join!(users, services).map_err(query_error)?;
-    let users: HashMap<_, _> = users
-        .into_iter()
-        .filter_map(|user| Some((user.get_str("_id").ok()?.to_string(), user)))
-        .collect();
     let identity = |uid: &str| {
         let user = users.get(uid);
         UsageIdentity {
             id: uid.into(),
-            display_name: user
-                .and_then(|u| u.get_str("display_name").ok())
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| user.and_then(|u| u.get_str("email").ok()))
-                .unwrap_or(if user.is_some() {
-                    "Unnamed user"
-                } else {
-                    "Unknown user"
-                })
-                .into(),
-            email: user
-                .and_then(|u| u.get_str("email").ok())
-                .map(str::to_string),
+            display_name: user.map(|u| u.label()).unwrap_or("Unknown user").into(),
+            email: user.and_then(|u| u.email.clone()),
             user_type: user
-                .and_then(|u| u.get_str("user_type").ok())
-                .unwrap_or(if user.is_some() { "person" } else { "unknown" })
+                .map(|u| u.user_type.as_str())
+                .unwrap_or("unknown")
                 .into(),
         }
     };

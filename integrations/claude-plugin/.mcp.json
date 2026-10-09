@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "nyxid": {
+      "type": "http",
+      "url": "https://nyx-api.chrono-ai.fun/mcp"
+    }
+  }
+}

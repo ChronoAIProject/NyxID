@@ -30,6 +30,7 @@ pub enum LoginError {
     Unavailable,
     Unsupported,
     Storage,
+    InputUnavailable,
 }
 
 impl LoginError {
@@ -47,6 +48,7 @@ impl LoginError {
             Self::Unavailable => "login_unavailable",
             Self::Unsupported => "login_unsupported",
             Self::Storage => "login_storage_failed",
+            Self::InputUnavailable => "login_input_unavailable",
         }
     }
     pub fn exit_code(self) -> i32 {
@@ -63,6 +65,7 @@ impl LoginError {
             Self::Unavailable => 19,
             Self::Unsupported => 20,
             Self::Storage => 21,
+            Self::InputUnavailable => 22,
         }
     }
     pub fn json(self) -> serde_json::Value {
@@ -84,6 +87,7 @@ impl std::fmt::Display for LoginError {
             Self::Unavailable => "Login could not complete. Check connectivity and resume later.",
             Self::Unsupported => "This backend does not support the requested login flow. Upgrade the server or use browser login.",
             Self::Storage => "The credential could not be saved. Start a new login after checking local storage.",
+            Self::InputUnavailable => "The login code could not be read securely from this terminal.",
         })
     }
 }
@@ -93,7 +97,7 @@ impl std::error::Error for LoginError {}
 #[derive(Debug)]
 pub struct LoginFailure {
     pub kind: LoginError,
-    pub diagnostic: Option<Diagnostic>,
+    pub diagnostic: Option<Box<Diagnostic>>,
 }
 impl From<LoginError> for LoginFailure {
     fn from(kind: LoginError) -> Self {
@@ -132,7 +136,7 @@ impl LoginFailure {
 fn unavailable(diagnostic: Diagnostic) -> LoginFailure {
     LoginFailure {
         kind: LoginError::Unavailable,
-        diagnostic: Some(diagnostic.for_login()),
+        diagnostic: Some(Box::new(diagnostic.for_login())),
     }
 }
 fn transport(error: reqwest::Error) -> LoginFailure {
@@ -146,7 +150,9 @@ fn transport(error: reqwest::Error) -> LoginFailure {
 fn storage(cause: &str) -> LoginFailure {
     LoginFailure {
         kind: LoginError::Storage,
-        diagnostic: Some(Diagnostic::new(Stage::Storage, None, None, cause).for_login()),
+        diagnostic: Some(Box::new(
+            Diagnostic::new(Stage::Storage, None, None, cause).for_login(),
+        )),
     }
 }
 fn storage_error(cause: &str, error: impl Into<anyhow::Error>) -> LoginFailure {
@@ -363,15 +369,11 @@ pub async fn run(args: LoginArgs) -> Result<()> {
             .unwrap_or(super::DEFAULT_LOGIN_BASE_URL),
     )?;
     if let Some(code) = args.code {
-        let code = Zeroizing::new(if code.is_empty() {
-            if !std::io::stdin().is_terminal() {
-                return Err(LoginError::InvalidCode.into());
-            }
-            rpassword::prompt_password("One-time login code: ")
-                .map_err(|_| LoginError::InvalidCode)?
+        let code = if code.is_empty() {
+            super::login_input::read_code().await?
         } else {
-            code
-        });
+            Zeroizing::new(code)
+        };
         return redeem(&base_url, args.profile.as_deref(), &code, args.output).await;
     }
     if !args.device && !args.agent_key && !args.no_wait && super::is_ci_environment() {
@@ -691,7 +693,7 @@ async fn poll_error(response: reqwest::Response) -> (LoginFailure, Option<u64>) 
                 )
                 .for_login();
                 diagnostic.server_error_code = code;
-                diagnostic
+                Box::new(diagnostic)
             }),
         },
         interval,

@@ -23,6 +23,9 @@ pub struct ReportedLlmUsage {
     /// Audio subsets of prompt/completion (OpenAI/xAI realtime and audio chat).
     pub audio_input_tokens: u64,
     pub audio_output_tokens: u64,
+    /// Image subsets of prompt/completion; not additional tokens.
+    pub image_input_tokens: u64,
+    pub image_output_tokens: u64,
     pub reported_cost: Option<f64>,
     pub cached_tokens_included_in_prompt: bool,
     pub images: u64,
@@ -38,6 +41,8 @@ impl ReportedLlmUsage {
             && self.cache_creation_tokens == 0
             && self.audio_input_tokens == 0
             && self.audio_output_tokens == 0
+            && self.image_input_tokens == 0
+            && self.image_output_tokens == 0
             && self.reported_cost.is_none()
             && self.images == 0
     }
@@ -63,6 +68,10 @@ impl ReportedLlmUsage {
             .with_audio_tokens(Some(crate::models::service_billing::AudioTokens {
                 input_tokens: clamp(self.audio_input_tokens),
                 output_tokens: clamp(self.audio_output_tokens),
+            }))
+            .with_image_tokens(Some(crate::models::service_billing::ImageTokens {
+                input_tokens: clamp(self.image_input_tokens),
+                output_tokens: clamp(self.image_output_tokens),
             }))
     }
 
@@ -90,6 +99,8 @@ pub struct ReportedLlmUsageAccumulator {
     cache_creation_tokens: u64,
     audio_input_tokens: u64,
     audio_output_tokens: u64,
+    image_input_tokens: u64,
+    image_output_tokens: u64,
     reported_cost: Option<f64>,
     cached_tokens_included_in_prompt: bool,
     images: u64,
@@ -274,6 +285,8 @@ impl ReportedLlmUsageAccumulator {
         self.cache_creation_tokens = self.cache_creation_tokens.max(usage.cache_creation_tokens);
         self.audio_input_tokens = self.audio_input_tokens.max(usage.audio_input_tokens);
         self.audio_output_tokens = self.audio_output_tokens.max(usage.audio_output_tokens);
+        self.image_input_tokens = self.image_input_tokens.max(usage.image_input_tokens);
+        self.image_output_tokens = self.image_output_tokens.max(usage.image_output_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(
@@ -309,6 +322,12 @@ impl ReportedLlmUsageAccumulator {
         self.audio_output_tokens = self
             .audio_output_tokens
             .saturating_add(usage.audio_output_tokens);
+        self.image_input_tokens = self
+            .image_input_tokens
+            .saturating_add(usage.image_input_tokens);
+        self.image_output_tokens = self
+            .image_output_tokens
+            .saturating_add(usage.image_output_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(self.reported_cost.unwrap_or(0.0) + cost);
@@ -338,6 +357,8 @@ impl ReportedLlmUsageAccumulator {
             cache_creation_tokens: self.cache_creation_tokens,
             audio_input_tokens: self.audio_input_tokens,
             audio_output_tokens: self.audio_output_tokens,
+            image_input_tokens: self.image_input_tokens,
+            image_output_tokens: self.image_output_tokens,
             reported_cost: self.reported_cost,
             cached_tokens_included_in_prompt: self.cached_tokens_included_in_prompt,
             images: self.images,
@@ -540,6 +561,40 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     )
     .unwrap_or(0);
 
+    let image_input_tokens = token_at(
+        value,
+        &[
+            "/input_tokens_details/image_tokens",
+            "/usage/input_tokens_details/image_tokens",
+            "/response/usage/input_tokens_details/image_tokens",
+            "/input_token_details/image_tokens",
+            "/usage/input_token_details/image_tokens",
+            "/response/usage/input_token_details/image_tokens",
+            "/prompt_tokens_details/image_tokens",
+            "/usage/prompt_tokens_details/image_tokens",
+            "/response/usage/prompt_tokens_details/image_tokens",
+        ],
+    )
+    .or_else(|| gemini_image_tokens(value, "promptTokensDetails"))
+    .unwrap_or(0);
+
+    let image_output_tokens = token_at(
+        value,
+        &[
+            "/output_tokens_details/image_tokens",
+            "/usage/output_tokens_details/image_tokens",
+            "/response/usage/output_tokens_details/image_tokens",
+            "/output_token_details/image_tokens",
+            "/usage/output_token_details/image_tokens",
+            "/response/usage/output_token_details/image_tokens",
+            "/completion_tokens_details/image_tokens",
+            "/usage/completion_tokens_details/image_tokens",
+            "/response/usage/completion_tokens_details/image_tokens",
+        ],
+    )
+    .or_else(|| gemini_image_tokens(value, "candidatesTokensDetails"))
+    .unwrap_or(0);
+
     let reported_cost = [
         "/usage/reported_cost",
         "/usage/cost_usd",
@@ -568,6 +623,8 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
         cache_creation_tokens,
         audio_input_tokens,
         audio_output_tokens,
+        image_input_tokens,
+        image_output_tokens,
         reported_cost,
         cached_tokens_included_in_prompt: [
             "/prompt_tokens_details/cached_tokens",
@@ -597,6 +654,22 @@ pub fn is_image_generation_path(path: &str) -> bool {
         .any(|suffix| path.ends_with(suffix))
 }
 
+fn gemini_image_tokens(value: &serde_json::Value, details: &str) -> Option<u64> {
+    let tokens = value.get("usageMetadata")?.get(details)?.as_array()?;
+    let mut found = false;
+    let total = tokens.iter().fold(0_u64, |sum, entry| {
+        if entry.get("modality").and_then(serde_json::Value::as_str) == Some("IMAGE")
+            && let Some(count) = entry.get("tokenCount").and_then(serde_json::Value::as_u64)
+        {
+            found = true;
+            sum.saturating_add(count)
+        } else {
+            sum
+        }
+    });
+    found.then_some(total)
+}
+
 pub fn extract_reported_usage_for_path(
     value: &serde_json::Value,
     path: &str,
@@ -604,6 +677,9 @@ pub fn extract_reported_usage_for_path(
 ) -> Option<ReportedLlmUsage> {
     let mut usage = extract_reported_usage(value).unwrap_or_default();
     if successful && is_image_generation_path(path) {
+        // OpenAI Images output_tokens describes generated images, while
+        // input_tokens may contain both text and image input.
+        usage.image_output_tokens = usage.completion_tokens;
         usage.images = value
             .get("data")
             .and_then(serde_json::Value::as_array)
@@ -723,6 +799,7 @@ pub fn extract_reported_usage_from_sse_event(
         Some("image_generation.completed" | "image_edit.completed")
     ) {
         let mut usage = extract_reported_usage(&value).unwrap_or_default();
+        usage.image_output_tokens = usage.completion_tokens;
         usage.images = 1;
         usage.completed_image_index = Some(
             value
@@ -1041,6 +1118,107 @@ mod tests {
             super::platform_usage(Some(&text), 0, false)
                 .audio_tokens
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn image_token_details_are_subsets_and_do_not_increase_total_or_priced_classes() {
+        let usage = super::extract_reported_usage_for_path(
+            &serde_json::json!({
+                "data": [{"url": "image"}],
+                "usage": {
+                    "input_tokens": 120, "output_tokens": 40,
+                    "input_tokens_details": {"image_tokens": 80, "text_tokens": 40, "cached_tokens": 20}
+                }
+            }),
+            "/v1/images/edits?model=gpt-image-1",
+            true,
+        ).expect("image usage");
+        assert_eq!(
+            (usage.image_input_tokens, usage.image_output_tokens),
+            (80, 40)
+        );
+        assert_eq!(usage.total_tokens, 160);
+        let platform = super::platform_usage(Some(&usage), 0, false);
+        assert_eq!(
+            platform.image_tokens,
+            Some(crate::models::service_billing::ImageTokens {
+                input_tokens: 80,
+                output_tokens: 40,
+            })
+        );
+        assert_eq!(
+            (
+                platform.input_tokens,
+                platform.output_tokens,
+                platform.cache_read_tokens,
+                platform.tokens
+            ),
+            (100, 40, 20, 160)
+        );
+
+        let text = extract_reported_usage(&serde_json::json!({
+            "usage": {"prompt_tokens": 120, "completion_tokens": 40}
+        }))
+        .unwrap();
+        assert!(
+            super::platform_usage(Some(&text), 0, false)
+                .image_tokens
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn captures_chat_and_gemini_image_subsets_and_preserves_stream_deduplication() {
+        let chat = extract_reported_usage(&serde_json::json!({
+            "response": {"usage": {"input_tokens": 100, "output_tokens": 30,
+                "input_tokens_details": {"image_tokens": 70},
+                "output_tokens_details": {"image_tokens": 20}}}
+        }))
+        .unwrap();
+        let gemini = extract_reported_usage(&serde_json::json!({
+            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 30,
+                "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 30}, {"modality": "IMAGE", "tokenCount": 70}],
+                "candidatesTokensDetails": [{"modality": "IMAGE", "tokenCount": 20}, {"modality": "TEXT", "tokenCount": 10}]}
+        })).unwrap();
+        assert_eq!(
+            (chat.image_input_tokens, chat.image_output_tokens),
+            (70, 20)
+        );
+        assert_eq!(
+            (gemini.image_input_tokens, gemini.image_output_tokens),
+            (70, 20)
+        );
+        let mut snapshots = ReportedLlmUsageAccumulator::default();
+        snapshots.observe_snapshot(chat.clone());
+        snapshots.observe_snapshot(chat);
+        let snapshots = snapshots.finalize().unwrap();
+        assert_eq!(
+            (
+                snapshots.image_input_tokens,
+                snapshots.image_output_tokens,
+                snapshots.total_tokens
+            ),
+            (70, 20, 130)
+        );
+
+        let event = r#"{"type":"image_generation.completed","image_index":0,"usage":{"input_tokens":10,"output_tokens":30,"input_tokens_details":{"image_tokens":4}}}"#;
+        let (first, mode) = extract_reported_usage_from_sse_event(None, event).unwrap();
+        let mut stream = ReportedLlmUsageAccumulator::default();
+        stream.observe(first.clone(), mode);
+        stream.observe(first, mode);
+        let second = event.replace("\"image_index\":0", "\"image_index\":1");
+        let (next, mode) = extract_reported_usage_from_sse_event(None, &second).unwrap();
+        stream.observe(next, mode);
+        let stream = stream.finalize().unwrap();
+        assert_eq!(
+            (
+                stream.images,
+                stream.image_input_tokens,
+                stream.image_output_tokens,
+                stream.total_tokens
+            ),
+            (2, 8, 60, 80)
         );
     }
 

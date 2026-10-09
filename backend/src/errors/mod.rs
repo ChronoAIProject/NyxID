@@ -1,3 +1,5 @@
+pub mod access_denial;
+pub mod skill_draft;
 pub mod voice_start;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -103,6 +105,13 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// Same forbidden / 1002 response with additive, fixed recovery metadata.
+    #[error("Forbidden: {message}")]
+    ForbiddenWithGuidance {
+        message: String,
+        guidance: Box<access_denial::AccessDenial>,
+    },
+
     #[error("Not found: {0}")]
     NotFound(String),
 
@@ -135,6 +144,9 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
+    #[error("Service concurrency limit reached; retry after an in-flight request completes")]
+    ServiceConcurrencyLimited,
+
     #[error("Internal server error: {0}")]
     Internal(String),
 
@@ -146,6 +158,10 @@ pub enum AppError {
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+
+    /// Authored skill diagnostics retain the existing validation_error / 1008 contract.
+    #[error(transparent)]
+    SkillDraftValidation(Box<skill_draft::SkillDraftValidation>),
 
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
@@ -744,17 +760,27 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Generic policy refusals, with or without additive recovery guidance.
+    /// Specialized 403 errors retain their own control-flow semantics.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(
+            self,
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. }
+        )
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
-            Self::BadRequest(_) | Self::CredentialUnavailable(_) | Self::ValidationError(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::BadRequest(_)
+            | Self::CredentialUnavailable(_)
+            | Self::ValidationError(_)
+            | Self::SkillDraftValidation(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive => StatusCode::CONFLICT,
@@ -763,6 +789,7 @@ impl AppError {
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
+            Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -973,7 +1000,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
-            Self::Forbidden(_) => 1002,
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
@@ -983,10 +1010,11 @@ impl AppError {
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantAttachmentExpired => 12101,
+            Self::ServiceConcurrencyLimited => 12700,
             Self::RateLimited => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
-            Self::ValidationError(_) => 1008,
+            Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
             Self::EmailSignupDisabled => 1009,
             Self::SshNodeKeyMissing(_) => 1011,
             Self::SshHostKeyMismatch(_) => 1012,
@@ -1233,7 +1261,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
-            Self::Forbidden(_) => "forbidden",
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
@@ -1243,10 +1271,11 @@ impl AppError {
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
+            Self::ServiceConcurrencyLimited => "service_concurrency_limited",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
-            Self::ValidationError(_) => "validation_error",
+            Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
             Self::EmailSignupDisabled => "email_signup_disabled",
             Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
             Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
@@ -1484,6 +1513,16 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::SkillDraftValidation(diagnostic) => {
+                Some(serde_json::to_value(diagnostic).expect("fixed skill draft diagnostic"))
+            }
+            AppError::ForbiddenWithGuidance { guidance, .. } => {
+                Some(serde_json::to_value(guidance).expect("fixed access denial metadata"))
+            }
+            AppError::Unauthorized(_) | AppError::AuthenticationFailed(_) => {
+                Some(serde_json::json!({"reason":"authentication_failed"}))
+            }
+            AppError::TokenExpired => Some(serde_json::json!({"reason":"credential_expired"})),
             AppError::ServicePoolAttemptsExhausted { attempts }
             | AppError::ServicePoolDeadlineExceeded { attempts } => {
                 Some(serde_json::json!({ "attempts": attempts }))
@@ -1543,7 +1582,14 @@ impl IntoResponse for AppError {
             AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
             _ => tracing::warn!(error = %self, "Client error"),
         }
-        (self.status_code(), axum::Json(self.response_body())).into_response()
+        let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
+        if self.error_key() == Self::ServiceConcurrencyLimited.error_key() {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
 
@@ -1561,6 +1607,28 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[test]
+    fn generic_forbidden_classification_includes_guidance_only() {
+        for error in [
+            AppError::Forbidden("Denied".into()),
+            AppError::unsupported_credential("Denied", access_denial::CredentialType::ApiKey),
+            AppError::insufficient_scope("Denied"),
+        ] {
+            assert!(error.is_forbidden());
+            assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), 1002);
+            assert_eq!(error.error_key(), "forbidden");
+            assert_eq!(error.to_string(), "Forbidden: Denied");
+        }
+        for error in [
+            AppError::Unauthorized("Invalid".into()),
+            AppError::NotFound("Missing".into()),
+            AppError::ApiKeyScopeForbidden("Specialized".into()),
+        ] {
+            assert!(!error.is_forbidden());
+        }
+    }
 
     #[tokio::test]
     async fn request_body_too_large_has_structured_413_contract() {

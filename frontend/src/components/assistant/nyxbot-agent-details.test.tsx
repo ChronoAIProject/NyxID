@@ -69,6 +69,17 @@ beforeEach(() => {
     created_at: at,
   });
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+    const fixtures: Record<string, unknown> = {
+      "/api/v1/nodes": { nodes: [] },
+      "/api/v1/saved-logins": [],
+      "/api/v1/triggers": { triggers: [] },
+      "/api/v1/orgs": { orgs: [] },
+    };
+    if (!(path in fixtures)) throw new Error(`Unexpected account read: ${path}`);
+    return new Response(JSON.stringify(fixtures[path]));
+  }));
   writes = [];
   agent = agentRow({});
   memory = [
@@ -120,6 +131,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   client.clear();
+  vi.unstubAllGlobals();
   globalThis.__nyxidAssistantHttpMock = undefined;
   useAuthStore.getState().setUser(null);
 });

@@ -1,105 +1,103 @@
-# Channel thread follow: gateway contract change
+# Channel thread follow: gateway contract 1
 
-Status: proposed handoff to the CMA Agent Event Gateway owning team. NyxID T1
-ships direct relay first. No gateway implementation or deployment is included.
-Existing gateway transports retain legacy behavior and report
-`follow_readiness: "unavailable"` until this contract is negotiated and tested.
+Implemented for review in NyxID `feat/gateway-thread-follow` and
+[CMA PR #980](https://github.com/ChronoAIProject/cma/pull/980)
+(`feat/nyxid-gateway-thread-follow`). CMA's `docs/CMAEG_Protocol.md` is the normative
+wire authority. Deployment requires the CMA owner's merge and rollout; this
+change does not deploy the gateway. The original handoff proposal is superseded
+by the concrete additive contract below.
 
-## Negotiation
+## Negotiation and admission
 
-Expose an additive channel capability response, tied to the channel's current
-configuration version, with `thread_contract_versions: [1]` and per-surface
-`thread_facts`, `bound_thread_replies`, `unmentioned_thread_events` booleans.
-NyxID requests `thread_contract_version: 1` when updating an opted-in channel;
-the gateway echoes the accepted version and capabilities in its response. A
-missing version/boolean means unsupported, never implicit acceptance. Advertise
-only verified implementations for that channel's platform and credentials.
+A channel management response advertises `thread_contract_versions: [1]` only
+for a verified, single Lark/Feishu relay source with a pinned bot identity.
+NyxID discovers this from the existing bounded sweep (at most every ten minutes),
+then updates the channel with expected-version concurrency control:
 
-All three booleans are required before NyxID marks follow ready. Optional
-`thread_history` support is independent; metadata fallback is valid. Do not
-change OAuth scopes, grant permissions or move a working bot implicitly.
-Configuration updates retain existing expected-version conflict handling.
-NyxID requests existing group policy `all` before enabling follow and filters
-events itself; successful policy update alone does not prove platform visibility.
+```json
+{"reply":{"thread_contract":{"version":1,"follow_chat_ids":["oc_chat"]}}}
+```
 
-## Event context
+NyxID requires the accepted version in `definition.reply.thread_contract` before
+persisting readiness. Version 1 guarantees verified thread facts, selected-chat
+admission and explicitly bound replies. No advertisement, refusal or missing
+acknowledgement leaves legacy behavior in control. Other platforms do not
+advertise this contract. `nyxbot:thread-follow` remains the existing rollout flag.
 
-Retain `event_context.conversation_id` (the existing `conv_*` registry alias),
-`activity.event_id`, `activity.actor`, `activity.conversation` and `event_ref`.
-Add `event_context.thread` for a verified message on a supported thread surface:
+For known follow-enabled chats or active followed children, NyxID projects up to
+256 chat IDs into the policy. CMA admits ordinary messages in those chats while
+preserving sender/chat ACLs and explicit group deny. Initial mentions arrive
+through ordinary admission; NyxID records the parent and widens that chat after
+activation. The sweep and chat updates reconcile the policy. If the bounded
+parent snapshot overflows, NyxID processes only positively selected chats; it
+never guesses that omitted explicitly disabled chats permit follow.
+
+This projection is a cheap event gate. Private chats, unsupported gateways,
+missing metadata, dormant follow and explicitly non-follow chats add no follow
+DB reads. Live follow eligibility, sender access, org authority, stop/expiry and
+pre-model checks still use the existing relay services. Newly created unknown
+chats use the enabled default; explicit per-chat opt-outs are projected.
+
+## Verified event metadata
+
+The additive field is `event_context.activity.thread`:
 
 ```json
 {
-  "version": 1,
-  "kind": "native",
-  "chat_id": "C123",
-  "parent_chat_id": null,
-  "message_id": "1700000001.000001",
-  "root_id": "1700000000.000001",
-  "native_thread_id": "1700000000.000001",
-  "parent_message_id": "1700000000.000001",
-  "sender_kind": "human",
-  "address": "mention"
+  "version":1,"kind":"native","chat_id":"oc_chat",
+  "message_id":"om_message","root_id":"om_root",
+  "native_thread_id":"omt_thread","parent_message_id":"om_parent",
+  "sender_kind":"human","address":"not_addressed","mentions_others":true
 }
 ```
 
-`kind` is `native`, `topic`, `reply_chain` or `email`. `chat_id` is the actual
-incoming platform conversation; `parent_chat_id` is its containing channel when
-the native thread is itself a channel (Discord). `root_id` is stable across
-senders/transports. Null means unresolved, never “most recent thread”. A
-reply-chain immediate parent must not be claimed as the root without evidence.
-`native_thread_id` is a non-secret alias; Discord interaction tokens are excluded.
+CMA derives it from signed raw Lark/Feishu events, not normalized caller hints.
+Root, alias and parent are optional; an immediate parent is never invented as a
+root. The sealed Activity digest covers these facts. NyxID also correlates the
+source event UUID, bot, owner, route, route key, sender, platform chat and message
+to original persisted ingress before retaining normalized facts. No mentioned
+user identities, bodies or opaque refs enter thread metadata.
 
-`sender_kind` is `human`, `bot` or `unknown`; `address` is `mention`,
-`reply_to_bot`, `not_addressed` or `unknown`. A mention must identify this bot,
-not any bot or `@all`. Do not infer it merely from gateway admission policy.
-Native private email direct-address evidence will be negotiated with PR E;
-unknown new kinds/evidence must fail closed in existing readers.
+A real bot mention addresses the bot. Other-user-only mentions stay quiet in an
+active followed child but remain context metadata. `@_all` only suppresses
+`mentions_others`; it does not activate a follow. NyxID correlates reply parents
+to its authenticated outbound receipts for admitted events; selected follow
+chats admit those replies even when CMA cannot prove the parent's author.
+Unselected chats retain legacy gateway admission. A selected chat with missing
+metadata cannot infer addressing from its widened admission.
+Events carrying the new metadata also cannot infer addressing while a lost
+management acknowledgement leaves NyxID's local readiness unset.
 
-Facts must match the authenticated bot/channel and exact source message, chat
-and actor. Preserve the originating NyxID inbound message UUID as `event_id`
-through retries; a new idempotency key must not create a new source identity.
-If facts cannot be resolved, pass unknown/missing fields and retain legacy
-behavior. Never substitute sender partitions, interaction secrets or a neighboring
-chat. No fetched history, raw tokens or new body retention in this envelope.
+## Bound immediate and delayed replies
 
-## Bound replies and compatibility
+NyxID emits `response.created.response.thread_reply: true` only when the shared
+follow handler selected this path. CMA uses it for that stream's automatic
+answer, acknowledgements and notices. Event replies and durable reply-target
+messages use `OutboundMessage.thread_reply: true`. Omission/false preserves
+legacy routing even when the channel supports the contract.
 
-The sealed `event_ref` must bind bot, source message, chat, canonical root,
-native destination/anchor, reply authority and expiry. Extend provider response
-creation with an optional `reply_target: {"version": 1, "event_ref": "..."}`;
-the gateway validates it against the current admitted event before honoring
-streamed output. `/events/{event_ref}/replies` must enforce the same binding.
-The owning team may adapt endpoint placement, but both paths must share these
-semantics and publish the agreed response schema before NyxID enables PR D.
+The sealed event and durable reply target bind native-reply availability and the
+original NyxID inbound UUID. CMA sends `thread_reply: true` to `/api/v1/channel-relay/thread-reply`.
+The distinct endpoint makes old replicas reject before any platform send; it
+never falls back to `/reply`. NyxID accepts no caller-supplied root/chat ID: it reconstructs the
+original target from persisted facts and the live admitted child binding, then
+uses the existing Lark/Feishu native reply endpoint with `reply_in_thread=true`.
+All split components and follow notices retain that target. Missing/revoked
+bindings fail closed with `thread_target_unavailable`; there is no parent-chat
+fallback. Delayed sends retain their original encrypted reference, expiry,
+authorization and dispatch barrier, never a newer event reference.
 
-Reply into Slack's root `thread_ts`, Telegram's exact topic/reply anchor,
-Discord's validated thread channel or message reference, and Lark/Feishu's native
-in-thread reply. All split text/media components and safe notices keep that
-target. A later event cannot retarget an earlier response. Email, when supported,
-remains tied to its original recipient and send barrier, never the newest sender.
+Deploy NyxID to **all** replicas first, then upgrade **all** gateway replicas
+before authoring opted-in definitions (old strict gateway readers cannot
+deserialize the new policy). Keep Lark/Feishu gateway platform flags off during
+this first mixed-version deployment; enable gateway routing/negotiation only
+after both rollouts complete. Ordinary channels and clients retain their
+serialized behavior. Opaque refs remain encrypted at rest and never logged.
 
-Expired, inaccessible, revoked or conflicting targets produce stable safe codes
-(`thread_target_expired`, `thread_target_unavailable`, `thread_target_mismatch`).
-No fallback to the parent channel, direct message, another thread or proactive
-send. Do not expose native credentials or provider error prose in replies/logs.
-Preserve existing single-send/dedup semantics on ambiguous send outcomes.
+## Deferred surfaces
 
-Keep `conversation_and_sender`, binding auth, `conv_*` PUT/DELETE and
-`readEventContext` unchanged. Each event independently chooses its canonical
-thread; multiple aliases can share a root and one alias can visit several roots.
-Registry deletion does not delete NyxID's shared thread history. Legacy clients
-and channels without negotiated v1 continue their existing behavior.
-
-## Acceptance fixtures
-
-Share fixtures for a root mention, later unmentioned human reply, two senders
-in one thread, one sender in parallel threads, reply to bot output, bot echo,
-unresolved ancestry, expiring targets and policy-update races. Assert identical
-canonical facts and outgoing targets across direct relay and gateway; verify
-immediate/deferred/error/media replies never escape the root. Include retries
-with changed idempotency keys and channel migration without duplicate work.
-
-No message bodies, tokens, sealed refs or provider error text in audit/live
-events. Record the deployed gateway version and verified platform capabilities
-with the fixtures. X public threads are explicitly excluded from T1.
+Lark/Feishu remain text-only on CMAEG. No media, edit or gateway history feature
+is added. NyxID reuses existing bounded adapter history with metadata fallback,
+without new scopes. Slack, Discord, Telegram topics/chains, WhatsApp and Aurinko
+need the follow-ups listed in [the parity table](CHANNEL_EVENT_GATEWAY.md#agent-gateway-group-thread-parity).
+X public thread follow remains out of scope.

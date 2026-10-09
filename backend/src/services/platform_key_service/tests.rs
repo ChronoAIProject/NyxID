@@ -586,6 +586,7 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
         assert_eq!(response.status(), 200);
     }
     let endpoint = mcp_service::McpToolEndpoint {
+        async_operation: None,
         endpoint_id: "completion".into(),
         name: "completion".into(),
         method: "POST".into(),
@@ -624,6 +625,11 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
     )
     .unwrap();
     let ctx = mcp_service::McpExecContext {
+        response_body_limit: None,
+        actor_user_id: None,
+        caller_token: None,
+        delegation_restrictions: Default::default(),
+        attribution: None,
         org_agent_access: None,
         agent_owner: None,
         operation_scopes: None,

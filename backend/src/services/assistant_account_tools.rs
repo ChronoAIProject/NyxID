@@ -265,6 +265,32 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     service
         .endpoints
         .extend(super::assistant_team_tools::agent_endpoints());
+    // Gated authoring is appended only by the actor-aware discovery helper.
+    service
+        .endpoints
+        .retain(|e| e.name != super::assistant_skill_authoring::TOOL_NAME);
+    service
+}
+
+pub async fn virtual_service_for(
+    db: &mongodb::Database,
+    chat: &acks::ChatAuthority,
+) -> McpToolService {
+    let mut service = virtual_service(chat);
+    // Only owner NyxBot chats need this rollout lookup. A flag-store failure
+    // hides authoring alone, preserving the existing tools for every caller.
+    if !chat.guest
+        && chat.is_orchestrator()
+        && super::assistant_skill_authoring::enabled(db, &chat.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        service.endpoints.extend(
+            super::assistant_team_tools::endpoints()
+                .into_iter()
+                .filter(|e| e.name == super::assistant_skill_authoring::TOOL_NAME),
+        );
+    }
     service
 }
 
@@ -288,6 +314,7 @@ fn account_service() -> McpToolService {
         endpoints: TOOL_NAMES
             .iter()
             .map(|name| McpToolEndpoint {
+                async_operation: None,
                 endpoint_id: format!("nyxid__{name}"),
                 name: (*name).into(),
                 description: Some(description(name)),
@@ -396,6 +423,14 @@ impl std::fmt::Debug for ToolResult {
 pub fn error_result(error: AppError) -> ToolResult {
     let body = error.response_body();
     let message = match error {
+        AppError::SkillDraftValidation(_) => {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": body.message, "details": body.details}),
+            };
+        }
         AppError::NotFound(_) | AppError::NodeNotFound(_) | AppError::ChannelBotNotFound(_) => {
             "Resource not found."
         }
@@ -410,7 +445,7 @@ pub fn error_result(error: AppError) -> ToolResult {
                     "message": message}),
             };
         }
-        AppError::Forbidden(_) | AppError::Unauthorized(_) => {
+        error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
             "This operation requires a conversation key and human acknowledgement."
         }
         AppError::Conflict(_) => {
@@ -1268,6 +1303,7 @@ mod search_tests {
         home.service_name = "Home Assistant at office".into();
         home.endpoints = (0..40)
             .map(|i| McpToolEndpoint {
+                async_operation: None,
                 endpoint_id: format!("home{i}"),
                 name: format!("get_states_{i}"),
                 description: Some("Home Assistant REST API: read entity states".into()),

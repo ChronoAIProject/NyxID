@@ -21,6 +21,7 @@ mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
 pub mod assistant_service;
+pub mod assistant_skill_authoring;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
 pub mod audit_service;
@@ -113,6 +114,7 @@ pub mod node_routing_service;
 pub mod node_service;
 pub mod node_ws_manager;
 pub mod notification_service;
+pub mod oauth_app_source;
 pub mod oauth_broker_service;
 pub mod oauth_client_service;
 pub mod oauth_consent_request_service;
@@ -123,6 +125,7 @@ pub mod oauth_service;
 pub mod openapi_parser;
 pub mod openclaw_channel_service;
 pub mod operation_descriptor;
+pub(crate) mod operation_path;
 pub mod oracle_login_profile_service;
 pub mod oracle_login_snapshot_service;
 pub mod oracle_pool_service;
@@ -151,6 +154,7 @@ pub mod proxy_service;
 pub mod push_service;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
+pub mod reporting_identity_service;
 pub mod role_service;
 pub mod scope_catalog;
 pub mod service_account_key_read_service;
@@ -181,6 +185,7 @@ pub mod url_validation;
 pub mod user_api_key_service;
 pub mod user_credentials_service;
 pub mod user_endpoint_service;
+pub mod user_preferences_service;
 pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
@@ -203,10 +208,12 @@ pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
 pub mod assistant_continuation;
 pub mod assistant_group_service;
+pub mod assistant_instruction_context;
 pub mod assistant_live;
 pub mod assistant_nyxagent;
 pub mod assistant_profile_routing;
 pub mod assistant_settings_service;
+pub mod assistant_steering;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
 pub mod channel_retry_ingress;
@@ -214,6 +221,8 @@ pub mod channel_turn_delivery;
 pub mod provider_link_service;
 pub mod retired_service_service;
 pub mod service_history;
+pub mod service_insights_activity;
+pub mod service_insights_billing;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;
@@ -281,6 +290,7 @@ pub mod voice;
 #[cfg(test)]
 mod machine_access_tests;
 
+pub mod service_concurrency_service;
 pub mod utility_inference_service;
 
 pub mod tool_topics;
@@ -289,4 +299,6 @@ pub mod tool_publication_service;
 
 pub mod tools_service;
 
+pub mod async_service_operation;
+pub mod service_preference_service;
 pub mod tool_twin_service;

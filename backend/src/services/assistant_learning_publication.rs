@@ -49,20 +49,11 @@ pub(super) fn package(
         .unix_permissions(0o644);
     // JSON string literals are also safe YAML scalars (quotes/newlines cannot
     // introduce frontmatter keys). Every control field is server-selected.
-    let quote = |text: &str| serde_json::to_string(text).map_err(|_| invalid());
-    let front = format!(
-        "---\nname: {}\ndescription: {}\nversion: {}\nmetadata:\n  category: plain\n  generated-by: nyxid-learning\n  operation-id: {}\n---\n\n",
-        quote(name)?,
-        quote(&draft.description)?,
-        quote(version)?,
-        quote(operation)?
-    );
+    let front = skill_markdown(draft, operation, name, version)?;
     zip.start_file(format!("{name}/SKILL.md"), options)
         .map_err(|_| invalid())?;
-    zip.write_all(front.as_bytes())
-        .and_then(|_| zip.write_all(draft.skill_md.as_bytes()))
-        .map_err(|_| invalid())?;
-    // validate_generated runs before this function. All file names are safe,
+    zip.write_all(front.as_bytes()).map_err(|_| invalid())?;
+    // Source-specific validation runs before this function. All file names are safe,
     // unique UTF-8 text paths; the archive is never extracted on the API host.
     for file in &draft.files {
         zip.start_file(format!("{name}/{}", file.path), options)
@@ -71,6 +62,23 @@ pub(super) fn package(
             .map_err(|_| invalid())?;
     }
     Ok(zip.finish().map_err(|_| invalid())?.into_inner())
+}
+
+pub(super) fn skill_markdown(
+    draft: &GeneratedProposal,
+    operation: &str,
+    name: &str,
+    version: &str,
+) -> AppResult<String> {
+    let quote = |text: &str| serde_json::to_string(text).map_err(|_| invalid());
+    Ok(format!(
+        "---\nname: {}\ndescription: {}\nversion: {}\nmetadata:\n  category: plain\n  generated-by: nyxid-learning\n  operation-id: {}\n---\n\n{}",
+        quote(name)?,
+        quote(&draft.description)?,
+        quote(version)?,
+        quote(operation)?,
+        draft.skill_md
+    ))
 }
 
 pub(super) fn hash(bytes: &[u8]) -> String {
@@ -245,7 +253,11 @@ pub(super) fn binding(
     p: &LearningPublication,
     skills_revision: i64,
 ) -> Value {
-    json!({"agent_id":row.agent_id,"proposal_id":row.id,"owner_id":row.owner_id,"config_revision":row.config_revision,"skills_revision":skills_revision,"revision":row.revision,"fingerprint":row.fingerprint,"operation_id":p.operation_id,"package_sha256":p.sha256,"version":p.version})
+    let mut binding = json!({"agent_id":row.agent_id,"proposal_id":row.id,"owner_id":row.owner_id,"config_revision":row.config_revision,"skills_revision":skills_revision,"revision":row.revision,"fingerprint":row.fingerprint,"operation_id":p.operation_id,"package_sha256":p.sha256,"version":p.version});
+    if row.source == crate::models::assistant_agent_learning::ProposalSource::Authored {
+        binding["authored_skill"] = json!({"agent_id":row.agent_id,"proposal_id":row.id,"revision":row.revision,"skills_revision":skills_revision});
+    }
+    binding
 }
 
 #[cfg(test)]

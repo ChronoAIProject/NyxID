@@ -102,6 +102,16 @@ it("does not expose owner settings to a reader", () => {
   ).not.toBeInTheDocument();
 });
 
+it("explains configured shared access on a headless machine without a browser toggle", () => {
+  render(<MachineSettings node={{ ...node, machine: { ...node.machine!, computer: false, browser: false,
+    separated: { available: false, landlock_abi: 8, reason: "separated_requires_managed_browser" },
+  } }} canManage />);
+  expect(screen.getByText(/Agents configured for Shared legacy can run granted commands/)).toBeInTheDocument();
+  expect(screen.getByText(/Browser permissions are not required/)).toBeInTheDocument();
+  expect(screen.getByText("separated_requires_managed_browser").closest("details")).not.toHaveAttribute("open");
+  expect(screen.queryByText("Live desktop")).not.toBeInTheDocument();
+});
+
 it("keeps the non-isolated shell warning visible to readers", () => {
   render(<MachineSettings node={node} canManage={false} />);
   expect(screen.getByText("Not isolated")).toBeInTheDocument();

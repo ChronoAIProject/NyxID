@@ -107,7 +107,18 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 /// the Drive, Calendar, and Gmail read/send scopes before offering it in production.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
+        "posthog" | "posthog-eu" => Some(POSTHOG_DEFAULT_SCOPES),
         "ifttt-mcp" => Some(&["mcp"]),
+        "railway" => Some(&[
+            "openid",
+            "email",
+            "profile",
+            "offline_access",
+            "project:viewer",
+            "project:member",
+            "workspace:viewer",
+            "workspace:member",
+        ]),
         "google" => Some(super::google_workspace::MANAGED_SCOPES),
         // Curated-broad: common recoverable read + authoring capabilities are
         // one-click. Excluded (-> BYO): `write:org` (alters org membership /
@@ -165,9 +176,25 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
             "Discover and use IFTTT tools, including Applet creation and actions.",
             true,
         )],
+        "posthog" | "posthog-eu" => POSTHOG,
         "twitter" => TWITTER,
         "google" => GOOGLE,
         "google-cloud" => GOOGLE_CLOUD,
+        "cloudflare" => &[
+            (
+                "openid",
+                "Account identity",
+                "Identify the connected Cloudflare user. API permissions are configured on the OAuth client.",
+                false,
+            ),
+            (
+                "offline_access",
+                "Keep connected",
+                "Refresh Cloudflare access without repeating authorization.",
+                false,
+            ),
+        ],
+        "railway" => RAILWAY,
         "github" => GITHUB,
         "facebook" => FACEBOOK,
         "discord" => DISCORD,
@@ -189,13 +216,70 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 sensitive: *sensitive,
-                required: slug == "ifttt-mcp",
+                required: slug == "ifttt-mcp" || (slug == "railway" && *scope == "openid"),
             })
             .collect(),
     )
 }
 
 // Tuple shape: (scope, label, description, sensitive)
+
+const RAILWAY: &[(&str, &str, &str, bool)] = &[
+    (
+        "openid",
+        "Account identity",
+        "Required by Railway for every OAuth authorization.",
+        false,
+    ),
+    (
+        "email",
+        "Email address",
+        "Read your Railway account email address.",
+        false,
+    ),
+    (
+        "profile",
+        "Profile",
+        "Read your Railway name and picture.",
+        false,
+    ),
+    (
+        "offline_access",
+        "Keep connected",
+        "Receive rotating refresh tokens for continued access.",
+        false,
+    ),
+    (
+        "project:viewer",
+        "Read selected projects",
+        "View projects you choose during authorization.",
+        false,
+    ),
+    (
+        "project:member",
+        "Manage selected projects",
+        "Modify projects you choose, within your existing role.",
+        true,
+    ),
+    (
+        "workspace:viewer",
+        "Read selected workspaces",
+        "View workspaces you choose during authorization.",
+        false,
+    ),
+    (
+        "workspace:member",
+        "Manage selected workspaces",
+        "Modify selected workspace resources, within your existing role.",
+        true,
+    ),
+    (
+        "workspace:admin",
+        "Administer selected workspaces",
+        "Administer selected workspaces. Requires your own OAuth app.",
+        true,
+    ),
+];
 
 const TWITTER: &[(&str, &str, &str, bool)] = &[
     (
@@ -998,6 +1082,66 @@ const LARK: &[(&str, &str, &str, bool)] = &[
     ),
 ];
 
+/// Read-only analytics permissions for the managed PostHog client.
+pub const POSTHOG_DEFAULT_SCOPES: &[&str] = &[
+    "project:read",
+    "insight:read",
+    "dashboard:read",
+    "feature_flag:read",
+    "query:read",
+];
+
+const POSTHOG: &[(&str, &str, &str, bool)] = &[
+    (
+        "project:read",
+        "Read projects",
+        "List accessible PostHog projects.",
+        false,
+    ),
+    (
+        "insight:read",
+        "Read insights",
+        "Read saved analytics insights.",
+        false,
+    ),
+    (
+        "dashboard:read",
+        "Read dashboards",
+        "Read dashboards and their insights.",
+        false,
+    ),
+    (
+        "feature_flag:read",
+        "Read feature flags",
+        "Read feature flag configuration.",
+        false,
+    ),
+    (
+        "query:read",
+        "Query analytics",
+        "Run read-only analytics queries.",
+        false,
+    ),
+    (
+        "insight:write",
+        "Manage insights",
+        "Create and update insights with your own OAuth client.",
+        true,
+    ),
+    (
+        "dashboard:write",
+        "Manage dashboards",
+        "Create and update dashboards with your own OAuth client.",
+        true,
+    ),
+    (
+        "feature_flag:write",
+        "Manage feature flags",
+        "Change feature flags with your own OAuth client.",
+        true,
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,6 +1184,8 @@ mod tests {
     #[test]
     fn known_oauth_providers_have_catalogs() {
         for slug in [
+            "cloudflare",
+            "railway",
             "twitter",
             "google",
             "google-cloud",

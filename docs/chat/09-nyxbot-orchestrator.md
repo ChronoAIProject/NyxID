@@ -319,20 +319,21 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   encrypted and served verbatim for `readEventContext`.
 - **Other NyxID platforms** use NyxID's relay directly (`/api/v1/nyxbot/relay/{id}`,
   verified with NyxID's relay callback token) unless the platform's gateway
-  flag is on for the bot's owner. Each NyxID channel platform other than
+  flag is on for the owner or, for an org bot, its linking admin. Each NyxID channel platform other than
   Telegram (which always uses the gateway) has a feature flag
   `nyxbot:gateway-{platform}` (lark, feishu, discord, slack, whatsapp, x,
   aurinko), off by default and toggled by platform admins on the feature-flag
-  page (global, org cohort or one person, resolved for each bot's owner) with
+  page (global, org cohort or one person, resolved for the linking person) with
   no restart. The gateway itself decides what it can take: it refuses to create
   a channel for a platform whose raw events it cannot verify itself (cma#957:
   Telegram, Lark and Feishu are verified; Discord, Slack and WhatsApp need a
   `trust_normalized` opt-in NyxID does not send, since the gateway would then
   lose mention and reply evidence) or does not know (X, Aurinko), and those bots
   stay on NyxID's relay, retried daily, so a flag turned on early takes effect
-  once the gateway supports its platform. Turning a flag off stops further
-  moves; bots already moved stay on the gateway until reconnected. Once a
-  platform's flag is on for an owner, their verified personal bots on it move
+  once the gateway supports its platform. Turning a flag off now returns existing
+  gateway bots to the relay automatically, including personal bots (previously
+  they stayed on the gateway). Telegram is excluded: it always uses the gateway.
+  Once a platform's flag is on for a linking person, their verified bots move
   to the gateway by themselves
   (each replica's 15-second sweep moves one bot at a time, each at most daily;
   a bot with a turn running answers first and is looked at again ten minutes
@@ -365,19 +366,37 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
   deletes those keys after 30 minutes. The swap needs MongoDB transactions (a
   replica set, as in production); on a standalone development database every
-  move ends as `swap_failed` and the bot stays on NyxID's relay.
+  move ends as `swap_failed` and the bot stays on its existing transport.
+  A return to the relay builds a fresh route key beside the working gateway
+  connection and atomically swaps the channel and existing route before
+  releasing the gateway channel and deleting its provider key and old route key.
+  Both directions recheck the flag, org authority and active turns before the
+  swap; a busy return retries after ten minutes. At most one move is attempted
+  per sweep per replica, across both directions. Gateway private events retain
+  an exact hashed sender/chat/topic-to-partition mapping, so returning to the
+  relay preserves that chat's history and settings across repeated moves.
+  Legacy gateway history without this mapping stays isolated until a verified
+  provider event establishes it; NyxID never guesses a sender's history.
 - **Organization bots.** An owner can link bots of organizations they
   administer (the rule for managing org bots), found by id or label:
   `nyxid__list_channel_bots` and the route tools cover personal and administered
   org bots and name each bot's org. The bot's route and route key are owned by
   the org (the key has no service grants; org routes must use org keys), and org
-  bots always use NyxID's relay, including Telegram, because a gateway channel is
-  bound to one person. Every inbound message re-checks that the owner still
-  administers the org, as does the 15-second sweep (so a demotion or removal is
-  noticed even without traffic) and every reply NyxBot sends; otherwise the link
-  fails with `org_access_lost`, its org route and route key are removed so the
-  org's other admins can link the bot, and nothing reaches or leaves their
-  agent. Disconnecting removes the org's route and key too.
+  bots follow the same platform flags and transport protocol as personal bots.
+  Flag resolution uses the linking admin (`row.user_id`), including live org
+  membership overrides, never the org as a person. The gateway channel is
+  created with that admin's delegated creator bearer. Its dedicated provider
+  agent key is also personal, because provider authentication binds the key's
+  owner to `row.user_id` and the profile owner subject; it has no service grants.
+  This does not change the org ownership of the bot, route or route key.
+  Every gateway provider endpoint and relay inbound re-checks live org-admin
+  membership, as do the sweep and asynchronous replies. Loss fails the link with
+  `org_access_lost`, retains the existing metadata audit and link-status/watch
+  behaviour, removes the org route, releases the gateway channel, and deletes
+  active and pending keys under their respective owners. No event reaches the
+  linking person's agent after that check fails. Telegram org bots always use
+  the gateway. Lark/Feishu org bots have the same text-only gateway limitation
+  as personal bots; media handling is unchanged.
 - **Right user.** The owner is verified through NyxID's Telegram notification
   link, a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram), or,
   for a Telegram bot created inside Telegram through NyxID, as the account that
@@ -561,6 +580,11 @@ as group admins, and NyxBot says so when a chat is set to `all`.
 **Guests.** A turn started by someone other than the verified owner is a guest
 turn (`guest_turn` on the thread, `guest` on its chat authority; kept after the
 turn so late tool calls stay restricted):
+
+Connected-service search/list discovery for guests includes only the specialist's
+granted UserManaged and Platform connections, dropping Internal catalog entries
+before dense preference ranking. Native `nyxid` virtual tools follow their separate
+guest authorization; their catalog inclusion grants no execution access.
 
 - NyxBot holds every service of the owner, so its guest turns call no tools at
   all and answer from the conversation; to let a chat's members use a service,
@@ -969,3 +993,92 @@ persisted-profile relaunches and package repair. Follow 12413 recovery guidance;
 ## Owner attachments
 
 The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them. Channel-media ingestion remains a follow-up.
+
+## Drafting agent skills
+
+When creating or improving an agent, use description for role/scope, persona for
+tone/style, and Ornn skills for repeatable procedures, checklists, domain
+reference, output templates and multi-step workflows. NyxBot searches existing
+skills, previews exact versions, then proposes attachment with `set_agent_skills`
+and its owner card. With `assistant:agent-learning` enabled for the person,
+`draft_agent_skill` covers procedures no existing skill fits. The name emphasizes
+that this is a draft, not model-authorized publication. Specialists request skills
+through NyxBot; guest and channel-guest turns cannot draft.
+
+The authoring tool accepts an immutable agent ID, a lowercase hyphenated skill
+name (1–64), description, SKILL.md body, up to eight small .md/.txt files, and an
+optional attached base GUID/version. It accepts no destination, owner override,
+permissions or scripts. The existing learning validator bounds the complete
+proposal to 8,000 bytes/7,500 characters and rejects unsafe paths and credential
+shapes. The full package is loaded on the owner card from encrypted storage;
+card records, audits and tool responses contain metadata only.
+
+One owner approval runs the existing publish-and-pin saga using the approving
+person's signed identity. A denial or expired card cannot publish. Repeat tool
+calls in the same turn reuse the proposal/card; uncertain publication reconciles
+without repeating the mutation. Never package or publish through Ornn Playground,
+sandboxes, machines or raw Ornn upload APIs. See `AGENT_LEARNING.md` for the shared
+review contract and org publication limitation.
+
+### Gateway group-thread follow
+
+Lark/Feishu gateway channels can use the same followed child conversations as
+the relay only after [thread contract 1](../CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md)
+is advertised and accepted. The existing follow flag remains authoritative.
+The management sweep projects follow-enabled chats into bounded per-chat gateway
+admission; NyxID filters admitted events with the same sender, mention, live org
+and follow policies as relay events. An other-person-only mention is context,
+not a new turn; broadcasts never activate follow. Native replies explicitly bind
+to the original event and root, including delayed replies. Legacy gateways keep
+follow unavailable. Lark/Feishu on the gateway remain text-only, including org
+bots; media and edit parity are separate work.
+
+## Asynchronous service results
+
+A trusted catalog `x-nyxid-async-operation` contract lets an assistant submit
+long work, end its turn, and receive the result later. Registration reserves
+capacity before upstream execution and persists the returned opaque operation
+ID. The watch binds the owner, agent, conversation, initiating turn, conversation
+key, exact service and submit endpoint. Repeated idempotent receipts from the
+same conversation key/service reuse the existing watch. An uncertain submit is
+never replayed automatically; the thread receives `submission_uncertain`.
+
+Delivery captures the initiating turn's channel/reply-channel binding, group
+request, specialist report target, voice request, and automation run. A later
+web message or a different chat cannot redirect that result. Nested async work
+inherits the event turn's saved destination. Results enter `pending_events` once,
+transactionally with the watch transition, then take their own event turn through
+the existing owner pool and loop guards. Busy threads and full event queues defer
+without dropping other events. Async results are not drained into unrelated user
+turns or coalesced with a different delivery place. Channel delivery retains live
+channel and organization checks; group replies use the originating member thread.
+Hidden voice requests and automation runs remain pending until their async work
+and resumed turn settle. Cancelling a voice task also cancels its family's watches.
+
+A separate 15-second backstop sweep claims due watches with 60-second MongoDB
+leases; each attempt is limited to 45 seconds. Per-watch polling backoff starts at
+5 seconds and caps at 60 seconds. Every status/result/cancel request reloads the
+same conversation credential and live key/grants/organization authority, resolves
+the exact operation through the normal service proxy, and uses normal rate limits,
+approvals, billing and service concurrency slots. This narrow durable authority
+permits only the declared operations for the saved operation ID while the submitting
+turn is idle; it does not create a synthetic live turn or enable other idle tools.
+Replica restarts recover leases, and stale workers cannot publish results after
+another claim or Stop.
+
+Limits are 32 active watches per owner, 8 per conversation, and 2 hours of service
+work. Reservations serialize per owner and conversation across replicas. Status
+and result reads are capped at 16 KiB. Successful results and upstream failure
+details are untrusted, JSON-quoted data in per-turn input context, never stable
+instructions. Retained payloads use envelope encryption, are erased on settlement
+or cancellation, and expire after 4 hours even if delivery is deferred. An expired
+payload produces `result_expired`; terminal metadata is TTL-cleaned. Audit contains
+identifiers and stable reasons, never operation payloads, returned IDs or credentials.
+
+Completion, `operation_failed`, `timeout`, `authority_lost`, `result_unavailable`,
+`result_too_large`, and submission failures resume the same thread with a stable
+reason. Stops suppress queued completions, cancel durable watches, and make a
+bounded best-effort call to the declared cancel operation under live authority.
+Conversation deletion removes its watches after attempting cancellation. A late
+poll cannot recreate a deleted watch or overwrite cancellation. Services without
+a trusted contract and legacy event behavior remain unchanged.

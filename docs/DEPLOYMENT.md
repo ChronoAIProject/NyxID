@@ -157,6 +157,68 @@ The frontend nginx config (`frontend/nginx.conf.template`) handles:
 - Gzip compression and cache headers for hashed assets
 - Security headers
 
+The production SPA checks `/health` and `/build-version.json` on startup, then
+every ten minutes. Returning to the tab or reconnecting cannot trigger another
+background check within that ten-minute window.
+Frontend metadata is authoritative because frontend and backend images can roll
+independently. Two consecutive observations of a different frontend build stage
+its initial JavaScript and CSS in the browser cache, without executing scripts,
+attaching styles, or remounting the running application. The served `index.html`
+must also identify that build before it is considered ready.
+
+Confirmed updates are saved in a Zustand store persisted to local storage, with
+an earliest detection timestamp that later polls and superseding deployments
+preserve. A matching loaded build clears the record; observing that the deployed
+build matches the running build also cancels it. A saved pending build must still
+match live metadata and available assets before activation.
+
+When assistant code changes, deliberate chat selection, New chat, agent/group
+selection, and ordinary links to another view attempt an update after navigation
+completes. Eligible destinations are reading pages and the main assistant,
+plugins, approvals, automations and machines listings; live desktops, setup and
+authentication flows are excluded. The selected destination remains in the URL
+through the reload.
+Automatic conversation adoption and programmatic redirects do not trigger this.
+Activation rechecks the deployment and refuses to reload if a local direct-chat
+turn is running/waiting, a mutation or dialog is active, editable controls contain
+text, the tab is hidden, or the destination changes during validation. Automatic
+activation uses the same session reload-loop guard as hidden-tab updates.
+
+If an update remains pending for two hours, a dismissible refresh banner appears.
+On `/assistant` and its workspace routes, it appears only when the assistant
+fingerprint changes or either build lacks that fingerprint. The
+SHA-256 fingerprint covers the assistant's resolved source dependencies, the
+bootstrap and root-shell dependencies, source styles, audio worklet, build
+configuration and scripts, and the dependency lockfile. Other routes are pruned
+at the lazy page barrel. Raw source bytes avoid changes caused only by a new
+commit stamp or regrouped output chunks; project version bumps are ignored in
+the lockfile. Public build environment changes also count. This identifies
+frontend assistant changes; `/health` does not expose a separate backend
+assistant version. Fingerprints are notification hints and do not retain old
+lazy assets across deployments.
+
+An untouched tab on the landing, dashboard, docs, blog or legal reading pages can
+refresh automatically after at least one minute hidden. Any pointer, keyboard,
+form, drop or SPA navigation activity disables automatic refresh for that
+document. Dialogs, editable controls, nonempty search boxes, pending mutations,
+query strings and URL fragments also block it. Stateful pages such as assistant
+chat, terminals, authentication and one-time credential flows never reload merely
+because the tab becomes hidden. Assistant updates instead use deliberate view
+switches when safe, with the delayed banner as a fallback. The banner's Refresh
+button checks the deployment again before
+reloading. Failed polls back off to thirty minutes; session storage bounds automatic
+reloads, including mixed replicas and rollback loops. Development builds do not poll.
+
+The image publish workflow supplies `NYXID_GIT_HASH` to the frontend Docker build,
+which stamps both the bundle and its version metadata. For manual image builds,
+pass `--build-arg NYXID_GIT_HASH=<commit>` to get the same stamp; without it each
+build uses a timestamp identity. Deploy this feature once before existing tabs
+can detect subsequent deployments. A visible document reload still rechecks
+authentication and loads route data, so immediate new code with zero visual
+change is not guaranteed. Keeping previous hashed assets available during
+rollouts also avoids the existing lazy-chunk recovery refresh when an old tab
+navigates to a route whose chunk has been removed.
+
 ### Production Docker Compose
 
 The production stack is defined as an override layer on top of the base

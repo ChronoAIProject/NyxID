@@ -544,7 +544,7 @@ pub async fn list_openapi_endpoints(
     // between users. Reuses the hardened fetch path: DNS pinning, 5 MB cap,
     // no redirects, 60 s TTL.
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &endpoint.user_id).await?;
-    let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+    let parsed = openapi_parser::parse_openapi_spec_for_url(&spec, spec_url)?;
     let scoped_services = if auth_user.assistant_operation_scopes.is_empty() {
         Vec::new()
     } else {

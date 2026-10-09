@@ -48,9 +48,10 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
     match err {
         AppError::BadRequest(_) | AppError::CredentialUnavailable(_) => (400, 1000),
         AppError::Unauthorized(_) => (401, 1001),
-        AppError::Forbidden(_) => (403, 1002),
+        error if error.is_forbidden() => (403, 1002),
         AppError::NotFound(_) => (404, 1003),
         AppError::RateLimited => (429, 1005),
+        AppError::ServiceConcurrencyLimited => (429, 12700),
         AppError::Internal(_) => (500, 1006),
         AppError::DatabaseError(_) => (500, 1007),
         AppError::ValidationError(_) => (400, 1008),
@@ -153,33 +154,6 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
         ServiceAccount => "service_account",
         Delegated => "delegated",
     }
-}
-
-/// Sign the delegation token with the downstream's canonical catalog identity.
-///
-/// UserService slugs may be disambiguated aliases, while downstream services
-/// validate `act.sub` against the catalog service they implement. Custom and
-/// legacy services have no separate catalog identity and keep their own slug.
-fn generate_proxy_delegation_token(
-    keys: &crate::crypto::jwt::JwtKeys,
-    config: &crate::config::AppConfig,
-    user_id: &uuid::Uuid,
-    scope: &str,
-    service_slug: &str,
-    catalog_service_slug: Option<&str>,
-    restrictions: Option<&crate::crypto::jwt::TokenRestrictionClaims>,
-) -> AppResult<String> {
-    let acting_service_slug = catalog_service_slug.unwrap_or(service_slug);
-
-    crate::crypto::jwt::generate_delegated_access_token(
-        keys,
-        config,
-        user_id,
-        scope,
-        acting_service_slug,
-        crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        restrictions,
-    )
 }
 
 /// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
@@ -881,20 +855,6 @@ fn single_system_header(
         .to_str()
         .map_err(|_| AppError::DurableGrantMismatch(format!("{name} must be valid ASCII text")))?;
     Ok(Some(value.to_string()))
-}
-
-fn caller_bearer_token_for_downstream(
-    headers: &axum::http::HeaderMap,
-    scheduled_invocation: bool,
-) -> Option<String> {
-    if scheduled_invocation {
-        return None;
-    }
-    headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(String::from)
 }
 
 async fn finish_durable_operation(
@@ -3241,12 +3201,11 @@ async fn preflight_proxy_deny_before_resolution(
         ));
     }
 
-    let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
     crate::services::tool_publication_service::gate_unconfigured_public_tool(
         &state.db,
         &hint.service_id,
         method,
-        &canonical,
+        path,
     )
     .await?;
 
@@ -3846,6 +3805,48 @@ fn execute_resolved_proxy<'a>(
     resolved_slug: &'a mut String,
     resolved: ResolvedProxyExecution,
 ) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+    Box::pin(async move {
+        *resolved_slug = resolved.target.service.slug.clone();
+        let lease = crate::services::service_concurrency_service::acquire(
+            &state.db,
+            &resolved.target.service,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+        let execution = execute_resolved_proxy_boxed(
+            state,
+            auth_user,
+            service_id,
+            path,
+            request,
+            extra_outbound_headers,
+            resolved_slug,
+            resolved,
+            lease.clone(),
+        );
+        match lease {
+            Some(lease) => {
+                let response = lease.run(execution).await?;
+                Ok(lease.hold_response(response))
+            }
+            None => execution.await,
+        }
+    })
+}
+
+// Keep construction of the large dispatch future outside the guard's poll frame.
+#[allow(clippy::too_many_arguments)]
+fn execute_resolved_proxy_boxed<'a>(
+    state: &'a AppState,
+    auth_user: &'a AuthUser,
+    service_id: &'a str,
+    path: &'a str,
+    request: Request<Body>,
+    extra_outbound_headers: Vec<(String, String)>,
+    resolved_slug: &'a mut String,
+    resolved: ResolvedProxyExecution,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
+) -> futures::future::BoxFuture<'a, AppResult<Response>> {
     Box::pin(execute_resolved_proxy_inner(
         state,
         auth_user,
@@ -3855,6 +3856,7 @@ fn execute_resolved_proxy<'a>(
         extra_outbound_headers,
         resolved_slug,
         resolved,
+        service_lease,
     ))
 }
 
@@ -3868,6 +3870,7 @@ async fn execute_resolved_proxy_inner(
     mut extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
     resolved: ResolvedProxyExecution,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Response> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
     let permission_bound =
@@ -4131,6 +4134,19 @@ async fn execute_resolved_proxy_inner(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = pool_accounting
+        .as_ref()
+        .map(|ctx| ctx.request_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        auth_user,
+        resolved_user_service_id.as_deref(),
+        &target.service.id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -4139,11 +4155,8 @@ async fn execute_resolved_proxy_inner(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
-    let billing_request_id = pool_accounting
-        .as_ref()
-        .map(|ctx| ctx.request_id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let is_ws_candidate = is_ws_upgrade_request(&request);
     let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
     let node_intent = match &node_route {
@@ -4227,8 +4240,10 @@ async fn execute_resolved_proxy_inner(
     }
 
     // Extract the caller's raw Bearer token for nyxid_token passthrough.
-    let caller_token =
-        caller_bearer_token_for_downstream(&all_headers, scheduled_api_key_id.is_some());
+    let caller_token = proxy_service::caller_bearer_token_for_downstream(
+        &all_headers,
+        scheduled_api_key_id.is_some(),
+    );
 
     // Check for WebSocket upgrade BEFORE consuming the request body.
     let is_ws = is_ws_candidate;
@@ -4369,6 +4384,7 @@ async fn execute_resolved_proxy_inner(
     match approval_outcome {
         approval_service::ApprovalOutcome::Allowed { .. } => {}
         approval_service::ApprovalOutcome::Denied => {
+            request_audit.denied(403);
             if let Some(api_key_id) = scheduled_api_key_id {
                 audit_service::log_for_user(
                     state.db.clone(),
@@ -4605,9 +4621,11 @@ async fn execute_resolved_proxy_inner(
     let delegated = if resolved_user_service_id.is_some() {
         Vec::new()
     } else {
-        let delegated_owner = effective_owner_for_approval
-            .as_deref()
-            .unwrap_or(&user_id_str);
+        let proxy_resolution_user_id = auth_user.proxy_resolution_user_id();
+        let delegated_owner = proxy_service::delegated_credential_owner(
+            &proxy_resolution_user_id,
+            effective_owner_for_approval.as_deref(),
+        );
         match Box::pin(delegation_service::resolve_delegated_credentials(
             &state.db,
             &state.encryption_keys,
@@ -4750,7 +4768,7 @@ async fn execute_resolved_proxy_inner(
         let user_uuid = auth_user.user_id;
         let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
 
-        match generate_proxy_delegation_token(
+        match identity_service::generate_proxy_delegation_token(
             &state.jwt_keys,
             &state.config,
             &user_uuid,
@@ -4776,7 +4794,9 @@ async fn execute_resolved_proxy_inner(
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
     // Billing and durable-grant admission carry their own database state.
     // Do not reserve it in every proxy poll, including early scope refusals.
-    let metered = Box::pin(state.billing.open(&billing_ctx)).await?;
+    let metered = Box::pin(state.billing.open(&billing_ctx))
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
         let grant_id = match durable_grant_id.as_deref() {
@@ -4938,7 +4958,9 @@ async fn execute_resolved_proxy_inner(
         let ws_upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
             Ok(ws) => ws,
             Err(rejection) => {
-                return Ok(rejection.into_response());
+                let response = rejection.into_response();
+                request_audit.denied(response.status().as_u16());
+                return Ok(response);
             }
         };
 
@@ -4962,8 +4984,10 @@ async fn execute_resolved_proxy_inner(
                 collect_realtime_llm_usage,
                 metered.clone(),
                 billing_egress_permit,
+                service_lease,
             ))
-            .await;
+            .await
+            .inspect(|response| request_audit.response(response.status().as_u16()));
         }
 
         // Direct WS passthrough: connect to downstream directly.
@@ -4982,8 +5006,10 @@ async fn execute_resolved_proxy_inner(
             collect_realtime_llm_usage,
             metered.clone(),
             billing_egress_permit,
+            service_lease,
         ))
-        .await;
+        .await
+        .inspect(|response| request_audit.response(response.status().as_u16()));
     }
 
     // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
@@ -4996,39 +5022,23 @@ async fn execute_resolved_proxy_inner(
             path,
             &delegated,
         )?;
-        let mut node_delegated = delegated.clone();
-        proxy_service::extend_with_path_credential(&mut node_delegated, &target);
-        let prepared =
-            proxy_service::prepare_delegated_request(path, query.as_deref(), &node_delegated)?;
-        let node_path = if prepared.path.starts_with('/') {
-            prepared.path.clone()
-        } else {
-            format!("/{}", prepared.path)
-        };
+        let prepared = proxy_service::prepare_node_request(
+            &target,
+            path,
+            query.as_deref(),
+            node_forward_headers,
+            &identity_headers,
+            &delegated,
+            caller_token.as_deref(),
+            &extra_outbound_headers,
+        )?;
         let node_location_context = AsyncLocationContext::new(
             &target.base_url,
-            &node_path,
+            &prepared.path,
             prepared.query.as_deref(),
             caller_proxy_prefix.clone(),
         )
         .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
-        let mut base_headers = node_forward_headers;
-        // Forward the caller's NyxID access token when the service is configured for it.
-        if let Some(token) = proxy_service::forwarded_caller_token(
-            &target,
-            caller_token.as_deref(),
-            &extra_outbound_headers,
-        ) {
-            base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
-        }
-        let enriched_headers = proxy_service::build_effective_outbound_headers(
-            &target,
-            base_headers,
-            &identity_headers,
-            &prepared.delegated_headers,
-            &extra_outbound_headers,
-        );
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
@@ -5038,9 +5048,9 @@ async fn execute_resolved_proxy_inner(
             service_slug: target.service.slug.clone(),
             base_url: target.base_url.clone(),
             method: method_str.clone(),
-            path: node_path,
+            path: prepared.path,
             query: prepared.query,
-            headers: enriched_headers,
+            headers: prepared.headers,
             body: body.as_ref().map(|b| b.to_vec()),
         };
 
@@ -5531,6 +5541,7 @@ async fn execute_resolved_proxy_inner(
                     }
 
                     destination_audit.complete(response.status().as_u16());
+                    request_audit.response(response.status().as_u16());
                     return Ok(response);
                 }
                 Err(NodeProxyFailure {
@@ -5962,6 +5973,7 @@ async fn execute_resolved_proxy_inner(
         }
 
         destination_audit.complete(response.status().as_u16());
+        request_audit.response(response.status().as_u16());
         return Ok(response);
     }
 
@@ -6598,6 +6610,7 @@ async fn execute_resolved_proxy_inner(
     );
 
     destination_audit.complete(response.status().as_u16());
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 
@@ -7702,6 +7715,7 @@ async fn handle_ws_passthrough(
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Response> {
     crate::services::destination_routing::reject_websocket(target)?;
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
@@ -7716,6 +7730,9 @@ async fn handle_ws_passthrough(
         .await?
         .ok_or(AppError::RateLimited)?;
     let slot_cancel = guard.cancellation_token();
+    if let Some(lease) = &service_lease {
+        lease.cancel_on_loss(slot_cancel.clone());
+    }
 
     // Connect to downstream BEFORE upgrading the client connection.
     // If the downstream is unreachable, the client gets a normal HTTP error.
@@ -7786,6 +7803,7 @@ async fn handle_ws_passthrough(
             )
             .await;
             drop(guard);
+            drop(service_lease);
             let platform_usage = websocket_platform_usage(&stats);
             let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
@@ -7838,6 +7856,7 @@ async fn handle_ws_passthrough_via_node(
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Response> {
     crate::services::destination_routing::reject_websocket(target)?;
     use crate::services::node_ws_manager::NodeWsProxyRequest;
@@ -7910,6 +7929,9 @@ async fn handle_ws_passthrough_via_node(
         .await?
         .ok_or(AppError::RateLimited)?;
     let slot_cancel = guard.cancellation_token();
+    if let Some(lease) = &service_lease {
+        lease.cancel_on_loss(slot_cancel.clone());
+    }
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut last_error: Option<AppError> = None;
@@ -8079,6 +8101,7 @@ async fn handle_ws_passthrough_via_node(
             // Best-effort close the node-side session.
             let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
             drop(guard);
+            drop(service_lease);
             let platform_usage = websocket_platform_usage(&stats);
             let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
@@ -8318,18 +8341,20 @@ mod tests {
     use super::{
         ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats,
         add_websocket_usage_provenance, apply_agent_attribution_headers,
-        apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
-        collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
-        ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
-        generate_proxy_delegation_token, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, read_proxy_request_body, should_enforce_runtime_approval,
-        should_retry_node_failure, single_system_header, strip_durable_idempotency_defaults,
-        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
+        apply_proxy_request_id_header, auth_kind_label, collect_ws_forward_headers,
+        compose_pre_resolved_node_ids, enforce_node_route_scope, ensure_proxy_request_id,
+        final_credential_class, forwarded_response_header_value, is_chat_completions_proxy_path,
+        is_codex_transport_path, is_ws_upgrade_request, read_proxy_request_body,
+        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
+        strip_durable_idempotency_defaults, validate_range_header,
+        websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
     use crate::mw::auth::AuthMethod;
     use crate::services::billing::{BillingRouteContext, MeteredProxyContext, NodeIntent};
+    use crate::services::identity_service::generate_proxy_delegation_token;
+    use crate::services::proxy_service::caller_bearer_token_for_downstream;
     use crate::services::{
         llm_usage_service,
         proxy_service::{self, validate_requested_proxy_path},
@@ -8482,7 +8507,7 @@ mod tests {
             caller_bearer_token_for_downstream(&headers, false).as_deref(),
             Some("nyxid_ag_example")
         );
-        assert_eq!(caller_bearer_token_for_downstream(&headers, true), None);
+        assert!(caller_bearer_token_for_downstream(&headers, true).is_none());
     }
 
     #[test]
@@ -9965,6 +9990,10 @@ mod tests {
             (403, 1002)
         );
         assert_eq!(
+            proxy_error_telemetry_fields(&AppError::insufficient_scope("Missing scope")),
+            (403, 1002)
+        );
+        assert_eq!(
             proxy_error_telemetry_fields(&AppError::NotFound("x".into())),
             (404, 1003)
         );
@@ -10952,6 +10981,7 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
+    include!("proxy_concurrency_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,
@@ -11627,6 +11657,7 @@ mod proxy_resolution_integration_tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: api_key_id.clone(),
                 user_id: owner_user_id.to_string(),

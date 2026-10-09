@@ -3,6 +3,7 @@
 #![allow(dead_code)] // PR B contracts are deliberately dormant until PR C.
 pub mod contracts;
 pub mod delivery;
+pub mod gateway;
 pub mod history;
 pub mod resolution;
 use bson::doc;

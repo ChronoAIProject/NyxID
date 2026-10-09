@@ -414,6 +414,11 @@ impl std::fmt::Debug for CreateKeyRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyResponse {
     pub offering_kind: crate::models::downstream_service::OfferingKind,
+    /// Whether the current caller may inspect and edit connection configuration.
+    pub can_edit_configuration: bool,
+    pub preference_rank: Option<u32>,
+    /// Saved position within the authorized catalog group, including disabled rows.
+    pub preference_position: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorship: Option<crate::handlers::service_history::AuthorshipResponse>,
     pub id: String,
@@ -502,6 +507,8 @@ pub struct KeyResponse {
     /// — so safe to surface. The `client_secret` is never returned by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
+    /// Resolved OAuth app source: platform or byo; absent only when unestablished.
+    pub oauth_app_source: Option<String>,
     /// Scopes currently granted on this OAuth connection (NyxID#917 follow-up),
     /// parsed from the backing `UserApiKey.token_scopes`. The connect UIs
     /// pre-select and lock these when adding scopes to an existing connection
@@ -1290,14 +1297,48 @@ pub async fn list_keys_with_tool_bindings(
         include_tool_bindings,
     )
     .await?;
-    let scope = auth_user.api_key_service_scope();
+    let views = crate::services::service_preference_service::filter_inventory(
+        views,
+        auth_user.api_key_service_scope(),
+        auth_user.auth_method == AuthMethod::ApiKey,
+    );
+    let visible = views
+        .iter()
+        .map(|view| {
+            (
+                view.id.clone(),
+                crate::services::service_preference_service::PreferenceMember {
+                    group: crate::services::service_preference_service::group_key(
+                        &view.id,
+                        view.catalog_service_id.as_deref(),
+                    ),
+                    listed: view.is_active && view.service_type == "http",
+                },
+            )
+        })
+        .collect();
+    let preference =
+        crate::services::service_preference_service::get(&state.db, &user_id_str).await?;
+    let ranks = crate::services::service_preference_service::rank_map_by_group(
+        preference
+            .as_ref()
+            .map_or(&[], |row| row.ordered.as_slice()),
+        &visible,
+    );
+    let positions = crate::services::service_preference_service::position_map_by_group(
+        preference
+            .as_ref()
+            .map_or(&[], |row| row.ordered.as_slice()),
+        &visible,
+    );
     let mut keys = views
         .into_iter()
-        .filter(|view| scope.is_none_or(|ids| ids.contains(&view.id)))
-        .filter(|view| {
-            auth_user.auth_method != AuthMethod::ApiKey || !view.credential_source.is_viewer_org()
+        .map(|view| {
+            let mut response = key_response_from_view(view);
+            response.preference_rank = ranks.get(&response.id).copied();
+            response.preference_position = positions.get(&response.id).copied();
+            response
         })
-        .map(key_response_from_view)
         .collect::<Vec<_>>();
     enrich_key_node_metadata(
         &state.db,
@@ -1348,6 +1389,16 @@ pub async fn get_key(
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
     let mut response = resolve_key_response(&state, &auth_user, &key_id).await?;
+    (response.preference_rank, response.preference_position) =
+        crate::services::service_preference_service::detail_rank(
+            &state.db,
+            &actor,
+            &response.id,
+            response.catalog_service_id.as_deref(),
+            auth_user.api_key_service_scope(),
+            auth_user.auth_method == AuthMethod::ApiKey,
+        )
+        .await?;
     enrich_key_response(
         &state.db,
         &state.node_ws_manager,
@@ -2697,6 +2748,9 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
 
     KeyResponse {
         offering_kind: Default::default(),
+        can_edit_configuration: true,
+        preference_rank: None,
+        preference_position: None,
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
@@ -2785,6 +2839,11 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         // wizard can call `GET /keys/:id` immediately after create if
         // it needs the field rendered.
         oauth_client_id: None,
+        oauth_app_source: result
+            .api_key
+            .as_ref()
+            .and_then(crate::services::oauth_app_source::from_key)
+            .map(|source| source.as_str().to_owned()),
         // Fresh create: an OAuth connection has no granted scopes until the
         // authorize callback completes, so there's nothing to surface yet.
         granted_scopes: None,
@@ -2837,8 +2896,13 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         .is_some_and(|node_id| !node_id.is_empty());
     let endpoint_url = (!view.auto_connected).then_some(view.endpoint_url);
 
+    let credential_source: crate::handlers::user_services_handler::CredentialSourceResponse =
+        view.credential_source.clone().into();
     KeyResponse {
         offering_kind: view.offering_kind,
+        can_edit_configuration: !view.auto_connected && credential_source.can_edit_configuration(),
+        preference_rank: None,
+        preference_position: None,
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
@@ -2903,6 +2967,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         custom_user_agent: view.custom_user_agent,
         connection_id: view.connection_id,
         oauth_client_id: view.oauth_client_id,
+        oauth_app_source: view.oauth_app_source,
         granted_scopes: view.granted_scopes,
         last_authorized_at: view.last_authorized_at,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
@@ -2932,6 +2997,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     }
 }
 
+/// Apply after discovery enrichment, which can add instance configuration.
+/// Execution and authorization-evidence projections keep their own contracts.
 async fn enrich_key_node_metadata(
     db: &mongodb::Database,
     ws_manager: &crate::services::node_ws_manager::NodeWsManager,
@@ -3213,6 +3280,7 @@ mod tests {
 
     fn make_blank_api_key() -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -3238,6 +3306,33 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn billing_metadata_read_only_key_exposes_oauth_selection_without_app_id() {
+        let mut key = make_blank_api_key();
+        key.credential_type = "oauth2".into();
+        key.credential_source = Some("platform".into());
+        let result = crate::services::unified_key_service::CreateKeyResult {
+            endpoint: test_user_endpoint(
+                "endpoint",
+                "owner",
+                "Twitter",
+                "https://example.test",
+                None,
+                None,
+            ),
+            api_key: Some(key),
+            service: test_user_service("service", "owner", "twitter", "endpoint", None, None),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_ca_public_key: None,
+            ssh_allowed_principals: None,
+            ssh_certificate_ttl_minutes: None,
+        };
+        let response = super::key_response_from_result(&result);
+        assert_eq!(response.oauth_app_source.as_deref(), Some("platform"));
+        assert_aevatar_secret_free(&serde_json::to_value(&response).unwrap());
     }
 
     #[test]
@@ -5525,6 +5620,69 @@ mod tests {
         assert_eq!(old.keys[0].label, "Catalog API");
         assert_eq!(old.keys[0].slug, "catalog-api");
         assert_eq!(old.keys[0].endpoint_url, "https://api.example.com");
+    }
+
+    #[tokio::test]
+    async fn connection_configuration_flag_requires_editor_without_hiding_data() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("configuration_read_acl").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        let service = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor, UserType::Person).await;
+        insert_user(&db, &org, UserType::Org).await;
+        insert_key_fixture(&db, &org, &service, "shared", "Shared").await;
+        db.collection::<mongodb::bson::Document>("user_services")
+            .update_one(
+                doc! { "_id": &service },
+                doc! { "$set": { "custom_user_agent": "private-client" } },
+            )
+            .await
+            .unwrap();
+        let membership = test_membership(&org, &actor, OrgRole::Admin, Some(vec![service.clone()]));
+        db.collection::<crate::models::org_membership::OrgMembership>("org_memberships")
+            .insert_one(&membership)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for (role, editable) in [("admin", true), ("member", false), ("viewer", false)] {
+            db.collection::<mongodb::bson::Document>("org_memberships")
+                .update_one(
+                    doc! { "_id": &membership.id },
+                    doc! { "$set": { "role": role } },
+                )
+                .await
+                .unwrap();
+            let Json(detail) = super::get_key(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Path(service.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(detail.can_edit_configuration, editable);
+            // The flag only gates editing UI; readers keep the configuration.
+            assert!(detail.endpoint_url.is_some());
+            let Json(list) = super::list_keys(State(state.clone()), test_auth_user(&actor))
+                .await
+                .unwrap();
+            let row = list.keys.iter().find(|row| row.id == service).unwrap();
+            assert_eq!(row.can_edit_configuration, editable);
+            assert!(row.endpoint_url.is_some());
+            assert!(row.custom_user_agent.is_some());
+            let Json(services) = crate::handlers::user_services_handler::list_user_services(
+                State(state.clone()),
+                test_auth_user(&actor),
+            )
+            .await
+            .unwrap();
+            let row = services
+                .services
+                .iter()
+                .find(|row| row.id == service)
+                .unwrap();
+            assert!(row.custom_user_agent.is_some());
+        }
     }
 
     // ---- get_key org scoping tests ----

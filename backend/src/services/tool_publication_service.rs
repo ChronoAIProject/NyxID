@@ -81,7 +81,7 @@ pub async fn gate_unconfigured_public_tool(
     db: &Database,
     service_id: &str,
     method: &str,
-    path: &CanonicalPath,
+    path: &str,
 ) -> AppResult<()> {
     let Some(service) = db
         .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
@@ -99,7 +99,8 @@ pub async fn gate_unconfigured_public_tool(
                 && config.audience == crate::models::downstream_service::PlatformKeyAudience::Public
         })
     {
-        gate(db, &service, method, path).await?;
+        let canonical = CanonicalPath::from_rest_decoded(path)?;
+        gate(db, &service, method, &canonical).await?;
     }
     Ok(())
 }
@@ -219,6 +220,8 @@ mod tests {
 
     fn endpoint(name: &str, path: &str, publication: PublicationState) -> ServiceEndpoint {
         ServiceEndpoint {
+            async_operation: None,
+
             id: uuid::Uuid::new_v4().to_string(),
             service_id: "tool".into(),
             name: name.into(),

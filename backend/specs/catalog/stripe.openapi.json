@@ -1,0 +1,478 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Stripe",
+    "version": "1.0.0-nyxid-overlay",
+    "description": "Read-only Stripe API v1 operations. NyxID injects the connected Stripe Apps OAuth token. Permissions are configured in the Stripe app manifest."
+  },
+  "servers": [
+    {
+      "url": "https://api.stripe.com"
+    }
+  ],
+  "paths": {
+    "/v1/customers": {
+      "get": {
+        "operationId": "stripe_list_customers",
+        "summary": "List customers.",
+        "x-aevatar-tool": {
+          "name": "stripe_list_customers",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Object ID from the previous page."
+            }
+          },
+          {
+            "name": "email",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "created[gte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          },
+          {
+            "name": "created[lte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/customers/{customer_id}": {
+      "get": {
+        "operationId": "stripe_retrieve_customer",
+        "summary": "Retrieve a customer.",
+        "x-aevatar-tool": {
+          "name": "stripe_retrieve_customer",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/invoices": {
+      "get": {
+        "operationId": "stripe_list_invoices",
+        "summary": "List invoices.",
+        "x-aevatar-tool": {
+          "name": "stripe_list_invoices",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Object ID from the previous page."
+            }
+          },
+          {
+            "name": "customer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "open",
+                "paid",
+                "uncollectible",
+                "void"
+              ]
+            }
+          },
+          {
+            "name": "created[gte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          },
+          {
+            "name": "created[lte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/invoices/{invoice_id}": {
+      "get": {
+        "operationId": "stripe_retrieve_invoice",
+        "summary": "Retrieve a invoice.",
+        "x-aevatar-tool": {
+          "name": "stripe_retrieve_invoice",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "invoice_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/payment_intents": {
+      "get": {
+        "operationId": "stripe_list_payment_intents",
+        "summary": "List payment intents.",
+        "x-aevatar-tool": {
+          "name": "stripe_list_payment_intents",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Object ID from the previous page."
+            }
+          },
+          {
+            "name": "customer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "created[gte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          },
+          {
+            "name": "created[lte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/payment_intents/{payment_intent_id}": {
+      "get": {
+        "operationId": "stripe_retrieve_payment_intent",
+        "summary": "Retrieve a payment intent.",
+        "x-aevatar-tool": {
+          "name": "stripe_retrieve_payment_intent",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "payment_intent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/subscriptions": {
+      "get": {
+        "operationId": "stripe_list_subscriptions",
+        "summary": "List subscriptions.",
+        "x-aevatar-tool": {
+          "name": "stripe_list_subscriptions",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "description": "Page size from 1 to 100; Stripe enforces this range."
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Object ID from the previous page."
+            }
+          },
+          {
+            "name": "customer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "all",
+                "canceled",
+                "ended",
+                "incomplete",
+                "incomplete_expired",
+                "past_due",
+                "paused",
+                "trialing",
+                "unpaid"
+              ]
+            }
+          },
+          {
+            "name": "created[gte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          },
+          {
+            "name": "created[lte]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Unix timestamp in seconds."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/subscriptions/{subscription_id}": {
+      "get": {
+        "operationId": "stripe_retrieve_subscription",
+        "summary": "Retrieve a subscription.",
+        "x-aevatar-tool": {
+          "name": "stripe_retrieve_subscription",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "subscription_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stripe resource data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

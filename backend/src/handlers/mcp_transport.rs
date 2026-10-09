@@ -1,6 +1,9 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+#[path = "async_service_operations.rs"]
+pub(crate) mod async_operations;
+
 use axum::body::Body;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -131,6 +134,21 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
             "isError": is_error,
         }),
     )
+}
+
+fn concurrency_limited_response(id: Option<serde_json::Value>) -> Response {
+    let error = crate::errors::AppError::ServiceConcurrencyLimited;
+    let mut response = rpc_error(
+        id,
+        -32000,
+        &format!("{} ({}): {error}", error.error_key(), error.error_code()),
+    );
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    response
 }
 
 fn request_body_too_large_tool_result(
@@ -411,11 +429,16 @@ async fn is_voice_task_conversation(
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    caller_token: Option<proxy_service::CallerToken>,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
+    scope: String,
+    resource_uris: Option<Vec<String>>,
     user_id: String,
     auth_method: AuthMethod,
     acting_client_id: Option<String>,
+    oauth_client_id: Option<String>,
+    api_key_credential_id: Option<String>,
     approval_owner_user_id: Option<String>,
     /// True when auth was via `x-api-key`. API-key requests are stateless: each
     /// request authenticates independently, no MCP session is created or required.
@@ -445,11 +468,16 @@ struct McpAuthContext {
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            caller_token: None,
             chat: None,
             account_acknowledged: false,
+            scope: String::new(),
+            resource_uris: None,
             user_id,
             auth_method,
             acting_client_id: None,
+            oauth_client_id: None,
+            api_key_credential_id: None,
             approval_owner_user_id: None,
             is_api_key: false,
             api_key_id: None,
@@ -512,6 +540,21 @@ impl McpAuthContext {
             || self.auth_method == AuthMethod::Delegated
     }
 
+    /// Whether an MCP session minted from this auth may later authenticate on
+    /// its own once the bearer is missing or expired (the session-fallback
+    /// path). The session records none of the token's restrictions, and
+    /// `AuthMethod::Session` is allow-all and skips the approval flow, so only
+    /// unrestricted first-party access tokens qualify. Tokens issued to an
+    /// OAuth client (Codex, Claude, any DCR app), tokens narrowed to specific
+    /// services or nodes, and service-account tokens keep their session for
+    /// notifications but must re-present a live bearer on every request.
+    fn allows_session_fallback(&self) -> bool {
+        self.auth_method == AuthMethod::AccessToken
+            && self.oauth_client_id.is_none()
+            && self.allow_all_services
+            && self.allow_all_nodes
+    }
+
     fn approval_requester_type(&self) -> Option<&'static str> {
         match &self.auth_method {
             AuthMethod::ApiKey => Some("api_key"),
@@ -560,10 +603,13 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// 2. `Authorization: Bearer <JWT>` (OAuth access token)
 /// 3. `Mcp-Session-Id` header (session fallback; only when `session_fallback` is true)
 ///
-/// When `session_fallback` is true (all methods except `initialize`), an
-/// expired JWT is tolerated as long as a valid MCP session exists.  This
-/// allows long-lived MCP sessions (30 days) to survive past the short-lived
-/// access-token TTL without forcing re-authentication.
+/// When `session_fallback` is true (all methods except `initialize`), a
+/// missing or expired JWT is tolerated only for sessions whose
+/// `session_fallback_allowed` flag is set: those minted from unrestricted
+/// first-party access tokens (see `McpAuthContext::allows_session_fallback`).
+/// They survive past the short access-token TTL for up to 30 idle days.
+/// Sessions minted from app-issued or restricted tokens, and legacy rows
+/// without the flag, return 401 so the client re-presents its token.
 ///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
 #[allow(clippy::result_large_err)]
@@ -582,10 +628,14 @@ async fn authenticate_mcp(
             .map_err(|_| mcp_401(&state.config.base_url))?;
 
         match crate::services::key_service::validate_api_key(&state.db, raw_key).await {
-            Ok((user_id, api_key, _credential_id)) => {
+            Ok((user_id, api_key, credential_id)) => {
                 if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
+                // Scheduled keys require REST's durable-grant admission; MCP
+                // cannot mint a downstream delegation token around that gate.
+                auth::ensure_api_key_purpose_route(&api_key, "/mcp")
+                    .map_err(axum::response::IntoResponse::into_response)?;
                 if !auth::scope_allows_rest_proxy(&api_key.scopes) {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
@@ -631,6 +681,9 @@ async fn authenticate_mcp(
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
                 return Ok(McpAuthContext {
+                    caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
+                    scope: api_key.scopes.clone(),
+                    resource_uris: None,
                     chat,
                     account_acknowledged: api_key
                         .scopes
@@ -639,6 +692,8 @@ async fn authenticate_mcp(
                     user_id,
                     auth_method: AuthMethod::ApiKey,
                     acting_client_id: None,
+                    oauth_client_id: None,
+                    api_key_credential_id: credential_id,
                     approval_owner_user_id: None,
                     is_api_key: true,
                     api_key_id: Some(api_key.id.clone()),
@@ -737,6 +792,8 @@ async fn authenticate_mcp(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                ctx.caller_token =
+                    proxy_service::caller_bearer_token_for_downstream(headers, false);
                 if matches!(
                     ctx.auth_method,
                     AuthMethod::AccessToken | AuthMethod::Delegated
@@ -765,6 +822,7 @@ async fn authenticate_mcp(
                     ctx.api_key_id = api_key_id;
                     ctx.api_key_name = api_key_name;
                 }
+                ctx.oauth_client_id = claims.client_id.clone();
                 if let Some(key) = relay_key {
                     crate::services::org_agent_service::validate_key(
                         &state.db,
@@ -792,6 +850,11 @@ async fn authenticate_mcp(
                         .await
                         .map_err(|_| mcp_401(&state.config.base_url))?;
                     }
+                }
+                ctx.scope = claims.scope.clone();
+                // REST service-account authentication has no resource claims.
+                if ctx.auth_method != AuthMethod::ServiceAccount {
+                    ctx.resource_uris = claims.resources.clone();
                 }
                 ctx.acting_client_id = claims.act.map(|a| a.sub);
                 ctx.approval_owner_user_id = approval_owner_user_id;
@@ -827,6 +890,12 @@ async fn authenticate_mcp(
     {
         if !session.proxy_authorized {
             return Err(mcp_403_insufficient_scope());
+        }
+        // Sessions created by restricted or client-issued tokens (and legacy
+        // rows without the flag) cannot stand in for the bearer: a 401 makes
+        // the client refresh and re-present a token whose restrictions apply.
+        if !session.session_fallback_allowed {
+            return Err(mcp_401(&state.config.base_url));
         }
         let user_id = verify_user_active(state, session.user_id).await?;
         let mut ctx = McpAuthContext::user(user_id, AuthMethod::Session);
@@ -936,6 +1005,26 @@ fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
     } else {
         mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
     }
+}
+
+#[cfg(test)]
+pub(super) async fn assert_oauth_service_scope(
+    state: &AppState,
+    access_token: &str,
+    expected_ids: &[String],
+) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {access_token}").parse().unwrap(),
+    );
+    let auth = authenticate_mcp(state, &headers, false).await.unwrap();
+    assert!(!auth.allow_all_services);
+    assert_eq!(auth.allowed_service_ids, expected_ids);
+    assert!(matches!(
+        mcp_service_scope(&auth),
+        mcp_service::ServiceScope::Allowed(ids) if ids == expected_ids
+    ));
 }
 
 /// Names of tools that SSH-gate on agent scope.
@@ -1086,6 +1175,7 @@ pub async fn mcp_post(
                 &user_id,
                 &request,
                 auth.is_stateless(),
+                auth.allows_session_fallback(),
                 auth.api_key_id.as_deref(),
                 auth.api_key_name.as_deref(),
                 auth.ip_address.as_deref(),
@@ -1152,6 +1242,7 @@ fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError
     use crate::errors::AppError;
     match err {
         AppError::RateLimited => rpc_error(id, -32005, "Rate limit exceeded"),
+        AppError::ServiceConcurrencyLimited => concurrency_limited_response(id),
         AppError::AssistantTurnRequired => rpc_error(
             id,
             -32003,
@@ -1387,6 +1478,7 @@ async fn handle_initialize(
     user_id: &str,
     request: &JsonRpcRequest,
     stateless: bool,
+    session_fallback_allowed: bool,
     api_key_id: Option<&str>,
     api_key_name: Option<&str>,
     ip_address: Option<&str>,
@@ -1403,7 +1495,7 @@ async fn handle_initialize(
     } else {
         match state
             .mcp_sessions
-            .create_with_proxy_access(user_id, true)
+            .create_with_proxy_access(user_id, true, session_fallback_allowed)
             .await
         {
             Ok(Some(id)) => {
@@ -1519,9 +1611,9 @@ async fn handle_tools_list(
         &mut services,
     );
     if let Some(chat) = auth.chat.as_ref() {
-        services.push(crate::services::assistant_account_tools::virtual_service(
-            chat,
-        ));
+        services.push(
+            crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
+        );
     }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -1546,13 +1638,7 @@ async fn handle_tools_list(
     }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        tool_defs.extend(
-            Box::pin(crate::services::machine_access_service::definitions(
-                &state.db, chat,
-            ))
-            .await
-            .unwrap_or_default(),
-        );
+        tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
         tool_defs.push(crate::services::assistant_upload_service::definition());
     }
 
@@ -1565,6 +1651,7 @@ async fn handle_tools_list(
                 "inputSchema": webhook_tool_schema(auth, &t.input_schema),
             });
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
+                tool["title"] = annotations["title"].clone();
                 tool["annotations"] = annotations;
             }
             tool
@@ -2186,8 +2273,24 @@ async fn dispatch_service_tool(
         return resp;
     }
 
+    let async_watch = if endpoint.async_operation.is_some() {
+        if let Some(chat) = auth.chat.as_ref() {
+            match crate::services::async_service_operation::reserve(
+                &state.db, chat, service, endpoint,
+            )
+            .await
+            {
+                Ok(watch) => Some(watch),
+                Err(error) => return tool_result(request.id.clone(), &error.to_string(), true),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let exec_ctx = mcp_exec_context(auth);
-    let response = match mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -2206,14 +2309,27 @@ async fn dispatch_service_tool(
         &exec_ctx,
         billing_egress_permit,
     )
-    .await
+    .await;
+    if let Some(watch) = &async_watch
+        && let Err(error) = crate::services::async_service_operation::submitted(
+            &state.db,
+            watch,
+            execution.as_ref().ok(),
+        )
+        .await
     {
+        tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
+    }
+    let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request.id.clone(), &msg, true);
         }
         Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
             return request_body_too_large_tool_result(request.id.clone(), &error);
+        }
+        Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+            return concurrency_limited_response(request.id.clone());
         }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
@@ -2225,6 +2341,9 @@ async fn dispatch_service_tool(
         }
     };
 
+    if async_watch.is_some() && (200..300).contains(&response.status) {
+        response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
+    }
     // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
@@ -2242,14 +2361,53 @@ async fn dispatch_service_tool(
         auth.api_key_name.clone(),
     );
 
+    let concurrency = response.concurrency.take();
     let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
-    content_result(request.id.clone(), content, is_error)
+    let result = content_result(request.id.clone(), content, is_error);
+    match concurrency {
+        Some(lease) => lease.hold_response(result),
+        None => result,
+    }
 }
 
 /// Build the execution context passed to `mcp_service::execute_tool` from
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        response_body_limit: None,
+        actor_user_id: Some(&auth.user_id),
+        caller_token: auth.caller_token.as_deref(),
+        delegation_restrictions: Box::new(jwt::TokenRestrictionClaims::from_authenticated_scope(
+            &auth.scope,
+            auth.resource_uris.as_deref(),
+            auth.allow_all_services,
+            &auth.allowed_service_ids,
+            auth.allow_all_nodes,
+            &auth.allowed_node_ids,
+        )),
+        attribution: Some(
+            crate::services::service_insights_activity::RequestAttribution {
+                actor: crate::services::audit_service::AuditActor {
+                    user_id: auth.user_id.clone(),
+                    api_key_id: auth.api_key_id.clone(),
+                    api_key_name: auth.api_key_name.clone(),
+                    ip_address: auth.ip_address.clone(),
+                    user_agent: auth.user_agent.clone(),
+                },
+                auth_kind: match auth.auth_method {
+                    AuthMethod::Session => "session",
+                    AuthMethod::AccessToken => "access_token",
+                    AuthMethod::ApiKey => "api_key",
+                    AuthMethod::ServiceAccount => "service_account",
+                    AuthMethod::Delegated => "delegated",
+                    AuthMethod::Relay => "relay",
+                }
+                .into(),
+                oauth_client_id: auth.oauth_client_id.clone(),
+                acting_client_id: auth.acting_client_id.clone(),
+                api_key_credential_id: auth.api_key_credential_id.clone(),
+            },
+        ),
         org_agent_access: auth.org_agent_access.as_deref(),
         agent_owner: auth.assistant_agent_owner_id.as_deref(),
         operation_scopes: Some(&auth.assistant_operation_scopes),
@@ -3047,8 +3205,24 @@ async fn handle_meta_call_tool(
         None => false,
     };
 
+    let async_watch = if endpoint.async_operation.is_some() {
+        if let Some(chat) = auth.chat.as_ref() {
+            match crate::services::async_service_operation::reserve(
+                &state.db, chat, service, endpoint,
+            )
+            .await
+            {
+                Ok(watch) => Some(watch),
+                Err(error) => return tool_result(request_id.clone(), &error.to_string(), true),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let exec_ctx = mcp_exec_context(auth);
-    let response = match mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -3067,8 +3241,18 @@ async fn handle_meta_call_tool(
         &exec_ctx,
         billing_egress_permit,
     )
-    .await
+    .await;
+    if let Some(watch) = &async_watch
+        && let Err(error) = crate::services::async_service_operation::submitted(
+            &state.db,
+            watch,
+            execution.as_ref().ok(),
+        )
+        .await
     {
+        tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
+    }
+    let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);
@@ -3076,12 +3260,18 @@ async fn handle_meta_call_tool(
         Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
             return request_body_too_large_tool_result(request_id, &error);
         }
+        Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+            return concurrency_limited_response(request_id);
+        }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
             return tool_result(request_id, &format!("Tool execution failed: {e}"), true);
         }
     };
 
+    if async_watch.is_some() && (200..300).contains(&response.status) {
+        response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
+    }
     // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
@@ -3100,10 +3290,11 @@ async fn handle_meta_call_tool(
         auth.api_key_name.clone(),
     );
 
+    let concurrency = response.concurrency.take();
     let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
 
     // Embed tools/list_changed inline for SSE-capable clients
-    if changed && client_accepts_sse {
+    let result = if changed && client_accepts_sse {
         content_result_with_notifications(
             request_id,
             content,
@@ -3115,6 +3306,79 @@ async fn handle_meta_call_tool(
         )
     } else {
         content_result(request_id, content, is_error)
+    };
+    match concurrency {
+        Some(lease) => lease.hold_response(result),
+        None => result,
+    }
+}
+
+/// A discovery failure must not hide its cause or remove unrelated tools.
+/// Record only fixed error metadata: no query, identifiers, or error contents.
+async fn machine_discovery_definitions(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> Vec<mcp_service::McpToolDefinition> {
+    match Box::pin(crate::services::machine_access_service::definitions(
+        &state.db, chat,
+    ))
+    .await
+    {
+        Ok(tools) => tools,
+        Err(error) => {
+            tracing::warn!(
+                reason = error.error_key(),
+                error_code = error.error_code(),
+                "Machine tool discovery unavailable"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// NyxAgent serializes the whole MCP result and truncates it at 10,000 chars.
+/// Bound the escaped wire result in bytes (also safe for multi-byte text), keep
+/// complete schemas for the best matches, and explicitly report omitted rows.
+fn bounded_chat_search_result(mut result: serde_json::Value) -> String {
+    loop {
+        let text = result.to_string();
+        let wire =
+            serde_json::json!({"content": [{"type": "text", "text": &text}], "isError": false});
+        if wire.to_string().len() <= 10_000 {
+            return text;
+        }
+        result["truncated"] = serde_json::json!(true);
+        result["hint"] = serde_json::json!(
+            "Call a matching tool with nyx__call_tool. For more matches, narrow the query; tools/list provides complete input schemas."
+        );
+        let matches = result["matches"].as_array_mut().expect("search matches");
+        if matches.len() > 1 {
+            matches.pop();
+        } else if matches
+            .first()
+            .is_some_and(|tool| tool["input_schema_omitted"] == true)
+        {
+            // Even the compact metadata failed the escaped wire budget (for
+            // example a corrupt legacy tool name). Always make progress.
+            matches.clear();
+        } else if let Some(tool) = matches.first_mut() {
+            // A single schema can exceed the entire budget. Do not fabricate a
+            // partial JSON Schema or pretend no tool matched.
+            tool.as_object_mut()
+                .expect("tool match")
+                .remove("inputSchema");
+            tool["input_schema_omitted"] = serde_json::json!(true);
+            if let Some(description) = tool["description"].as_str() {
+                tool["description"] =
+                    serde_json::json!(description.chars().take(512).collect::<String>());
+            }
+            // Names are normally bounded by service/endpoint validation. A
+            // corrupt legacy row must not make this loop unbounded either.
+            if tool["name"].as_str().is_some_and(|name| name.len() > 1024) {
+                matches.clear();
+            }
+        }
+        result["count"] = serde_json::json!(result["matches"].as_array().unwrap().len());
     }
 }
 
@@ -3139,7 +3403,7 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    let services = match load_all_services_for_meta_tools(state, auth).await {
+    let (services, ranks) = match load_preferred_services_for_meta_tools(state, auth).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for search: {e}");
@@ -3149,64 +3413,51 @@ async fn handle_meta_search(
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
-    let search_result = mcp_service::search_all_tools(&services, query);
+    let search_result = mcp_service::search_all_tools_ranked(&services, query, &ranks);
 
-    let mut results: Vec<serde_json::Value> = search_result
-        .matches
-        .iter()
-        .map(|t| {
+    let mut candidates = search_result.matches;
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
+        candidates.push(crate::services::assistant_upload_service::definition());
+    }
+    let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
+        .into_iter()
+        .map(|tool| {
             let mut value = serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
             });
-            if auth.chat.is_some()
-                && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)
-            {
-                value["chat_access"] = serde_json::json!(chat_access(auth, service));
+            if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
+                value["executable"] = serde_json::json!(service.executable);
+                value["preference_rank"] =
+                    serde_json::json!(ranks.get(&service.service_id).copied());
+                if auth.chat.is_some() {
+                    value["chat_access"] = serde_json::json!(chat_access(auth, service));
+                }
+            } else {
+                value["executable"] = serde_json::json!(true);
+                value["preference_rank"] = serde_json::Value::Null;
+                value["hint"] = serde_json::json!("Call this native tool directly by name.");
             }
             value
         })
         .collect();
-
-    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        let matcher = mcp_service::ToolSearch::new(query);
-        let mut tools: Vec<_> = Box::pin(crate::services::machine_access_service::definitions(
-            &state.db, chat,
-        ))
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .chain(std::iter::once(
-            crate::services::assistant_upload_service::definition(),
-        ))
-        .filter_map(|tool| {
-            matcher
-                .rank(&tool.name, &tool.description)
-                .map(|rank| (rank, tool))
-        })
-        .collect();
-        tools.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
-        results.extend(tools.into_iter().map(|(_, tool)| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": tool.input_schema,
-                "hint": "Call this native tool directly by name.",
-            })
-        }));
-    }
     let mut response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
         "hint": "Use nyx__call_tool to invoke any of these tools by name. \
-            Pass the tool name and arguments as shown in the match results.",
+            Pass the tool name and arguments as shown in the match results. At equal relevance, connections of the same service follow the owner's agent order in their original slots. preference_rank is relative to that service; executable reports current credential and routing availability.",
     });
     if auth.chat.is_some() {
         response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
     }
 
-    let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
+    let text = if auth.chat.is_some() {
+        bounded_chat_search_result(response_json)
+    } else {
+        serde_json::to_string_pretty(&response_json).unwrap_or_default()
+    };
     tool_result(request_id, &text, false)
 }
 
@@ -3233,15 +3484,38 @@ async fn load_all_services_for_meta_tools(
     );
     if let Some(chat) = auth.chat.as_ref() {
         let mut services = services;
+        if chat.guest {
+            services.retain(|service| match &service.source {
+                mcp_service::McpToolSource::UserManaged { .. } => {
+                    auth.allowed_service_ids.contains(&service.service_id)
+                }
+                mcp_service::McpToolSource::Platform { .. } => auth
+                    .allowed_platform_service_ids
+                    .contains(&service.service_id),
+                mcp_service::McpToolSource::Internal => false,
+            });
+        }
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
-        services.push(crate::services::assistant_account_tools::virtual_service(
-            chat,
-        ));
+        services.push(
+            crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
+        );
         Ok(services)
     } else {
         Ok(filter_services_by_scope(services, auth))
     }
+}
+
+async fn load_preferred_services_for_meta_tools(
+    state: &AppState,
+    auth: &McpAuthContext,
+) -> crate::errors::AppResult<(
+    Vec<mcp_service::McpToolService>,
+    std::collections::HashMap<String, u32>,
+)> {
+    let services = load_all_services_for_meta_tools(state, auth).await?;
+    crate::services::service_preference_service::order_discovery(&state.db, &auth.user_id, services)
+        .await
 }
 
 async fn handle_meta_list_connected(
@@ -3255,7 +3529,7 @@ async fn handle_meta_list_connected(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    let services = match load_all_services_for_meta_tools(state, auth).await {
+    let (services, ranks) = match load_preferred_services_for_meta_tools(state, auth).await {
         Ok(services) => services,
         Err(error) => {
             tracing::error!("Failed to load connected services: {error}");
@@ -3263,7 +3537,7 @@ async fn handle_meta_list_connected(
         }
     };
 
-    let mut result = mcp_service::list_connected_services(&services, query);
+    let mut result = mcp_service::list_connected_services_ranked(&services, query, &ranks);
     if auth.chat.is_some()
         && let Some(rows) = result["services"].as_array_mut()
     {
@@ -3314,6 +3588,27 @@ async fn handle_meta_discover(
     }
 }
 
+/// Refusal for a restricted caller asking to connect a service outside its
+/// grant. Only a plain OAuth app's access is the user's consent, which they
+/// change by revoking the app and reconnecting; API keys, the relay tokens
+/// that inherit an agent key's allowlist, delegated tokens and service
+/// accounts are managed elsewhere.
+fn restricted_connect_refusal(auth: &McpAuthContext, frontend_url: &str) -> String {
+    if auth.auth_method != AuthMethod::AccessToken || auth.api_key_id.is_some() {
+        return "API key does not have access to this service".to_string();
+    }
+    let consents_url = format!("{}/settings/consents", frontend_url.trim_end_matches('/'));
+    serde_json::json!({
+        "error": "service_not_granted",
+        "message": "The user's NyxID sign-in for this app does not include this service.",
+        "instructions": format!(
+            "Ask the user to open {consents_url}, revoke this app, then reconnect it and choose the services to share (or all services)."
+        ),
+        "manage_access_url": consents_url,
+    })
+    .to_string()
+}
+
 async fn handle_meta_connect(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3349,7 +3644,7 @@ async fn handle_meta_connect(
     {
         return tool_result(
             request_id,
-            "API key does not have access to this service",
+            &restricted_connect_refusal(auth, &state.config.frontend_url),
             true,
         );
     }
@@ -4159,18 +4454,32 @@ async fn handle_mcp_ssh_exec(
         timeout_secs,
     };
 
-    // Reuse the core logic from the ssh_exec module
-    let result = execute_ssh_command_internal(
+    let concurrency = match crate::services::service_concurrency_service::acquire_policy(
+        &state.db,
+        service.concurrency_policy.as_ref(),
+        &auth.user_id,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => return app_error_to_rpc(request_id, &error),
+    };
+
+    // Native SSH has a separate dispatcher from HTTP-backed catalog tools.
+    let execution = Box::pin(execute_ssh_command_internal(
         state,
         auth,
         &service_id,
         &ssh_svc,
         &body,
         billing_egress_permit,
-    )
-    .await;
+    ));
+    let result = match &concurrency {
+        Some(lease) => lease.run(execution).await,
+        None => execution.await,
+    };
 
-    match result {
+    let response = match result {
         Ok(response) => {
             let response_json = serde_json::json!({
                 "exit_code": response.exit_code,
@@ -4185,7 +4494,14 @@ async fn handle_mcp_ssh_exec(
             let is_error = response.exit_code != 0;
             tool_result(request_id, &text, is_error)
         }
+        Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+            return concurrency_limited_response(request_id);
+        }
         Err(e) => tool_result(request_id, &format!("SSH exec failed: {e}"), true),
+    };
+    match concurrency {
+        Some(lease) => lease.hold_response(response),
+        None => response,
     }
 }
 
@@ -4625,11 +4941,16 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            caller_token: None,
             chat: None,
             account_acknowledged: false,
+            scope: String::new(),
+            resource_uris: None,
             user_id: "user-1".into(),
             auth_method: AuthMethod::ApiKey,
             acting_client_id: None,
+            oauth_client_id: None,
+            api_key_credential_id: None,
             approval_owner_user_id: None,
             is_api_key: true,
             api_key_id: Some("key-1".into()),
@@ -5214,6 +5535,7 @@ mod tests {
                 cost_class: None,
                 execution: Default::default(),
                 publication: Default::default(),
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),
@@ -5247,6 +5569,7 @@ mod tests {
                 cost_class: None,
                 execution: Default::default(),
                 publication: Default::default(),
+                async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),
@@ -5531,6 +5854,122 @@ mod tests {
     }
 
     #[test]
+    fn only_unrestricted_first_party_access_tokens_allow_session_fallback() {
+        // A session records none of the token's restrictions, and session auth
+        // is allow-all and skips approval. Restricted and client-issued tokens
+        // keep a session for notifications but must not be able to drop their
+        // bearer and continue as `AuthMethod::Session`.
+        let first_party = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
+        assert!(first_party.allows_session_fallback());
+
+        let mut client_issued = first_party.clone();
+        client_issued.oauth_client_id = Some("codex-dcr-client".to_string());
+        assert!(!client_issued.allows_session_fallback());
+
+        let mut zero_services = first_party.clone();
+        zero_services.allow_all_services = false;
+        assert!(!zero_services.allows_session_fallback());
+
+        let mut node_restricted = first_party.clone();
+        node_restricted.allow_all_nodes = false;
+        assert!(!node_restricted.allows_session_fallback());
+
+        for method in [
+            AuthMethod::ApiKey,
+            AuthMethod::Relay,
+            AuthMethod::Delegated,
+            AuthMethod::ServiceAccount,
+            AuthMethod::Session,
+        ] {
+            let label = format!("{method:?}");
+            assert!(
+                !McpAuthContext::user("user-1".to_string(), method).allows_session_fallback(),
+                "{label} must not mint a fallback-capable session"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restricted_token_session_cannot_stand_in_for_the_bearer() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let sid = state
+            .mcp_sessions
+            .create_with_proxy_access("user-1", true, false)
+            .await
+            .unwrap()
+            .expect("session created");
+
+        // No bearer at all: the session alone must not authenticate.
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-session-id", sid.parse().unwrap());
+        let refused = authenticate_mcp(&state, &headers, true)
+            .await
+            .expect_err("session fallback must be refused");
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+        // An expired or invalid bearer falls through to the same refusal.
+        headers.insert("authorization", "Bearer not-a-valid-jwt".parse().unwrap());
+        let refused = authenticate_mcp(&state, &headers, true)
+            .await
+            .expect_err("invalid bearer must not fall back to the session");
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn restricted_connect_refusal_points_oauth_users_at_their_consents() {
+        let mut api_key = McpAuthContext::user("user-1".to_string(), AuthMethod::ApiKey);
+        api_key.is_api_key = true;
+        assert_eq!(
+            restricted_connect_refusal(&api_key, "https://nyx.example/"),
+            "API key does not have access to this service"
+        );
+
+        for method in [
+            AuthMethod::Relay,
+            AuthMethod::Delegated,
+            AuthMethod::ServiceAccount,
+        ] {
+            let label = format!("{method:?}");
+            let ctx = McpAuthContext::user("user-1".to_string(), method);
+            assert_eq!(
+                restricted_connect_refusal(&ctx, "https://nyx.example/"),
+                "API key does not have access to this service",
+                "{label} must not be sent to OAuth consents"
+            );
+        }
+
+        let oauth = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
+        let refusal: serde_json::Value =
+            serde_json::from_str(&restricted_connect_refusal(&oauth, "https://nyx.example/"))
+                .expect("structured refusal");
+        assert_eq!(refusal["error"], "service_not_granted");
+        assert_eq!(
+            refusal["manage_access_url"],
+            "https://nyx.example/settings/consents"
+        );
+        assert!(!refusal.to_string().contains("API key"));
+    }
+
+    #[test]
+    fn legacy_session_rows_without_the_flag_do_not_allow_fallback() {
+        let now = bson::DateTime::now();
+        let legacy = bson::doc! {
+            "_id": "sess-legacy",
+            "user_id": "user-1",
+            "client_info": bson::Bson::Null,
+            "activated_service_ids": [],
+            "proxy_authorized": true,
+            "notification_sequence": 0_i64,
+            "created_at": now,
+            "last_active_at": now,
+            "expires_at": now,
+        };
+        let record: crate::models::mcp_session::McpSessionRecord =
+            bson::from_document(legacy).expect("legacy row deserializes");
+        assert!(!record.session_fallback_allowed);
+    }
+
+    #[test]
     fn mcp_extract_ip_prefers_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
@@ -5759,6 +6198,97 @@ mod tests {
     // app_error_to_rpc tests
     // -----------------------------------------------------------------------
 
+    #[tokio::test]
+    async fn service_concurrency_native_ssh_cannot_bypass_catalog_limit() {
+        use crate::models::downstream_service::{DownstreamService, SshServiceConfig};
+        use crate::models::service_concurrency::ServiceConcurrencyPolicy;
+        use crate::services::service_concurrency_service as concurrency;
+        let db = crate::test_utils::connect_transaction_test_database("concurrency_mcp_ssh").await;
+        concurrency::ensure_indexes(&db).await.unwrap();
+        let actor = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&actor, UserType::Person))
+            .await
+            .unwrap();
+        let mut service = crate::test_utils::test_auto_connected_catalog_service();
+        service.service_type = "ssh".into();
+        service.ssh_config = Some(SshServiceConfig {
+            host: "127.0.0.1".into(),
+            port: 22,
+            ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::Cert,
+            certificate_auth_enabled: true,
+            certificate_ttl_minutes: 15,
+            allowed_principals: vec!["test".into()],
+            ca_private_key_encrypted: None,
+            ca_public_key: None,
+        });
+        service.concurrency_policy = Some(ServiceConcurrencyPolicy {
+            service_id: service.id.clone(),
+            default_limit: Some(1),
+            users: vec![],
+            orgs: vec![],
+        });
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let mut connection = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &actor,
+            "limited-ssh",
+            &uuid::Uuid::new_v4().to_string(),
+            Some(&service.id),
+            None,
+        );
+        connection.service_type = "ssh".into();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(connection)
+            .await
+            .unwrap();
+        let held = concurrency::acquire(&db, &service, &actor).await.unwrap();
+        let state = test_app_state(db);
+        let auth = McpAuthContext::user(actor, AuthMethod::Session);
+        let permit =
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Mcp,
+                    ),
+                ),
+                crate::services::billing::BillingIngress::Mcp,
+            )
+            .unwrap();
+        let response = Box::pin(handle_mcp_ssh_exec(
+            &state,
+            &auth,
+            &serde_json::json!({"service":service.id,"command":"pwd"}),
+            Some(serde_json::json!(1)),
+            permit,
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "1");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn service_concurrency_refusal_has_http_and_typed_rpc_contract() {
+        let response = super::concurrency_limited_response(Some(serde_json::json!(7)));
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "1");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["id"], 7);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("service_concurrency_limited (12700)")
+        );
+    }
+
     #[test]
     fn app_error_to_rpc_handles_rate_limited() {
         let resp = app_error_to_rpc(
@@ -5826,11 +6356,19 @@ mod tests {
 
     #[test]
     fn mcp_exec_context_from_api_key_auth() {
-        let auth = api_key_auth(vec!["svc-1".into()]);
+        let mut auth = api_key_auth(vec!["svc-1".into()]);
+        auth.api_key_credential_id = Some("login-credential".into());
         let ctx = mcp_exec_context(&auth);
         assert_eq!(ctx.api_key_id, Some("key-1"));
         assert!(!ctx.allow_all_nodes);
         assert!(ctx.allowed_node_ids.is_empty());
+        let attribution = ctx.attribution.unwrap();
+        assert_eq!(attribution.actor.api_key_id.as_deref(), Some("key-1"));
+        assert_eq!(attribution.actor.api_key_name.as_deref(), Some("agent"));
+        assert_eq!(
+            attribution.api_key_credential_id.as_deref(),
+            Some("login-credential")
+        );
     }
 
     #[test]
@@ -5839,6 +6377,21 @@ mod tests {
         let ctx = mcp_exec_context(&auth);
         assert!(ctx.api_key_id.is_none());
         assert!(ctx.allow_all_nodes);
+        assert_eq!(ctx.attribution.unwrap().auth_kind, "session");
+    }
+
+    #[test]
+    fn mcp_exec_context_preserves_verified_application_identity() {
+        let mut auth = McpAuthContext::user("user-1".into(), AuthMethod::AccessToken);
+        auth.oauth_client_id = Some("registered-client".into());
+        let ctx = mcp_exec_context(&auth);
+        let attribution = ctx.attribution.unwrap();
+        assert_eq!(
+            attribution.oauth_client_id.as_deref(),
+            Some("registered-client")
+        );
+        assert_eq!(attribution.auth_kind, "access_token");
+        assert!(attribution.actor.api_key_id.is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -6166,7 +6719,7 @@ mod curation_auth_regressions {
         let sid = f
             .state
             .mcp_sessions
-            .create_with_proxy_access(&f.sa.id, true)
+            .create_with_proxy_access(&f.sa.id, true, true)
             .await
             .unwrap()
             .unwrap();
@@ -6241,6 +6794,15 @@ mod org_agent_mcp_tests {
             .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", credential.raw_key.parse().unwrap());
+        // The live org-agent service/node intersection must survive delegation.
+        let (_, key, credential_id) =
+            crate::services::key_service::validate_api_key(&f.state.db, &credential.raw_key)
+                .await
+                .unwrap();
+        let rest = auth::api_key_auth_user(&f.state.db, &key, credential_id, None, None)
+            .await
+            .unwrap();
+        let expected = jwt::TokenRestrictionClaims::from_auth_user(&rest);
         memberships.store(0, Ordering::SeqCst);
         let ctx = authenticate_mcp(&f.state, &headers, false)
             .await
@@ -6253,6 +6815,12 @@ mod org_agent_mcp_tests {
         );
         assert_eq!(ctx.user_id, f.admin);
         assert!(ctx.chat.is_some());
+        let actual = mcp_exec_context(&ctx).delegation_restrictions;
+        assert_eq!(actual.resources, expected.resources);
+        assert_eq!(actual.allowed_service_ids, expected.allowed_service_ids);
+        assert_eq!(actual.allow_all_services, expected.allow_all_services);
+        assert_eq!(actual.allowed_node_ids, expected.allowed_node_ids);
+        assert_eq!(actual.allow_all_nodes, expected.allow_all_nodes);
         assert!(
             matches!(mcp_service_scope(&ctx), mcp_service::ServiceScope::Allowed(ids) if ids.is_empty())
         );
@@ -6343,3 +6911,185 @@ mod typed_outcome_tests {
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod skill_authoring_discovery_tests {
+    use super::*;
+    use crate::{
+        models::{assistant_conversation::AgentRole, feature_flag_override},
+        services::{
+            assistant_acknowledgement_service::ChatAuthority,
+            assistant_agent_learning,
+            feature_flag_service::{self, FlagTarget},
+        },
+        test_utils::{connect_test_database_with_command_handler, test_app_state},
+    };
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn chat_auth(role: AgentRole, guest: bool) -> McpAuthContext {
+        let mut auth = McpAuthContext::user("owner".into(), AuthMethod::ApiKey);
+        auth.is_api_key = true;
+        auth.api_key_id = Some("chat-key".into());
+        auth.chat = Some(ChatAuthority {
+            org_agent_access: None,
+            turn_id: Some("turn".into()),
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: Vec::new(),
+            saved_login_ids: Vec::new(),
+            conversation_id: "conversation".into(),
+            user_id: auth.user_id.clone(),
+            api_key_id: "chat-key".into(),
+            role,
+            agent_id: "agent".into(),
+            agent_name: "agent".into(),
+            guest,
+            confirmation_policy: None,
+        });
+        auth
+    }
+
+    async fn observed_state(name: &str) -> (AppState, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("find").ok()
+                    == Some(feature_flag_override::COLLECTION_NAME)
+                && event
+                    .command
+                    .get_document("filter")
+                    .ok()
+                    .and_then(|filter| filter.get_str("flag_key").ok())
+                    == Some(assistant_agent_learning::FLAG_KEY)
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let db = connect_test_database_with_command_handler(name, handler)
+            .await
+            .expect("MongoDB required");
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                "owner",
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        (test_app_state(db), reads)
+    }
+
+    async fn tool_names(state: &AppState, auth: &McpAuthContext) -> Vec<String> {
+        let request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".into(),
+            params: None,
+        };
+        let response = Box::pin(handle_tools_list(state, auth, None, &request)).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value.get("error").is_none(), "{value}");
+        value["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn only_owner_nyxbot_tools_list_reads_authoring_flag() {
+        let (state, reads) = observed_state("authoring_discovery_reads").await;
+        feature_flag_service::set_platform_override(
+            &state.db,
+            assistant_agent_learning::FLAG_KEY,
+            &FlagTarget::User("owner".into()),
+            true,
+            "owner",
+        )
+        .await
+        .unwrap();
+        for auth in [
+            chat_auth(AgentRole::Subagent, false),
+            chat_auth(AgentRole::Orchestrator, true),
+            chat_auth(AgentRole::Subagent, true),
+            McpAuthContext::user("owner".into(), AuthMethod::ApiKey),
+        ] {
+            reads.store(0, Ordering::SeqCst);
+            let names = Box::pin(tool_names(&state, &auth)).await;
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            assert!(!names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        }
+        reads.store(0, Ordering::SeqCst);
+        let auth = chat_auth(AgentRole::Orchestrator, false);
+        let names = Box::pin(tool_names(&state, &auth)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert!(names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_authoring_flag_read_preserves_other_tools() {
+        let (state, reads) = observed_state("authoring_discovery_failure").await;
+        // A matching malformed record makes flag deserialization fail without
+        // disturbing catalog reads, demonstrating the isolated failure boundary.
+        state
+            .db
+            .collection::<mongodb::bson::Document>(feature_flag_override::COLLECTION_NAME)
+            .insert_one(mongodb::bson::doc! {
+                "_id": "malformed-flag", "flag_key": assistant_agent_learning::FLAG_KEY,
+                "enabled": true, "target_kind": "unknown"
+            })
+            .await
+            .unwrap();
+        assert!(
+            crate::services::assistant_skill_authoring::enabled(&state.db, "owner")
+                .await
+                .is_err()
+        );
+        reads.store(0, Ordering::SeqCst);
+        let auth = chat_auth(AgentRole::Orchestrator, false);
+        let names = Box::pin(tool_names(&state, &auth)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert!(!names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        for preserved in [
+            "nyxid__list_subagents",
+            "nyxid__remember",
+            "nyxid__settings_link",
+        ] {
+            assert!(names.iter().any(|name| name == preserved), "{preserved}");
+        }
+        // The same fallback applies to catalog loading for tool calls.
+        let services = Box::pin(load_all_services_for_meta_tools(&state, &auth))
+            .await
+            .unwrap();
+        let native = services
+            .iter()
+            .find(|service| service.service_slug == "nyxid")
+            .unwrap();
+        assert!(
+            native
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.name == "list_subagents")
+        );
+        assert!(
+            !native
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.name == "draft_agent_skill")
+        );
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+#[path = "mcp_delegation_tests.rs"]
+mod delegation_tests;

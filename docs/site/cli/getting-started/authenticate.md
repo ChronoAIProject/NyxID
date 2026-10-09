@@ -76,6 +76,7 @@ the shape `{"error":{"code":"login_pending","message":"..."}}`:
 | 19 | `login_unavailable` |
 | 20 | `login_unsupported` |
 | 21 | `login_storage_failed` |
+| 22 | `login_input_unavailable` |
 
 ### Login with a one-time code
 
@@ -88,8 +89,26 @@ machine:
 nyxid login --code --profile work --base-url <BASE_URL>
 ```
 
-The command prompts for the code without displaying it. The optional argument
-form `--code XXXX-XXXX` supports automation but may enter shell history.
+The command prompts for the code without displaying it. On Unix it disables and
+verifies echo on the stdin terminal itself, including managed PTYs without a
+controlling `/dev/tty`. It restores the saved terminal settings after entry,
+errors or interruption (including Ctrl-C). The existing explicit argument form
+remains accepted for compatibility; keep codes out of command lines, environment
+variables, shell history and logs.
+
+Piped/non-terminal stdin is refused; there is no secret-from-pipe opt-in. If
+hidden input cannot be guaranteed, no code is read or redeemed. Text and JSON
+report `login_input_unavailable` (exit 22), with `diagnostic.stage: "input"`, a
+fixed `diagnostic.reason` such as `stdin_not_terminal` or
+`hidden_input_unavailable`, and the same recovery hint: run in an interactive
+terminal, or use plain `nyxid login` (device flow) or `nyxid login --callback`.
+Input interruptions use `input_interrupted`; read/closed-input failures use
+`input_read_failed` / `input_closed`. A failed terminal restoration reports
+`terminal_restore_failed` and prevents redemption. Diagnostics never include
+entered text or raw IO errors. In JSON mode the prompt goes to stderr and stdout
+contains only the structured result. A code rejected or cancelled by the server
+still reports `login_code_invalid` (exit 18).
+
 Codes are consumed once. The issuing screen shows redemption and requester
 context; Cancel stops a pending code, while Revoke invalidates its delivered
 session or child credential. Neither the code nor a poll secret belongs in URLs

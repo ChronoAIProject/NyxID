@@ -134,6 +134,8 @@ pub struct EvidenceItem {
 }
 #[derive(Serialize)]
 pub struct ProposalItem {
+    pub source: ProposalSource,
+    pub updated_at: chrono::DateTime<Utc>,
     pub id: String,
     pub agent_id: String,
     pub owner_id: String,
@@ -178,6 +180,9 @@ async fn current(
     agent: &AssistantAgent,
     row: &AssistantAgentLearningProposal,
 ) -> AppResult<bool> {
+    if row.source == ProposalSource::Authored {
+        return Ok(agent.destroyed_at.is_none() && agent.user_id == row.owner_id);
+    }
     let config = db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
         .find_one(doc! {"_id":&row.agent_id,"owner_id":&row.owner_id,"enabled":true,"config_revision":row.config_revision}).await?;
     let Some(config) = config else {
@@ -227,16 +232,29 @@ async fn draft(
         .await
         .map_err(|_| not_found())?;
     let text = std::str::from_utf8(&bytes).map_err(|_| not_found())?;
+    if row.source == ProposalSource::Authored {
+        return super::assistant_skill_authoring::decode_body(text);
+    }
     let valid = learning::validate_generated(text)?.ok_or_else(not_found)?;
     serde_json::from_slice(&valid).map_err(|_| not_found())
 }
 
 /// Improvements may only target an active L1 root at its exact current B2 pin.
 /// Called after model validation, on edit, and before every publication/pin.
+#[cfg(test)]
 pub(crate) async fn validate_base(
     db: &Database,
     agent: &AssistantAgent,
     draft: &GeneratedProposal,
+) -> AppResult<()> {
+    validate_proposal_base(db, agent, draft, ProposalSource::Learned).await
+}
+
+pub(crate) async fn validate_proposal_base(
+    db: &Database,
+    agent: &AssistantAgent,
+    draft: &GeneratedProposal,
+    source: ProposalSource,
 ) -> AppResult<()> {
     let Some(base) = &draft.base_skill else {
         return Ok(());
@@ -249,8 +267,8 @@ pub(crate) async fn validate_base(
             && s.name == base.name
             && s.dependencies.is_empty()
     });
-    if base.source != "ornn" || pin.is_none() || db.collection::<AssistantAgentLearningSkillRoot>(ROOTS_COLLECTION_NAME)
-        .find_one(doc! {"agent_id":&agent.id,"owner_id":&agent.user_id,"skill_id":&base.skill_id,"version":&base.version,"sha256":&base.sha256}).await?.is_none() {
+    if base.source != "ornn" || pin.is_none() || (source == ProposalSource::Learned && db.collection::<AssistantAgentLearningSkillRoot>(ROOTS_COLLECTION_NAME)
+        .find_one(doc! {"agent_id":&agent.id,"owner_id":&agent.user_id,"skill_id":&base.skill_id,"version":&base.version,"sha256":&base.sha256}).await?.is_none()) {
         return Err(AppError::Conflict("base_skill_changed".into()));
     }
     publication::next_version(Some(base))?;
@@ -293,6 +311,8 @@ pub async fn list(
             Vec::new()
         };
         result.push(ProposalItem {
+            source: row.source,
+            updated_at: row.updated_at,
             id: row.id,
             agent_id: row.agent_id,
             owner_id: row.owner_id,
@@ -334,9 +354,14 @@ pub async fn edit(
     if row.revision != expected_revision || row.status != "pending" {
         return Err(conflict());
     }
-    let encoded = learning::validate_generated(&value.to_string())?.ok_or_else(conflict)?;
+    let encoded = if row.source == ProposalSource::Authored {
+        let body = super::assistant_skill_authoring::decode_body(&value.to_string())?;
+        super::assistant_skill_authoring::validate_body(&body)?
+    } else {
+        learning::validate_generated(&value.to_string())?.ok_or_else(conflict)?
+    };
     let value: GeneratedProposal = serde_json::from_slice(&encoded).map_err(|_| conflict())?;
-    validate_base(&state.db, &agent, &value).await?;
+    validate_proposal_base(&state.db, &agent, &value, row.source).await?;
     let encrypted = state.encryption_keys.encrypt(&encoded).await?;
     let fingerprint = super::assistant_action_receipts::fingerprint_sensitive_material(&format!(
         "{}:{}:{}",
@@ -459,11 +484,17 @@ pub async fn approval_binding(
     }
     require_current(&state.db, &agent, &row).await?;
     let body = draft(state, &row).await?;
-    validate_base(&state.db, &agent, &body).await?;
+    validate_proposal_base(&state.db, &agent, &body, row.source).await?;
     if row.publication.is_none() {
         let operation = Uuid::new_v4().to_string();
         let name = body.base_skill.as_ref().map_or_else(
-            || format!("nyx-learning-{}", operation.replace('-', "")),
+            || {
+                if row.source == ProposalSource::Authored {
+                    body.name.clone()
+                } else {
+                    format!("nyx-learning-{}", operation.replace('-', ""))
+                }
+            },
             |b| b.name.clone(),
         );
         let version = publication::next_version(body.base_skill.as_ref())?;
@@ -630,7 +661,7 @@ async fn recheck(
     {
         return Err(conflict());
     }
-    validate_base(&state.db, &agent, body).await?;
+    validate_proposal_base(&state.db, &agent, body, row.source).await?;
     Ok(agent)
 }
 async fn execute(
@@ -713,6 +744,7 @@ async fn execute(
                 if marked.matched_count != 1 {
                     return Err(conflict());
                 }
+                if row_for_pin.source == ProposalSource::Learned {
                 let config = db
                     .collection::<bson::Document>(CONFIG_COLLECTION_NAME)
                     .update_one(
@@ -723,6 +755,7 @@ async fn execute(
                     .await?;
                 if config.matched_count != 1 {
                     return Err(conflict());
+                }
                 }
                 let completed = db
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
@@ -775,3 +808,31 @@ async fn execute(
 #[cfg(test)]
 #[path = "assistant_agent_learning_review_tests.rs"]
 mod tests;
+
+/// First-party human preview of the exact package bound to an authored card.
+pub async fn authored_preview(
+    state: &AppState,
+    actor: &str,
+    agent_id: &str,
+    id: &str,
+) -> AppResult<Value> {
+    let (agent, row) = load(&state.db, actor, agent_id, id).await?;
+    if row.source != ProposalSource::Authored {
+        return Err(not_found());
+    }
+    let p = row.publication.as_ref().ok_or_else(conflict)?;
+    let mut files = Vec::new();
+    if !matches!(row.status.as_str(), "pinned" | "rejected" | "invalidated") {
+        let body = draft(state, &row).await?;
+        files.push(json!({"path":"SKILL.md","content":publication::skill_markdown(&body, &p.operation_id, &p.name, &p.version)?}));
+        files.extend(
+            body.files
+                .iter()
+                .map(|f| json!({"path":f.path,"content":f.content})),
+        );
+    }
+    Ok(
+        json!({"id":row.id,"agent_id":row.agent_id,"agent_name":agent.display_name.as_deref().unwrap_or(&agent.name),"revision":row.revision,"skills_revision":p.skills_revision,
+        "current_skills_revision":agent.skills_revision,"status":row.status,"name":p.name,"version":p.version,"files":files}),
+    )
+}

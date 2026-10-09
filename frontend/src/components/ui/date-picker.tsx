@@ -275,7 +275,7 @@ export function DatePicker(props: DatePickerProps) {
                     (cell.disabled || selectionLimitReached) &&
                       "cursor-not-allowed opacity-30",
                     sel && "bg-primary text-primary-foreground font-medium",
-                    tod && !sel && "font-medium text-primary",
+                    tod && !sel && "font-medium text-primary-text",
                   )}
                 >
                   {cell.day}

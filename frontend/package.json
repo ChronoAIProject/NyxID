@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "0.65.0",
+  "version": "0.68.0",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -50,6 +50,7 @@
     "cmdk": "^1.1.1",
     "i18next": "^26.0.3",
     "lucide-react": "^0.563.0",
+    "motion": "^14.0.0",
     "posthog-js": "^1.280.1",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",

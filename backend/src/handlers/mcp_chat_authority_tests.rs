@@ -642,6 +642,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
             cost_class: None,
             execution: Default::default(),
             publication: Default::default(),
+            async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: service.id.clone(),
@@ -3208,3 +3209,401 @@ async fn assistant_skills_specialist_permission_is_advisory_and_agent_scoped() {
     assert!(denied.get("error").is_some());
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged() {
+    use crate::services::service_preference_service as preferences;
+    let f = fixture("preference_mcp").await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let observed = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/{*path}",
+                any(move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    async { Json(json!({"target":"alpha"})) }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let a = connected(&f.state.db, &f.owner, "alpha", &address).await;
+    let slack = connected(&f.state.db, &f.owner, "slack", "https://example.com").await;
+    let b = connected(&f.state.db, &f.owner, "beta", "https://example.com").await;
+    let hidden = connected(&f.state.db, &f.owner, "hidden", "https://example.com").await;
+    let catalog = uuid::Uuid::new_v4().to_string();
+    let group = format!("catalog:{catalog}");
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&a,&b,&hidden]}},
+            doc! {"$set":{"catalog_service_id":&catalog}},
+        )
+        .await
+        .unwrap();
+    let slack_catalog = uuid::Uuid::new_v4().to_string();
+    for catalog_id in [&catalog, &slack_catalog] {
+        let mut service = crate::test_utils::test_auto_connected_catalog_service();
+        service.id = catalog_id.clone();
+        service.slug = if catalog_id == &catalog {
+            "anthropic"
+        } else {
+            "slack"
+        }
+        .into();
+        service.requires_user_credential = true;
+        f.state
+            .db
+            .collection(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        f.state.db.collection::<bson::Document>("service_endpoints").insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(), "service_id":catalog_id,
+            "name":"request", "description":"Request service data", "method":"GET", "path":"/ok",
+            "risk":"read", "is_active":true, "created_at":now,"updated_at":now,
+        }).await.unwrap();
+    }
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&slack},
+            doc! {"$set":{"catalog_service_id":&slack_catalog}},
+        )
+        .await
+        .unwrap();
+    for (i, id) in [&a, &slack, &b, &hidden].iter().enumerate() {
+        f.state.db.collection::<bson::Document>("user_services").update_one(doc! {"_id":*id},doc! {"$set":{"created_at":bson::DateTime::from_millis(2000000000000_i64-i as i64*1000)}}).await.unwrap();
+    }
+    let revoked = crate::services::user_api_key_service::create_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        crate::services::user_api_key_service::CreateApiKeyParams {
+            label: "revoked fixture",
+            credential_type: "bearer",
+            credential: "fixture-only",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "revoked",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&hidden},
+            doc! {"$set":{"auth_method":"bearer","api_key_id":revoked.id}},
+        )
+        .await
+        .unwrap();
+    for id in [&a, &b, &slack] {
+        let ask = service_gate(
+            &f.state.db,
+            &f.chat,
+            id,
+            if id == &a {
+                "alpha"
+            } else if id == &b {
+                "beta"
+            } else {
+                "slack"
+            },
+            "Service",
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            ask["acknowledgement_id"].as_str().unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let auth = authenticate(&f).await;
+    let call_args = json!({
+        "tool_name":"alpha__request",
+        "arguments":{}
+    });
+    let baseline = result(
+        direct_call(&f, &auth, "nyx__call_tool", call_args.clone()).await,
+        false,
+    )
+    .await;
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/list".into(),
+        params: None,
+    };
+    let before = axum::body::to_bytes(
+        handle_tools_list(&f.state, &auth, None, &request)
+            .await
+            .into_body(),
+        2 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    preferences::replace_group(
+        &f.state.db,
+        &f.owner,
+        &group,
+        &[b.clone(), hidden.clone()],
+        0,
+    )
+    .await
+    .unwrap();
+    let listed = result(
+        direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await,
+        false,
+    )
+    .await;
+    assert_eq!(listed["services"][0]["service_id"], b);
+    assert_eq!(listed["services"][0]["preference_rank"], 1);
+    assert!(listed.to_string().contains(&hidden));
+    assert_eq!(listed["services"][1]["service_id"], slack);
+    assert!(listed["services"][1]["preference_rank"].is_null());
+    let unavailable = listed["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["service_id"] == hidden)
+        .unwrap();
+    assert_eq!(unavailable["executable"], false);
+    assert_eq!(unavailable["preference_rank"], 2);
+    let searched = result(
+        direct_call(&f, &auth, "nyx__search_tools", json!({"query":"request"})).await,
+        false,
+    )
+    .await;
+    assert!(
+        searched["matches"][0]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("beta__")
+    );
+    assert_eq!(searched["matches"][0]["preference_rank"], 1);
+    assert!(
+        searched["matches"][1]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("slack__")
+    );
+    assert!(
+        searched["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("executable").is_some())
+    );
+    assert_eq!(
+        searched["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"].as_str().unwrap().starts_with("hidden__"))
+            .unwrap()["executable"],
+        false
+    );
+    assert!(
+        searched["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("preference_rank").is_some())
+    );
+    let native = result(
+        direct_call(
+            &f,
+            &auth,
+            "nyx__search_tools",
+            json!({"query":"uploaded document"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    let attachment = native["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "nyx__attachment_read")
+        .expect("native upload search extra");
+    assert_eq!(attachment["preference_rank"], Value::Null);
+    assert_eq!(attachment["executable"], true);
+    assert_eq!(
+        attachment["hint"],
+        "Call this native tool directly by name."
+    );
+    let after = axum::body::to_bytes(
+        handle_tools_list(&f.state, &auth, None, &request)
+            .await
+            .into_body(),
+        2 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        result(
+            direct_call(&f, &auth, "nyx__call_tool", call_args).await,
+            false
+        )
+        .await,
+        baseline
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let audits = f.state.db.collection::<crate::models::audit_log::AuditLog>(
+        crate::models::audit_log::COLLECTION_NAME,
+    );
+    let filter = doc! {"event_type":"mcp_tool_call", "event_data.tool":"alpha__request"};
+    let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let events: Vec<_> = audits
+                .find(filter.clone())
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if events.len() >= 2 {
+                break events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both asynchronous execution audits arrive");
+    assert_eq!(events.len(), 2, "no execution retry or extra audit");
+    assert_eq!(events[0].event_data, events[1].event_data);
+    for event in &events {
+        assert_eq!(event.user_id.as_deref(), Some(f.owner.as_str()));
+        assert_eq!(event.api_key_id.as_deref(), auth.api_key_id.as_deref());
+        assert_eq!(event.event_data.as_ref().unwrap()["service_id"], a);
+        assert_eq!(event.event_data.as_ref().unwrap()["via"], "nyx__call_tool");
+    }
+    preferences::replace_group(
+        &f.state.db,
+        &f.owner,
+        &group,
+        &[hidden.clone(), b.clone()],
+        1,
+    )
+    .await
+    .unwrap();
+    let scoped_key = crate::services::key_service::create_api_key_with_scope_authorization(
+        &f.state.db,
+        &f.owner,
+        Some(&f.owner),
+        "preference-scoped",
+        "proxy",
+        None,
+        None,
+        Some(&[a.clone(), b.clone()]),
+        Some(&[]),
+        Some(false),
+        Some(false),
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", scoped_key.full_key.parse().unwrap());
+    let scoped = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+    let listed = result(
+        direct_call(&f, &scoped, "nyx__list_connected_services", json!({})).await,
+        false,
+    )
+    .await;
+    assert_eq!(listed["services"][0]["service_id"], b);
+    assert_eq!(listed["services"][0]["preference_rank"], 1);
+    assert!(!listed.to_string().contains(&hidden));
+    let relay = crate::crypto::jwt::generate_relay_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &uuid::Uuid::parse_str(&f.owner).unwrap(),
+        "proxy",
+        None,
+        &crate::crypto::jwt::RelayAgentScope {
+            api_key_id: scoped.api_key_id.clone().unwrap(),
+            api_key_name: "preference-scoped".into(),
+            allowed_service_ids: vec![a.clone(), b.clone()],
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allow_all_nodes: false,
+        },
+    )
+    .unwrap();
+    let mut relay_headers = HeaderMap::new();
+    relay_headers.insert("authorization", format!("Bearer {relay}").parse().unwrap());
+    let relay_auth = authenticate_mcp(&f.state, &relay_headers, false)
+        .await
+        .unwrap();
+    assert_eq!(relay_auth.user_id, f.owner);
+    let relay_listed = result(
+        direct_call(&f, &relay_auth, "nyx__list_connected_services", json!({})).await,
+        false,
+    )
+    .await;
+    assert_eq!(relay_listed["services"], listed["services"]);
+    let relay_search = result(
+        direct_call(
+            &f,
+            &relay_auth,
+            "nyx__search_tools",
+            json!({"query":"request"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(relay_search["matches"][0]["preference_rank"], 1);
+    assert!(
+        relay_search["matches"][0]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("beta__")
+    );
+    assert!(!relay_search.to_string().contains(&hidden));
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    let listed = result(
+        direct_call(&f, &guest, "nyx__list_connected_services", json!({})).await,
+        false,
+    )
+    .await;
+    assert_eq!(listed["services"][0]["service_id"], b);
+    assert_eq!(listed["services"][0]["preference_rank"], 1);
+    assert!(!listed.to_string().contains(&hidden));
+    server.abort();
+}
+#[path = "async_service_operation_tests.rs"]
+mod async_service_operation_tests;

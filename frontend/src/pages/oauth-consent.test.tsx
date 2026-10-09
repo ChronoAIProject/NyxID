@@ -257,19 +257,59 @@ describe("OAuthConsentPage", () => {
     const permissions = screen.getByRole("region", {
       name: /This will allow/,
     });
+    expect(within(permissions).getByText("Your NyxID profile")).toBeVisible();
     expect(
-      within(permissions).getByText("Read your roles and permissions"),
+      within(permissions).getByText("openid profile email roles groups"),
     ).toBeVisible();
-    expect(within(permissions).getByText("Read your groups")).toBeVisible();
-    expect(
-      within(permissions).getByText("Use your connected services"),
-    ).toBeVisible();
+    expect(within(permissions).getByText("offline_access")).toBeVisible();
     expect(
       within(permissions).queryByText("Custom permission"),
     ).not.toBeInTheDocument();
-    for (const scope of ["roles", "groups", "proxy"]) {
-      expect(within(permissions).getByText(scope)).toBeVisible();
-    }
+    // `proxy` is presented as the service access table.
+    const services = screen.getByRole("region", { name: "Service access" });
+    expect(within(services).getByText("proxy")).toBeVisible();
+  });
+
+  it("grants agent apps read access to every service by default", () => {
+    setSearch({
+      ...VALID,
+      scope: "openid profile email offline_access proxy",
+    });
+
+    const { container } = render(<OAuthConsentPage />);
+
+    expect(
+      screen.getByRole("radiogroup", { name: "All services" }),
+    ).toBeVisible();
+    expect(
+      within(
+        screen.getByRole("radiogroup", { name: "All services" }),
+      ).getByRole("radio", { name: "Read" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      container.querySelector('input[name="allow_all_services"]'),
+    ).toHaveValue("true");
+    expect(container.querySelector('input[name="write_access"]')).toHaveValue(
+      "none",
+    );
+  });
+
+  it("only grants write access when the user chooses it", async () => {
+    setSearch({
+      ...VALID,
+      scope: "openid profile email offline_access proxy",
+    });
+
+    const { container } = render(<OAuthConsentPage />);
+    await userEvent.click(
+      within(
+        screen.getByRole("radiogroup", { name: "All services" }),
+      ).getByRole("radio", { name: "Read & write" }),
+    );
+
+    expect(container.querySelector('input[name="write_access"]')).toHaveValue(
+      "all",
+    );
   });
 
   it("shows the signed-in account in the connection card footer", () => {

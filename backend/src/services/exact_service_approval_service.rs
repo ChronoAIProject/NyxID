@@ -33,6 +33,7 @@ pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_requ
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
+    pub delegation_restrictions: Box<crate::crypto::jwt::TokenRestrictionClaims>,
     pub assistant_group_id: Option<String>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub agent_owner: Option<String>,
@@ -82,6 +83,7 @@ pub struct ExactServiceApprovalFence {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 #[serde(rename_all = "snake_case")]
 pub enum ExactServiceApprovalState {
     Pending,
@@ -96,7 +98,11 @@ pub enum ExactServiceApprovalState {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub struct ExactServiceApprovalResult {
+    /// Runtime-only capacity ownership; never part of the approval or receipt.
+    #[serde(skip)]
+    pub concurrency: Option<super::service_concurrency_service::Lease>,
     pub request_id: String,
     pub state: ExactServiceApprovalState,
     pub user_service_id: String,
@@ -479,6 +485,27 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            response_body_limit: None,
+            actor_user_id: Some(&caller.actor_user_id),
+            caller_token: None,
+            delegation_restrictions: caller.delegation_restrictions.clone(),
+            attribution: Some(super::service_insights_activity::RequestAttribution {
+                actor: super::audit_service::AuditActor {
+                    user_id: caller.actor_user_id.clone(),
+                    api_key_id: caller.api_key_id.clone(),
+                    api_key_name: caller
+                        .api_key_id
+                        .as_ref()
+                        .and(caller.requester_label.clone()),
+                    ip_address: None,
+                    user_agent: None,
+                },
+                auth_kind: caller.requester_type.clone(),
+                acting_client_id: (caller.requester_type == "delegated")
+                    .then(|| caller.requester_id.clone()),
+                oauth_client_id: None,
+                api_key_credential_id: None,
+            }),
             org_agent_access: caller.org_agent_access.as_deref(),
             agent_owner: caller.agent_owner.as_deref(),
             operation_scopes: Some(&caller.operation_scopes),
@@ -540,7 +567,7 @@ pub async fn redeem_request(
                 &caller.proxy_resolution_user_id,
                 &execution.resolution,
             );
-        let executed = Box::pin(mcp_service::execute_tool_resolved(
+        let mut executed = Box::pin(mcp_service::execute_tool_resolved(
             &state.http_client,
             &state.db,
             &state.encryption_keys,
@@ -562,9 +589,17 @@ pub async fn redeem_request(
             node_route,
             has_cred_for_fallback,
             billing_context_builder,
+            execution.resolution.catalog_service_slug.as_deref(),
         ))
         .await;
 
+        let concurrency = match &mut executed {
+            Ok(mcp_service::McpToolExecutionOutcome::Response(response)) => {
+                response.concurrency.take()
+            }
+            _ => None,
+        };
+        let concurrency_limited = matches!(&executed, Err(AppError::ServiceConcurrencyLimited));
         let completed_at = Utc::now();
         let redemption = match executed {
             Ok(mcp_service::McpToolExecutionOutcome::Response(mcp_service::ToolResponse {
@@ -635,7 +670,12 @@ pub async fn redeem_request(
                 "exact_service_redemption_state_conflict".to_string(),
             ));
         }
-        result_for(&updated, persisted.state)
+        if concurrency_limited {
+            return Err(AppError::ServiceConcurrencyLimited);
+        }
+        let mut result = result_for(&updated, persisted.state)?;
+        result.concurrency = concurrency;
+        Ok(result)
     };
 
     match tokio::time::timeout_at(deadline, post_claim).await {
@@ -1678,6 +1718,7 @@ fn result_for(
         .ok_or_else(|| AppError::BadRequest("not_an_exact_service_request".to_string()))?;
     let redemption = binding.redemption.as_ref();
     Ok(ExactServiceApprovalResult {
+        concurrency: None,
         request_id: request.id.clone(),
         state,
         user_service_id: binding.user_service_id.clone(),
@@ -1797,6 +1838,7 @@ async fn reject_legacy_request_replay(
 
 fn safe_execution_failure_code(error: &AppError) -> &'static str {
     match error {
+        AppError::ServiceConcurrencyLimited => "service_concurrency_limited",
         AppError::ApiKeyScopeForbidden(_)
         | AppError::ApiKeyScopeInactive
         | AppError::ApiKeyScopeNotFound(_) => "authorization_revoked",
@@ -1821,6 +1863,7 @@ mod tests {
 
     fn caller() -> ExactServiceApprovalCaller {
         ExactServiceApprovalCaller {
+            delegation_restrictions: Default::default(),
             assistant_group_id: None,
             agent_owner: None,
             org_agent_access: None,
