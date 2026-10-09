@@ -2179,7 +2179,7 @@ async fn dispatch_service_tool(
             .await
             .unwrap_or(false)
             {
-                return tool_result(request.id.clone(), &serde_json::json!({"error":"tool_operation_not_published","error_code":12600,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
+                return tool_result(request.id.clone(), &serde_json::json!({"error":"tool_operation_not_published","error_code":12700,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
             }
             if mcp_service::inactive_workspace_tool(tool_name, &services) {
                 return tool_result(
@@ -3113,7 +3113,7 @@ async fn handle_meta_call_tool(
             .await
             .unwrap_or(false)
             {
-                return tool_result(request_id, &serde_json::json!({"error":"tool_operation_not_published","error_code":12600,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
+                return tool_result(request_id, &serde_json::json!({"error":"tool_operation_not_published","error_code":12700,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
             }
             if mcp_service::inactive_workspace_tool(tool_name, &services) {
                 return tool_result(
@@ -6285,7 +6285,7 @@ mod tests {
             body["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("service_concurrency_limited (12700)")
+                .contains("service_concurrency_limited (12600)")
         );
     }
 

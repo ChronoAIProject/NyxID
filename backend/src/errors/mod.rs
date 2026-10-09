@@ -1006,11 +1006,11 @@ impl AppError {
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::VoiceProviderUnavailable => 12501,
-            Self::ToolOperationNotPublished => 12600,
+            Self::ToolOperationNotPublished => 12700,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantAttachmentExpired => 12101,
-            Self::ServiceConcurrencyLimited => 12700,
+            Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,

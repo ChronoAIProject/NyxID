@@ -51,7 +51,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         error if error.is_forbidden() => (403, 1002),
         AppError::NotFound(_) => (404, 1003),
         AppError::RateLimited => (429, 1005),
-        AppError::ServiceConcurrencyLimited => (429, 12700),
+        AppError::ServiceConcurrencyLimited => (429, 12600),
         AppError::Internal(_) => (500, 1006),
         AppError::DatabaseError(_) => (500, 1007),
         AppError::ValidationError(_) => (400, 1008),

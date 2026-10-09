@@ -213,7 +213,7 @@ async fn service_concurrency_rest_slug_uuid_mcp_and_stream_share_catalog_capacit
     server.abort();
     assert_eq!(
         super::proxy_error_telemetry_fields(&AppError::ServiceConcurrencyLimited),
-        (429, 12700)
+        (429, 12600)
     );
 }
 

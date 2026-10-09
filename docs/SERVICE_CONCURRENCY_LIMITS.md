@@ -51,7 +51,7 @@ IP/daily quota controls. Direct use of a downstream credential or an issued SSH
 certificate outside NyxID is not observable by NyxID; this policy governs NyxID
 execution, not the provider's own admission controls.
 
-At capacity, admission returns `ServiceConcurrencyLimited` (12700), HTTP 429 with
+At capacity, admission returns `ServiceConcurrencyLimited` (12600), HTTP 429 with
 `Retry-After: 1`, without queuing or contacting the provider. MCP returns an HTTP
 429 JSON-RPC error with the typed key/code and the same retry header. Already
 started streams cannot change their HTTP status; lease loss terminates them.
