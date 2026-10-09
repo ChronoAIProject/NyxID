@@ -152,6 +152,13 @@ pub struct SshServiceConfigResponse {
     pub ca_public_key: Option<String>,
 }
 
+/// A channel operation the service can price without an endpoint row.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeclaredOperationResponse {
+    pub operation: String,
+    pub label: String,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct XChannelBillingResponse {
     pub lane: String,
@@ -159,6 +166,7 @@ pub struct XChannelBillingResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    pub declared_operations: Vec<DeclaredOperationResponse>,
     pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub topics: Vec<String>,
     pub supplier: Option<String>,
@@ -302,6 +310,10 @@ pub struct BillingUpdate {
     #[serde(skip)]
     platform_components_present: bool,
     #[serde(skip)]
+    byok_operations_present: bool,
+    #[serde(skip)]
+    platform_operations_present: bool,
+    #[serde(skip)]
     platform_present: bool,
     #[serde(skip)]
     present_fields: std::collections::HashSet<String>,
@@ -334,6 +346,18 @@ fn serialize_billing_update<S: serde::Serializer>(
             lane.remove("components");
         }
     }
+    for (field, present) in [
+        ("byok_pricing", billing.byok_operations_present),
+        ("platform_key_pricing", billing.platform_operations_present),
+    ] {
+        if !present
+            && let Some(lane) = value
+                .get_mut(field)
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            lane.remove("operations");
+        }
+    }
     value.serialize(serializer)
 }
 
@@ -345,6 +369,8 @@ impl<'de> Deserialize<'de> for BillingUpdate {
                 .as_object()
                 .map(|fields| fields.keys().cloned().collect())
                 .unwrap_or_default(),
+            byok_operations_present: raw.pointer("/byok_pricing/operations").is_some(),
+            platform_operations_present: raw.pointer("/platform_key_pricing/operations").is_some(),
             byok_components_present: raw.pointer("/byok_pricing/components").is_some(),
             platform_components_present: raw.pointer("/platform_key_pricing/components").is_some(),
             byok_present: raw.get("byok_pricing").is_some(),
@@ -385,6 +411,22 @@ impl BillingUpdate {
         ] {
             if !present && let (Some(requested), Some(previous)) = (requested, previous) {
                 requested.components = previous.components.clone();
+            }
+        }
+        for (requested, previous, present) in [
+            (
+                &mut self.value.byok_pricing,
+                current.byok_pricing.as_ref(),
+                self.byok_operations_present,
+            ),
+            (
+                &mut self.value.platform_key_pricing,
+                current.platform_key_pricing.as_ref(),
+                self.platform_operations_present,
+            ),
+        ] {
+            if !present && let (Some(requested), Some(previous)) = (requested, previous) {
+                requested.operations = previous.operations.clone();
             }
         }
         // A new lane-only payload must retain its rollout fallback and resale.
@@ -1496,6 +1538,12 @@ async fn create_service_inner(
     if let Some(billing) = body.billing.as_mut() {
         crate::services::billing::pricing::normalize_platform_pricing(&slug, None, billing)?;
         crate::services::billing::pricing::normalize_lane_pricing(&slug, None, billing)?;
+        // A new service has no endpoint rows yet, so only declared channel
+        // operations can be priced at creation.
+        crate::services::billing::pricing::validate_operation_keys(
+            &state.db, &id, &slug, None, billing,
+        )
+        .await?;
     }
     if let Some(config) = body.platform_key.as_mut() {
         require_admin(&state, &auth_user).await?;
@@ -1977,6 +2025,14 @@ async fn update_service_inner(
             service.billing.as_ref(),
             billing,
         )?;
+        crate::services::billing::pricing::validate_operation_keys(
+            &state.db,
+            &service.id,
+            &service.slug,
+            service.billing.as_ref(),
+            billing,
+        )
+        .await?;
         lane_price_changed = billing.byok_pricing
             != service
                 .billing
@@ -4144,6 +4200,236 @@ mod tests {
             .await
             .expect("count created downstream service");
         assert_eq!(service_count, 1);
+    }
+
+    fn requests_lane(operations: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"metric": "requests", "credits_per_unit": "1", "operations": operations})
+    }
+
+    /// Lanes rejected before any endpoint lookup, with their messages.
+    fn invalid_operation_lanes() -> Vec<(serde_json::Value, &'static str)> {
+        vec![
+            (
+                requests_lane(serde_json::json!([
+                    {"operation": "search", "credits_per_unit": "1"},
+                    {"operation": "search", "credits_per_unit": "2"},
+                ])),
+                "Operation prices must have unique operation keys",
+            ),
+            (
+                requests_lane(serde_json::json!([
+                    {"operation": "Search-Items", "credits_per_unit": "1"},
+                    {"operation": "search_items", "credits_per_unit": "2"},
+                ])),
+                "Operation prices must have unique metric codes",
+            ),
+            (
+                requests_lane(
+                    serde_json::json!([{"operation": "search", "credits_per_unit": "0.0000000000001"}]),
+                ),
+                "billing.platform_pricing.credits_per_unit must be a non-negative decimal with at most 12 fractional digits",
+            ),
+            (
+                serde_json::json!({"metric": "tokens", "credits_per_unit": "1", "operations": [
+                    {"operation": "search", "credits_per_unit": "1"}
+                ]}),
+                "Operation prices require a requests primary metric",
+            ),
+            (
+                requests_lane(
+                    serde_json::json!([{"operation": "k".repeat(240), "credits_per_unit": "1"}]),
+                ),
+                "Operation price key is too long for a Lago metric code",
+            ),
+        ]
+    }
+
+    fn validation_message(result: AppResult<Json<super::ServiceResponse>>) -> String {
+        match result {
+            Err(AppError::ValidationError(message)) => message,
+            Err(_) => panic!("expected a validation error"),
+            Ok(_) => panic!("expected the request to be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_prices_are_validated_when_services_are_created() {
+        let db = connect_test_database("h_services_operation_create")
+            .await
+            .expect("MongoDB required");
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let create = |slug: &str, lane: serde_json::Value| {
+            let state = state.clone();
+            let admin_id = admin_id.clone();
+            let mut request = create_http_service_request("Priced", slug, base_url.clone());
+            request.billing =
+                Some(serde_json::from_value(serde_json::json!({ "byok_pricing": lane })).unwrap());
+            async move {
+                create_service(
+                    State(state),
+                    test_auth_user(&admin_id),
+                    crate::telemetry::TelemetryContext::default(),
+                    Json(request),
+                )
+                .await
+            }
+        };
+        // A new service has no endpoints; only declared channel operations exist.
+        let mut rejected = vec![(
+            "ops-unknown",
+            requests_lane(serde_json::json!([{"operation": "search", "credits_per_unit": "1"}])),
+            "Operation prices must reference an active endpoint or a declared channel operation of this service",
+        )];
+        rejected.extend(
+            invalid_operation_lanes()
+                .into_iter()
+                .map(|(lane, expected)| ("api-twitter", lane, expected)),
+        );
+        for (slug, lane, expected) in rejected {
+            let message = validation_message(create(slug, lane).await);
+            assert!(message == expected, "unexpected validation for {slug}");
+        }
+        assert_eq!(
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+
+        let Json(created) = create(
+            "api-twitter",
+            requests_lane(
+                serde_json::json!([{"operation": "channel_dm_send", "credits_per_unit": "0.250"}]),
+            ),
+        )
+        .await
+        .expect("declared channel operations are priceable at creation");
+        server.abort();
+        let operation = &created.billing.unwrap().byok_pricing.unwrap().operations[0];
+        assert_eq!(operation.credits_per_unit, "0.25");
+        assert_eq!(
+            operation.lago_metric_code,
+            "platform_svc_api-twitter_byok_op_channel_dm_send"
+        );
+        assert_eq!(operation.sync_status, PricingSyncStatus::Pending);
+        // Shared catalog operations keep their endpoint names as labels.
+        assert_eq!(
+            created
+                .declared_operations
+                .iter()
+                .map(|declared| (declared.operation.as_str(), declared.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("get_me", "get_me"),
+                ("create_tweet", "create_tweet"),
+                ("channel_dm_send", "Channel direct message sent"),
+                ("channel_dm_received", "Channel direct message received"),
+                ("channel_chat_received", "Channel chat message received"),
+                ("channel_post_received", "Channel post received"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn operation_prices_are_validated_against_active_endpoints_on_update() {
+        use crate::models::service_endpoint::COLLECTION_NAME as ENDPOINTS;
+        let db = connect_test_database("h_services_operation_update")
+            .await
+            .expect("MongoDB required");
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let mut service = dummy_service();
+        service.slug = "ops-update".into();
+        service.created_by = admin_id.clone();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let search =
+            crate::test_utils::test_service_endpoint(&service.id, "search", "GET", "/search");
+        let mut retired =
+            crate::test_utils::test_service_endpoint(&service.id, "retired", "GET", "/retired");
+        retired.is_active = false;
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(ENDPOINTS)
+            .insert_many([&search, &retired])
+            .await
+            .unwrap();
+        let update = |billing: serde_json::Value| {
+            let state = state.clone();
+            let admin_id = admin_id.clone();
+            let id = service.id.clone();
+            async move {
+                update_service(
+                    State(state),
+                    test_auth_user(&admin_id),
+                    crate::telemetry::TelemetryContext::default(),
+                    Path(id),
+                    Json(
+                        serde_json::from_value(serde_json::json!({ "billing": billing })).unwrap(),
+                    ),
+                )
+                .await
+            }
+        };
+        let priced = |operation: &str, base: &str| {
+            serde_json::json!({"byok_pricing": {"metric": "requests", "credits_per_unit": base,
+                "operations": [{"operation": operation, "credits_per_unit": "2"}]}})
+        };
+        for operation in ["retired", "channel_dm_send", "unknown"] {
+            let message = validation_message(update(priced(operation, "1")).await);
+            assert!(
+                message
+                    == "Operation prices must reference an active endpoint or a declared channel operation of this service",
+                "unexpected validation for {operation}"
+            );
+        }
+        for (index, (lane, expected)) in invalid_operation_lanes().into_iter().enumerate() {
+            let message =
+                validation_message(update(serde_json::json!({ "byok_pricing": lane })).await);
+            assert!(
+                message == expected,
+                "unexpected validation for case {index}"
+            );
+        }
+        let Json(updated) = update(priced("search", "1"))
+            .await
+            .expect("active endpoint names are priceable");
+        assert_eq!(
+            updated.billing.unwrap().byok_pricing.unwrap().operations[0].lago_metric_code,
+            "platform_svc_ops-update_byok_op_search"
+        );
+
+        // Deactivating a priced endpoint never blocks later lane edits; the
+        // omitted operations are preserved and only new keys are validated.
+        db.collection::<bson::Document>(ENDPOINTS)
+            .update_one(
+                doc! {"_id": &search.id},
+                doc! {"$set": {"is_active": false}},
+            )
+            .await
+            .unwrap();
+        let Json(updated) = update(serde_json::json!({
+            "byok_pricing": {"metric": "requests", "credits_per_unit": "3"}
+        }))
+        .await
+        .expect("a base price edit keeps the existing operation price");
+        let lane = updated.billing.unwrap().byok_pricing.unwrap();
+        assert_eq!(lane.credits_per_unit, "3");
+        assert_eq!(lane.operations.len(), 1);
+        let Json(cleared) = update(serde_json::json!({
+            "byok_pricing": {"metric": "requests", "credits_per_unit": "3", "operations": null}
+        }))
+        .await
+        .expect("an explicit null clears operation prices");
+        let billing = cleared.billing.unwrap();
+        assert!(billing.byok_pricing.unwrap().operations.is_empty());
+        assert_eq!(
+            billing.component_cleanup_metric_codes,
+            ["platform_svc_ops-update_byok_op_search"]
+        );
     }
 
     #[tokio::test]

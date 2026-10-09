@@ -18,7 +18,7 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::mw::auth::AuthUser;
 use crate::services::{org_service, role_service, user_service_service};
 
-use super::services::{ServiceResponse, SshServiceConfigResponse};
+use super::services::{DeclaredOperationResponse, ServiceResponse, SshServiceConfigResponse};
 
 /// Per-viewer routing summary for a single catalog `DownstreamService`.
 ///
@@ -280,12 +280,21 @@ pub async fn service_to_response_with_viewer(
             )
             .into(),
         });
+    let declared_operations =
+        crate::services::channel_billing_service::declared_operations(&s.slug)
+            .into_iter()
+            .map(|(operation, label)| DeclaredOperationResponse {
+                operation: operation.to_owned(),
+                label: label.to_owned(),
+            })
+            .collect();
     ServiceResponse {
         offering_kind: s.offering_kind,
         topics: s.topics.clone(),
         supplier: s.supplier.clone(),
         import_source: s.import_source.clone().map(Into::into),
         x_channel_billing,
+        declared_operations,
         provider_config_id: s.provider_config_id.clone(),
         credential_configured: match inspection_keys {
             Some(keys) => {

@@ -52,6 +52,20 @@ pub struct LanePricing {
     pub sync_error: Option<String>,
     #[serde(default, deserialize_with = "deserialize_components")]
     pub components: Vec<LanePriceComponent>,
+    #[serde(default, deserialize_with = "deserialize_operations")]
+    pub operations: Vec<OperationPrice>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct OperationPrice {
+    pub operation: String,
+    pub credits_per_unit: String,
+    #[serde(default)]
+    pub lago_metric_code: String,
+    #[serde(default)]
+    pub sync_status: PricingSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -64,6 +78,12 @@ pub struct LanePriceComponent {
     pub sync_status: PricingSyncStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_error: Option<String>,
+}
+
+fn deserialize_operations<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<OperationPrice>, D::Error> {
+    Ok(Option::<Vec<OperationPrice>>::deserialize(d)?.unwrap_or_default())
 }
 
 fn deserialize_components<'de, D: serde::Deserializer<'de>>(

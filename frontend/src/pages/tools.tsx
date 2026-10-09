@@ -1,4 +1,4 @@
-import { toolPrice } from "@/lib/tools";
+import { operationPrice, toolPrice } from "@/lib/tools";
 import { useApiKeys } from "@/hooks/use-api-keys";
 import {
   Dialog,
@@ -93,6 +93,9 @@ export function ToolsPage() {
 }
 export function ToolCard({ tool }: { tool: ToolOffering }) {
   const [grantsOpen, setGrantsOpen] = useState(false);
+  const operationPriced =
+    tool.pricing.platform !== "free" &&
+    Boolean(tool.pricing.platform.operations?.length);
   return (
     <Card>
       <CardContent className="space-y-3 p-4">
@@ -134,6 +137,11 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
                 <code className="break-all text-11">
                   {op.method} {op.path}
                 </code>
+                {operationPriced && (
+                  <p className="text-11 text-text-tertiary">
+                    {operationPrice(tool, op.name)} credits / request
+                  </p>
+                )}
                 <div>
                   {op.risk && (
                     <Badge variant={op.risk === "read" ? "success" : "warning"}>

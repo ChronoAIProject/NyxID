@@ -382,6 +382,29 @@ impl BillingService {
         self.open_with_requirement(ctx, true).await
     }
 
+    /// The priced catalog operation an HTTP request selects. The service's
+    /// active endpoints are read only when billing is enabled and the selected
+    /// lane prices operations, so other requests cost no extra query.
+    pub async fn http_operation(
+        &self,
+        ctx: &BillingRouteContext,
+        method: &str,
+        path: &str,
+    ) -> AppResult<Option<String>> {
+        let Some(service_id) = ctx.catalog_service_id.as_deref() else {
+            return Ok(None);
+        };
+        if !self.config.billing_enabled || !ctx.prices_operations() {
+            return Ok(None);
+        }
+        let path = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+        let endpoints =
+            crate::services::service_endpoint_service::list_endpoints(&self.db, service_id).await?;
+        Ok(crate::services::tool_publication_service::active_operation(
+            &endpoints, method, &path,
+        ))
+    }
+
     async fn open_with_requirement(
         &self,
         ctx: &BillingRouteContext,
@@ -1088,6 +1111,7 @@ mod tests {
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
             components: Vec::new(),
+            operations: vec![],
             metric,
             credits_per_unit: "01.250000".into(),
             lago_metric_code: "untrusted".into(),
@@ -1342,6 +1366,7 @@ mod tests {
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
             components: Vec::new(),
+            operations: vec![],
             metric,
             credits_per_unit: "0.01".into(),
             lago_metric_code: String::new(),
@@ -1870,6 +1895,7 @@ mod tests {
                 }),
                 byok_pricing: credits.map(|credits| LanePricing {
                     components: Vec::new(),
+                    operations: vec![],
                     metric: BillingMetric::Requests,
                     credits_per_unit: credits.into(),
                     lago_metric_code: String::new(),
@@ -2088,5 +2114,7 @@ mod exact_tests;
 
 #[cfg(test)]
 mod legacy_v1_fixture;
+#[cfg(test)]
+mod operation_pricing_tests;
 
 pub mod voice;

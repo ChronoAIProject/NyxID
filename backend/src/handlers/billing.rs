@@ -50,6 +50,7 @@ pub struct BillingUsageResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BillingUsageRow {
+    pub operation: Option<String>,
     pub service_slug: Option<String>,
     pub service_id: Option<String>,
     pub metric: BillingMetric,
@@ -300,6 +301,7 @@ pub async fn get_usage(
                     "service_id": "$service_id",
                     "metric": "$metric",
                     "lago_metric_code": "$lago_metric_code",
+                    "operation": "$operation",
                     "layer": "$layer",
                     "lago_acked": "$lago_acked",
                     // Model and agent split the per-service total into the
@@ -390,6 +392,7 @@ pub async fn get_usage(
         .await?;
         let costs = usage_costs(&doc, billable, pricing)?;
         rows.push(BillingUsageRow {
+            operation: id_doc.get_str("operation").ok().map(ToString::to_string),
             service_slug: id_doc.get_str("service_slug").ok().map(ToString::to_string),
             service_id: id_doc.get_str("service_id").ok().map(ToString::to_string),
             metric,

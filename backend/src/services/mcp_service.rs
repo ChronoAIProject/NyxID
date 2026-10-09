@@ -113,6 +113,7 @@ impl McpBillingRouteContextBuilder {
         target: &proxy_service::ProxyTarget,
         node_route: Option<&node_routing_service::NodeRoute>,
         has_server_credential: bool,
+        operation: Option<&str>,
     ) -> AppResult<crate::services::billing::BillingRouteContext> {
         let credential_class = self.credential_class_override.unwrap_or_else(|| {
             mcp_credential_class(
@@ -154,7 +155,8 @@ impl McpBillingRouteContextBuilder {
             BillingMetric::Requests,
             target.service.billing.as_ref(),
             billing.resale_enabled(),
-        ))
+        )
+        .with_operation(operation))
     }
 }
 
@@ -5148,6 +5150,9 @@ async fn execute_tool_resolved_inner(
             &target,
             node_route.as_ref(),
             has_server_credential,
+            // Generic dispatch exists only for services without endpoint rows,
+            // so it can never select an operation price.
+            (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
         )
         .await?;
     let billing_ctx = billing_ctx.with_request_body(body.as_deref());
@@ -12625,6 +12630,7 @@ mod tests {
                         &resolution.target,
                         None,
                         true,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -12656,6 +12662,7 @@ mod tests {
                     &resolution.target,
                     None,
                     resolution.has_server_credential,
+                    None,
                 )
                 .await
                 .expect("personal MCP billing context");
@@ -12706,6 +12713,7 @@ mod tests {
             &resolution.target,
             None,
             resolution.has_server_credential,
+            None,
         )
         .await
         .expect("organization MCP billing context");
@@ -12743,6 +12751,7 @@ mod tests {
                     &master_resolution.target,
                     None,
                     true,
+                    None,
                 )
                 .await
                 .expect("final credential MCP billing context");
@@ -12780,6 +12789,7 @@ mod tests {
                 &target,
                 None,
                 false,
+                None,
             )
             .await
             .expect("service-account MCP billing context");

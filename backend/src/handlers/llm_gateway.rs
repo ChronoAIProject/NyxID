@@ -403,18 +403,21 @@ pub async fn llm_proxy_request(
     ))
     .await?;
 
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-        let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
-            &operation_path,
-        )?;
-        crate::services::tool_publication_service::gate(
-            &state.db,
-            &service,
-            &request_method_str,
-            &canonical,
-        )
-        .await?;
-    }
+    let tool_operation =
+        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+                &operation_path,
+            )?;
+            crate::services::tool_publication_service::gate(
+                &state.db,
+                &service,
+                &request_method_str,
+                &canonical,
+            )
+            .await?
+        } else {
+            None
+        };
 
     // Two-tier credential resolution:
     //   1. Prefer the new UserService / UserApiKey model (created via
@@ -604,7 +607,19 @@ pub async fn llm_proxy_request(
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
-    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
+    let priced_operation =
+        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            tool_operation
+        } else {
+            state
+                .billing
+                .http_operation(&billing_ctx, &request_method_str, &operation_path)
+                .await
+                .inspect_err(|error| request_audit.admission_error(error))?
+        };
+    let billing_ctx = billing_ctx
+        .with_operation(priced_operation.as_deref())
+        .with_request_body(Some(&body_bytes));
     let metered = state
         .billing
         .open(&billing_ctx)
@@ -985,12 +1000,17 @@ async fn gateway_provider_request(
     ))
     .await?;
 
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+    let tool_operation = if service.offering_kind
+        == crate::models::downstream_service::OfferingKind::Tool
+    {
         let canonical =
             crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(&final_path)?;
         crate::services::tool_publication_service::gate(&state.db, &service, "POST", &canonical)
-            .await?;
-    }
+            .await?
+    } else {
+        None
+    };
+    let requested_path = final_path.clone();
 
     // Two-tier proxy target resolution (mirrors `llm_proxy_request`):
     //   1. Prefer the new UserService / UserApiKey model, which bakes the
@@ -1208,7 +1228,19 @@ async fn gateway_provider_request(
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
-    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
+    let priced_operation =
+        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            tool_operation
+        } else {
+            state
+                .billing
+                .http_operation(&billing_ctx, "POST", &requested_path)
+                .await
+                .inspect_err(|error| request_audit.admission_error(error))?
+        };
+    let billing_ctx = billing_ctx
+        .with_operation(priced_operation.as_deref())
+        .with_request_body(Some(&body_bytes));
     let metered = state
         .billing
         .open(&billing_ctx)

@@ -105,6 +105,8 @@ export const billingUsageRowSchema = z.object({
   service_id: z.string().nullable().optional(),
   metric: z.string(),
   lago_metric_code: z.string(),
+  /** Operation price key, when one replaced the base request rate. */
+  operation: z.string().nullable().optional(),
   layer: z.string(),
   // Optional so an older backend without the model/agent breakdown still
   // parses; the UI degrades to a service-level row.

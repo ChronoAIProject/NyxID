@@ -974,6 +974,19 @@ pub struct CatalogServiceArgs {
     /// Remove all additional platform-key components, preserving the primary price
     #[arg(long, conflicts_with = "platform_key_free")]
     pub platform_key_clear_components: bool,
+    /// BYOK operation price, repeatable (<operation>=<price>); replaces the Requests
+    /// base price for that endpoint name or declared channel operation once synced
+    #[arg(long, value_parser = crate::commands::billing_units::operation, conflicts_with_all = ["byok_free", "byok_clear_operations"])]
+    pub byok_operation: Vec<String>,
+    /// Remove all BYOK operation prices, preserving the base price
+    #[arg(long, conflicts_with = "byok_free")]
+    pub byok_clear_operations: bool,
+    /// Platform-key operation price, repeatable (<operation>=<price>)
+    #[arg(long, value_parser = crate::commands::billing_units::operation, conflicts_with_all = ["platform_key_free", "platform_key_clear_operations"])]
+    pub platform_key_operation: Vec<String>,
+    /// Remove all platform-key operation prices, preserving the base price
+    #[arg(long, conflicts_with = "platform_key_free")]
+    pub platform_key_clear_operations: bool,
 }
 
 #[derive(Subcommand)]

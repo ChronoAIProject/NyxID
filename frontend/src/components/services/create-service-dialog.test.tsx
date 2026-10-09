@@ -7,6 +7,9 @@ const { create, navigate } = vi.hoisted(() => ({
   create: vi.fn(),
   navigate: vi.fn(),
 }));
+vi.mock("@/hooks/use-endpoints", () => ({
+  useEndpoints: () => ({ data: [] }),
+}));
 vi.mock("@/hooks/use-services", () => ({
   useCreateService: () => ({ mutateAsync: create, isPending: false }),
 }));

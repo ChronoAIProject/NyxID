@@ -1381,6 +1381,7 @@ async fn hourly_rollup_production_density_benchmark() {
             let pipeline = fast_pipeline(
                 &params,
                 cached_rates(&db).await.unwrap(),
+                Document::new(),
                 state.as_ref().and_then(|s| s.folded_before),
                 state.as_ref().is_some_and(|s| s.daily_ready),
                 crate::services::billing::exact_migration::rollup_ready(&db)
@@ -2643,6 +2644,7 @@ async fn covered_money_reduction_matches_decimal_or_fails_closed_on_overflow() {
         let pipeline = fast_pipeline(
             &query().validate(end).unwrap(),
             Document::new(),
+            Document::new(),
             Some(end),
             false,
             true,
@@ -2702,5 +2704,59 @@ async fn covered_money_reduction_matches_decimal_or_fails_closed_on_overflow() {
             }
         }
         db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn operation_usage_is_reported_per_service_before_and_after_folding() {
+    use crate::services::billing::usage_rollup::fold_once;
+    let db = connect_test_database("admin_usage_operations")
+        .await
+        .expect("MongoDB required");
+    let actor = uuid::Uuid::new_v4().to_string();
+    // Lago codes carry the normalized key; the configured price restores the
+    // exact key, and a removed price falls back to the normalized key.
+    db.collection::<Document>("downstream_services")
+        .insert_one(doc! {
+            "_id": "x", "slug": "x", "name": "X",
+            "billing": { "byok_pricing": { "metric": "requests", "credits_per_unit": "1",
+                "operations": [{ "operation": "searchTweets", "credits_per_unit": "3",
+                    "lago_metric_code": "platform_svc_x_byok_op_searchtweets" }] } },
+        })
+        .await
+        .unwrap();
+    let created = bson::DateTime::from_chrono(Utc::now() - chrono::Duration::minutes(10));
+    for (code, operation) in [
+        ("platform_svc_x_byok_op_searchtweets", Some("searchTweets")),
+        ("platform_svc_x_byok_op_searchtweets", Some("searchTweets")),
+        ("platform_svc_x_pk_op_retired_op", Some("retired_op")),
+        ("platform_svc_x_byok", None),
+    ] {
+        let mut row = meter(&actor, &actor, "x", 1);
+        row.insert("metric", "requests");
+        row.insert("lago_metric_code", code);
+        row.insert("created_at", created);
+        if let Some(operation) = operation {
+            row.insert("operation", operation);
+        }
+        insert(&db, row).await;
+    }
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, Utc::now()).await.unwrap() > 0 {}
+        }
+        let response = read(&db, query()).await;
+        assert_eq!(response.by_service.len(), 1);
+        let service = &response.by_service[0];
+        assert_eq!(service.usage.requests, 4);
+        assert_eq!(
+            service
+                .by_operation
+                .iter()
+                .map(|row| (row.operation.as_str(), row.usage.requests))
+                .collect::<Vec<_>>(),
+            [("retired_op", 1), ("searchTweets", 2)],
+            "folded: {folded}"
+        );
     }
 }

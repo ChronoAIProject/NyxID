@@ -121,6 +121,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             service_slug: Some("service".into()),
             metric: BillingMetric::Requests,
             lago_metric_code: "platform_service".into(),
+            operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,

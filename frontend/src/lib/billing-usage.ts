@@ -7,9 +7,16 @@ import {
   type BillingCatalog,
 } from "./billing-display";
 
-export type Dimension = "service" | "model" | "agent" | "layer" | "metric";
+export type Dimension =
+  | "service"
+  | "operation"
+  | "model"
+  | "agent"
+  | "layer"
+  | "metric";
 export const dimensions: Record<Dimension, string> = {
   service: "Service",
+  operation: "Operation",
   model: "Model",
   agent: "Agent",
   layer: "Billing layer",
@@ -28,24 +35,28 @@ export function groupRows(
     const key =
       dimension === "service"
         ? (row.service_id ?? row.service_slug ?? "unknown")
-        : dimension === "agent"
-          ? (row.api_key_id ?? "unrecorded")
-          : dimension === "model"
-            ? (row.model ?? "unrecorded")
-            : dimension === "layer"
-              ? row.layer
-              : row.metric;
+        : dimension === "operation"
+          ? `${row.service_id ?? row.service_slug ?? "unknown"}:${row.operation ?? ""}`
+          : dimension === "agent"
+            ? (row.api_key_id ?? "unrecorded")
+            : dimension === "model"
+              ? (row.model ?? "unrecorded")
+              : dimension === "layer"
+                ? row.layer
+                : row.metric;
     const name =
       dimension === "service"
         ? serviceName(catalog, row.service_slug)
-        : dimension === "agent"
-          ? (row.api_key_name ??
-            (row.api_key_id ? "Unnamed agent key" : "No agent key recorded"))
-          : dimension === "model"
-            ? (row.model ?? "No model recorded")
-            : dimension === "layer"
-              ? layerName(row.layer)
-              : billingMetricLabel(row.metric);
+        : dimension === "operation"
+          ? `${serviceName(catalog, row.service_slug)} · ${row.operation ?? "Base price"}`
+          : dimension === "agent"
+            ? (row.api_key_name ??
+              (row.api_key_id ? "Unnamed agent key" : "No agent key recorded"))
+            : dimension === "model"
+              ? (row.model ?? "No model recorded")
+              : dimension === "layer"
+                ? layerName(row.layer)
+                : billingMetricLabel(row.metric);
     const group = groups.get(key) ?? { key, name, rows: [] };
     group.rows.push(row);
     groups.set(key, group);

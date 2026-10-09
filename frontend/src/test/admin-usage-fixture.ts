@@ -47,7 +47,14 @@ export function usageFixture(): AdminUsageResponse {
       period: "24h",
     },
     totals: usageStats(),
-    by_service: [{ ...service, ...usageStats(), by_credential_class: [lane] }],
+    by_service: [
+      {
+        ...service,
+        ...usageStats(),
+        by_credential_class: [lane],
+        by_operation: [],
+      },
+    ],
     by_credential_class: [lane],
     ranking: [
       {

@@ -228,6 +228,17 @@ function laneValues(lane: LanePricingView | null | undefined) {
               ),
             }
           : {}),
+        ...(lane.operations
+          ? {
+              operations: lane.operations.map(
+                ({ operation, label, credits_per_unit }) => ({
+                  operation,
+                  ...(label ? { label } : {}),
+                  credits_per_unit,
+                }),
+              ),
+            }
+          : {}),
       }
     : null;
 }

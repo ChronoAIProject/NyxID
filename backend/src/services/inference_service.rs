@@ -26,10 +26,18 @@ pub struct LanePricingView {
     pub credits_per_unit: String,
     pub sync_status: PricingSyncStatus,
     pub components: Vec<LaneComponentView>,
+    pub operations: Vec<OperationPricingView>,
 }
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct LaneComponentView {
     pub metric: BillingMetric,
+    pub credits_per_unit: String,
+    pub sync_status: PricingSyncStatus,
+}
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct OperationPricingView {
+    pub operation: String,
+    pub label: String,
     pub credits_per_unit: String,
     pub sync_status: PricingSyncStatus,
 }
@@ -39,6 +47,16 @@ impl From<&LanePricing> for LanePricingView {
             metric: price.metric,
             credits_per_unit: price.credits_per_unit.clone(),
             sync_status: price.sync_status,
+            operations: price
+                .operations
+                .iter()
+                .map(|o| OperationPricingView {
+                    operation: o.operation.clone(),
+                    label: crate::services::channel_billing_service::operation_label(&o.operation),
+                    credits_per_unit: o.credits_per_unit.clone(),
+                    sync_status: o.sync_status,
+                })
+                .collect(),
             components: price
                 .components
                 .iter()
@@ -137,4 +155,45 @@ pub fn normalized(inference: &ServiceInference) -> ServiceInference {
     let mut inference = inference.clone();
     inference.realtime |= inference.voice.is_some();
     inference
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LanePricingView;
+    use crate::models::service_billing::{
+        BillingMetric, LanePricing, OperationPrice, PricingSyncStatus,
+    };
+
+    #[test]
+    fn operation_labels_describe_only_channel_operations() {
+        let price = |operation: &str| OperationPrice {
+            operation: operation.into(),
+            credits_per_unit: "1".into(),
+            lago_metric_code: format!("op_{operation}"),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        // A non-X service, such as an overlay with its own `get_me`.
+        let view = LanePricingView::from(&LanePricing {
+            metric: BillingMetric::Requests,
+            credits_per_unit: "1".into(),
+            lago_metric_code: "platform_svc_api-reddit_byok".into(),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: None,
+            components: vec![],
+            operations: ["get_me", "create_tweet", "channel_dm_send"]
+                .map(price)
+                .to_vec(),
+        });
+        assert_eq!(
+            view.operations
+                .iter()
+                .map(|operation| operation.label.as_str())
+                .collect::<Vec<_>>(),
+            ["get_me", "create_tweet", "Channel direct message sent"]
+        );
+        assert!(
+            crate::services::channel_billing_service::declared_operations("api-reddit").is_empty()
+        );
+    }
 }

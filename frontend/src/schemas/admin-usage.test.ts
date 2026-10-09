@@ -41,6 +41,28 @@ describe("admin usage contracts", () => {
       }).success,
     ).toBe(false);
   });
+  it("reads per-operation service usage and defaults it for older servers", () => {
+    const response = usageFixture();
+    const { by_operation: _omitted, ...older } = response.by_service[0]!;
+    void _omitted;
+    expect(
+      adminUsageResponseSchema.parse({ ...response, by_service: [older] })
+        .by_service[0]!.by_operation,
+    ).toEqual([]);
+    const priced = adminUsageResponseSchema.parse({
+      ...response,
+      by_service: [
+        {
+          ...response.by_service[0],
+          by_operation: [{ ...usageFixture().totals, operation: "get_me" }],
+        },
+      ],
+    });
+    expect(priced.by_service[0]!.by_operation[0]).toMatchObject({
+      operation: "get_me",
+      requests: 7,
+    });
+  });
   it("normalizes URL controls and validates the 31-day custom limit", () => {
     expect(normalizeAdminUsageSearch({})).toMatchObject({
       period: "24h",

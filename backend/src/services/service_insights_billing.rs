@@ -1070,6 +1070,7 @@ mod tests {
             sync_status: PricingSyncStatus::Synced,
             sync_error: None,
             components: Vec::new(),
+            operations: vec![],
         }
     }
 

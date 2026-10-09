@@ -77,6 +77,9 @@ vi.mock("@/hooks/use-services", () => ({
     isPending: false,
   }),
 }));
+vi.mock("@/hooks/use-endpoints", () => ({
+  useEndpoints: () => ({ data: [] }),
+}));
 vi.mock("@/hooks/use-developer-apps", () => ({
   useDeveloperApps: () => ({
     data: { clients: mock.developerApps },

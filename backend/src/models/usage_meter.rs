@@ -246,6 +246,8 @@ pub struct UsageMeterRow {
     pub service_slug: Option<String>,
     pub metric: BillingMetric,
     pub lago_metric_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
     pub credential_class: CredentialClass,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

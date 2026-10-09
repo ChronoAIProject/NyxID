@@ -2466,6 +2466,41 @@ pub(crate) fn test_membership(
     }
 }
 
+/// An active, published catalog operation without parameters or a body.
+pub(crate) fn test_service_endpoint(
+    service_id: &str,
+    name: &str,
+    method: &str,
+    path: &str,
+) -> crate::models::service_endpoint::ServiceEndpoint {
+    crate::models::service_endpoint::ServiceEndpoint {
+        async_operation: None,
+        id: Uuid::new_v4().to_string(),
+        service_id: service_id.to_string(),
+        name: name.to_string(),
+        description: Some(name.to_string()),
+        method: method.to_string(),
+        path: path.to_string(),
+        target_id: None,
+        parameters: None,
+        request_body_schema: None,
+        request_content_type: None,
+        request_body_required: false,
+        response_description: None,
+        response: Default::default(),
+        risk: None,
+        supports_idempotency_key: false,
+        data_scope: None,
+        cost_class: None,
+        execution: Default::default(),
+        publication: Default::default(),
+        is_active: true,
+        operation_generation: 1,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
 pub(crate) fn test_user_endpoint(
     endpoint_id: &str,
     user_id: &str,

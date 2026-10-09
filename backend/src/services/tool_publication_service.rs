@@ -15,14 +15,22 @@ use mongodb::{
     bson::{Document, doc},
 };
 
-pub fn require_published_operation(
-    endpoints: &[ServiceEndpoint],
+/// Endpoints tied for the most specific match of `method` and `path`.
+/// Literal path segments outrank template segments.
+fn most_specific<'a>(
+    endpoints: impl IntoIterator<Item = &'a ServiceEndpoint>,
     method: &str,
     path: &CanonicalPath,
-) -> AppResult<()> {
-    let mut winning_specificity = None;
-    let mut published = false;
-    for endpoint in endpoints.iter().filter(|endpoint| {
+) -> Vec<&'a ServiceEndpoint> {
+    let specificity = |endpoint: &ServiceEndpoint| {
+        endpoint
+            .path
+            .split('/')
+            .filter(|segment| !segment.contains('{'))
+            .count()
+    };
+    let mut winners: Vec<&ServiceEndpoint> = Vec::new();
+    for endpoint in endpoints.into_iter().filter(|endpoint| {
         proxy_authorization::rule_matches(
             &ProxyOperationRule {
                 method: endpoint.method.clone(),
@@ -33,40 +41,66 @@ pub fn require_published_operation(
             path,
         )
     }) {
-        let specificity = endpoint
-            .path
-            .split('/')
-            .filter(|segment| !segment.contains('{'))
-            .count();
-        let callable = endpoint.publication == PublicationState::Published && endpoint.is_active;
-        match winning_specificity {
-            None => {
-                winning_specificity = Some(specificity);
-                published = callable;
-            }
-            Some(winner) if specificity > winner => {
-                winning_specificity = Some(specificity);
-                published = callable;
-            }
-            Some(winner) if specificity == winner => published &= callable,
-            _ => {}
+        match winners.first().map(|winner| specificity(winner)) {
+            Some(best) if specificity(endpoint) < best => {}
+            Some(best) if specificity(endpoint) == best => winners.push(endpoint),
+            _ => winners = vec![endpoint],
         }
     }
-    if published {
-        Ok(())
-    } else {
-        Err(AppError::ToolOperationNotPublished)
-    }
+    winners
 }
 
+/// The operation name the winners agree on; differently named ties select none.
+fn winning_name(winners: &[&ServiceEndpoint]) -> Option<String> {
+    let first = winners.first()?;
+    winners
+        .iter()
+        .all(|endpoint| endpoint.name == first.name)
+        .then(|| first.name.clone())
+}
+
+/// Authorizes a tool request and returns the selected operation name. Every
+/// equally specific match must be published and active.
+pub fn require_published_operation(
+    endpoints: &[ServiceEndpoint],
+    method: &str,
+    path: &CanonicalPath,
+) -> AppResult<Option<String>> {
+    let winners = most_specific(endpoints, method, path);
+    if winners.is_empty()
+        || !winners.iter().all(|endpoint| {
+            endpoint.publication == PublicationState::Published && endpoint.is_active
+        })
+    {
+        return Err(AppError::ToolOperationNotPublished);
+    }
+    Ok(winning_name(&winners))
+}
+
+/// The active operation a request selects under the same rule, without
+/// publication. Billing uses it to price catalog operations.
+pub fn active_operation(
+    endpoints: &[ServiceEndpoint],
+    method: &str,
+    path: &CanonicalPath,
+) -> Option<String> {
+    winning_name(&most_specific(
+        endpoints.iter().filter(|endpoint| endpoint.is_active),
+        method,
+        path,
+    ))
+}
+
+/// Tool publication gate. Returns the selected operation name for tools and
+/// `None` for every other offering.
 pub async fn gate(
     db: &Database,
     service: &DownstreamService,
     method: &str,
     path: &CanonicalPath,
-) -> AppResult<()> {
+) -> AppResult<Option<String>> {
     if service.offering_kind != OfferingKind::Tool {
-        return Ok(());
+        return Ok(None);
     }
     let endpoints: Vec<ServiceEndpoint> = db
         .collection::<ServiceEndpoint>(COLLECTION_NAME)
@@ -311,6 +345,37 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn publication_and_billing_select_the_same_most_specific_operation() {
+        let me = CanonicalPath::from_rest_decoded("/items/me").unwrap();
+        let rows = [
+            endpoint("item", "/items/{id}", PublicationState::Published),
+            endpoint("me", "/items/me", PublicationState::Published),
+        ];
+        assert_eq!(
+            require_published_operation(&rows, "GET", &me).unwrap(),
+            Some("me".into())
+        );
+        assert_eq!(active_operation(&rows, "GET", &me), Some("me".into()));
+        let other = CanonicalPath::from_rest_decoded("/items/42").unwrap();
+        assert_eq!(active_operation(&rows, "GET", &other), Some("item".into()));
+        assert_eq!(active_operation(&rows, "POST", &other), None);
+
+        // Billing ignores inactive rows; differently named ties price nothing.
+        let mut inactive = rows.clone();
+        inactive[1].is_active = false;
+        assert_eq!(active_operation(&inactive, "GET", &me), Some("item".into()));
+        let tied = [
+            endpoint("left", "/items/{id}", PublicationState::Published),
+            endpoint("right", "/{kind}/42", PublicationState::Published),
+        ];
+        assert_eq!(active_operation(&tied, "GET", &other), None);
+        assert_eq!(
+            require_published_operation(&tied, "GET", &other).unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

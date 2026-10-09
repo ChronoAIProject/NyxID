@@ -245,6 +245,11 @@ export interface DownstreamService {
   readonly inference?: InferenceMetadata | null;
   readonly platform_key?: PlatformKeyConfig | null;
   readonly x_channel_billing?: { readonly lane: string } | null;
+  /** Channel operations priceable without an endpoint, with display labels. */
+  readonly declared_operations?: readonly {
+    readonly operation: string;
+    readonly label: string;
+  }[];
   readonly id: string;
   readonly name: string;
   readonly slug: string;

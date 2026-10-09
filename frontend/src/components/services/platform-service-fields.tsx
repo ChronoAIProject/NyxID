@@ -1,4 +1,5 @@
 import { VoiceInferenceFields } from "./voice-inference-fields";
+import { useEndpoints } from "@/hooks/use-endpoints";
 import { BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
 import { Badge } from "@/components/ui/badge";
 import { serviceCredentialStatus } from "@/lib/service-credential-status";
@@ -49,6 +50,22 @@ export function PlatformServiceFields({
       metric !== "voice_seconds" ||
       inference?.voice?.billing_metrics.includes(metric),
   );
+  const { data: endpoints = [] } = useEndpoints(service?.id ?? "");
+  // Active endpoints, declared channel operations, then any saved key that is
+  // no longer listed, so a stale price can still be cleared.
+  const operationChoices = (
+    prices: readonly { readonly operation: string }[] = [],
+  ) => {
+    const choices = new Map<string, string>();
+    for (const endpoint of endpoints)
+      if (endpoint.is_active) choices.set(endpoint.name, endpoint.name);
+    for (const declared of service?.declared_operations ?? [])
+      choices.set(declared.operation, declared.label);
+    for (const price of prices)
+      if (!choices.has(price.operation))
+        choices.set(price.operation, price.operation);
+    return [...choices].map(([operation, label]) => ({ operation, label }));
+  };
   const platform = form.watch("platform_key") ?? {
     enabled: service?.legacy_public_master ?? false,
     audience: service?.legacy_public_master ? "public" : "restricted",
@@ -340,7 +357,8 @@ export function PlatformServiceFields({
         {service?.x_channel_billing && (
           <p className="text-12 text-muted-foreground">
             X channels bill through the {service.x_channel_billing.lane} lane.
-            Configure a synced Requests price on that lane to enable paid X channels.
+            Configure a synced Requests price on that lane to enable paid X
+            channels.
           </p>
         )}
         {!form.watch("byok_pricing") && !form.watch("platform_key_pricing") && (
@@ -394,6 +412,8 @@ export function PlatformServiceFields({
                           metric: metric as NonNullable<
                             SharedServiceFormData[typeof field]
                           >["metric"],
+                          // Operation prices exist only on Requests lanes.
+                          ...(metric === "requests" ? {} : { operations: [] }),
                         })
                       }
                     >
@@ -425,6 +445,20 @@ export function PlatformServiceFields({
                         </FormItem>
                       )}
                     />
+                    {lane.metric === "requests" && (
+                      <OperationPrices
+                        operations={operationChoices(lane.operations ?? [])}
+                        prices={lane.operations ?? []}
+                        saved={service?.billing?.[field]?.operations ?? []}
+                        errorAt={(index) =>
+                          form.formState.errors[field]?.operations?.[index]
+                            ?.credits_per_unit?.message
+                        }
+                        onChange={(operations) =>
+                          setLane({ ...lane, operations })
+                        }
+                      />
+                    )}
                     {status && (
                       <Badge
                         variant={status === "synced" ? "success" : "warning"}
@@ -573,6 +607,95 @@ export function PlatformServiceFields({
           </p>
         )}
       </section>
+    </div>
+  );
+}
+
+type OperationPrice = {
+  readonly operation: string;
+  readonly credits_per_unit: string;
+  readonly sync_status?: "pending" | "synced" | "failed";
+};
+
+function OperationPrices({
+  operations,
+  prices,
+  saved,
+  errorAt,
+  onChange,
+}: {
+  readonly operations: readonly {
+    readonly operation: string;
+    readonly label: string;
+  }[];
+  readonly prices: readonly OperationPrice[];
+  readonly saved: readonly OperationPrice[];
+  /** Validation message for the price at this index of `prices`. */
+  readonly errorAt: (index: number) => string | undefined;
+  readonly onChange: (prices: OperationPrice[]) => void;
+}) {
+  if (!operations.length) return null;
+  return (
+    <div className="space-y-2 border-t border-border/50 pt-3">
+      <div className="text-12 font-medium">Operation prices</div>
+      <p className="text-11 text-muted-foreground">
+        A synced operation price replaces the base Requests price. Leave an
+        operation empty to use the base price.
+      </p>
+      {operations.map(({ operation, label }) => {
+        const index = prices.findIndex((item) => item.operation === operation);
+        const price = prices[index];
+        const error = index >= 0 ? errorAt(index) : undefined;
+        const status = saved.find(
+          (item) =>
+            item.operation === operation &&
+            item.credits_per_unit === price?.credits_per_unit,
+        )?.sync_status;
+        return (
+          <div
+            key={operation}
+            className="grid grid-cols-[1fr_8rem_4.5rem] items-center gap-2"
+          >
+            <span className="truncate text-12" title={operation}>
+              {label}
+            </span>
+            <Input
+              aria-label={`${label} operation price`}
+              aria-invalid={Boolean(error)}
+              inputMode="decimal"
+              placeholder="Base price"
+              value={price?.credits_per_unit ?? ""}
+              onChange={(event) => {
+                const value = event.target.value;
+                const next = { operation, credits_per_unit: value };
+                onChange(
+                  !value
+                    ? prices.filter((item) => item.operation !== operation)
+                    : index >= 0
+                      ? prices.map((item, at) => (at === index ? next : item))
+                      : [...prices, next],
+                );
+              }}
+            />
+            {status ? (
+              <Badge variant={status === "synced" ? "success" : "warning"}>
+                {status === "synced"
+                  ? "Synced"
+                  : status === "failed"
+                    ? "Failed"
+                    : "Pending"}
+              </Badge>
+            ) : (
+              <span />
+            )}
+            {error && (
+              <p className="col-span-3 text-11 font-medium text-destructive">
+                {error}
+              </p>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

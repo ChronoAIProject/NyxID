@@ -32,6 +32,10 @@ impl CatalogServiceArgs {
             || self.platform_key_metric.is_some()
             || self.platform_key_price.is_some()
             || self.platform_key_free
+            || !self.byok_operation.is_empty()
+            || self.byok_clear_operations
+            || !self.platform_key_operation.is_empty()
+            || self.platform_key_clear_operations
     }
     pub fn apply_tool_fields(&self, body: &mut Value) {
         if let Some(value) = &self.service_category {
@@ -125,22 +129,38 @@ impl CatalogServiceArgs {
             billing = json!({});
         }
         let mut changed = false;
-        for (field, metric, price, free, components, clear_components) in [
+        for (
+            field,
+            flag,
+            metric,
+            price,
+            free,
+            components,
+            clear_components,
+            operations,
+            clear_operations,
+        ) in [
             (
                 "byok_pricing",
+                "byok",
                 &self.byok_metric,
                 &self.byok_price,
                 self.byok_free,
                 &self.byok_component,
                 self.byok_clear_components,
+                &self.byok_operation,
+                self.byok_clear_operations,
             ),
             (
                 "platform_key_pricing",
+                "platform-key",
                 &self.platform_key_metric,
                 &self.platform_key_price,
                 self.platform_key_free,
                 &self.platform_key_component,
                 self.platform_key_clear_components,
+                &self.platform_key_operation,
+                self.platform_key_clear_operations,
             ),
         ] {
             if free {
@@ -150,6 +170,8 @@ impl CatalogServiceArgs {
                 || price.is_some()
                 || !components.is_empty()
                 || clear_components
+                || !operations.is_empty()
+                || clear_operations
             {
                 let mut lane = billing[field].clone();
                 if !lane.is_object() {
@@ -186,14 +208,52 @@ impl CatalogServiceArgs {
                     }
                     lane["components"] = json!(values);
                 }
+                if clear_operations {
+                    lane["operations"] = json!([]);
+                }
+                if !operations.is_empty() {
+                    let mut values = lane["operations"].as_array().cloned().unwrap_or_default();
+                    let mut seen = std::collections::HashSet::new();
+                    for entry in operations {
+                        let (operation, amount) = entry
+                            .split_once('=')
+                            .ok_or_else(|| anyhow::anyhow!("Use <operation>=<price>"))?;
+                        if !seen.insert(operation) {
+                            bail!("Operation prices must be unique within each lane");
+                        }
+                        let price = json!({"operation": operation, "credits_per_unit": amount});
+                        if let Some(existing) =
+                            values.iter_mut().find(|v| v["operation"] == operation)
+                        {
+                            *existing = price;
+                        } else {
+                            values.push(price);
+                        }
+                    }
+                    lane["operations"] = json!(values);
+                }
+                if lane["metric"] != "requests"
+                    && lane["operations"]
+                        .as_array()
+                        .is_some_and(|operations| !operations.is_empty())
+                {
+                    bail!(
+                        "Operation prices require a requests lane; use --{flag}-clear-operations to remove them"
+                    );
+                }
                 // Only editable price fields are sent; all sync state is server-owned.
                 for key in ["lago_metric_code", "sync_status", "sync_error"] {
                     lane.as_object_mut().unwrap().remove(key);
                 }
-                if let Some(components) = lane["components"].as_array_mut() {
-                    for component in components {
-                        if let Some(object) = component.as_object_mut() {
-                            object.retain(|key, _| key == "metric" || key == "credits_per_unit");
+                for (array, fields) in [
+                    ("components", ["metric", "credits_per_unit"]),
+                    ("operations", ["operation", "credits_per_unit"]),
+                ] {
+                    if let Some(rows) = lane[array].as_array_mut() {
+                        for row in rows {
+                            if let Some(object) = row.as_object_mut() {
+                                object.retain(|key, _| fields.contains(&key.as_str()));
+                            }
                         }
                     }
                 }
@@ -312,7 +372,29 @@ pub(crate) fn lane_price_label(value: Option<&Value>) -> String {
                 .map(|component| lane_price_label(Some(component))),
         );
     }
-    prices.join(" + ")
+    let mut label = prices.join(" + ");
+    // Operation prices replace the base request price; they are not additive.
+    if let Some(operations) = value["operations"]
+        .as_array()
+        .filter(|operations| !operations.is_empty())
+    {
+        let operations: Vec<String> = operations
+            .iter()
+            .map(|operation| {
+                format!(
+                    "{} {}{}",
+                    operation["operation"].as_str().unwrap_or("?"),
+                    operation["credits_per_unit"].as_str().unwrap_or("?"),
+                    match operation["sync_status"].as_str() {
+                        Some("synced") | None => "",
+                        _ => " (pending)",
+                    }
+                )
+            })
+            .collect();
+        label.push_str(&format!("; operations: {}", operations.join(", ")));
+    }
+    label
 }
 
 pub(crate) fn platform_config_label(value: &Value) -> String {
@@ -530,6 +612,87 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn operation_flags_set_replace_clear_and_require_a_requests_lane() {
+        let parse = |flags: &[&str]| {
+            let mut argv = vec!["nyxid", "service", "update", "id"];
+            argv.extend_from_slice(flags);
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Commands::Service {
+                command: ServiceCommands::Update { catalog, .. },
+            } = cli.command
+            else {
+                panic!("update expected")
+            };
+            catalog
+        };
+        let mut api = ApiClient::new("http://127.0.0.1:1", "test".into()).unwrap();
+        let current = json!({"billing": {"byok_pricing": {
+            "metric": "requests", "credits_per_unit": "1", "sync_status": "synced", "lago_metric_code": "primary",
+            "operations": [{"operation": "get_me", "credits_per_unit": "2", "sync_status": "synced",
+                "lago_metric_code": "platform_svc_api-twitter_byok_op_get_me"}]
+        }}});
+        let args = parse(&[
+            "--byok-operation",
+            "get_me=3",
+            "--byok-operation",
+            "channel_dm_send=0.015",
+        ]);
+        assert!(args.is_requested());
+        let mut body = json!({});
+        args.apply_update(&mut api, &current, &mut body)
+            .await
+            .unwrap();
+        let lane = &body["billing"]["byok_pricing"];
+        assert_eq!(
+            lane["operations"],
+            json!([
+                {"operation": "get_me", "credits_per_unit": "3"},
+                {"operation": "channel_dm_send", "credits_per_unit": "0.015"},
+            ])
+        );
+        assert_eq!(lane["credits_per_unit"], "1");
+        let mut cleared = json!({});
+        parse(&["--byok-clear-operations"])
+            .apply_update(&mut api, &current, &mut cleared)
+            .await
+            .unwrap();
+        assert_eq!(cleared["billing"]["byok_pricing"]["operations"], json!([]));
+        // Operation prices exist only on Requests lanes.
+        let error = parse(&["--byok-metric", "tokens"])
+            .apply_update(&mut api, &current, &mut json!({}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("--byok-clear-operations"));
+        let mut switched = json!({});
+        parse(&["--byok-metric", "tokens", "--byok-clear-operations"])
+            .apply_update(&mut api, &current, &mut switched)
+            .await
+            .unwrap();
+        assert_eq!(switched["billing"]["byok_pricing"]["metric"], "tokens");
+        for value in ["=1", "get_me", "get_me=-1", "get_me=0.0000000000001"] {
+            assert!(
+                Cli::try_parse_from([
+                    "nyxid",
+                    "service",
+                    "update",
+                    "id",
+                    "--platform-key-operation",
+                    value
+                ])
+                .is_err()
+            );
+        }
+        assert_eq!(
+            lane_price_label(Some(&json!({"metric": "requests", "credits_per_unit": "1",
+            "operations": [
+                {"operation": "get_me", "credits_per_unit": "3", "sync_status": "synced"},
+                {"operation": "channel_dm_send", "credits_per_unit": "5", "sync_status": "pending"},
+            ]}))),
+            "1 credits / request; operations: get_me 3, channel_dm_send 5 (pending)"
+        );
     }
 
     #[tokio::test]
