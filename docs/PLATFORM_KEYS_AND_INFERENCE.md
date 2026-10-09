@@ -235,6 +235,26 @@ charged only when explicitly configured.
 With no lanes, legacy behavior is unchanged. Resale remains independent. The
 `platform_charge_nyxid_credentials_only` restriction still applies after lane selection.
 
+Paid X channels consume `api-twitter` through the **Your own key (BYOK)** lane,
+using shared-app OAuth. Configure a synced **Requests** price there: a price on
+the **NyxID platform key** lane alone leaves channels blocked. The admin service
+response exposes channel consumers and their lane labels for the pricing form.
+Grant- and allowance-funded paid channels still require a provisioned Lago wallet
+and subscription.
+
+Paid-channel admission fails closed before funding with `BillingNotConfigured`
+(code unchanged). The generic billing guard names the service slug and selected lane. When the
+X channel preflight runs, it reports exactly: “The X service (api-twitter) has no
+synced price on the Your own key (BYOK) lane that shared-app X channels bill
+through; configure a Requests price on that lane”. With no lanes the generic
+guard states that no lane prices and legacy platform billing is disabled; it asks
+to enable legacy Requests billing or configure a synced Requests price on the
+selected lane. Provider absence separately reports “The billing provider (Lago) is not
+configured; configure Lago before enabling paid channels”. Missing wallet or
+subscription reports “A provisioned Lago billing wallet and subscription are
+required for paid channels, including grant or allowance funding”. Creation,
+Verify and Reconnect preflight the catalog price before owner resolution.
+
 Stable primary Lago codes remain `platform_svc_{slug}_byok` / `platform_svc_{slug}_pk`;
 additional components use `platform_svc_{slug}_{byok|pk}_{metric}`. Each price has its
 own rate-cache row and synchronization state. Removed components are recorded in

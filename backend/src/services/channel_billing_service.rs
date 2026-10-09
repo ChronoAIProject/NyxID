@@ -10,6 +10,11 @@ use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::usage_meter::CredentialClass;
 use crate::models::{channel_bot::ChannelBot, downstream_service::DownstreamService};
 
+pub const X_CHANNEL_SERVICE_SLUG: &str = "api-twitter";
+pub const X_CHANNEL_PLATFORM: &str = "x";
+pub const X_CHANNEL_DISPLAY_NAME: &str = "X";
+pub const X_CHANNEL_CREDENTIAL_CLASS: CredentialClass = CredentialClass::NyxidPlatformOauthApp;
+
 pub struct ChannelBilling {
     db: mongodb::Database,
     billing: BillingService,
@@ -41,7 +46,7 @@ impl ChannelBilling {
         owner_id: &str,
         api_key_id: Option<&str>,
     ) -> Option<Self> {
-        (platform == "x").then(|| Self {
+        (platform == X_CHANNEL_PLATFORM).then(|| Self {
             db: db.clone(),
             billing: billing.clone(),
             owner_id: owner_id.to_owned(),
@@ -63,26 +68,17 @@ impl ChannelBilling {
         let service = self
             .db
             .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
-            .find_one(doc! {"slug": "api-twitter", "is_active": true})
+            .find_one(doc! {"slug": X_CHANNEL_SERVICE_SLUG, "is_active": true})
             .await?
             .ok_or_else(|| {
                 AppError::BillingNotConfigured(
-                    "Configure the X catalog service before using paid channels".into(),
+                    format!("Configure the {X_CHANNEL_DISPLAY_NAME} catalog service ({X_CHANNEL_SERVICE_SLUG}) before using paid channels"),
                 )
             })?;
-        let owner = self
-            .billing
-            .owner_resolver()
-            .resolve_for_execution(
-                &self.owner_id,
-                &self.owner_id,
-                CredentialClass::NyxidPlatformOauthApp,
-            )
-            .await?;
-        let route = BillingRouteContext::new(
+        let mut route = BillingRouteContext::new(
             ingress,
             request_id,
-            owner.owner_id,
+            self.owner_id.clone(),
             self.owner_id.clone(),
             self.api_key_id.clone(),
             None,
@@ -90,19 +86,30 @@ impl ChannelBilling {
             Some(service.slug.clone()),
             NodeIntent::Direct,
             "oauth2".into(),
-            CredentialClass::NyxidPlatformOauthApp,
+            X_CHANNEL_CREDENTIAL_CLASS,
             super::billing::metric_resolution::platform_metric_for_request(&service, false),
             service.billing.as_ref(),
             false,
         );
+        if let Err(AppError::BillingNotConfigured(_)) = route.require_platform_price() {
+            return Err(AppError::BillingNotConfigured(format!(
+                "The X service ({X_CHANNEL_SERVICE_SLUG}) has no synced price on the Your own key (BYOK) lane that shared-app X channels bill through; configure a Requests price on that lane"
+            )));
+        }
         if route
             .platform_specs()
             .any(|(metric, _)| metric != BillingMetric::Requests)
         {
-            return Err(AppError::BillingNotConfigured(
-                "X channels require per-request pricing on the X service".into(),
-            ));
+            return Err(AppError::BillingNotConfigured(format!(
+                "{X_CHANNEL_DISPLAY_NAME} channels require per-request pricing on the {X_CHANNEL_DISPLAY_NAME} service ({X_CHANNEL_SERVICE_SLUG})"
+            )));
         }
+        let owner = self
+            .billing
+            .owner_resolver()
+            .resolve_for_execution(&self.owner_id, &self.owner_id, X_CHANNEL_CREDENTIAL_CLASS)
+            .await?;
+        route.billing_owner_id = owner.owner_id;
         self.billing.open_required(&route).await
     }
 
@@ -292,8 +299,10 @@ pub async fn sweep(state: &crate::AppState) -> AppResult<()> {
     let bots: Vec<ChannelBot> = state
         .db
         .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-        .find(doc! {"platform": "x", "webhook_registered": true,
-        "$or": [{"status": "failed"}, {"is_active": false}]})
+        .find(
+            doc! {"platform": X_CHANNEL_PLATFORM, "webhook_registered": true,
+            "$or": [{"status": "failed"}, {"is_active": false}]},
+        )
         .limit(100)
         .await?
         .try_collect()
