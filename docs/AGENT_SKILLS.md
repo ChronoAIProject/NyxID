@@ -107,7 +107,59 @@ sandbox, machine or model-selected raw upload is part of this path. Org
 publication keeps L1's `owner_binding_unavailable` refusal, without a personal
 fallback. See `AGENT_LEARNING.md` for bounds and fencing.
 
+The card offers **Retry publication** for a conclusively
+non-effective attempt, **Check again** for an uncertain or verified operation,
+and **Request a new confirmation** for an expired card. A pending confirmation
+offers **Deny**, which records the acknowledgement decision. An already decided
+card offers **Discard** only while the operation is non-effective. A renewed
+confirmation appears in the original conversation. Failure codes use fixed, sanitized
+copy; Ornn response details and skill contents never enter audit. For an
+update, NyxID snapshots the base interface before allocating the card so the
+new frontmatter preserves category, output type, runtimes, dependency names,
+environment variable names, tool names, and tags. If the base cannot be
+reconstructed in Ornn's flat frontmatter, no card is allocated. Scripts and
+other executable files from the base are not copied into the draft ZIP.
+
 Owner-authored drafts allow ordinary URLs, example IDs and paths. Only credential
 shapes are refused as private material, with safe rule/field/line diagnostics.
 The 7,500-character total cap supports CJK and four-byte scripts through a
 30,000-byte ceiling. Learned proposals retain their existing stricter checks.
+
+## Adapter boundary
+
+Ornn is the only skill registry, but its wire protocol stays in two modules.
+
+- `services/agent_skill_service.rs` defines `OrnnReader` and classifies each
+  request as `OrnnOutcome`: success, a local refusal or local error before
+  dispatch, a complete response (status plus the problem-body root `code` mapped
+  through a fixed `OrnnCode` table by `OrnnCode::from_problem_body`; the body
+  read is bounded in size and time), a proxy error, an interrupted success
+  body, or an uncertain timeout. Ordinary skill reads collapse it with
+  `into_app_result`, which preserves the read error contract.
+  `preview_checked` separates content that contradicts a pin (identity,
+  dependency limits, hash, package) from a read that failed or came back
+  malformed; only the former is an integrity failure for publication.
+- `services/assistant_learning_publication.rs` owns frontmatter and interface
+  snapshots, ZIP packaging, base verification, exact-version reconciliation and
+  the mapping from registry codes to provider-neutral results: `PublishOutcome`
+  (published, refused before mutation, version conflict, uncertain),
+  `PublicationError`, `PublicationStage` and `FailureCode`.
+
+The saga in `assistant_agent_learning_review.rs`, the card actions and the
+frontend depend only on those neutral types and the non-effective predicate.
+Generic proxy, acknowledgement, middleware and MCP code has no registry
+branches. Failure codes that describe generic states are neutral
+(`publish_uncertain`, `verify_failed`, `pin_conflict`, `target_busy`);
+`ornn_*` codes mark refusals Ornn itself reported and remain stable strings.
+
+Another registry adapter would implement:
+
+1. An `OrnnReader`-equivalent reader that uses the acting person's identity and
+   classifies outcomes without retaining response text.
+2. Base verification (owner, private visibility, empty sharing, content hash,
+   latest version) and an interface snapshot that its package format can
+   reproduce exactly, or a refusal before any card exists.
+3. Deterministic packaging with a content hash, and a publish call mapped to
+   `PublishOutcome`, where only conclusive refusals count as non-mutating.
+4. Exact-version reconciliation that verifies the downloaded bytes against the
+   bound hash, and a mapping of its refusal codes to `FailureCode`.

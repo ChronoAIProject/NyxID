@@ -223,9 +223,14 @@ async fn authored_refusal_creates_no_proposal_or_card() {
     let f = fixture("authoring_refusal_diagnostic").await;
     let mut value = input(&f.chat.agent_id);
     value["files"][0]["content"] = "Public checklist\nhttps://reader:fixture@example.org/".into();
-    let error = create(&f.state, &f.chat, parse_input(&value).unwrap())
-        .await
-        .unwrap_err();
+    let error = create(
+        &f.state,
+        &f.chat,
+        parse_input(&value).unwrap(),
+        &review::UnavailableReader,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(
         details(error),
         json!({"rule":"credential_shape","field":"files[0].content","line":2})
@@ -311,6 +316,7 @@ async fn authored_chinese_edit_survives_review_and_publication() {
             &row.id,
             1,
             row.agent_skills_revision,
+            &review::UnavailableReader,
         )
         .await
         .unwrap();

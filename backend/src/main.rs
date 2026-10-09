@@ -995,6 +995,7 @@ async fn server_main() {
         .await
         .expect("Upload retention policy");
     services::assistant_upload_retention::spawn(state.clone());
+    services::assistant_agent_learning_review::start_publication_migration(&state).await;
     services::assistant_agent_learning::spawn(state.clone());
     spawn_broker_policy_refresh_task(state.clone());
 

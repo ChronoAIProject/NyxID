@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,6 +8,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAgentLearningReview } from "@/hooks/use-agent-learning-review";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
+
+function requestFailure(cause: unknown): string {
+  return cause instanceof Error && cause.message
+    ? cause.message
+    : "The request could not be completed. Check the proposal and try again.";
+}
 
 export function AgentLearningReview({
   agentId,
@@ -20,6 +28,7 @@ export function AgentLearningReview({
   const [open, setOpen] = useState<string>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [cards, setCards] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
 
   if (!enabled || (readOnly && !review.data)) {
@@ -97,6 +106,13 @@ export function AgentLearningReview({
         const draftText = drafts[proposal.id] ?? draft?.skill_md ?? "";
         const isOpen = open === proposal.id;
         const card = cards[proposal.id];
+        const checkOnly = proposal.evidence_available === false;
+        // A verified version NyxID refused to attach is settled; the server
+        // refuses to check it again.
+        const settled =
+          proposal.status === "published_unpinned" &&
+          (proposal.failure_code === "evidence_unavailable" ||
+            proposal.failure_code === "base_changed");
         return (
           <article
             key={proposal.id}
@@ -115,6 +131,23 @@ export function AgentLearningReview({
               {proposal.evidence_count} evidence items ·{" "}
               {proposal.body_bytes.toLocaleString()} bytes
             </p>
+            {proposal.failure_code ? (
+              <p role="alert" className="text-11 text-destructive">
+                {publicationFailureText(proposal.failure_code, proposal.status)}
+              </p>
+            ) : null}
+            {errors[proposal.id] ? (
+              <p role="alert" className="text-11 text-destructive">
+                {errors[proposal.id]}
+              </p>
+            ) : null}
+            {checkOnly ? (
+              <p role="status" className="text-11 text-warning">
+                Learning evidence or consent is no longer available. NyxID
+                can only check whether this publication reached Ornn; it will
+                not attach it to the agent.
+              </p>
+            ) : null}
 
             {isOpen && draft ? (
               <div className="space-y-2">
@@ -167,40 +200,85 @@ export function AgentLearningReview({
               >
                 {isOpen ? "Hide draft" : "Review draft"}
               </Button>
-              <Button
+              {proposal.source === "authored" ? (
+                proposal.card_conversation_id ? (
+                  <Link
+                    to="/assistant"
+                    search={{ c: proposal.card_conversation_id }}
+                    className="text-11 text-primary hover:underline"
+                  >
+                    Open the confirmation card
+                  </Link>
+                ) : (
+                  <p className="text-11 text-muted-foreground">
+                    Confirm this authored skill from its conversation card.
+                  </p>
+                )
+              ) : settled ? null : <Button
                 size="sm"
                 disabled={readOnly || review.approve.isPending}
                 onClick={async () => {
-                  const result = await review.approve.mutateAsync({
-                    proposalId: proposal.id,
-                    acknowledgementId: card,
-                  });
-                  const acknowledgementId =
-                    result.acknowledgement?.acknowledgement_id;
-                  if (
-                    result.status === "confirmation_required" &&
-                    acknowledgementId
-                  ) {
-                    setCards((current) => ({
+                  setErrors((current) => ({ ...current, [proposal.id]: "" }));
+                  try {
+                    const result = await review.approve.mutateAsync({
+                      proposalId: proposal.id,
+                      acknowledgementId: card,
+                    });
+                    const acknowledgementId =
+                      result.acknowledgement?.acknowledgement_id;
+                    if (
+                      result.status === "confirmation_required" &&
+                      acknowledgementId
+                    ) {
+                      setCards((current) => ({
+                        ...current,
+                        [proposal.id]: acknowledgementId,
+                      }));
+                    }
+                  } catch (cause) {
+                    setErrors((current) => ({
                       ...current,
-                      [proposal.id]: acknowledgementId,
+                      [proposal.id]: requestFailure(cause),
                     }));
                   }
                 }}
               >
-                {card
-                  ? "Confirm publish & attach"
-                  : "Publish & request confirmation"}
-              </Button>
-              <Button
-                size="sm"
-                disabled={readOnly || review.reject.isPending}
-                onClick={() => review.reject.mutate(proposal.id)}
-              >
-                Reject
-              </Button>
+                {checkOnly
+                  ? card
+                    ? "Confirm check"
+                    : "Check publication"
+                  : card
+                    ? "Confirm publish & attach"
+                    : "Publish & request confirmation"}
+              </Button>}
+              {/* The server rejects only pending or failed drafts. A failed
+                  publication that may have reached Ornn is refused, and the
+                  reason appears in the error line above. */}
+              {proposal.status === "pending" ||
+              proposal.status === "publication_failed" ? (
+                <Button
+                  size="sm"
+                  disabled={readOnly || review.reject.isPending}
+                  onClick={async () => {
+                    setErrors((current) => ({ ...current, [proposal.id]: "" }));
+                    try {
+                      await review.reject.mutateAsync({
+                        proposalId: proposal.id,
+                        revision: proposal.revision,
+                      });
+                    } catch (cause) {
+                      setErrors((current) => ({
+                        ...current,
+                        [proposal.id]: requestFailure(cause),
+                      }));
+                    }
+                  }}
+                >
+                  Reject
+                </Button>
+              ) : null}
             </div>
-            {card ? (
+            {card && proposal.source !== "authored" && !checkOnly ? (
               <p className="text-11 text-warning">
                 Confirming this exact card will publish the private skill and
                 attach its pinned version. The card expires if the draft or

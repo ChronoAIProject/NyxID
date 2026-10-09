@@ -50,9 +50,15 @@ export const authoredSkillPreviewSchema = z.object({
   skills_revision: z.number(),
   current_skills_revision: z.number(),
   status: z.string(),
+  state: z.string().default("active"),
+  // Unknown actions from a newer server are ignored rather than failing the card.
+  actions: z.array(z.string()).default([]),
   name: z.string(),
   version: z.string(),
   files: z.array(z.object({ path: z.string(), content: z.string() })),
+  failure_code: z.string().nullish(),
+  lease_live: z.boolean().nullish(),
+  base_scripts_not_copied: z.boolean().nullish(),
 });
 
 export const learningProposalSchema = z.object({
@@ -67,6 +73,10 @@ export const learningProposalSchema = z.object({
   body_bytes: z.number(),
   created_at: z.string(),
   updated_at: z.string(),
+  failure_code: z.string().nullish(),
+  // Older servers omit it; their listed proposals always had current evidence.
+  evidence_available: z.boolean().default(true),
+  card_conversation_id: z.string().nullish(),
   draft: z.object({
     schema_version: z.number().default(1),
     kind: z.enum(["new", "improve", "none"]).default("new"),

@@ -27,6 +27,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 pub const TOOL: &str = "nyxid__approve_agent_learning";
+pub(crate) use super::assistant_learning_publication::FailureCode as PublicationFailureCode;
+use super::assistant_learning_publication::PublicationStage;
 const LEASE_SECONDS: i64 = 180;
 fn conflict() -> AppError {
     AppError::Conflict("Learning proposal changed; reload and review it again".into())
@@ -39,12 +41,356 @@ fn failure_status(proposal: &AssistantAgentLearningProposal) -> &'static str {
     if proposal
         .publication
         .as_ref()
-        .is_some_and(|publication| publication.started)
+        .is_some_and(|publication| publication.verified_at.is_some())
     {
-        "publication_failed"
-    } else {
         "published_unpinned"
+    } else {
+        "publication_failed"
     }
+}
+
+const MIGRATION_ID: &str = "publication-targets-v1";
+
+async fn publication_ready(db: &Database) -> AppResult<()> {
+    if db
+        .collection::<bson::Document>(MIGRATIONS_COLLECTION_NAME)
+        .find_one(doc! {"_id":MIGRATION_ID})
+        .await?
+        .is_none()
+    {
+        return Err(AppError::Conflict(
+            "nyxid_refused: publication temporarily unavailable".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn target_id(p: &LearningPublication) -> Option<String> {
+    if p.target_kind.as_deref() == Some("update") {
+        Some(format!("{}:{}", p.target_skill_id.as_deref()?, p.version))
+    } else {
+        None
+    }
+}
+
+/// A publication request may have reached the registry, or its exact version
+/// was verified. Such an operation is reconciled, never rewritten or released.
+fn dispatched(p: &LearningPublication) -> bool {
+    p.started || p.uncertain_dispatch || p.verified_at.is_some()
+}
+
+pub(super) fn non_effective(p: &LearningPublication, now: chrono::DateTime<Utc>) -> bool {
+    !dispatched(p) && p.lease_expires_at.is_none_or(|expiry| expiry <= now)
+}
+
+fn review_required_failure(row: &AssistantAgentLearningProposal) -> bool {
+    match row
+        .failure_code
+        .as_deref()
+        .and_then(PublicationFailureCode::parse)
+    {
+        Some(PublicationFailureCode::VersionConflict) => {
+            !row.publication.as_ref().is_some_and(dispatched)
+        }
+        Some(code) => code.requires_new_package(),
+        None => false,
+    }
+}
+
+/// A verified version NyxID refused to attach (changed source skill or
+/// withdrawn learned evidence) is settled: checking again would only repeat
+/// the refusal, so no confirmation may claim it.
+fn attach_refused(row: &AssistantAgentLearningProposal) -> bool {
+    row.publication
+        .as_ref()
+        .is_some_and(|p| p.verified_at.is_some())
+        && matches!(
+            row.failure_code
+                .as_deref()
+                .and_then(PublicationFailureCode::parse),
+            Some(PublicationFailureCode::BaseChanged | PublicationFailureCode::EvidenceUnavailable)
+        )
+}
+
+fn attach_settled() -> AppError {
+    AppError::Conflict(
+        "NyxID verified this version but did not attach it; it stays private in Ornn".into(),
+    )
+}
+
+/// Codes a later confirmation must never replace: the package has to change.
+fn package_refusal_codes() -> Vec<&'static str> {
+    let mut codes = PublicationFailureCode::codes(PublicationFailureCode::requires_new_package);
+    codes.push(PublicationFailureCode::VersionConflict.as_str());
+    codes
+}
+
+async fn interface_snapshot(
+    state: &AppState,
+    p: &LearningPublication,
+) -> AppResult<Option<publication::InterfaceSnapshot>> {
+    let Some(encrypted) = &p.interface_encrypted else {
+        return Ok(None);
+    };
+    let bytes = state
+        .encryption_keys
+        .decrypt(encrypted)
+        .await
+        .map_err(|_| conflict())?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| conflict())
+}
+
+/// The target recorded in an operation's own encrypted draft: `Ok(Some(None))`
+/// for a create, `Ok(Some(Some(id)))` for an update, `Ok(None)` when there is
+/// no draft or it does not decode. `Err` means decryption failed now (for
+/// example a key-service outage) and the migration should retry.
+async fn original_target_from_body(
+    state: &AppState,
+    row: &AssistantAgentLearningProposal,
+) -> Result<Option<Option<String>>, ()> {
+    if row.body_encrypted.is_empty() {
+        return Ok(None);
+    }
+    let bytes = state
+        .encryption_keys
+        .decrypt(&row.body_encrypted)
+        .await
+        .map_err(|_| ())?;
+    let decoded = || {
+        let body: Value = serde_json::from_slice(&bytes).ok()?;
+        match (body.get("kind")?.as_str()?, body.get("base_skill")) {
+            ("new", None | Some(Value::Null)) => Some(None),
+            ("improve", Some(base)) => Some(Some(base.get("skill_id")?.as_str()?.to_owned())),
+            _ => None,
+        }
+    };
+    Ok(decoded())
+}
+
+/// Result of one pass of the publication-target migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MigrationOutcome {
+    /// The completion marker exists; publication is admitted.
+    Complete,
+    /// An operation's target cannot be recovered from operation-bound
+    /// evidence. The marker is withheld until an operator records it.
+    Unresolved,
+    /// A draft could not be decrypted now; another pass may classify it.
+    Retry,
+}
+
+/// A draft still undecryptable on this pass is also reported unresolved, so a
+/// permanently broken draft reaches operators while retries continue.
+const REPORT_UNDECRYPTABLE_ON_PASS: u32 = 3;
+
+/// Runs the migration before serving and, while a pass fails for a
+/// retryable reason (storage or decryption), keeps retrying in the
+/// background with capped backoff. Publication stays refused meanwhile.
+pub async fn start_publication_migration(state: &AppState) {
+    if publication_migration_settled(state, 1).await {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut delay = std::time::Duration::from_secs(5);
+        let mut pass = 1;
+        loop {
+            tokio::time::sleep(delay).await;
+            pass += 1;
+            if publication_migration_settled(&state, pass).await {
+                break;
+            }
+            delay = (delay * 2).min(std::time::Duration::from_secs(300));
+        }
+    });
+}
+
+async fn publication_migration_settled(state: &AppState, pass: u32) -> bool {
+    match migrate_publication_targets(state, pass == REPORT_UNDECRYPTABLE_ON_PASS).await {
+        Ok(MigrationOutcome::Complete) => true,
+        Ok(MigrationOutcome::Unresolved) => {
+            tracing::error!(
+                "Skill publication migration has unresolved operations; publication remains unavailable until an operator records their targets"
+            );
+            true
+        }
+        Ok(MigrationOutcome::Retry) => {
+            tracing::warn!(
+                pass,
+                "Skill publication migration will retry undecryptable drafts"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::error!(%error, pass, "Skill publication migration failed; retrying");
+            false
+        }
+    }
+}
+
+/// Runs before publication traffic is admitted. A missing marker fails closed.
+async fn report_unresolved_publication(
+    state: &AppState,
+    row: &AssistantAgentLearningProposal,
+    operation_id: &str,
+    reason: &'static str,
+) {
+    tracing::error!(operation_id, agent_id = %row.agent_id, proposal_id = %row.id, reason,
+        "Legacy skill publication blocks publication migration");
+    let _ = super::audit_service::log_system_event(
+        state.db.clone(),
+        "assistant_learning_migration_unresolved",
+        Some(json!({"operation_id":operation_id,"agent_id":row.agent_id,"proposal_id":row.id,"reason":reason})),
+    )
+    .await;
+}
+
+/// One migration pass. `report_undecryptable` also reports drafts that still
+/// cannot be decrypted as unresolved (see `REPORT_UNDECRYPTABLE_ON_PASS`).
+pub async fn migrate_publication_targets(
+    state: &AppState,
+    report_undecryptable: bool,
+) -> AppResult<MigrationOutcome> {
+    if publication_ready(&state.db).await.is_ok() {
+        return Ok(MigrationOutcome::Complete);
+    }
+    let mut rows = state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find(doc! {"publication.started":true,"status":{"$ne":"pinned"}})
+        .await?;
+    let mut unresolved_count = 0_usize;
+    let mut retry = false;
+    while let Some(row) = rows.try_next().await? {
+        let Some(p) = row.publication.as_ref() else {
+            unresolved_count += 1;
+            report_unresolved_publication(state, &row, &row.id, "unclassified").await;
+            continue;
+        };
+        let Ok(original_target) = original_target_from_body(state, &row).await else {
+            retry = true;
+            tracing::warn!(operation_id = %p.operation_id, proposal_id = %row.id,
+                "Legacy skill publication draft could not be decrypted; migration will retry");
+            if report_undecryptable {
+                report_unresolved_publication(state, &row, &p.operation_id, "undecryptable").await;
+            }
+            continue;
+        };
+        let base_id = original_target.clone().flatten();
+        if original_target.as_ref().is_some_and(|base| {
+            p.target_kind
+                .as_deref()
+                .is_some_and(|kind| kind != if base.is_some() { "update" } else { "create" })
+        }) {
+            unresolved_count += 1;
+            report_unresolved_publication(state, &row, &p.operation_id, "unclassified").await;
+            continue;
+        }
+        let kind = p
+            .target_kind
+            .as_deref()
+            .or_else(|| {
+                original_target.as_ref().map(
+                    |base| {
+                        if base.is_some() { "update" } else { "create" }
+                    },
+                )
+            })
+            .or_else(|| p.target_skill_id.as_ref().map(|_| "update"));
+        let target = p.target_skill_id.clone().or(base_id).or_else(|| {
+            (kind == Some("update"))
+                .then(|| p.skill_id.clone())
+                .flatten()
+        });
+        if kind == Some("update")
+            && [
+                p.target_skill_id.as_ref(),
+                original_target.as_ref().and_then(Option::as_ref),
+                p.skill_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|id| Some(id.as_str()) != target.as_deref())
+        {
+            unresolved_count += 1;
+            report_unresolved_publication(state, &row, &p.operation_id, "unclassified").await;
+            continue;
+        }
+        let Some(kind) = kind else {
+            unresolved_count += 1;
+            report_unresolved_publication(state, &row, &p.operation_id, "unclassified").await;
+            continue;
+        };
+        if kind == "update"
+            && target
+                .as_deref()
+                .is_none_or(|id| Uuid::parse_str(id).is_err())
+        {
+            unresolved_count += 1;
+            report_unresolved_publication(state, &row, &p.operation_id, "unclassified").await;
+            continue;
+        }
+        if kind != "update" && kind != "create" {
+            unresolved_count += 1;
+            report_unresolved_publication(state, &row, &p.operation_id, "unclassified").await;
+            continue;
+        }
+        if kind == "update" {
+            let id = format!("{}:{}", target.as_deref().unwrap_or_default(), p.version);
+            let existing = state
+                .db
+                .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&id})
+                .await?;
+            if existing.is_none() {
+                let now = Utc::now();
+                let row_target = LearningPublicationTarget {
+                    id,
+                    agent_id: row.agent_id.clone(),
+                    owner_id: row.owner_id.clone(),
+                    proposal_id: row.id.clone(),
+                    operation_id: p.operation_id.clone(),
+                    package_sha256: p.sha256.clone(),
+                    state: "uncertain".into(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                if let Err(error) = state
+                    .db
+                    .collection(PUBLICATION_TARGETS_COLLECTION_NAME)
+                    .insert_one(row_target)
+                    .await
+                    && !matches!(error.kind.as_ref(),
+                        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) if write.code == 11000)
+                    && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 11000)
+                {
+                    return Err(error.into());
+                }
+            }
+        }
+        state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+            doc! {"_id":&row.id,"revision":revision_filter(row.revision),"publication.operation_id":&p.operation_id,"publication.started":true},
+            doc! {"$set":{"publication.target_kind":kind,"publication.target_skill_id":target,"publication.uncertain_dispatch":true}},
+        ).await?;
+    }
+    if retry {
+        return Ok(MigrationOutcome::Retry);
+    }
+    if unresolved_count > 0 {
+        return Ok(MigrationOutcome::Unresolved);
+    }
+    state
+        .db
+        .collection::<bson::Document>(MIGRATIONS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":MIGRATION_ID},
+            doc! {"$setOnInsert":{"completed_at":bson::DateTime::now()} },
+        )
+        .upsert(true)
+        .await?;
+    Ok(MigrationOutcome::Complete)
 }
 
 fn approval_actor_allowed(agent: &AssistantAgent, actor: &str, chat: &ChatAuthority) -> bool {
@@ -154,6 +500,12 @@ pub struct ProposalItem {
     pub draft: Option<GeneratedProposal>,
     pub published_skill_id: Option<String>,
     pub published_version: Option<String>,
+    /// False when learned evidence or consent was withdrawn after a request
+    /// may have reached the registry: NyxID only checks it and never attaches.
+    pub evidence_available: bool,
+    /// Authored proposals are confirmed on their conversation card; this is the
+    /// conversation of the newest one, so the panel can link to it.
+    pub card_conversation_id: Option<String>,
 }
 
 async fn load(
@@ -204,16 +556,76 @@ async fn require_current(
     agent: &AssistantAgent,
     row: &AssistantAgentLearningProposal,
 ) -> AppResult<()> {
-    if !current(db, agent, row).await? {
-        db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
-            doc! {"_id":&row.id,"revision":revision_filter(row.revision),"status":{"$nin":["pinned","rejected"]}},
-            doc! {"$set":{"status":"invalidated","failure_code":"evidence_unavailable","body_bytes":0,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
-        ).await?;
-        return Err(AppError::Conflict(
-            "Learning evidence or consent is no longer available".into(),
-        ));
+    if current(db, agent, row).await? {
+        return Ok(());
     }
-    Ok(())
+    Err(invalidate_stale(db, row).await)
+}
+
+/// Withdrawn learned evidence or consent cannot recall a request that may
+/// already have reached the registry. Such an operation may still observe
+/// whether its exact version landed (`Ok(false)`), but only current evidence
+/// attaches it (`Ok(true)`). Any other stale draft is invalidated.
+async fn evidence_allows_pin(
+    db: &Database,
+    agent: &AssistantAgent,
+    row: &AssistantAgentLearningProposal,
+) -> AppResult<bool> {
+    if current(db, agent, row).await? {
+        return Ok(true);
+    }
+    if row.publication.as_ref().is_some_and(dispatched) {
+        return Ok(false);
+    }
+    Err(invalidate_stale(db, row).await)
+}
+
+fn must_reconcile() -> AppError {
+    AppError::Conflict("Publication must be reconciled before the draft can change".into())
+}
+
+/// Invalidates a stale draft whose operation is conclusively non-effective and
+/// returns the refusal to report; an effective operation is left intact.
+async fn invalidate_stale(db: &Database, row: &AssistantAgentLearningProposal) -> AppError {
+    if row
+        .publication
+        .as_ref()
+        .is_some_and(|p| !non_effective(p, Utc::now()))
+    {
+        return must_reconcile();
+    }
+    let transaction_db = db.clone();
+    let stale = row.clone();
+    let mut session = match db.client().start_session().await {
+        Ok(session) => session,
+        Err(error) => return error.into(),
+    };
+    let invalidated = session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<()> = async {
+            let fresh = transaction_db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&stale.id,"revision":revision_filter(stale.revision),"status":{"$nin":["pinned","rejected"]}})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+            if fresh.publication.as_ref().is_some_and(|p| !non_effective(p, Utc::now())) { return Err(conflict()); }
+            if let Some(p) = &fresh.publication && let Some(target) = target_id(p) {
+                transaction_db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME).delete_one(
+                    doc! {"_id":target,"operation_id":&p.operation_id,"package_sha256":&p.sha256,"state":"reserved"}
+                ).session(&mut *session).await?;
+            }
+            let mut filter = operation_filter(&fresh);
+            filter.insert("status", doc! {"$nin":["pinned","rejected"]});
+            let changed = transaction_db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+                filter,
+                doc! {"$set":{"status":"invalidated","failure_code":"evidence_unavailable","body_bytes":0,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
+            ).session(&mut *session).await?;
+            if changed.modified_count != 1 { return Err(conflict()); }
+            Ok(())
+        }.await;
+        transactions::transaction_result(result)
+    }).await;
+    match invalidated {
+        Ok(()) => AppError::Conflict("Learning evidence or consent is no longer available".into()),
+        Err(error) => transactions::map_transaction_error(error),
+    }
 }
 fn revision_filter(revision: i64) -> bson::Bson {
     if revision == 0 {
@@ -221,6 +633,16 @@ fn revision_filter(revision: i64) -> bson::Bson {
     } else {
         revision.into()
     }
+}
+
+fn operation_filter(row: &AssistantAgentLearningProposal) -> bson::Document {
+    let mut filter = doc! {"_id":&row.id,"revision":revision_filter(row.revision)};
+    if let Some(p) = &row.publication {
+        filter.insert("publication.operation_id", &p.operation_id);
+    } else {
+        filter.insert("publication", bson::Bson::Null);
+    }
+    filter
 }
 async fn draft(
     state: &AppState,
@@ -259,6 +681,22 @@ pub(crate) async fn validate_proposal_base(
     let Some(base) = &draft.base_skill else {
         return Ok(());
     };
+    if !base_current(db, agent, draft, source).await? {
+        return Err(AppError::Conflict("base_skill_changed".into()));
+    }
+    publication::next_version(Some(base))?;
+    Ok(())
+}
+
+async fn base_current(
+    db: &Database,
+    agent: &AssistantAgent,
+    draft: &GeneratedProposal,
+    source: ProposalSource,
+) -> AppResult<bool> {
+    let Some(base) = &draft.base_skill else {
+        return Ok(true);
+    };
     let pin = agent.skills.iter().find(|s| {
         s.source == base.source
             && s.skill_id == base.skill_id
@@ -267,12 +705,15 @@ pub(crate) async fn validate_proposal_base(
             && s.name == base.name
             && s.dependencies.is_empty()
     });
-    if base.source != "ornn" || pin.is_none() || (source == ProposalSource::Learned && db.collection::<AssistantAgentLearningSkillRoot>(ROOTS_COLLECTION_NAME)
-        .find_one(doc! {"agent_id":&agent.id,"owner_id":&agent.user_id,"skill_id":&base.skill_id,"version":&base.version,"sha256":&base.sha256}).await?.is_none()) {
-        return Err(AppError::Conflict("base_skill_changed".into()));
+    if base.source != "ornn" || pin.is_none() {
+        return Ok(false);
     }
-    publication::next_version(Some(base))?;
-    Ok(())
+    if source == ProposalSource::Learned {
+        return Ok(db.collection::<AssistantAgentLearningSkillRoot>(ROOTS_COLLECTION_NAME)
+            .find_one(doc! {"agent_id":&agent.id,"owner_id":&agent.user_id,"skill_id":&base.skill_id,"version":&base.version,"sha256":&base.sha256})
+            .await?.is_some());
+    }
+    Ok(true)
 }
 
 pub async fn list(
@@ -288,11 +729,31 @@ pub async fn list(
         .sort(doc! {"created_at":-1}).limit(16).await?.try_collect().await?;
     let mut result = Vec::new();
     for row in rows {
-        let valid = row.status == "pinned" || current(&state.db, &agent, &row).await?;
+        let evidence_available = row.status == "pinned" || current(&state.db, &agent, &row).await?;
+        let valid = evidence_available
+            || row
+                .publication
+                .as_ref()
+                .is_some_and(|p| !non_effective(p, Utc::now()));
         if !valid {
-            require_current(&state.db, &agent, &row).await.ok();
+            let _ = invalidate_stale(&state.db, &row).await;
             continue;
         }
+        let card_conversation_id = if row.source == ProposalSource::Authored {
+            state
+                .db
+                .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                )
+                .find_one(
+                    doc! {"user_id":actor,"tool_name":TOOL,"authored_skill.proposal_id":&row.id},
+                )
+                .sort(doc! {"created_at":-1})
+                .await?
+                .map(|card| card.conversation_id)
+        } else {
+            None
+        };
         let body = if include_drafts && row.status != "pinned" {
             Some(draft(state, &row).await?)
         } else {
@@ -331,6 +792,8 @@ pub async fn list(
             draft: body,
             published_skill_id: row.publication.as_ref().and_then(|p| p.skill_id.clone()),
             published_version: row.publication.as_ref().map(|p| p.version.clone()),
+            evidence_available,
+            card_conversation_id,
         });
     }
     Ok(result)
@@ -339,6 +802,140 @@ pub async fn list(
 async fn audit(db: &Database, actor: &str, row: &AssistantAgentLearningProposal, event: &str) {
     let _ = super::audit_service::log_actor_event(db.clone(), &super::audit_service::AuditActor {user_id:actor.into(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},event,
         Some(json!({"agent_id":row.agent_id,"owner_id":row.owner_id,"proposal_id":row.id,"revision":row.revision,"evidence_count":row.evidence.len()}))).await;
+}
+
+struct DeferredAudit<'a> {
+    code: &'a str,
+    stage: &'a str,
+    status: Option<i32>,
+    /// The card the owner clicked, when it is not the approving card.
+    clicked: Option<&'a str>,
+}
+
+async fn audit_deferred(
+    db: &Database,
+    actor: &str,
+    row: &AssistantAgentLearningProposal,
+    p: &LearningPublication,
+    event: DeferredAudit<'_>,
+) {
+    let _ = super::audit_service::log_actor_event(db.clone(), &super::audit_service::AuditActor {user_id:actor.into(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},"assistant_learning_publication_deferred",
+        Some(json!({"agent_id":row.agent_id,"proposal_id":row.id,"revision":row.revision,"failure_code":event.code,"stage":event.stage,"attempt":p.attempt,"registry_status":event.status,"operation_id":p.operation_id,"acknowledgement_id":p.acknowledgement_id,"clicked_acknowledgement_id":event.clicked}))).await;
+}
+
+struct DeferredFailure {
+    code: publication::FailureCode,
+    stage: PublicationStage,
+    status: Option<i32>,
+    definitive: bool,
+}
+
+async fn defer(
+    state: &AppState,
+    actor: &str,
+    row: &AssistantAgentLearningProposal,
+    p: &LearningPublication,
+    failure: DeferredFailure,
+) -> AppResult<()> {
+    let DeferredFailure {
+        code,
+        stage,
+        status,
+        definitive,
+    } = failure;
+    let db = state.db.clone();
+    let filter = lease_filter(row, p);
+    let target = target_id(p);
+    let operation = p.operation_id.clone();
+    let sha = p.sha256.clone();
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<()> = async {
+            // Status and release follow the fenced durable row (for example a
+            // verified checkpoint written by this attempt), not the claim snapshot.
+            let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(filter.clone()).session(&mut *session).await?.ok_or_else(conflict)?;
+            let mut after = fresh.publication.clone().ok_or_else(conflict)?;
+            after.started = false;
+            after.lease_expires_at = None;
+            let releasable = definitive && non_effective(&after, Utc::now());
+            let mut fields = doc! {"status":failure_status(&fresh),"failure_code":code.as_str(),"publication.last_stage":stage.as_str(),"publication.last_registry_status":status,"publication.lease_expires_at":bson::Bson::Null,"updated_at":bson::DateTime::now()};
+            if releasable {
+                fields.insert("publication.started", false);
+            } else if matches!(stage, PublicationStage::Publish | PublicationStage::Reconcile) {
+                fields.insert("publication.uncertain_dispatch", true);
+            }
+            let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                .update_one(filter.clone(), doc! {"$set":fields}).session(&mut *session).await?;
+            if changed.modified_count != 1 { return Err(conflict()); }
+            if let Some(target) = target.as_ref() {
+                if releasable {
+                    db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME)
+                        .delete_one(doc! {"_id":target,"operation_id":&operation,"package_sha256":&sha,"state":{"$in":["reserved","uncertain"]}})
+                        .session(&mut *session).await?;
+                } else {
+                    // Never downgrade a landed (verified) target.
+                    db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME)
+                        .update_one(doc! {"_id":target,"operation_id":&operation,"package_sha256":&sha,"state":"reserved"},
+                            doc! {"$set":{"state":"uncertain","updated_at":bson::DateTime::now()}})
+                        .session(&mut *session).await?;
+                }
+            }
+            Ok(())
+        }.await;
+        transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)?;
+    audit_deferred(
+        &state.db,
+        actor,
+        row,
+        p,
+        DeferredAudit {
+            code: code.as_str(),
+            stage: stage.as_str(),
+            status,
+            clicked: None,
+        },
+    )
+    .await;
+    Ok(())
+}
+
+async fn defer_publication_error<T>(
+    state: &AppState,
+    actor: &str,
+    row: &AssistantAgentLearningProposal,
+    p: &LearningPublication,
+    stage: PublicationStage,
+    error: publication::PublicationError,
+    fallback_status: Option<u16>,
+) -> AppResult<T> {
+    use publication::FailureCode as Code;
+    let code = error.failure_code(stage);
+    let status = error.status().or(fallback_status).map(i32::from);
+    defer(
+        state,
+        actor,
+        row,
+        p,
+        DeferredFailure {
+            code,
+            stage,
+            status,
+            definitive: !p.started
+                && !p.uncertain_dispatch
+                && matches!(
+                    stage,
+                    PublicationStage::FormatValidate | PublicationStage::BaseVerify
+                ),
+        },
+    )
+    .await?;
+    match code {
+        Code::VersionConflict => Err(AppError::Conflict("version_conflict".into())),
+        Code::PublishUncertain => Err(publication::ambiguous()),
+        _ => Err(error.into_app_error()),
+    }
 }
 
 pub async fn edit(
@@ -351,8 +948,17 @@ pub async fn edit(
 ) -> AppResult<()> {
     let (agent, row) = load(&state.db, actor, agent_id, id).await?;
     require_current(&state.db, &agent, &row).await?;
-    if row.revision != expected_revision || row.status != "pending" {
+    if row.revision != expected_revision
+        || !matches!(row.status.as_str(), "pending" | "publication_failed")
+    {
         return Err(conflict());
+    }
+    if row
+        .publication
+        .as_ref()
+        .is_some_and(|p| !non_effective(p, Utc::now()))
+    {
+        return Err(must_reconcile());
     }
     let encoded = if row.source == ProposalSource::Authored {
         let body = super::assistant_skill_authoring::decode_body(&value.to_string())?;
@@ -369,13 +975,33 @@ pub async fn edit(
         row.model_contract,
         String::from_utf8_lossy(&encoded)
     ));
-    let changed = state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
-        doc! {"_id":id,"status":"pending","revision":revision_filter(expected_revision)},
-        doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"body_bytes":encoded.len() as i64,"fingerprint":fingerprint,"revision":expected_revision+1,"agent_skills_revision":agent.skills_revision,"updated_at":bson::DateTime::now()},"$unset":{"publication":"","failure_code":""}},
-    ).await?;
-    if changed.modified_count != 1 {
-        return Err(conflict());
-    }
+    let db = state.db.clone();
+    let proposal_id = id.to_owned();
+    let skills_revision = agent.skills_revision;
+    let body_len = encoded.len() as i64;
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<()> = async {
+            let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(expected_revision),"status":{"$in":["pending","publication_failed"]}})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+            if fresh.publication.as_ref().is_some_and(|p| !non_effective(p, Utc::now())) { return Err(must_reconcile()); }
+            if let Some(p) = &fresh.publication && let Some(target) = target_id(p) {
+                db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME).delete_one(
+                    doc! {"_id":target,"operation_id":&p.operation_id,"package_sha256":&p.sha256,"state":"reserved"}
+                ).session(&mut *session).await?;
+            }
+            let mut filter = operation_filter(&fresh);
+            filter.insert("status", doc! {"$in":["pending","publication_failed"]});
+            let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+                filter,
+                doc! {"$set":{"status":"pending","body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted.clone()},"body_bytes":body_len,"fingerprint":&fingerprint,"revision":expected_revision+1,"agent_skills_revision":skills_revision,"updated_at":bson::DateTime::now()},"$unset":{"publication":"","failure_code":""}},
+            ).session(&mut *session).await?;
+            if changed.modified_count != 1 { return Err(conflict()); }
+            Ok(())
+        }.await;
+        transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)?;
     audit(&state.db, actor, &row, "assistant_learning_proposal_edited").await;
     Ok(())
 }
@@ -407,10 +1033,19 @@ pub async fn reject(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
+                let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                    .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(revision),"status":{"$in":["pending","publication_failed"]}})
+                    .session(&mut *session).await?.ok_or_else(conflict)?;
+                if fresh.publication.as_ref().is_some_and(|p| !non_effective(p, Utc::now())) { return Err(must_reconcile()); }
+                if let Some(p) = &fresh.publication && let Some(target) = target_id(p) {
+                    db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME).delete_one(
+                        doc! {"_id":target,"operation_id":&p.operation_id,"package_sha256":&p.sha256,"state":"reserved"}
+                    ).session(&mut *session).await?;
+                }
                 let changed = db
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
-                        doc! {"_id":&proposal_id,"status":"pending","revision":revision_filter(revision)},
+                        { let mut filter = operation_filter(&fresh); filter.insert("status", doc! {"$in":["pending","publication_failed"]}); filter },
                         doc! {"$set":{"status":"rejected","body_bytes":0,"failure_code":&reason,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
                     )
                     .session(&mut *session)
@@ -458,33 +1093,105 @@ pub async fn reject(
     Ok(())
 }
 
-/// Allocate immutable external operation metadata before showing the card.
-/// Binding uses the live B2 revision; retries after a B2 edit need a new card,
-/// but they reuse the same external operation and cannot repeat its write.
-pub async fn approval_binding(
+#[cfg(test)]
+pub(super) struct UnavailableReader;
+#[cfg(test)]
+#[async_trait::async_trait]
+impl OrnnReader for UnavailableReader {
+    async fn get(&self, _path: &str) -> AppResult<Vec<u8>> {
+        Err(conflict())
+    }
+}
+
+pub(crate) struct BindingFailure {
+    pub(crate) code: Option<publication::FailureCode>,
+    pub(crate) error: AppError,
+}
+
+impl From<AppError> for BindingFailure {
+    fn from(error: AppError) -> Self {
+        Self { code: None, error }
+    }
+}
+
+impl From<mongodb::error::Error> for BindingFailure {
+    fn from(error: mongodb::error::Error) -> Self {
+        Self::from(AppError::from(error))
+    }
+}
+
+impl BindingFailure {
+    /// The binding snapshot reads and verifies the base before any card exists.
+    fn from_publication(error: publication::PublicationError) -> Self {
+        Self {
+            code: Some(error.failure_code(PublicationStage::BaseVerify)),
+            error: error.into_app_error(),
+        }
+    }
+}
+
+pub async fn approval_binding<R: OrnnReader>(
     state: &AppState,
     actor: &str,
     agent_id: &str,
     id: &str,
     expected_revision: i64,
     expected_skills_revision: i64,
+    reader: &R,
 ) -> AppResult<Value> {
+    approval_binding_typed(
+        state,
+        actor,
+        agent_id,
+        id,
+        expected_revision,
+        expected_skills_revision,
+        reader,
+    )
+    .await
+    .map_err(|failure| failure.error)
+}
+
+pub(crate) async fn approval_binding_typed<R: OrnnReader>(
+    state: &AppState,
+    actor: &str,
+    agent_id: &str,
+    id: &str,
+    expected_revision: i64,
+    expected_skills_revision: i64,
+    reader: &R,
+) -> Result<Value, BindingFailure> {
+    publication_ready(&state.db).await?;
     let (agent, mut row) = load(&state.db, actor, agent_id, id).await?;
     if agent.user_id != actor {
-        return Err(AppError::Conflict("owner_binding_unavailable".into()));
+        return Err(AppError::Conflict("owner_binding_unavailable".into()).into());
+    }
+    if attach_refused(&row) {
+        return Err(attach_settled().into());
     }
     if row.revision != expected_revision
         || agent.skills_revision != expected_skills_revision
+        || review_required_failure(&row)
         || !matches!(
             row.status.as_str(),
             "pending" | "publication_failed" | "published_unpinned" | "publishing"
         )
     {
-        return Err(conflict());
+        return Err(conflict().into());
     }
-    require_current(&state.db, &agent, &row).await?;
+    evidence_allows_pin(&state.db, &agent, &row).await?;
     let body = draft(state, &row).await?;
-    validate_proposal_base(&state.db, &agent, &body, row.source).await?;
+    // A possibly dispatched operation may still be checked after its base
+    // changed; the pin gate refuses to attach the result.
+    if !row.publication.as_ref().is_some_and(dispatched)
+        && !base_current(&state.db, &agent, &body, row.source).await?
+    {
+        record_base_changed_if_current(&state.db, &row).await?;
+        return Err(BindingFailure {
+            code: Some(publication::FailureCode::BaseChanged),
+            error: AppError::Conflict("base_skill_changed".into()),
+        });
+    }
     if row.publication.is_none() {
         let operation = Uuid::new_v4().to_string();
         let name = body.base_skill.as_ref().map_or_else(
@@ -498,7 +1205,31 @@ pub async fn approval_binding(
             |b| b.name.clone(),
         );
         let version = publication::next_version(body.base_skill.as_ref())?;
-        let bytes = publication::package(&body, &operation, &name, &version)?;
+        let snapshot = if let Some(base) = &body.base_skill {
+            Some(
+                publication::snapshot(reader, actor, base)
+                    .await
+                    .map_err(BindingFailure::from_publication)?,
+            )
+        } else {
+            None
+        };
+        let bytes = publication::package_with_snapshot(
+            &body,
+            &operation,
+            &name,
+            &version,
+            snapshot.as_ref(),
+        )?;
+        let encrypted = match snapshot {
+            Some(value) => Some(
+                state
+                    .encryption_keys
+                    .encrypt(&serde_json::to_vec(&value).map_err(|_| conflict())?)
+                    .await?,
+            ),
+            None => None,
+        };
         let p = LearningPublication {
             operation_id: operation,
             name,
@@ -512,17 +1243,238 @@ pub async fn approval_binding(
             skills_revision: agent.skills_revision,
             lease_id: None,
             lease_expires_at: None,
+            target_kind: Some(
+                if body.base_skill.is_some() {
+                    "update"
+                } else {
+                    "create"
+                }
+                .into(),
+            ),
+            target_skill_id: body.base_skill.as_ref().map(|base| base.skill_id.clone()),
+            interface_encrypted: encrypted,
+            ..Default::default()
         };
         state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(doc! {"_id":id,"revision":revision_filter(row.revision),"status":"pending","publication":bson::Bson::Null},doc! {"$set":{"publication":bson::to_bson(&p).map_err(|_| conflict())?}}).await?;
         row = load(&state.db, actor, agent_id, id).await?.1;
     }
+    if row
+        .publication
+        .as_ref()
+        .is_some_and(|p| p.target_kind.is_none())
+    {
+        let kind = if body.base_skill.is_some() {
+            "update"
+        } else {
+            "create"
+        };
+        let target = body.base_skill.as_ref().map(|b| b.skill_id.clone());
+        let p = row.publication.as_ref().ok_or_else(conflict)?;
+        let changed = state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+            doc! {"_id":id,"revision":revision_filter(row.revision),"publication.operation_id":&p.operation_id,"publication.target_kind":bson::Bson::Null},
+            doc! {"$set":{"publication.target_kind":kind,"publication.target_skill_id":target}},
+        ).await?;
+        if changed.modified_count != 1 {
+            return Err(conflict().into());
+        }
+        row = load(&state.db, actor, agent_id, id).await?.1;
+    }
     let p = row.publication.as_ref().ok_or_else(conflict)?;
+    match (p.target_kind.as_deref(), body.base_skill.as_ref()) {
+        (Some("update"), Some(base))
+            if p.target_skill_id.as_deref() == Some(base.skill_id.as_str()) => {}
+        (Some("create"), None) if p.target_skill_id.is_none() => {}
+        _ => return Err(conflict().into()),
+    }
     if p.lease_expires_at.is_some_and(|t| t > Utc::now()) {
-        return Err(AppError::Conflict(
-            "Publication is in progress; retry when it settles".into(),
-        ));
+        return Err(
+            AppError::Conflict("Publication is in progress; retry when it settles".into()).into(),
+        );
     }
     Ok(publication::binding(&row, p, agent.skills_revision))
+}
+
+/// A changed base is definitive for an operation that never dispatched: it
+/// replaces any retryable code (so the card stops offering a doomed retry)
+/// but never a package refusal, a newer attempt or a live lease.
+async fn record_base_changed_if_current(
+    db: &Database,
+    row: &AssistantAgentLearningProposal,
+) -> AppResult<()> {
+    let Some(observed) = row.publication.as_ref() else {
+        return Ok(());
+    };
+    db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.id,"revision":revision_filter(row.revision),"publication.operation_id":&observed.operation_id,
+                "publication.attempt":observed.attempt,"publication.lease_expires_at":bson::Bson::Null,
+                "publication.started":{"$ne":true},"publication.uncertain_dispatch":{"$ne":true},
+                "publication.verified_at":bson::Bson::Null,"status":{"$in":["pending","publication_failed"]},
+                "failure_code":{"$nin":package_refusal_codes()}},
+            doc! {"$set":{"failure_code":PublicationFailureCode::BaseChanged.as_str(),"status":"publication_failed",
+                "publication.last_stage":"pre_claim","updated_at":bson::DateTime::now()}},
+        )
+        .await?;
+    Ok(())
+}
+
+/// The only card an HTTP learned confirmation may act on: the owner's own
+/// learning action card for this exact binding, in the NyxBot conversation
+/// that raised it. A live pending card is allowed and audited here; a used
+/// card can only resume the operation it approved (the claim checks that).
+/// Any other card id, including service, account and authored cards, is
+/// refused without changing it.
+pub async fn confirm_learned_card(
+    state: &AppState,
+    chat: &ChatAuthority,
+    auditor: &super::audit_service::AuditActor,
+    card_id: &str,
+    binding: &Value,
+) -> AppResult<()> {
+    let card = state
+        .db
+        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":card_id,"user_id":&chat.user_id,"kind":"action","tool_name":TOOL,
+            "authored_skill":bson::Bson::Null,"conversation_id":&chat.conversation_id,
+            "arguments_digest":acks::arguments_digest(binding),
+            "$or":[{"status":{"$in":["pending","allowed"]},"expires_at":{"$gt":bson::DateTime::now()}},{"status":"used"}]})
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("Learning approval card is missing, expired, used or stale".into())
+        })?;
+    if card.status == "pending" {
+        let decided = acks::decide(
+            &state.db,
+            &chat.user_id,
+            &card.conversation_id,
+            &card.id,
+            true,
+        )
+        .await?;
+        acks::audit_decision(&state.db, auditor, &decided).await;
+    }
+    Ok(())
+}
+
+/// A renewal re-raises the original card's exact operation: the fresh binding
+/// must equal the original digest at the original card's skills revision.
+pub fn require_renewal_of(
+    original: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+    binding: &Value,
+) -> AppResult<()> {
+    let changed = || AppError::Conflict("Skill review changed".into());
+    let reference = original.authored_skill.as_ref().ok_or_else(changed)?;
+    let mut original_args = binding.clone();
+    original_args["skills_revision"] = json!(reference.skills_revision);
+    original_args["authored_skill"]["skills_revision"] = json!(reference.skills_revision);
+    if original.arguments_digest.as_deref() != Some(acks::arguments_digest(&original_args).as_str())
+    {
+        return Err(changed());
+    }
+    Ok(())
+}
+
+/// Admin recovery for a target reserved by an operation whose dispatch is
+/// uncertain (typically a migrated legacy attempt), used only after the
+/// operator holds authoritative evidence, from Ornn's version list and its own
+/// request records for this operation ID, that the request had no effect and
+/// can no longer have one. The operation becomes non-effective so its owner
+/// can retry the same reviewed package or discard it. NyxID never skips to
+/// another version on its own.
+pub async fn operator_release_target(
+    state: &AppState,
+    operator: &super::audit_service::AuditActor,
+    proposal_id: &str,
+    operation_id: &str,
+    evidence_ref: &str,
+) -> AppResult<Value> {
+    if evidence_ref.is_empty()
+        || evidence_ref.len() > 128
+        || !evidence_ref
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._:/#-".contains(&c))
+    {
+        return Err(AppError::ValidationError(
+            "evidence_ref must be a short reference to the operator's evidence".into(),
+        ));
+    }
+    let db = state.db.clone();
+    let id = proposal_id.to_owned();
+    let operation = operation_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    let (row, target, previous_state) = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<(AssistantAgentLearningProposal, String, String)> = async {
+                let row = db
+                    .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                    .find_one(doc! {"_id":&id,"publication.operation_id":&operation})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(not_found)?;
+                let p = row.publication.as_ref().ok_or_else(not_found)?;
+                if row.status == "pinned"
+                    || p.verified_at.is_some()
+                    || p.lease_expires_at.is_some_and(|t| t > Utc::now())
+                {
+                    return Err(AppError::Conflict(
+                        "Only an unverified publication without a live attempt can be released"
+                            .into(),
+                    ));
+                }
+                let target = target_id(p).ok_or_else(|| {
+                    AppError::Conflict("This publication holds no update target".into())
+                })?;
+                let holder = db
+                    .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+                    .find_one(doc! {"_id":&target,"operation_id":&operation,"state":{"$in":["reserved","uncertain"]}})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Conflict("This publication does not hold a releasable target".into())
+                    })?;
+                db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME)
+                    .delete_one(doc! {"_id":&target,"operation_id":&operation,"state":&holder.state})
+                    .session(&mut *session)
+                    .await?;
+                let mut fields = doc! {"publication.started":false,"publication.uncertain_dispatch":false,
+                    "publication.last_stage":"operator_released","updated_at":bson::DateTime::now()};
+                if matches!(row.status.as_str(), "pending" | "publishing" | "publication_failed") {
+                    fields.insert("status", "publication_failed");
+                    fields.insert("failure_code", PublicationFailureCode::OperatorReleased.as_str());
+                }
+                let changed = db
+                    .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&id,"revision":revision_filter(row.revision),"publication.operation_id":&operation,
+                            "publication.attempt":p.attempt,"publication.verified_at":bson::Bson::Null},
+                        doc! {"$set":fields},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if changed.modified_count != 1 {
+                    return Err(conflict());
+                }
+                Ok((row, target, holder.state))
+            }
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
+    let _ = super::audit_service::log_actor_event(
+        state.db.clone(),
+        operator,
+        "assistant_learning_publication_target_released",
+        Some(json!({"agent_id":row.agent_id,"owner_id":row.owner_id,"proposal_id":row.id,
+            "operation_id":operation_id,"target":target,"previous_state":previous_state,"evidence_ref":evidence_ref})),
+    )
+    .await;
+    Ok(
+        json!({"status":"released","proposal_id":row.id,"operation_id":operation_id,"target":target}),
+    )
 }
 
 /// HTTP-only caller has verified first-party human identity and decided this
@@ -537,18 +1489,18 @@ pub async fn approve(
     binding: &Value,
     reader: &impl OrnnReader,
 ) -> AppResult<Value> {
+    publication_ready(&state.db).await?;
     let actor = &chat.user_id;
     let (agent, row) = load(&state.db, actor, agent_id, id).await?;
     if !approval_actor_allowed(&agent, actor, chat) {
         return Err(AppError::Forbidden("owner_binding_unavailable".into()));
     }
-    require_current(&state.db, &agent, &row).await?;
+    evidence_allows_pin(&state.db, &agent, &row).await?;
     let mut p = row.publication.clone().ok_or_else(conflict)?;
     if publication::binding(&row, &p, agent.skills_revision) != *binding {
         return Err(conflict());
     }
     let digest = acks::arguments_digest(binding);
-    let resumed = resumes_publication(&p, actor, card, &digest);
     let lease = Uuid::new_v4().to_string();
     let db = state.db.clone();
     let chat = chat.clone();
@@ -560,39 +1512,63 @@ pub async fn approve(
     let proposal_id = id.to_owned();
     let proposal_revision = row.revision;
     let agent_for_claim = agent.clone();
-    let initial = p.clone();
     let mut session = db.client().start_session().await?;
-    p = session
+    let claim_future = session
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<LearningPublication> = async {
-                if !resumed
-                    && !acks::consume_action_in_session(
-                        &db,
-                        &chat,
-                        &card,
-                        TOOL,
-                        &binding,
-                        &mut *session,
-                    )
-                    .await?
-                {
-                    return Err(AppError::Conflict(
-                        "Learning approval card is missing, expired, used or stale".into(),
-                    ));
+                let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                    .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id})
+                    .session(&mut *session).await?.ok_or_else(conflict)?;
+                let mut next = fresh.publication.clone().ok_or_else(conflict)?;
+                if publication::binding(&fresh, &next, agent_for_claim.skills_revision) != binding { return Err(conflict()); }
+                if review_required_failure(&fresh) { return Err(conflict()); }
+                if attach_refused(&fresh) { return Err(attach_settled()); }
+                let classified = match next.target_kind.as_deref() {
+                    Some("create") => next.target_skill_id.is_none(),
+                    Some("update") => next.target_skill_id.as_deref().is_some_and(|id| Uuid::parse_str(id).is_ok()),
+                    _ => false,
+                };
+                if !classified || next.lease_expires_at.is_some_and(|t| t > Utc::now()) {
+                    return Err(conflict());
                 }
-                let mut next = initial.clone();
+                if !resumes_publication(&next, &actor_for_claim, &card, &digest)
+                    && !acks::consume_action_in_session(&db, &chat, &card, TOOL, &binding, &mut *session).await? {
+                    return Err(AppError::Conflict(if fresh.source == ProposalSource::Learned {
+                        "Learning approval card is missing, expired, used or stale"
+                    } else {
+                        "This confirmation cannot publish right now; see the card for the reason"
+                    }.into()));
+                }
+                if let Some(target) = target_id(&next) {
+                    let targets = db.collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME);
+                    if let Some(holder) = targets.find_one(doc! {"_id":&target}).session(&mut *session).await? {
+                        if (holder.operation_id != next.operation_id || holder.package_sha256 != next.sha256) && !next.started {
+                            return Err(AppError::Conflict("target_busy: Another draft is publishing this skill version".into()));
+                        }
+                    } else {
+                        let now = Utc::now();
+                        targets.insert_one(LearningPublicationTarget { id: target, agent_id: fresh.agent_id.clone(), owner_id: fresh.owner_id.clone(), proposal_id: fresh.id.clone(), operation_id: next.operation_id.clone(), package_sha256: next.sha256.clone(), state: "reserved".into(), created_at: now, updated_at: now }).session(&mut *session).await.map_err(|error| {
+                            if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) if write.code == 11000) {
+                                AppError::Conflict("target_busy: Another draft is publishing this skill version".into())
+                            } else { AppError::from(error) }
+                        })?;
+                    }
+                }
                 next.approved_by = Some(actor_for_claim.clone());
                 next.acknowledgement_id = Some(card.clone());
                 next.approval_digest = Some(digest.clone());
                 next.skills_revision = agent_for_claim.skills_revision;
                 next.lease_id = Some(lease.clone());
                 next.lease_expires_at = Some(Utc::now() + Duration::seconds(LEASE_SECONDS));
+                next.attempt += 1;
+                next.last_stage = Some("claimed".into());
+                next.last_registry_status = None;
                 let changed = db
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id,"status":{"$in":["pending","publishing","publication_failed","published_unpinned"]},"$or":[{"publication.lease_expires_at":bson::Bson::Null},{"publication.lease_expires_at":{"$lte":bson::DateTime::now()}}]},
-                        doc! {"$set":{"status":"publishing","publication":bson::to_bson(&next).map_err(|_|conflict())?,"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
+                        doc! {"$set":{"status":"publishing","publication.approved_by":&next.approved_by,"publication.acknowledgement_id":&next.acknowledgement_id,"publication.approval_digest":&next.approval_digest,"publication.skills_revision":next.skills_revision,"publication.lease_id":&next.lease_id,"publication.lease_expires_at":next.lease_expires_at.map(bson::DateTime::from_chrono),"publication.attempt":next.attempt,"publication.last_stage":"claimed","publication.last_registry_status":bson::Bson::Null,"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
                     )
                     .session(&mut *session)
                     .await?;
@@ -603,7 +1579,8 @@ pub async fn approve(
             }
             .await;
             transactions::transaction_result(result)
-        })
+        });
+    p = claim_future
         .await
         .map_err(transactions::map_transaction_error)?;
     audit(
@@ -613,7 +1590,7 @@ pub async fn approve(
         "assistant_learning_publication_approved",
     )
     .await;
-    let result = Box::pin(execute(state, &actor, &row, &p, reader)).await;
+    let result = execute(state, &actor, &row, &p, reader).await;
     if result.is_err() {
         let durable = state
             .db
@@ -621,37 +1598,149 @@ pub async fn approve(
             .find_one(doc! {"_id":id})
             .await?
             .ok_or_else(not_found)?;
-        let status = failure_status(&durable);
-        state
-            .db
-            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
-            .update_one(
-                doc! {"_id":id,"publication.operation_id":&p.operation_id,"publication.lease_id":&p.lease_id,"status":{"$in":["publishing","published_unpinned"]}},
-                doc! {"$set":{"status":status,"failure_code":"publication_retry_required","publication.lease_expires_at":bson::Bson::Null}},
-            )
-            .await?;
-        audit(
-            &state.db,
-            &actor,
-            &row,
-            "assistant_learning_publication_deferred",
-        )
-        .await;
+        if durable.status == "publishing" || durable.status == "published_unpinned" {
+            let status = failure_status(&durable).to_owned();
+            let observed = durable.publication.as_ref();
+            let stage = observed
+                .and_then(|v| v.last_stage.as_deref())
+                .unwrap_or("preflight")
+                .to_owned();
+            // Registry outcomes are recorded where they occur. Anything left
+            // here failed inside NyxID (lost lease, changed state, storage), so
+            // its code follows only from what may already have reached the
+            // registry, never from the stage name.
+            let code = if observed.is_some_and(|v| v.verified_at.is_some()) {
+                publication::FailureCode::PinConflict
+            } else if observed.is_some_and(dispatched) {
+                publication::FailureCode::PublishUncertain
+            } else {
+                publication::FailureCode::NyxidRefused
+            }
+            .as_str()
+            .to_owned();
+            let mut after = durable.publication.clone().ok_or_else(conflict)?;
+            after.lease_expires_at = None;
+            let release = non_effective(&after, Utc::now());
+            let target = target_id(&after);
+            let db = state.db.clone();
+            let proposal_id = id.to_owned();
+            let operation = p.operation_id.clone();
+            let sha = p.sha256.clone();
+            // A failure already recorded under this lease cleared its expiry.
+            let filter = doc! {"_id":id,"revision":revision_filter(row.revision),"publication.operation_id":&p.operation_id,"publication.attempt":p.attempt,"publication.lease_id":&p.lease_id,"publication.lease_expires_at":{"$ne":bson::Bson::Null},"status":{"$in":["publishing","published_unpinned"]}};
+            let audit_code = code.clone();
+            let audit_stage = stage.clone();
+            let response_status: Option<i32> = None;
+            let mut session = db.client().start_session().await?;
+            let changed = session.start_transaction().and_run2(async move |session| {
+                let db = db.clone();
+                let filter = filter.clone();
+                let target = target.clone();
+                let proposal_id = proposal_id.clone();
+                let operation = operation.clone();
+                let sha = sha.clone();
+                let code = code.clone();
+                let stage = stage.clone();
+                let status = status.clone();
+                let result: AppResult<bool> = async {
+                    let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                        .update_one(filter, doc! {"$set":{"status":status,"failure_code":code,"publication.last_stage":stage,"publication.last_registry_status":response_status,"publication.lease_expires_at":bson::Bson::Null}})
+                        .session(&mut *session).await?;
+                    if changed.modified_count == 1 && release && let Some(target) = target {
+                        db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME)
+                            .delete_one(doc! {"_id":target,"proposal_id":&proposal_id,"operation_id":operation,"package_sha256":sha,"state":"reserved"})
+                            .session(&mut *session).await?;
+                    }
+                    Ok(changed.modified_count == 1)
+                }.await;
+                transactions::transaction_result(result)
+            }).await.map_err(transactions::map_transaction_error)?;
+            if changed {
+                audit_deferred(
+                    &state.db,
+                    &actor,
+                    &row,
+                    &p,
+                    DeferredAudit {
+                        code: &audit_code,
+                        stage: &audit_stage,
+                        status: response_status,
+                        clicked: None,
+                    },
+                )
+                .await;
+            }
+        }
     }
     result
 }
 fn lease_filter(row: &AssistantAgentLearningProposal, p: &LearningPublication) -> bson::Document {
-    doc! {"_id":&row.id,"revision":revision_filter(row.revision),"status":{"$in":["publishing","published_unpinned"]},"publication.operation_id":&p.operation_id,"publication.lease_id":&p.lease_id,"publication.lease_expires_at":{"$gt":bson::DateTime::now()}}
+    doc! {"_id":&row.id,"revision":revision_filter(row.revision),"status":{"$in":["publishing","published_unpinned"]},"publication.operation_id":&p.operation_id,"publication.attempt":p.attempt,"publication.lease_id":&p.lease_id,"publication.lease_expires_at":{"$gt":bson::DateTime::now()}}
 }
+async fn set_stage(
+    state: &AppState,
+    row: &AssistantAgentLearningProposal,
+    p: &LearningPublication,
+    stage: &str,
+) -> AppResult<()> {
+    let changed = state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_one(
+            lease_filter(row, p),
+            doc! {"$set":{"publication.last_stage":stage}},
+        )
+        .await?;
+    if changed.modified_count != 1 {
+        return Err(conflict());
+    }
+    Ok(())
+}
+
+async fn mark_started(
+    state: &AppState,
+    row: &AssistantAgentLearningProposal,
+    p: &LearningPublication,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    let filter = lease_filter(row, p);
+    let target = target_id(p);
+    let operation = p.operation_id.clone();
+    let sha = p.sha256.clone();
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<()> = async {
+            let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                .update_one(filter.clone(), doc! {"$set":{"publication.started":true,"publication.last_stage":"publish"}})
+                .session(&mut *session).await?;
+            if changed.modified_count != 1 { return Err(conflict()); }
+            if let Some(target) = target.as_ref() {
+                let changed = db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME)
+                    .update_one(doc! {"_id":target,"operation_id":&operation,"package_sha256":&sha,"state":"reserved"},
+                        doc! {"$set":{"state":"uncertain","updated_at":bson::DateTime::now()}})
+                    .session(&mut *session).await?;
+                if changed.matched_count != 1 { return Err(conflict()); }
+            }
+            Ok(())
+        }.await;
+        transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)?;
+    Ok(())
+}
+/// Re-validates the claimed operation against live state. Returns the agent
+/// and, when the result must not be attached, why: withdrawn learned evidence
+/// or a changed source skill on an operation that may already have
+/// dispatched. Such an operation still reconciles and verifies read-only.
 async fn recheck(
     state: &AppState,
     actor: &str,
     row: &AssistantAgentLearningProposal,
     p: &LearningPublication,
     body: &GeneratedProposal,
-) -> AppResult<AssistantAgent> {
+    stage: PublicationStage,
+) -> AppResult<(AssistantAgent, Option<PublicationFailureCode>)> {
     let (agent, latest) = load(&state.db, actor, &row.agent_id, &row.id).await?;
-    require_current(&state.db, &agent, &latest).await?;
+    let evidence_current = evidence_allows_pin(&state.db, &agent, &latest).await?;
     if latest.revision != row.revision
         || latest.fingerprint != row.fingerprint
         || agent.skills_revision != p.skills_revision
@@ -661,8 +1750,28 @@ async fn recheck(
     {
         return Err(conflict());
     }
-    validate_proposal_base(&state.db, &agent, body, row.source).await?;
-    Ok(agent)
+    let mut withheld = (!evidence_current).then_some(PublicationFailureCode::EvidenceUnavailable);
+    if !base_current(&state.db, &agent, body, row.source).await? {
+        if !latest.publication.as_ref().is_some_and(dispatched) {
+            defer(
+                state,
+                actor,
+                row,
+                p,
+                DeferredFailure {
+                    code: PublicationFailureCode::BaseChanged,
+                    stage,
+                    status: None,
+                    definitive: true,
+                },
+            )
+            .await?;
+            return Err(AppError::Conflict("base_skill_changed".into()));
+        }
+        withheld = withheld.or(Some(PublicationFailureCode::BaseChanged));
+    }
+    publication::next_version(body.base_skill.as_ref())?;
+    Ok((agent, withheld))
 }
 async fn execute(
     state: &AppState,
@@ -672,36 +1781,182 @@ async fn execute(
     reader: &impl OrnnReader,
 ) -> AppResult<Value> {
     let body = draft(state, row).await?;
-    recheck(state, actor, row, p, &body).await?;
-    let id = if p.started {
-        publication::reconcile(reader, actor, p, body.base_skill.as_ref()).await?
+    set_stage(state, row, p, PublicationStage::Preflight.as_str()).await?;
+    recheck(state, actor, row, p, &body, PublicationStage::Preflight).await?;
+    let id = if p.verified_at.is_some() {
+        p.skill_id.clone().ok_or_else(conflict)?
+    } else if p.started || p.uncertain_dispatch {
+        match publication::reconcile(reader, actor, p, body.base_skill.as_ref()).await {
+            Ok(id) => id,
+            Err(error) => {
+                return defer_publication_error(
+                    state,
+                    actor,
+                    row,
+                    p,
+                    PublicationStage::Reconcile,
+                    error,
+                    None,
+                )
+                .await;
+            }
+        }
     } else {
-        let bytes = publication::package(&body, &p.operation_id, &p.name, &p.version)?;
+        let snapshot = interface_snapshot(state, p).await?;
+        let bytes = publication::package_with_snapshot(
+            &body,
+            &p.operation_id,
+            &p.name,
+            &p.version,
+            snapshot.as_ref(),
+        )?;
         if publication::hash(&bytes) != p.sha256 {
             return Err(conflict());
         }
-        publication::validate(reader, &bytes).await?;
-        if let Some(base) = &body.base_skill {
-            publication::verify_base(reader, actor, base).await?;
+        set_stage(state, row, p, PublicationStage::FormatValidate.as_str()).await?;
+        if let Err(error) = publication::validate(reader, &bytes).await {
+            return defer_publication_error(
+                state,
+                actor,
+                row,
+                p,
+                PublicationStage::FormatValidate,
+                error,
+                None,
+            )
+            .await;
         }
-        recheck(state, actor, row, p, &body).await?;
+        if let Some(base) = &body.base_skill {
+            set_stage(state, row, p, PublicationStage::BaseVerify.as_str()).await?;
+            if let Err(error) = publication::verify_base(reader, actor, base).await {
+                return defer_publication_error(
+                    state,
+                    actor,
+                    row,
+                    p,
+                    PublicationStage::BaseVerify,
+                    error,
+                    None,
+                )
+                .await;
+            }
+        }
+        recheck(state, actor, row, p, &body, PublicationStage::BaseVerify).await?;
         // Durable uncertainty boundary, before the first potentially effective
         // write. Crash/timeout from here on permits reconciliation reads only.
-        let changed = state
+        mark_started(state, row, p).await?;
+        match publication::publish_classified(reader, body.base_skill.as_ref(), bytes).await {
+            publication::PublishOutcome::Published(id) => id,
+            publication::PublishOutcome::Refused { code, status } => {
+                defer(
+                    state,
+                    actor,
+                    row,
+                    p,
+                    DeferredFailure {
+                        code,
+                        stage: PublicationStage::Publish,
+                        status: status.map(i32::from),
+                        definitive: true,
+                    },
+                )
+                .await?;
+                return Err(AppError::Conflict(code.as_str().into()));
+            }
+            publication::PublishOutcome::VersionConflict { status } => {
+                match publication::reconcile(reader, actor, p, body.base_skill.as_ref()).await {
+                    Ok(id) => id,
+                    Err(error) => {
+                        return defer_publication_error(
+                            state,
+                            actor,
+                            row,
+                            p,
+                            PublicationStage::Reconcile,
+                            error,
+                            Some(status),
+                        )
+                        .await;
+                    }
+                }
+            }
+            publication::PublishOutcome::Uncertain { status } => {
+                defer(
+                    state,
+                    actor,
+                    row,
+                    p,
+                    DeferredFailure {
+                        code: publication::FailureCode::PublishUncertain,
+                        stage: PublicationStage::Publish,
+                        status: status.map(i32::from),
+                        definitive: false,
+                    },
+                )
+                .await?;
+                return Err(publication::ambiguous());
+            }
+        }
+    };
+    set_stage(state, row, p, PublicationStage::Verify.as_str()).await?;
+    let preview = match publication::verify(reader, actor, p, &id).await {
+        Ok(preview) => preview,
+        Err(error) => {
+            return defer_publication_error(
+                state,
+                actor,
+                row,
+                p,
+                PublicationStage::Verify,
+                error,
+                None,
+            )
+            .await;
+        }
+    };
+    let checkpoint = state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+        lease_filter(row, p),
+        doc! {"$set":{"publication.skill_id":&id,"publication.verified_at":bson::DateTime::now(),"publication.last_stage":"verified"}},
+    ).await?;
+    if checkpoint.modified_count != 1 {
+        return Err(conflict());
+    }
+    if let Some(target) = target_id(p) {
+        state
             .db
-            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+            .collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME)
             .update_one(
-                lease_filter(row, p),
-                doc! {"$set":{"publication.started":true}},
+                doc! {"_id":target,"operation_id":&p.operation_id,"package_sha256":&p.sha256},
+                doc! {"$set":{"state":"landed","updated_at":bson::DateTime::now()}},
             )
             .await?;
-        if changed.modified_count != 1 {
-            return Err(conflict());
-        }
-        publication::publish(reader, body.base_skill.as_ref(), bytes).await?
-    };
-    let preview = publication::verify(reader, actor, p, &id).await?;
-    let agent = recheck(state, actor, row, p, &body).await?;
+    }
+    set_stage(state, row, p, PublicationStage::Pin.as_str()).await?;
+    let (agent, withheld) = recheck(state, actor, row, p, &body, PublicationStage::Pin).await?;
+    if let Some(code) = withheld {
+        // Observing the landed version is safe; attaching it is not.
+        defer(
+            state,
+            actor,
+            row,
+            p,
+            DeferredFailure {
+                code,
+                stage: PublicationStage::Pin,
+                status: None,
+                definitive: false,
+            },
+        )
+        .await?;
+        return Err(AppError::Conflict(
+            if code == PublicationFailureCode::BaseChanged {
+                "The source skill changed; the verified version was not attached"
+            } else {
+                "Learning evidence or consent is no longer available; the verified version was not attached"
+            }
+            .into(),
+        ));
+    }
     let mut selection = Selection {
         expected_revision: p.skills_revision,
         skills: agent.skills.clone(),
@@ -737,7 +1992,7 @@ async fn execute(
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         lease_filter(&row_for_pin, &publication_for_pin),
-                        doc! {"$set":{"status":"published_unpinned","publication.skill_id":&skill_id}},
+                        doc! {"$set":{"status":"published_unpinned"}},
                     )
                     .session(&mut *session)
                     .await?;
@@ -810,6 +2065,7 @@ async fn execute(
 mod tests;
 
 /// First-party human preview of the exact package bound to an authored card.
+/// Without a card it keeps the original response; card actions are additive.
 pub async fn authored_preview(
     state: &AppState,
     actor: &str,
@@ -817,22 +2073,388 @@ pub async fn authored_preview(
     id: &str,
 ) -> AppResult<Value> {
     let (agent, row) = load(&state.db, actor, agent_id, id).await?;
+    preview_value(state, &agent, &row).await
+}
+
+async fn preview_value(
+    state: &AppState,
+    agent: &AssistantAgent,
+    row: &AssistantAgentLearningProposal,
+) -> AppResult<Value> {
     if row.source != ProposalSource::Authored {
         return Err(not_found());
     }
     let p = row.publication.as_ref().ok_or_else(conflict)?;
     let mut files = Vec::new();
+    let mut draft_unavailable = false;
     if !matches!(row.status.as_str(), "pinned" | "rejected" | "invalidated") {
-        let body = draft(state, &row).await?;
-        files.push(json!({"path":"SKILL.md","content":publication::skill_markdown(&body, &p.operation_id, &p.name, &p.version)?}));
-        files.extend(
-            body.files
-                .iter()
-                .map(|f| json!({"path":f.path,"content":f.content})),
-        );
+        match draft(state, row).await {
+            Ok(body) => {
+                match interface_snapshot(state, p).await.and_then(|snapshot| {
+                    publication::skill_markdown_with_snapshot(
+                        &body,
+                        &p.operation_id,
+                        &p.name,
+                        &p.version,
+                        snapshot.as_ref(),
+                    )
+                }) {
+                    Ok(markdown) => {
+                        files.push(json!({"path":"SKILL.md","content":markdown}));
+                        files.extend(
+                            body.files
+                                .iter()
+                                .map(|f| json!({"path":f.path,"content":f.content})),
+                        );
+                    }
+                    Err(_) => draft_unavailable = true,
+                }
+            }
+            Err(_) => draft_unavailable = true,
+        }
     }
+    let failure_code = row.failure_code.as_deref();
     Ok(
         json!({"id":row.id,"agent_id":row.agent_id,"agent_name":agent.display_name.as_deref().unwrap_or(&agent.name),"revision":row.revision,"skills_revision":p.skills_revision,
-        "current_skills_revision":agent.skills_revision,"status":row.status,"name":p.name,"version":p.version,"files":files}),
+        "current_skills_revision":agent.skills_revision,"status":row.status,"name":p.name,"version":p.version,"files":files,
+        "failure_code":if draft_unavailable { Some("draft_unavailable") } else { failure_code },
+        "lease_live":p.lease_expires_at.is_some_and(|t| t > Utc::now()),"base_scripts_not_copied":p.target_kind.as_deref()==Some("update")}),
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthoredAction {
+    Publish,
+    Deny,
+    Retry,
+    Check,
+    Renew,
+    Discard,
+    DismissCard,
+}
+
+pub struct AuthoredCardActions {
+    pub actions: Vec<AuthoredAction>,
+    pub state: &'static str,
+    /// Set when another operation's target reservation is the only reason
+    /// publish/retry is withheld; shown instead of the stored code.
+    pub blocked_by: Option<PublicationFailureCode>,
+}
+
+impl AuthoredCardActions {
+    pub fn contains(&self, action: AuthoredAction) -> bool {
+        self.actions.contains(&action)
+    }
+
+    fn settled(state: &'static str) -> Self {
+        Self {
+            actions: Vec::new(),
+            state,
+            blocked_by: None,
+        }
+    }
+}
+
+/// Computes the provider-neutral actions currently safe for one acknowledgement
+/// card, from the card's own binding and the durable publication state only.
+/// Publish/Retry need a live card at the current skills revision, a package
+/// that can succeed unchanged, files, a free target and a non-effective
+/// operation; Check needs a dispatched operation and a card that approved it
+/// (even after expiry) or can still decide; Renew is offered only when no card
+/// can act and no attempt holds a lease.
+async fn actions_for_card(
+    state: &AppState,
+    actor: &str,
+    agent: &AssistantAgent,
+    row: &AssistantAgentLearningProposal,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+    files_present: bool,
+) -> AppResult<AuthoredCardActions> {
+    let p = row.publication.as_ref().ok_or_else(conflict)?;
+    match row.status.as_str() {
+        "pinned" => return Ok(AuthoredCardActions::settled("pinned")),
+        "rejected" => return Ok(AuthoredCardActions::settled("discarded")),
+        "invalidated" => return Ok(AuthoredCardActions::settled("invalidated")),
+        _ => {}
+    }
+    if card.status == "denied" {
+        return Ok(AuthoredCardActions::settled("dismissed"));
+    }
+    let Some(reference) = card.authored_skill.as_ref() else {
+        return Err(not_found());
+    };
+    if card.user_id != actor
+        || card.tool_name.as_deref() != Some(TOOL)
+        || reference.agent_id != row.agent_id
+        || reference.proposal_id != row.id
+        || reference.revision != row.revision
+        || card.arguments_digest.as_deref()
+            != Some(
+                acks::arguments_digest(&publication::binding(row, p, reference.skills_revision))
+                    .as_str(),
+            )
+    {
+        return Ok(AuthoredCardActions::settled("changed"));
+    }
+    let now = Utc::now();
+    let effective = !non_effective(p, now);
+    let lease_live = p.lease_expires_at.is_some_and(|expiry| expiry > now);
+    let current_revision = reference.skills_revision == agent.skills_revision;
+    let card_live = card.expires_at > now && card.status != "expired";
+    let package_publishable = !review_required_failure(row);
+    let target_available = if let Some(target) = target_id(p) {
+        state
+            .db
+            .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+            .find_one(doc! {"_id":target})
+            .await?
+            .is_none_or(|holder| {
+                holder.operation_id == p.operation_id && holder.package_sha256 == p.sha256
+            })
+    } else {
+        true
+    };
+    let same_approval = p.approved_by.as_deref() == Some(actor)
+        && p.acknowledgement_id.as_deref() == Some(card.id.as_str())
+        && p.approval_digest == card.arguments_digest;
+    let can_use_decision = card.status == "pending" || card.status == "allowed" || same_approval;
+    let mut actions = Vec::new();
+    if card.status == "pending" && card_live {
+        actions.push(if effective {
+            AuthoredAction::DismissCard
+        } else {
+            AuthoredAction::Deny
+        });
+    }
+    let write = match card.status.as_str() {
+        "pending" => Some(AuthoredAction::Publish),
+        "allowed" => Some(AuthoredAction::Retry),
+        "used" if same_approval => Some(AuthoredAction::Retry),
+        _ => None,
+    }
+    .filter(|_| {
+        current_revision && card_live && package_publishable && files_present && !effective
+    });
+    let mut blocked_by = None;
+    match write {
+        Some(action) if target_available => actions.push(action),
+        Some(_) => blocked_by = Some(PublicationFailureCode::TargetBusy),
+        None => {}
+    }
+    if current_revision
+        && effective
+        && !lease_live
+        && !attach_refused(row)
+        && (same_approval || (card_live && can_use_decision))
+    {
+        actions.push(AuthoredAction::Check);
+    }
+    if !effective && (card.status != "pending" || !card_live) {
+        actions.push(AuthoredAction::Discard);
+    }
+    if package_publishable
+        && (!card_live || !current_revision)
+        && !lease_live
+        && !actions.iter().any(|action| {
+            matches!(
+                action,
+                AuthoredAction::Publish | AuthoredAction::Retry | AuthoredAction::Check
+            )
+        })
+    {
+        // Any card at the live binding that can still decide, or the card
+        // that approved this operation, makes a renewal redundant.
+        let live_digest =
+            acks::arguments_digest(&publication::binding(row, p, agent.skills_revision));
+        let mut can_act = vec![
+            doc! {"status":{"$in":["pending","allowed"]},"expires_at":{"$gt":bson::DateTime::now()}},
+        ];
+        if let Some(approving) = p.acknowledgement_id.as_deref() {
+            can_act.push(doc! {"_id":approving,"status":"used"});
+        }
+        let another_card = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"_id":{"$ne":&card.id},"user_id":actor,"tool_name":TOOL,"authored_skill.proposal_id":&row.id,"arguments_digest":live_digest,"$or":can_act})
+            .await?.is_some();
+        if !another_card {
+            actions.push(AuthoredAction::Renew);
+        }
+    }
+    Ok(AuthoredCardActions {
+        actions,
+        state: "active",
+        blocked_by,
+    })
+}
+
+async fn load_for_card(
+    state: &AppState,
+    actor: &str,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+) -> AppResult<(
+    AssistantAgent,
+    AssistantAgentLearningProposal,
+    Value,
+    AuthoredCardActions,
+)> {
+    let reference = card.authored_skill.as_ref().ok_or_else(not_found)?;
+    let (agent, row) = load(
+        &state.db,
+        actor,
+        &reference.agent_id,
+        &reference.proposal_id,
+    )
+    .await?;
+    let preview = preview_value(state, &agent, &row).await?;
+    let files_present = preview["files"]
+        .as_array()
+        .is_some_and(|files| !files.is_empty());
+    let actions = actions_for_card(state, actor, &agent, &row, card, files_present).await?;
+    Ok((agent, row, preview, actions))
+}
+
+pub async fn authored_actions(
+    state: &AppState,
+    actor: &str,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+) -> AppResult<AuthoredCardActions> {
+    Ok(load_for_card(state, actor, card).await?.3)
+}
+
+pub async fn authored_preview_for_card(
+    state: &AppState,
+    actor: &str,
+    agent_id: &str,
+    id: &str,
+    acknowledgement_id: &str,
+) -> AppResult<Value> {
+    let card = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .find_one(doc! {"_id":acknowledgement_id,"user_id":actor,"tool_name":TOOL,"authored_skill.proposal_id":id,"authored_skill.agent_id":agent_id})
+        .await?.ok_or_else(not_found)?;
+    let (_, _, mut preview, computed) = load_for_card(state, actor, &card).await?;
+    if let Some(code) = computed.blocked_by {
+        preview["failure_code"] = json!(code.as_str());
+    } else if preview["failure_code"] == PublicationFailureCode::ApprovalExpired.as_str()
+        && computed.actions.iter().any(|action| {
+            matches!(
+                action,
+                AuthoredAction::Publish | AuthoredAction::Retry | AuthoredAction::Check
+            )
+        })
+    {
+        preview["failure_code"] = Value::Null;
+    }
+    preview["actions"] = json!(computed.actions);
+    preview["state"] = json!(computed.state);
+    Ok(preview)
+}
+
+/// Metadata-only audit of a card decision the server withheld.
+pub async fn audit_withheld_decision(
+    db: &Database,
+    actor: &str,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+    computed: &AuthoredCardActions,
+    allow: bool,
+) {
+    let reference = card.authored_skill.as_ref();
+    let _ = super::audit_service::log_actor_event(db.clone(), &super::audit_service::AuditActor {user_id:actor.into(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},"assistant_learning_publication_decision_withheld",
+        Some(json!({"agent_id":reference.map(|r| &r.agent_id),"proposal_id":reference.map(|r| &r.proposal_id),"revision":reference.map(|r| r.revision),
+            "acknowledgement_id":card.id,"card_status":card.status,"decision":if allow {"allow"} else {"deny"},"state":computed.state,"actions":computed.actions,
+            "blocked_by":computed.blocked_by.map(PublicationFailureCode::as_str)}))).await;
+}
+
+pub async fn record_pre_claim_failure(
+    state: &AppState,
+    actor: &str,
+    reference: &crate::models::assistant_acknowledgement::AuthoredSkillReview,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+    expected_attempt: i64,
+    code: PublicationFailureCode,
+) -> AppResult<()> {
+    if card.user_id != actor
+        || card.authored_skill.as_ref().is_none_or(|bound| {
+            bound.agent_id != reference.agent_id
+                || bound.proposal_id != reference.proposal_id
+                || bound.revision != reference.revision
+                || bound.skills_revision != reference.skills_revision
+        })
+    {
+        return Err(conflict());
+    }
+    let row = state.db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&reference.proposal_id,"agent_id":&reference.agent_id,"owner_id":actor,"revision":revision_filter(reference.revision)})
+        .await?.ok_or_else(conflict)?;
+    let p = row.publication.as_ref().ok_or_else(conflict)?;
+    if p.attempt != expected_attempt {
+        return Err(conflict());
+    }
+    let digest = acks::arguments_digest(&publication::binding(&row, p, reference.skills_revision));
+    if card.arguments_digest.as_deref() != Some(digest.as_str()) {
+        return Err(conflict());
+    }
+    // A pre-claim refusal never replaces a substantive outcome of an attempt:
+    // only an empty, pre-claim or transient code, and never a package refusal.
+    let replaceable =
+        PublicationFailureCode::codes(PublicationFailureCode::replaceable_before_claim);
+    let changed = state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+        doc! {"_id":&row.id,"revision":revision_filter(row.revision),"publication.operation_id":&p.operation_id,"publication.attempt":expected_attempt,"publication.lease_expires_at":bson::Bson::Null,"status":{"$in":["pending","publication_failed"]},
+            "$and":[{"failure_code":{"$nin":package_refusal_codes()}},{"$or":[{"failure_code":bson::Bson::Null},{"publication.last_stage":"pre_claim"},{"failure_code":{"$in":replaceable}}]}]},
+        doc! {"$set":{"status":"publication_failed","failure_code":code.as_str(),"publication.last_stage":"pre_claim","updated_at":bson::DateTime::now()}},
+    ).await?;
+    if changed.modified_count == 1 {
+        audit_deferred(
+            &state.db,
+            actor,
+            &row,
+            p,
+            DeferredAudit {
+                code: code.as_str(),
+                stage: "pre_claim",
+                status: None,
+                clicked: Some(&card.id),
+            },
+        )
+        .await;
+    }
+    Ok(())
+}
+
+pub async fn publication_attempt(
+    state: &AppState,
+    actor: &str,
+    reference: &crate::models::assistant_acknowledgement::AuthoredSkillReview,
+) -> AppResult<i64> {
+    let row = state.db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&reference.proposal_id,"agent_id":&reference.agent_id,"owner_id":actor,"revision":revision_filter(reference.revision)})
+        .await?.ok_or_else(conflict)?;
+    Ok(row.publication.as_ref().ok_or_else(conflict)?.attempt)
+}
+
+pub async fn target_busy_for(
+    state: &AppState,
+    actor: &str,
+    reference: &crate::models::assistant_acknowledgement::AuthoredSkillReview,
+) -> AppResult<bool> {
+    let row = state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(
+            doc! {"_id":&reference.proposal_id,"agent_id":&reference.agent_id,"owner_id":actor,
+            "revision":revision_filter(reference.revision)},
+        )
+        .await?
+        .ok_or_else(conflict)?;
+    let p = row.publication.as_ref().ok_or_else(conflict)?;
+    let Some(target) = target_id(p) else {
+        return Ok(false);
+    };
+    Ok(state
+        .db
+        .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+        .find_one(doc! {"_id":target})
+        .await?
+        .is_some_and(|holder| {
+            holder.operation_id != p.operation_id || holder.package_sha256 != p.sha256
+        }))
 }
