@@ -418,8 +418,19 @@ pub struct UpdateServiceRequest {
     pub service_category: Option<String>,
     pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     pub topics: Option<Vec<String>>,
-    pub supplier: Option<String>,
-    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supplier: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub import_source:
+        Option<Option<crate::services::catalog_import_source::CatalogImportSourceDto>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_targets: Option<std::collections::BTreeMap<String, String>>,
@@ -2048,10 +2059,13 @@ async fn update_service_inner(
         proposed.topics = topics.clone();
     }
     if let Some(supplier) = &body.supplier {
-        proposed.supplier = Some(supplier.clone());
+        proposed.supplier = supplier.clone();
     }
     if let Some(source) = &body.import_source {
-        proposed.import_source = Some(source.clone().into_model()?);
+        proposed.import_source = source
+            .clone()
+            .map(crate::services::catalog_import_source::CatalogImportSourceDto::into_model)
+            .transpose()?;
     }
     if body
         .credential
