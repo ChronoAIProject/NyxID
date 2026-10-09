@@ -1,0 +1,139 @@
+name: Desktop Companion
+
+on:
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "desktop/companion/**"
+      - ".github/workflows/desktop-companion.yml"
+  push:
+    branches: [main, dev]
+    paths:
+      - "desktop/companion/**"
+      - ".github/workflows/desktop-companion.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: desktop/companion
+
+jobs:
+  frontend:
+    name: Frontend contract and bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/companion/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Build production frontend
+        run: npm run bundle
+
+  native:
+    name: Native contract and release compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/companion/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/companion/src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Test native core
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Lint native core
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Compile native release
+        run: npm run desktop:build -- --no-bundle
+
+  native-macos:
+    name: macOS native bundle
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/companion/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/companion/src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS bundle
+        run: npm run desktop:build
