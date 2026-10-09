@@ -1249,6 +1249,20 @@ pub async fn list_keys(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<KeyListResponse>> {
+    list_keys_with_tool_bindings(state, auth_user, false).await
+}
+
+#[derive(Default, serde::Deserialize)]
+pub struct ListKeysQuery {
+    #[serde(default)]
+    pub include_tool_bindings: bool,
+}
+
+pub async fn list_keys_with_tool_bindings(
+    state: AppState,
+    auth_user: AuthUser,
+    include_tool_bindings: bool,
+) -> AppResult<Json<KeyListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
     let providers = crate::services::platform_key_service::load_providers(&state.db).await?;
@@ -1257,25 +1271,24 @@ pub async fn list_keys(
         &user_id_str,
     )
     .await?;
-    let views = if auth_user.auth_method == AuthMethod::ApiKey {
-        unified_key_service::list_keys_read_only_with_grants(
+    if auth_user.auth_method != AuthMethod::ApiKey {
+        unified_key_service::auto_provision_with_grants(
             &state.db,
-            &state.encryption_keys,
             &user_id_str,
             &grants,
             &providers,
         )
-        .await?
-    } else {
-        unified_key_service::list_keys_with_grants(
-            &state.db,
-            &state.encryption_keys,
-            &user_id_str,
-            &grants,
-            &providers,
-        )
-        .await?
-    };
+        .await?;
+    }
+    let views = unified_key_service::list_keys_read_only_with_tool_bindings(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &grants,
+        &providers,
+        include_tool_bindings,
+    )
+    .await?;
     let scope = auth_user.api_key_service_scope();
     let mut keys = views
         .into_iter()

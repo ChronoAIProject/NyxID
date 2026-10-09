@@ -1873,7 +1873,7 @@ pub async fn auto_provision_no_auth_services(
     auto_provision_with_grants(db, user_id, &grants, &providers).await
 }
 
-async fn auto_provision_with_grants(
+pub(crate) async fn auto_provision_with_grants(
     db: &mongodb::Database,
     user_id: &str,
     grants: &OwnerGrants,
@@ -2529,6 +2529,18 @@ pub async fn list_keys_read_only_with_grants(
     grants: &OwnerGrants,
     providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
+    list_keys_read_only_with_tool_bindings(db, encryption_keys, user_id, grants, providers, false)
+        .await
+}
+
+pub async fn list_keys_read_only_with_tool_bindings(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+    include_tool_bindings: bool,
+) -> AppResult<Vec<KeyView>> {
     // Disabled services are included here and nowhere else: `/keys` is the
     // management surface that owns the Enable control, so a paused row has to
     // stay visible for the pause to be reversible. Each `KeyView` carries
@@ -2621,13 +2633,15 @@ pub async fn list_keys_read_only_with_grants(
     let mut views: Vec<KeyView> = tagged
         .into_iter()
         .filter_map(|t| {
-            if t.service
-                .catalog_service_id
-                .as_deref()
-                .and_then(|id| cat_map.get(id))
-                .is_some_and(|catalog| {
-                    catalog.offering_kind == crate::models::downstream_service::OfferingKind::Tool
-                })
+            if !include_tool_bindings
+                && t.service
+                    .catalog_service_id
+                    .as_deref()
+                    .and_then(|id| cat_map.get(id))
+                    .is_some_and(|catalog| {
+                        catalog.offering_kind
+                            == crate::models::downstream_service::OfferingKind::Tool
+                    })
                 && super::platform_key_service::binding(&t.service) == "platform"
             {
                 return None;
@@ -4747,6 +4761,27 @@ mod tests {
             crate::models::downstream_service::OfferingKind::Tool
         );
         assert_eq!(views[0].credential_binding, "user");
+        let auth = crate::test_utils::test_auth_user(&owner);
+        let axum::Json(hidden) =
+            crate::handlers::keys::list_keys(axum::extract::State(state.clone()), auth.clone())
+                .await
+                .unwrap();
+        assert_eq!(hidden.keys.len(), 1);
+        assert_eq!(hidden.keys[0].id, byok_id);
+        let axum::Json(included) =
+            crate::handlers::keys::list_keys_with_tool_bindings(state, auth, true)
+                .await
+                .unwrap();
+        assert_eq!(included.keys.len(), 2);
+        assert!(
+            included
+                .keys
+                .iter()
+                .any(|key| key.id == byok_id && key.credential_binding == "user")
+        );
+        assert!(included.keys.iter().any(|key| key.offering_kind
+            == crate::models::downstream_service::OfferingKind::Tool
+            && key.credential_binding == "platform"));
         db.drop().await.unwrap();
     }
 

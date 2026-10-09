@@ -16,19 +16,15 @@ import type { WsFrameInjection } from "@/schemas/services";
 
 // -- Queries --
 
-export function useKeys(options: {includeTools?: boolean} = {}) {
+export function useKeys(options: { includeTools?: boolean } = {}) {
   const identity = useAuthStore((state) => state.user?.id);
   const query = useQuery({
     queryKey: ["keys", "list", identity, options.includeTools ?? false],
     queryFn: async (): Promise<readonly KeyInfo[]> => {
-      const res = await api.get<KeyListResponse>("/keys");
-      if (!options.includeTools) return res.keys;
-      const connections = await api.get<{services:{id:string;catalog_service_id:string|null}[]}>("/user-services");
-      const tools = await api.get<import("@/schemas/tools").ToolOffering[]>("/tools");
-      const toolIds = new Set(tools.map(tool=>tool.id));
-      const existing = new Set(res.keys.map(key=>key.id));
-      const extra = await Promise.all(connections.services.filter(service=>service.catalog_service_id && toolIds.has(service.catalog_service_id) && !existing.has(service.id)).map(service=>api.get<KeyInfo>(`/keys/${service.id}`)));
-      return [...res.keys,...extra];
+      const res = await api.get<KeyListResponse>(
+        options.includeTools ? "/keys?include_tool_bindings=true" : "/keys",
+      );
+      return res.keys;
     },
     staleTime: 0,
     refetchOnMount: "always",

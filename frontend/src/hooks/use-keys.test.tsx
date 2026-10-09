@@ -55,6 +55,27 @@ describe("query hooks unwrap their list envelopes", () => {
     expect(result.current.data).toEqual([{ id: "k1" }]);
   });
 
+  it("includes Tool platform bindings with one server-side keys query", async () => {
+    mockGet.mockResolvedValue({
+      keys: [
+        {
+          id: "tool-key",
+          offering_kind: "tool",
+          credential_binding: "platform",
+        },
+      ],
+    });
+    const { result } = renderHook(() => useKeys({ includeTools: true }), {
+      wrapper: wrapperFactory(),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledWith("/keys?include_tool_bindings=true");
+    expect(result.current.data).toEqual([
+      { id: "tool-key", offering_kind: "tool", credential_binding: "platform" },
+    ]);
+  });
+
   it("useCatalog returns the `entries` array from /catalog", async () => {
     mockGet.mockResolvedValue({ entries: [{ slug: "openai" }] });
     const { result } = renderHook(() => useCatalog(), {
