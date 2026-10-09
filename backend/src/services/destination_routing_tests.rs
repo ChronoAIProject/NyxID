@@ -206,6 +206,9 @@ pub(crate) async fn restore_historical_drive_endpoints(
         .into_iter()
         .map(
             |endpoint| crate::services::service_endpoint_service::EndpointInput {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
                 async_operation: None,
                 name: endpoint.name,
                 description: endpoint.description,

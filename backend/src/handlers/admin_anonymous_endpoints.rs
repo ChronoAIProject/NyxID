@@ -233,6 +233,10 @@ mod tests {
     /// (identity_propagation_mode != "none" or token forwarding/delegation on).
     fn catalog_service(created_by: &str, identity_propagating: bool) -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,

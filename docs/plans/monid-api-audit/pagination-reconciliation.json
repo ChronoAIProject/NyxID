@@ -1,0 +1,444 @@
+{
+  "reported_total": 2441,
+  "enumerated_total": 2440,
+  "reported_providers": 87,
+  "providers": [
+    {
+      "provider": "aaa-gas-prices",
+      "enumerated": 13,
+      "reported_total": 13
+    },
+    {
+      "provider": "accuweather",
+      "enumerated": 3,
+      "reported_total": 3
+    },
+    {
+      "provider": "agentmail",
+      "enumerated": 35,
+      "reported_total": 35
+    },
+    {
+      "provider": "ahrefs",
+      "enumerated": 36,
+      "reported_total": 36
+    },
+    {
+      "provider": "akta",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "alibaba",
+      "enumerated": 10,
+      "reported_total": 10
+    },
+    {
+      "provider": "api.itsgloria.ai",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "api.kadec0.xyz",
+      "enumerated": 45,
+      "reported_total": 45
+    },
+    {
+      "provider": "api.strale.io",
+      "enumerated": 192,
+      "reported_total": 192
+    },
+    {
+      "provider": "apify",
+      "enumerated": 44,
+      "reported_total": 44
+    },
+    {
+      "provider": "apollo",
+      "enumerated": 8,
+      "reported_total": 8
+    },
+    {
+      "provider": "artificial-analysis",
+      "enumerated": 9,
+      "reported_total": 9
+    },
+    {
+      "provider": "bid.cars",
+      "enumerated": 10,
+      "reported_total": 10
+    },
+    {
+      "provider": "blockrun.ai",
+      "enumerated": 69,
+      "reported_total": 69
+    },
+    {
+      "provider": "builtin",
+      "enumerated": 3,
+      "reported_total": 3
+    },
+    {
+      "provider": "bytedance",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "capterra",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "carfax",
+      "enumerated": 11,
+      "reported_total": 11
+    },
+    {
+      "provider": "cars.com",
+      "enumerated": 3,
+      "reported_total": 3
+    },
+    {
+      "provider": "clay",
+      "enumerated": 10,
+      "reported_total": 10
+    },
+    {
+      "provider": "cloro",
+      "enumerated": 7,
+      "reported_total": 7
+    },
+    {
+      "provider": "clutch",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "contactout",
+      "enumerated": 20,
+      "reported_total": 20
+    },
+    {
+      "provider": "context.dev",
+      "enumerated": 21,
+      "reported_total": 21
+    },
+    {
+      "provider": "crunchbase",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "dataforseo",
+      "enumerated": 216,
+      "reported_total": 216
+    },
+    {
+      "provider": "defillama",
+      "enumerated": 134,
+      "reported_total": 134
+    },
+    {
+      "provider": "edmunds",
+      "enumerated": 3,
+      "reported_total": 3
+    },
+    {
+      "provider": "elevenlabs",
+      "enumerated": 9,
+      "reported_total": 9
+    },
+    {
+      "provider": "emc2ai.io",
+      "enumerated": 1,
+      "reported_total": 1
+    },
+    {
+      "provider": "exa",
+      "enumerated": 2,
+      "reported_total": 2
+    },
+    {
+      "provider": "finviz",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "firecrawl",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "fundable",
+      "enumerated": 17,
+      "reported_total": 17
+    },
+    {
+      "provider": "g2",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "gemini",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "getapp",
+      "enumerated": 11,
+      "reported_total": 11
+    },
+    {
+      "provider": "google-trends.use.x402atlas.com",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "homes.com",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "hunterio",
+      "enumerated": 13,
+      "reported_total": 13
+    },
+    {
+      "provider": "idealist",
+      "enumerated": 9,
+      "reported_total": 9
+    },
+    {
+      "provider": "indeed",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "iqair",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "kbb",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "keenable",
+      "enumerated": 2,
+      "reported_total": 2
+    },
+    {
+      "provider": "kling",
+      "enumerated": 12,
+      "reported_total": 12
+    },
+    {
+      "provider": "levels.fyi",
+      "enumerated": 8,
+      "reported_total": 8
+    },
+    {
+      "provider": "litescrape",
+      "enumerated": 34,
+      "reported_total": 34
+    },
+    {
+      "provider": "lmarena",
+      "enumerated": 13,
+      "reported_total": 13
+    },
+    {
+      "provider": "loopnet",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "magichour",
+      "enumerated": 1,
+      "reported_total": 1
+    },
+    {
+      "provider": "marketbeat",
+      "enumerated": 14,
+      "reported_total": 14
+    },
+    {
+      "provider": "minimax",
+      "enumerated": 8,
+      "reported_total": 8
+    },
+    {
+      "provider": "mrscraper",
+      "enumerated": 50,
+      "reported_total": 50
+    },
+    {
+      "provider": "nasdaq",
+      "enumerated": 20,
+      "reported_total": 20
+    },
+    {
+      "provider": "octen",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "openai",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "opoint",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "orbit",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "pdl",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "ploid",
+      "enumerated": 10,
+      "reported_total": 10
+    },
+    {
+      "provider": "recall",
+      "enumerated": 1,
+      "reported_total": 1
+    },
+    {
+      "provider": "saperly",
+      "enumerated": 14,
+      "reported_total": 14
+    },
+    {
+      "provider": "search1api",
+      "enumerated": 5,
+      "reported_total": 5
+    },
+    {
+      "provider": "secform4",
+      "enumerated": 11,
+      "reported_total": 11
+    },
+    {
+      "provider": "sfs",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "smolmachine",
+      "enumerated": 12,
+      "reported_total": 12
+    },
+    {
+      "provider": "stockanalysis",
+      "enumerated": 7,
+      "reported_total": 8,
+      "missing_items": [],
+      "provider_scoped_returned": 7
+    },
+    {
+      "provider": "surf",
+      "enumerated": 105,
+      "reported_total": 105
+    },
+    {
+      "provider": "suzanne",
+      "enumerated": 4,
+      "reported_total": 4
+    },
+    {
+      "provider": "tendata",
+      "enumerated": 16,
+      "reported_total": 16
+    },
+    {
+      "provider": "the-companies-api",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "tikhub",
+      "enumerated": 896,
+      "reported_total": 896
+    },
+    {
+      "provider": "tinyfish",
+      "enumerated": 10,
+      "reported_total": 10
+    },
+    {
+      "provider": "topaz",
+      "enumerated": 23,
+      "reported_total": 23
+    },
+    {
+      "provider": "trustpilot",
+      "enumerated": 7,
+      "reported_total": 7
+    },
+    {
+      "provider": "typesafe",
+      "enumerated": 1,
+      "reported_total": 1
+    },
+    {
+      "provider": "vaquill",
+      "enumerated": 13,
+      "reported_total": 13
+    },
+    {
+      "provider": "weather-underground",
+      "enumerated": 10,
+      "reported_total": 10
+    },
+    {
+      "provider": "web3.career",
+      "enumerated": 9,
+      "reported_total": 9
+    },
+    {
+      "provider": "wellfound",
+      "enumerated": 8,
+      "reported_total": 8
+    },
+    {
+      "provider": "www.capminal.ai",
+      "enumerated": 1,
+      "reported_total": 1
+    },
+    {
+      "provider": "x402.browserbase.com",
+      "enumerated": 12,
+      "reported_total": 12
+    },
+    {
+      "provider": "x402.quicknode.com",
+      "enumerated": 2,
+      "reported_total": 2
+    },
+    {
+      "provider": "yahoo-finance",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "ycombinator",
+      "enumerated": 6,
+      "reported_total": 6
+    },
+    {
+      "provider": "zillow",
+      "enumerated": 8,
+      "reported_total": 8
+    }
+  ]
+}

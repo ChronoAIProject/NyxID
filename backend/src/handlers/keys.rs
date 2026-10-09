@@ -413,6 +413,7 @@ impl std::fmt::Debug for CreateKeyRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyResponse {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
     /// Whether the current caller may inspect and edit connection configuration.
     pub can_edit_configuration: bool,
     pub preference_rank: Option<u32>,
@@ -1155,6 +1156,7 @@ pub(crate) async fn create_key_with_service_id(
         key_response_from_view(view)
     } else {
         let mut response = key_response_from_result(&result);
+        response.offering_kind = view.offering_kind;
         response.platform_key_available = view.platform_key_available;
         response.platform_key_pricing = view.platform_key_pricing;
         response.byok_pricing = view.byok_pricing;
@@ -1240,6 +1242,7 @@ pub(crate) async fn create_key_with_service_id(
 #[utoipa::path(
     get,
     path = "/api/v1/keys",
+    params(("include_tool_bindings" = Option<bool>, Query, description = "Include otherwise hidden platform Tool bindings within the existing key read scope")),
     responses(
         (status = 200, description = "List of user's AI service keys; catalog editor service accounts receive platform catalog metadata; other service accounts receive granted connection metadata", body = super::service_account_key_reads::KeyListReadResponse),
         (status = 403, description = "Service account lacks a live read scope or key read grant", body = crate::errors::ErrorResponse),
@@ -1254,6 +1257,20 @@ pub async fn list_keys(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<KeyListResponse>> {
+    list_keys_with_tool_bindings(state, auth_user, false).await
+}
+
+#[derive(Default, serde::Deserialize)]
+pub struct ListKeysQuery {
+    #[serde(default)]
+    pub include_tool_bindings: bool,
+}
+
+pub async fn list_keys_with_tool_bindings(
+    state: AppState,
+    auth_user: AuthUser,
+    include_tool_bindings: bool,
+) -> AppResult<Json<KeyListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
     let providers = crate::services::platform_key_service::load_providers(&state.db).await?;
@@ -1262,25 +1279,24 @@ pub async fn list_keys(
         &user_id_str,
     )
     .await?;
-    let views = if auth_user.auth_method == AuthMethod::ApiKey {
-        unified_key_service::list_keys_read_only_with_grants(
+    if auth_user.auth_method != AuthMethod::ApiKey {
+        unified_key_service::auto_provision_with_grants(
             &state.db,
-            &state.encryption_keys,
             &user_id_str,
             &grants,
             &providers,
         )
-        .await?
-    } else {
-        unified_key_service::list_keys_with_grants(
-            &state.db,
-            &state.encryption_keys,
-            &user_id_str,
-            &grants,
-            &providers,
-        )
-        .await?
-    };
+        .await?;
+    }
+    let views = unified_key_service::list_keys_read_only_with_tool_bindings(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &grants,
+        &providers,
+        include_tool_bindings,
+    )
+    .await?;
     let views = crate::services::service_preference_service::filter_inventory(
         views,
         auth_user.api_key_service_scope(),
@@ -2731,6 +2747,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
     .to_string();
 
     KeyResponse {
+        offering_kind: Default::default(),
         can_edit_configuration: true,
         preference_rank: None,
         preference_position: None,
@@ -2882,6 +2899,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     let credential_source: crate::handlers::user_services_handler::CredentialSourceResponse =
         view.credential_source.clone().into();
     KeyResponse {
+        offering_kind: view.offering_kind,
         can_edit_configuration: !view.auto_connected && credential_source.can_edit_configuration(),
         preference_rank: None,
         preference_position: None,

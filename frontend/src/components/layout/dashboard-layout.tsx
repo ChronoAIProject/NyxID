@@ -163,6 +163,7 @@ const SECTION_TITLES: Record<string, string> = {
   dashboard: "dashboard",
   billing: "billing & usage",
   keys: "ai services",
+  tools: "tools",
   orgs: "org",
   nodes: "nodes",
   "channel-bots": "channel bots",
@@ -205,7 +206,12 @@ function TopBar({
   }
 
   const ROOT_PATHS = new Set([
-    "/dashboard", "/keys", "/orgs", "/nodes", "/channel-bots",
+    "/dashboard",
+    "/keys",
+    "/tools",
+    "/orgs",
+    "/nodes",
+    "/channel-bots",
     "/settings", "/guide", "/approvals/settings", "/approvals/history",
     "/approvals/grants", "/developer/apps", "/ai-setup", "/integration-guide",
   ]);

@@ -1,3 +1,4 @@
+import { toolMetadataFields } from "./tools";
 import { BILLING_METRICS, unitPriceSchema } from "./billing-metrics";
 import {
   inferenceMetadataSchema,
@@ -352,6 +353,7 @@ export type WsFrameInjection = z.infer<typeof wsFrameInjectionSchema>;
 
 export const updateServiceSchema = z
   .object({
+    ...toolMetadataFields,
     ...sharedServiceFields,
     service_type: z.enum(SERVICE_TYPES),
     visibility: z.enum(VISIBILITY_OPTIONS).optional(),

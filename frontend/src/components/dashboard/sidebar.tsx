@@ -45,10 +45,10 @@ import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
 import { canAdminWrite, hasAdminRead, isBillingAvailable } from "@/types/api";
 
-
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
+  { to: "/tools", icon: Sparkles, label: "Tools" },
   { to: "/billing", icon: WalletCards, label: "Billing & Usage" },
   { to: "/orgs", icon: Building2, label: "Organizations" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
@@ -77,7 +77,11 @@ export const ADMIN_NAV = [
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
   { to: "/admin/upload-retention", icon: HardDrive, label: "Upload retention" },
-  { to: "/admin/platform-credentials", icon: KeyRound, label: "Platform Credentials" },
+  {
+    to: "/admin/platform-credentials",
+    icon: KeyRound,
+    label: "Platform Credentials",
+  },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/usage", icon: ChartNoAxesCombined, label: "Usage" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
@@ -89,6 +93,7 @@ export const ADMIN_NAV = [
   { to: "/admin/nodes", icon: HardDrive, label: "Node Registry" },
   { to: "/admin/ownership", icon: Server, label: "Ownership transfers" },
   { to: "/services", icon: Server, label: "Services" },
+  { to: "/admin/tools", icon: Sparkles, label: "Tools" },
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;
 
@@ -111,7 +116,12 @@ function getVisibleAdminNav(
 ): readonly NavItemDef[] {
   return ADMIN_NAV.filter(
     (item) =>
-      !["/admin/platform-credentials", "/admin/ownership", "/admin/upload-retention"].includes(item.to) || canAdminWrite(user),
+      ![
+        "/admin/platform-credentials",
+        "/admin/ownership",
+        "/admin/tools",
+        "/admin/upload-retention",
+      ].includes(item.to) || canAdminWrite(user),
   );
 }
 
@@ -234,7 +244,7 @@ export function Sidebar({
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
   const mainNav = getVisibleMainNav(user);
-  const adminNav = getVisibleAdminNav(user);
+  const adminNav = hasAdminRead(user) ? getVisibleAdminNav(user) : [];
 
   const mode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
@@ -334,7 +344,7 @@ export function Sidebar({
           ))}
         </div>
 
-        {hasAdminRead(user) && (
+        {adminNav.length > 0 && (
           <>
             <div className="px-3 my-2 flex items-center">
               {isCollapsed ? (
@@ -449,7 +459,9 @@ export function Sidebar({
       )}
       style={mode === "collapsed" ? undefined : { width }}
     >
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{sidebarContent}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {sidebarContent}
+      </div>
       {mode === "expanded" && (
         <SidebarResizeHandle
           sidebar="dashboard"

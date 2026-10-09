@@ -37,6 +37,14 @@ use super::services_helpers::{
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateServiceRequest {
+    pub twin_of_service_id: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    pub custom_user_agent: Option<String>,
+    pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
+    pub topics: Option<Vec<String>>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
+
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
     pub provider_config_id: Option<String>,
@@ -52,6 +60,7 @@ pub struct CreateServiceRequest {
     pub credential: Option<String>,
     /// "provider", "connection", or "internal". Defaults to "connection".
     pub service_category: Option<String>,
+    pub openapi_spec_url: Option<String>,
     /// "public" or "private". Defaults to "public" for HTTP, "private" for SSH.
     pub visibility: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
@@ -145,6 +154,11 @@ pub struct SshServiceConfigResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
+    pub topics: Vec<String>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
+
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
     pub provider_config_id: Option<String>,
@@ -401,6 +415,23 @@ impl std::ops::DerefMut for BillingUpdate {
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdateServiceRequest {
+    pub service_category: Option<String>,
+    pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
+    pub topics: Option<Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supplier: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub import_source:
+        Option<Option<crate::services::catalog_import_source::CatalogImportSourceDto>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_targets: Option<std::collections::BTreeMap<String, String>>,
     pub name: Option<String>,
@@ -948,6 +979,19 @@ pub async fn create_service(
     Box::pin(create_service_inner(state, auth_user, tele, body)).await
 }
 
+pub async fn create_service_request(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    Json(body): Json<serde_json::Value>,
+) -> AppResult<Json<ServiceResponse>> {
+    require_admin(&state, &auth_user).await?;
+    let prepared = crate::services::tool_twin_service::prepare_create(&state.db, body).await?;
+    let body =
+        serde_json::from_value(prepared).map_err(|e| AppError::ValidationError(e.to_string()))?;
+    create_service(State(state), auth_user, tele, Json(body)).await
+}
+
 async fn create_service_inner(
     state: AppState,
     auth_user: AuthUser,
@@ -1362,6 +1406,20 @@ async fn create_service_inner(
         )
     };
 
+    let asyncapi_spec_url = body.asyncapi_spec_url.clone().or(asyncapi_spec_url);
+    if let Some(url) = asyncapi_spec_url.as_deref() {
+        validate_optional_spec_url(url)?;
+    }
+    if body
+        .custom_user_agent
+        .as_ref()
+        .is_some_and(|v| v.len() > 512 || v.chars().any(char::is_control))
+    {
+        return Err(AppError::ValidationError(
+            "Invalid custom_user_agent".into(),
+        ));
+    }
+
     // Validate metadata URL fields
     for (label, url_opt) in [
         ("homepage_url", &body.homepage_url),
@@ -1452,7 +1510,19 @@ async fn create_service_inner(
         body.destination_targets.clone(),
         proxy_operation_policy.as_ref(),
     )?;
+    let openapi_spec_url = body.openapi_spec_url.clone().or(openapi_spec_url);
+    if let Some(url) = &openapi_spec_url {
+        validate_optional_spec_url(url)?;
+    }
     let new_service = DownstreamService {
+        offering_kind: body.offering_kind.unwrap_or_default(),
+        topics: body.topics.clone().unwrap_or_default(),
+        supplier: body.supplier.clone(),
+        import_source: body
+            .import_source
+            .clone()
+            .map(crate::services::catalog_import_source::CatalogImportSourceDto::into_model)
+            .transpose()?,
         git_http: None,
         destination_targets,
         owner_user_id: None,
@@ -1508,7 +1578,7 @@ async fn create_service_inner(
         required_permissions: body.required_permissions.clone(),
         examples_url: body.examples_url.clone(),
         recommended_skills: body.recommended_skills.clone(),
-        custom_user_agent: None,
+        custom_user_agent: body.custom_user_agent.clone(),
         default_request_headers,
         ws_frame_injections: body.ws_frame_injections.clone(),
         developer_app_ids: body.developer_app_ids.clone(),
@@ -1518,20 +1588,45 @@ async fn create_service_inner(
         created_at: now,
         updated_at: now,
     };
+    crate::services::tool_topics::validate_tool_service(&new_service)?;
     crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
     crate::services::destination_routing::validate_credential_source(&new_service)?;
 
-    let new_service = crate::services::catalog_skill_service::create(
-        &state.db,
-        &new_service,
-        &auth_user.user_id.to_string(),
-        &initial_skills,
-        &skill_request_id,
-        &create_fingerprint,
-    )
-    .await?;
+    let twin_endpoints = match body.twin_of_service_id.as_deref() {
+        Some(source_id) => {
+            crate::services::tool_twin_service::clone_endpoints(
+                &state.db,
+                source_id,
+                &new_service.id,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
+    let new_service = if body.twin_of_service_id.is_some() {
+        crate::services::catalog_skill_service::create_with_endpoints(
+            &state.db,
+            &new_service,
+            &auth_user.user_id.to_string(),
+            &initial_skills,
+            &skill_request_id,
+            &create_fingerprint,
+            &twin_endpoints,
+        )
+        .await?
+    } else {
+        crate::services::catalog_skill_service::create(
+            &state.db,
+            &new_service,
+            &auth_user.user_id.to_string(),
+            &initial_skills,
+            &skill_request_id,
+            &create_fingerprint,
+        )
+        .await?
+    };
     let id = new_service.id.clone();
 
     for (changed, event) in [
@@ -1627,7 +1722,11 @@ pub async fn delete_service(
 ) -> AppResult<Json<DeleteServiceResponse>> {
     // CR-4: Use shared require_admin_or_creator helper instead of inline check
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     let now = Utc::now();
     state
@@ -1794,7 +1893,14 @@ async fn update_service_inner(
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool)
+    {
+        require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
+
     if body.destination_targets.is_some() {
         require_admin(&state, &auth_user).await?;
     }
@@ -1938,7 +2044,69 @@ async fn update_service_inner(
             ));
         }
     }
+    if body.service_category.is_some() {
+        require_admin(&state, &auth_user).await?;
+    }
+    let mut proposed = service.clone();
+    if let Some(category) = &body.service_category {
+        proposed.service_category =
+            derive_http_service_category(&service.auth_method, Some(category))?;
+        proposed.requires_user_credential = proposed.service_category == "connection";
+    }
+    if let Some(kind) = body.offering_kind {
+        proposed.offering_kind = kind;
+    }
+    if let Some(topics) = &body.topics {
+        proposed.topics = topics.clone();
+    }
+    if let Some(supplier) = &body.supplier {
+        proposed.supplier = supplier.clone();
+    }
+    if let Some(source) = &body.import_source {
+        proposed.import_source = source
+            .clone()
+            .map(crate::services::catalog_import_source::CatalogImportSourceDto::into_model)
+            .transpose()?;
+    }
+    if body
+        .credential
+        .as_ref()
+        .is_some_and(|c| !c.trim().is_empty())
+    {
+        proposed.credential_encrypted = vec![1];
+    }
+    if let Some(config) = &body.platform_key {
+        proposed.platform_key = Some(config.clone());
+    }
+    crate::services::tool_topics::validate_tool_service(&proposed)?;
     let mut set_doc = doc! {};
+    if body.service_category.is_some() {
+        set_doc.insert("service_category", &proposed.service_category);
+        set_doc.insert(
+            "requires_user_credential",
+            proposed.requires_user_credential,
+        );
+    }
+    if body.offering_kind.is_some() {
+        set_doc.insert(
+            "offering_kind",
+            bson::to_bson(&proposed.offering_kind)
+                .map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
+    if body.topics.is_some() {
+        set_doc.insert("topics", &proposed.topics);
+    }
+    if body.supplier.is_some() {
+        set_doc.insert("supplier", &proposed.supplier);
+    }
+    if body.import_source.is_some() {
+        set_doc.insert(
+            "import_source",
+            bson::to_bson(&proposed.import_source)
+                .map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
     if let Some(credential) = body
         .credential
         .as_ref()
@@ -3432,6 +3600,14 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            twin_of_service_id: None,
+            asyncapi_spec_url: None,
+            custom_user_agent: None,
+            offering_kind: None,
+            topics: None,
+            supplier: None,
+            import_source: None,
+            openapi_spec_url: None,
             destination_targets: Default::default(),
             recommended_skill_refs: None,
             skills_request_id: None,

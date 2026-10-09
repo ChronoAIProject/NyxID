@@ -123,6 +123,8 @@ pub mod webhooks;
 pub mod catalog_curation;
 #[cfg(test)]
 mod catalog_editor_tests;
+#[cfg(test)]
+mod tools_tests;
 
 pub mod assistant_group;
 pub mod assistant_nyxagent;
@@ -169,6 +171,7 @@ pub mod machine_access;
 pub mod admin_utility_inference;
 
 pub mod service_preference;
+pub mod tools;
 
 pub mod service_concurrency;
 #[cfg(test)]

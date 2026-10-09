@@ -457,6 +457,9 @@ export function ServiceConnectionTable({
                         aria-hidden="true"
                       />
                     </Link>
+                    {key.offering_kind === "tool" && (
+                      <Badge variant="secondary">Tool · your key</Badge>
+                    )}
                     <Badge
                       className="ml-auto shrink-0"
                       variant={

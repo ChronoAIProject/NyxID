@@ -108,6 +108,8 @@ const PAGE_LABELS: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/billing": "Billing & Usage",
   "/keys": "Services & Credentials",
+  "/tools": "Tools",
+  "/admin/tools": "Tools",
   "/orgs": "Organizations",
   "/nodes": "Credential Nodes",
   "/channel-bots": "Channel Bots",

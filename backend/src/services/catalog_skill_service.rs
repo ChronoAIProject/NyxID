@@ -631,6 +631,18 @@ pub async fn create(
     request_id: &str,
     fingerprint: &str,
 ) -> AppResult<DownstreamService> {
+    create_with_endpoints(db, service, actor_id, input, request_id, fingerprint, &[]).await
+}
+
+pub async fn create_with_endpoints(
+    db: &Database,
+    service: &DownstreamService,
+    actor_id: &str,
+    input: &SkillUpdate,
+    request_id: &str,
+    fingerprint: &str,
+    endpoints: &[crate::models::service_endpoint::ServiceEndpoint],
+) -> AppResult<DownstreamService> {
     let desired = resolve_update(&SkillState::default(), input)?;
     if let Some(replay) = replay_create(db, actor_id, request_id, fingerprint).await? {
         return Ok(replay);
@@ -646,6 +658,7 @@ pub async fn create(
     let transaction_actor = actor_id.to_owned();
     let transaction_request = request_id.to_owned();
     let transaction_fingerprint = fingerprint.to_owned();
+    let endpoints = endpoints.to_vec();
     let committed = session
         .start_transaction()
         .and_run2(async move |session| {
@@ -674,6 +687,14 @@ pub async fn create(
                         .insert_one(&service)
                         .session(&mut *session)
                         .await?;
+                }
+                if !endpoints.is_empty() {
+                    db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                        crate::models::service_endpoint::COLLECTION_NAME,
+                    )
+                    .insert_many(&endpoints)
+                    .session(&mut *session)
+                    .await?;
                 }
                 if changed {
                     db.collection::<CatalogSkillRevision>(HISTORY)

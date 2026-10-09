@@ -27,6 +27,11 @@ async fn service_concurrency_rest_slug_uuid_mcp_and_stream_share_catalog_capacit
     .unwrap();
     // Catalog-backed MCP discovery requires a published operation contract.
     let endpoint = crate::models::service_endpoint::ServiceEndpoint {
+        data_scope: None,
+        cost_class: None,
+        execution: Default::default(),
+        publication: Default::default(),
+
         async_operation: None,
         id: Uuid::new_v4().to_string(),
         service_id: catalog.id.clone(),

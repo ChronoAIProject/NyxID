@@ -3230,6 +3230,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    offering_kind: crate::models::downstream_service::OfferingKind,
     concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     inference: Option<crate::models::downstream_service::ServiceInference>,
     workspace_destinations_pending: bool,
@@ -3259,6 +3260,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        offering_kind: service.offering_kind,
         concurrency_policy: service.concurrency_policy.clone(),
         inference: service.inference.clone(),
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
@@ -3275,6 +3277,7 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    service.offering_kind = authorization.offering_kind;
     service.concurrency_policy = authorization.concurrency_policy.clone();
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
@@ -3816,6 +3819,10 @@ fn build_minimal_downstream_service(
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
+        offering_kind: Default::default(),
+        topics: Vec::new(),
+        supplier: None,
+        import_source: None,
         destination_targets: Default::default(),
         owner_user_id: None,
         recommended_skill_refs: None,
@@ -6044,6 +6051,10 @@ mod tests {
             auth_key_name: "Authorization".to_string(),
             credential: String::new(),
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
                 destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
@@ -7373,6 +7384,10 @@ mod tests {
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
                 destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
@@ -7719,6 +7734,10 @@ mod tests {
             auth_key_name: "app_secret".to_string(),
             credential: "super-secret".to_string(),
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
                 destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
@@ -7951,6 +7970,10 @@ mod tests {
             auth_key_name: String::new(),
             credential,
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
                 destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
@@ -8200,6 +8223,10 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,

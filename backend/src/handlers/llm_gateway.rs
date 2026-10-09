@@ -406,6 +406,19 @@ pub async fn llm_proxy_request(
     ))
     .await?;
 
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+            &operation_path,
+        )?;
+        crate::services::tool_publication_service::gate(
+            &state.db,
+            &service,
+            &request_method_str,
+            &canonical,
+        )
+        .await?;
+    }
+
     // Two-tier credential resolution:
     //   1. Prefer the new UserService / UserApiKey model (created via
     //      `nyxid service add` / POST /api/v1/keys). Its target has the
@@ -962,6 +975,13 @@ async fn gateway_provider_request(
         },
     ))
     .await?;
+
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(&final_path)?;
+        crate::services::tool_publication_service::gate(&state.db, &service, "POST", &canonical)
+            .await?;
+    }
 
     // Two-tier proxy target resolution (mirrors `llm_proxy_request`):
     //   1. Prefer the new UserService / UserApiKey model, which bakes the
@@ -2878,6 +2898,57 @@ mod agent_operation_tests {
             )
             .is_err()
         );
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {"_id": &catalog.id},
+                doc! {"$set":{"offering_kind":"tool"}},
+            )
+            .await
+            .unwrap();
+        let mut unrestricted = auth.clone();
+        unrestricted.assistant_operation_scopes.clear();
+        for gateway in [false, true] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/llm/openai/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(BillingRoutePolicy::Metered(if gateway {
+                    BillingIngress::LlmGateway
+                } else {
+                    BillingIngress::LlmProvider
+                }));
+            let response = if gateway {
+                gateway_request(
+                    State(f.state.clone()),
+                    unrestricted.clone(),
+                    Path("chat/completions".into()),
+                    request,
+                )
+                .await
+            } else {
+                Box::pin(llm_proxy_request(
+                    State(f.state.clone()),
+                    unrestricted.clone(),
+                    Path(("openai".into(), "chat/completions".into())),
+                    request,
+                ))
+                .await
+            };
+            assert!(
+                matches!(response, Err(AppError::ToolOperationNotPublished)),
+                "unpublished LLM Tool must fail before credential resolution: {response:?}"
+            );
+        }
         f.state.db.drop().await.unwrap();
     }
 }

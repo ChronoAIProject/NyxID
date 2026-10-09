@@ -19,6 +19,10 @@ use super::services_helpers::{fetch_service, require_admin_or_creator, require_h
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEndpointRequest {
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
+
     pub target_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
@@ -36,6 +40,18 @@ pub struct CreateEndpointRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateEndpointRequest {
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub data_scope: Option<Option<crate::models::service_endpoint::DataScope>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub cost_class: Option<Option<crate::models::service_endpoint::CostClass>>,
+    pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
+
     #[serde(
         default,
         deserialize_with = "crate::models::nullable_field::deserialize"
@@ -82,6 +98,11 @@ pub struct UpdateEndpointRequest {
 
 #[derive(Debug, Serialize)]
 pub struct EndpointResponse {
+    pub publication: crate::models::service_endpoint::PublicationState,
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: crate::models::service_endpoint::ExecutionKind,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_id: Option<String>,
     pub id: String,
@@ -176,6 +197,10 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
     let request_body_required = e.effective_request_body_required();
 
     EndpointResponse {
+        publication: e.publication,
+        data_scope: e.data_scope,
+        cost_class: e.cost_class,
+        execution: e.execution,
         target_id: e.target_id,
         id: e.id,
         service_id: e.service_id,
@@ -211,7 +236,14 @@ pub async fn list_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
 
-    let endpoints = service_endpoint_service::list_endpoints(&state.db, &service_id).await?;
+    let endpoints = if super::services_helpers::require_admin(&state, &auth_user)
+        .await
+        .is_ok()
+    {
+        service_endpoint_service::list_all_endpoints(&state.db, &service_id).await?
+    } else {
+        service_endpoint_service::list_endpoints(&state.db, &service_id).await?
+    };
     let items: Vec<EndpointResponse> = endpoints
         .into_iter()
         .filter(|endpoint| {
@@ -248,7 +280,11 @@ pub async fn create_endpoint(
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     validate_endpoint_name(&body.name)?;
     validate_method(&body.method)?;
@@ -261,6 +297,9 @@ pub async fn create_endpoint(
     }
 
     let input = EndpointInput {
+        data_scope: body.data_scope,
+        cost_class: body.cost_class,
+        execution: body.execution.unwrap_or_default(),
         async_operation: None,
         target_id: body.target_id,
         request_body_required: body
@@ -302,8 +341,19 @@ pub async fn update_endpoint(
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        && body.is_active.is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Use the publication route to enable or pause tool operations".into(),
+        ));
+    }
     if let Some(ref name) = body.name {
         validate_endpoint_name(name)?;
     }
@@ -321,6 +371,9 @@ pub async fn update_endpoint(
     }
 
     let updates = EndpointUpdate {
+        data_scope: body.data_scope,
+        cost_class: body.cost_class,
+        execution: body.execution,
         target_id: body.target_id,
         name: body.name,
         description: body.description,
@@ -360,7 +413,11 @@ pub async fn delete_endpoint(
 ) -> AppResult<Json<DeleteEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
     service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
 
@@ -387,13 +444,17 @@ pub async fn discover_endpoints(
 ) -> AppResult<Json<DiscoverEndpointsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::services_helpers::require_admin(&state, &auth_user).await?;
+    } else {
+        require_admin_or_creator(&state, &auth_user, &service).await?;
+    }
 
-    let api_spec_url = service.openapi_spec_url.ok_or_else(|| {
-        AppError::BadRequest("Service has no openapi_spec_url configured".to_string())
-    })?;
-
-    let parsed = openapi_parser::parse_openapi_spec(&state.http_client, &api_spec_url).await?;
+    let api_spec_url = service
+        .openapi_spec_url
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("Service has no openapi_spec_url configured".into()))?;
+    let parsed = openapi_parser::parse_openapi_spec(&state.http_client, api_spec_url).await?;
 
     for endpoint in &parsed {
         if let Some(content_type) = endpoint.request_content_type.as_deref() {
@@ -405,6 +466,9 @@ pub async fn discover_endpoints(
     let mut inputs: Vec<EndpointInput> = parsed
         .into_iter()
         .map(|p| EndpointInput {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
             async_operation: None,
             target_id: None,
             name: p.name,
@@ -421,7 +485,7 @@ pub async fn discover_endpoints(
             supports_idempotency_key: p.supports_idempotency_key,
         })
         .collect();
-    crate::services::catalog_spec_sync::annotate_hosted_async_inputs(&api_spec_url, &mut inputs)?;
+    crate::services::catalog_spec_sync::annotate_hosted_async_inputs(api_spec_url, &mut inputs)?;
 
     let count = inputs.len();
     let endpoints =
@@ -508,6 +572,10 @@ mod tests {
     #[test]
     fn endpoint_to_response_uses_effective_request_body_required() {
         let endpoint = ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -553,6 +621,9 @@ mod tests {
             &db,
             &other_service_id,
             EndpointInput {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
                 async_operation: None,
                 target_id: None,
                 name: "other_endpoint".to_string(),
@@ -578,6 +649,9 @@ mod tests {
             test_auth_user(&owner_id),
             Path((route_service.id.clone(), endpoint.id.clone())),
             Json(UpdateEndpointRequest {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
                 target_id: None,
                 name: None,
                 description: None,
@@ -616,4 +690,65 @@ mod tests {
         assert_eq!(persisted.path, "/original");
         assert_eq!(persisted.operation_generation, 1);
     }
+}
+
+#[derive(Deserialize)]
+pub struct PublicationRequest {
+    pub state: crate::models::service_endpoint::PublicationState,
+}
+
+#[derive(Deserialize)]
+pub struct BulkPublicationRequest {
+    pub state: crate::models::service_endpoint::PublicationState,
+    pub endpoint_names: Vec<String>,
+}
+
+pub async fn change_publication(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((service_id, endpoint_id)): Path<(String, String)>,
+    Json(body): Json<PublicationRequest>,
+) -> AppResult<Json<EndpointResponse>> {
+    let service = fetch_service(&state, &service_id).await?;
+    super::services_helpers::require_admin(&state, &auth_user).await?;
+    require_http_service(&service)?;
+    let mut rows = crate::services::tool_publication_service::change_publication(
+        &state.db,
+        &service_id,
+        &[endpoint_id],
+        body.state,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+    )
+    .await?;
+    Ok(Json(endpoint_to_response(rows.remove(0))))
+}
+
+pub async fn change_publication_bulk(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    Json(body): Json<BulkPublicationRequest>,
+) -> AppResult<Json<EndpointListResponse>> {
+    let service = fetch_service(&state, &service_id).await?;
+    super::services_helpers::require_admin(&state, &auth_user).await?;
+    require_http_service(&service)?;
+    let ids = crate::services::tool_publication_service::ids_by_name(
+        &state.db,
+        &service_id,
+        &body.endpoint_names,
+    )
+    .await?;
+    let rows = crate::services::tool_publication_service::change_publication(
+        &state.db,
+        &service_id,
+        &ids,
+        body.state,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+    )
+    .await?;
+    Ok(Json(EndpointListResponse {
+        endpoints: rows.into_iter().map(endpoint_to_response).collect(),
+    }))
 }

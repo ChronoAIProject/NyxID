@@ -104,6 +104,11 @@ it("uses the real CLI shim and list hook with no dashboard user to select connec
   await user.click(screen.getByRole("checkbox", { name: "CLI platform" }));
   expect(screen.getByRole("status")).toHaveTextContent("personal,platform");
   expect(useAuthStore.getState().user).toBeNull();
+  expect(
+    transport.mock.calls.some(([input]) =>
+      String(input).includes("/keys?include_tool_bindings=true"),
+    ),
+  ).toBe(true);
   expect(requests).toEqual(
     expect.arrayContaining([
       { path: "/api/proxy/api/v1/keys", csrf: bootstrap.csrf },
@@ -115,7 +120,7 @@ it("uses the real CLI shim and list hook with no dashboard user to select connec
   );
   expect(requests.some(({ path }) => path.endsWith("/users/me"))).toBe(false);
   expect(
-    client.getQueryData(["keys", "list", modeAQueryIdentity()]),
+    client.getQueryData(["keys", "list", modeAQueryIdentity(), true]),
   ).toHaveLength(2);
   expect(client.getQueryData(["keys", "list", undefined])).toBeUndefined();
 });

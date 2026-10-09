@@ -33,6 +33,7 @@ pub mod cae_webhook_service;
 pub mod catalog_delegation_service;
 pub mod catalog_discovery_service;
 pub mod catalog_identity_service;
+pub mod catalog_import_source;
 pub mod catalog_service;
 pub mod catalog_spec_registry;
 pub mod catalog_spec_sync;
@@ -292,5 +293,12 @@ mod machine_access_tests;
 pub mod service_concurrency_service;
 pub mod utility_inference_service;
 
+pub mod tool_topics;
+
+pub mod tool_publication_service;
+
+pub mod tools_service;
+
 pub mod async_service_operation;
 pub mod service_preference_service;
+pub mod tool_twin_service;

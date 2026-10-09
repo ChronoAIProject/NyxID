@@ -22,6 +22,11 @@ use crate::services::{org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
+    pub topics: Vec<String>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
@@ -167,6 +172,10 @@ fn build_catalog_entry(
         .and_then(|b| b.byok_pricing.as_ref())
         .map(Into::into);
     CatalogEntry {
+        offering_kind: svc.offering_kind,
+        topics: svc.topics.clone(),
+        supplier: svc.supplier.clone(),
+        import_source: svc.import_source.clone(),
         inference,
         platform_key,
         byok_pricing,
@@ -1010,6 +1019,10 @@ mod tests {
 
     fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,

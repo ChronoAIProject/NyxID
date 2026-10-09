@@ -259,8 +259,42 @@ pub struct SshServiceConfig {
     pub ca_public_key: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OfferingKind {
+    #[default]
+    AiService,
+    Tool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogImportKind {
+    Monid,
+    VendorSpec,
+    CatalogTwin,
+    Manual,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CatalogImportSource {
+    pub kind: CatalogImportKind,
+    pub reference: String,
+    pub version: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub imported_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DownstreamService {
+    #[serde(default)]
+    pub offering_kind: OfferingKind,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub supplier: Option<String>,
+    #[serde(default)]
+    pub import_source: Option<CatalogImportSource>,
     /// Absent policies add no concurrency work to execution paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
@@ -540,6 +574,10 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -647,6 +685,10 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -737,6 +779,10 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -799,6 +845,10 @@ mod tests {
         // Remove the fields that have #[serde(default = ...)]
         doc.remove("service_type");
         doc.remove("visibility");
+        doc.remove("offering_kind");
+        doc.remove("topics");
+        doc.remove("supplier");
+        doc.remove("import_source");
         doc.remove("service_category");
         doc.remove("requires_user_credential");
         doc.remove("identity_propagation_mode");
@@ -808,6 +858,10 @@ mod tests {
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.visibility, "public");
+        assert_eq!(restored.offering_kind, OfferingKind::AiService);
+        assert!(restored.topics.is_empty());
+        assert!(restored.supplier.is_none());
+        assert!(restored.import_source.is_none());
         assert_eq!(restored.service_category, "connection");
         assert_eq!(restored.identity_propagation_mode, "none");
         assert!(restored.requires_user_credential);

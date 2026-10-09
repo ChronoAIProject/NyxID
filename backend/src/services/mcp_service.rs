@@ -353,6 +353,7 @@ pub struct McpCatalogDiagnostics {
 }
 
 pub struct McpOperationCatalog {
+    pub unpublished_services: Vec<McpToolService>,
     pub services: Vec<McpToolService>,
     pub diagnostics: McpCatalogDiagnostics,
 }
@@ -869,6 +870,17 @@ pub async fn load_operation_catalog(
         .iter()
         .filter(|service| service.invalid_openapi_contract)
         .count();
+    let mut unpublished_services = Vec::new();
+    let mut published_services = Vec::new();
+    for service in visible {
+        if service.endpoints.is_empty() {
+            unpublished_services.push(service);
+        } else {
+            published_services.push(service);
+        }
+    }
+    invalid_contract_services += unpublished_services.len();
+    let mut visible = published_services;
     visible.retain(|service| {
         let valid = operation_set_is_publishable(service);
         if !valid {
@@ -886,6 +898,7 @@ pub async fn load_operation_catalog(
         .filter(|service| service.is_generic_proxy)
         .count();
     Ok(McpOperationCatalog {
+        unpublished_services,
         services: visible,
         diagnostics: McpCatalogDiagnostics {
             no_visible_connections,
@@ -1311,6 +1324,9 @@ async fn load_user_tools_with_grants(
 
     let mut eps_by_svc: HashMap<&str, Vec<&ServiceEndpoint>> = HashMap::new();
     for ep in &all_endpoints {
+        if ep.publication != crate::models::service_endpoint::PublicationState::Published {
+            continue;
+        }
         eps_by_svc
             .entry(ep.service_id.as_str())
             .or_default()
@@ -1407,7 +1423,11 @@ async fn load_user_tools_with_grants(
                     endpoints: Vec::new(),
                     durable_metadata: HashMap::new(),
                 });
-            match user_spec_url {
+            match user_spec_url.filter(|_| {
+                catalog_policy.is_none_or(|service| {
+                    service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
+                })
+            }) {
                 Some(spec_url) => {
                     match try_user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id).await {
                         Some(instance_endpoints) => (instance_endpoints, false, false),
@@ -6206,6 +6226,52 @@ pub fn skills_manifest_digest(services: &[McpToolService]) -> String {
     )
 }
 
+pub async fn unpublished_tool(
+    db: &mongodb::Database,
+    tool_name: &str,
+    services: &[McpToolService],
+    unpublished_services: &[McpToolService],
+) -> AppResult<bool> {
+    let Some((slug, name)) = tool_name.split_once("__") else {
+        return Ok(false);
+    };
+    let Some(service) = services
+        .iter()
+        .chain(unpublished_services)
+        .find(|s| s.service_slug == slug)
+    else {
+        return Ok(false);
+    };
+    let catalog_id = match &service.source {
+        McpToolSource::Platform {
+            downstream_service_id,
+        } => Some(downstream_service_id.as_str()),
+        McpToolSource::UserManaged {
+            catalog_service_id, ..
+        } => catalog_service_id.as_deref(),
+        _ => None,
+    };
+    let Some(id) = catalog_id else {
+        return Ok(false);
+    };
+    if db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id":id,"offering_kind":"tool"})
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let endpoint = db
+        .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+        .find_one(doc! {"service_id":id,"name":name})
+        .await?;
+    Ok(endpoint.is_some_and(|e| {
+        !e.is_active
+            || e.publication != crate::models::service_endpoint::PublicationState::Published
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -8161,6 +8227,10 @@ mod tests {
     #[test]
     fn catalog_rows_carry_their_overlay_destructive_markers() {
         let row = |name: &str, method: &str, path: &str| ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             async_operation: None,
             target_id: None,
             id: format!("ep-{name}"),
@@ -8592,6 +8662,10 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -8803,6 +8877,10 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -8999,6 +9077,10 @@ mod tests {
         // Template row that would publish `template_op` without an override.
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -9116,6 +9198,10 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                publication: Default::default(),
                 async_operation: None,
                 target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -12799,6 +12885,10 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
                 destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,

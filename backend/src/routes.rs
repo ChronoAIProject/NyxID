@@ -659,7 +659,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_concurrency::get).put(handlers::service_concurrency::put),
         )
         .route("/", get(handlers::services::list_services))
-        .route("/", post(handlers::services::create_service))
+        .route("/", post(handlers::services::create_service_request))
         .route("/{service_id}", get(handlers::services::get_service))
         .route("/{service_id}", put(handlers::services::update_service))
         .route("/{service_id}", delete(handlers::services::delete_service))
@@ -678,6 +678,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/{service_id}/regenerate-secret",
             post(handlers::services::regenerate_oidc_secret),
+        )
+        .route(
+            "/{service_id}/publication",
+            post(handlers::endpoints::change_publication_bulk),
+        )
+        .route(
+            "/{service_id}/endpoints/{endpoint_id}/publication",
+            post(handlers::endpoints::change_publication),
         )
         .route(
             "/{service_id}/endpoints",
@@ -1600,6 +1608,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::orgs::cancel_invite),
         );
 
+    let tools_routes = Router::new()
+        .route("/", get(handlers::tools::list))
+        .route("/{slug}", get(handlers::tools::get))
+        .layer(middleware::from_fn(reject_service_account_tokens));
     let catalog_routes = Router::new()
         .route("/", get(handlers::catalog::list_catalog))
         .route("/{slug}", get(handlers::catalog::get_catalog_entry))
@@ -1825,6 +1837,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .route("/tools/topics", get(handlers::catalog::tool_topics))
         .route(
             "/machines/pair/request",
             post(handlers::machine_setup::request_pair),
@@ -2010,6 +2023,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         // Shared relay/delegated layers apply; exact account:read GETs retain
         // their existing delegated exception.
         .nest("/catalog", catalog_routes)
+        .nest("/tools", tools_routes)
         // Like authenticate_mcp: sessions, proxy-scoped access tokens, general
         // API keys (including chat keys), and non-Curation service accounts.
         // AuthUser rejects scheduled keys and Curation SAs; the handler checks
@@ -2527,8 +2541,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::permission_keys::pause)
                 .delete(handlers::permission_keys::revoke),
         )
-        .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
+        .nest("/api-keys", api_key_routes)
         .route("/docs", get(handlers::docs::docs_ui))
         .route("/docs/catalog", get(handlers::docs::catalog_ui))
         .route("/docs/openapi.json", get(handlers::docs::openapi_json))

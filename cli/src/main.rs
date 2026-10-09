@@ -11,6 +11,7 @@ mod error_format;
 mod net_diagnostics;
 pub mod node;
 pub mod org_resolver;
+mod output;
 mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
@@ -205,6 +206,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Mfa { .. } => ("user", "mfa"),
         Commands::Session { .. } => ("user", "session"),
         Commands::Catalog { .. } => ("catalog", "subcommand"),
+        Commands::Tools { .. } => ("tools", "subcommand"),
         Commands::Keys(_) => ("service", "list"),
         Commands::Service { .. } => ("service", "subcommand"),
         Commands::Pool { .. } => ("pool", "subcommand"),
@@ -275,6 +277,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Session { command } => commands::session::run(command).await,
 
         Commands::Catalog { command } => commands::catalog::run(command).await,
+        Commands::Tools { command } => commands::catalog_tools::run_tools(command).await,
         Commands::Keys(auth) => commands::service::run(cli::ServiceCommands::List { auth }).await,
         Commands::Service { command } => commands::service::run(command).await,
         Commands::Pool { command } => commands::pool::run(command).await,

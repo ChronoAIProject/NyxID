@@ -2605,6 +2605,10 @@ pub(crate) fn test_auto_connected_catalog_service()
 -> crate::models::downstream_service::DownstreamService {
     use crate::models::downstream_service::DownstreamService;
     DownstreamService {
+        offering_kind: Default::default(),
+        topics: Vec::new(),
+        supplier: None,
+        import_source: None,
         destination_targets: Default::default(),
         owner_user_id: None,
         id: uuid::Uuid::new_v4().to_string(),

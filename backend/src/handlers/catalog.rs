@@ -23,6 +23,11 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogEntryResponse {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
+    pub topics: Vec<String>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
+
     pub slug: String,
     pub resource_uri: String,
     pub name: String,
@@ -192,6 +197,7 @@ pub struct CatalogEndpointsListResponse {
 
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct CatalogListQuery {
+    pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     /// Include all active services (including system services without auth).
     /// Default: false (only shows services requiring user credential setup).
     #[serde(default)]
@@ -216,13 +222,22 @@ pub async fn list_catalog(
     Query(query): Query<CatalogListQuery>,
 ) -> AppResult<Json<CatalogListResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let entries = if query.include_all {
+    let entries = if query.include_all
+        || query.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool)
+    {
         catalog_service::list_catalog_all(&state.db, &state.encryption_keys, &user_id).await?
     } else {
         catalog_service::list_catalog(&state.db, &state.encryption_keys, &user_id).await?
     };
     let items: Vec<CatalogEntryResponse> = entries
         .into_iter()
+        .filter(|entry| {
+            query.include_all
+                || query.offering_kind.map_or(
+                    entry.offering_kind != crate::models::downstream_service::OfferingKind::Tool,
+                    |kind| kind == entry.offering_kind,
+                )
+        })
         .map(|entry| catalog_entry_response(&state.config, entry))
         .collect();
 
@@ -316,6 +331,10 @@ pub(crate) fn catalog_entry_response(
     let resource_uri = oauth_resource_service::user_service_resource_uri(config, &entry.slug);
 
     CatalogEntryResponse {
+        offering_kind: entry.offering_kind,
+        topics: entry.topics.clone(),
+        supplier: entry.supplier.clone(),
+        import_source: entry.import_source.clone().map(Into::into),
         slug: entry.slug,
         resource_uri,
         name: entry.name,
@@ -613,3 +632,22 @@ mod tests;
 #[cfg(test)]
 #[path = "catalog_routes_tests.rs"]
 mod catalog_routes_tests;
+
+/// Controlled topic vocabulary shared by Tools clients.
+pub async fn tool_topics() -> Json<Vec<ToolTopicResponse>> {
+    Json(
+        crate::services::tool_topics::TOOL_TOPICS
+            .iter()
+            .map(|(slug, label)| ToolTopicResponse {
+                slug: (*slug).into(),
+                label: (*label).into(),
+            })
+            .collect(),
+    )
+}
+
+#[derive(Serialize)]
+pub struct ToolTopicResponse {
+    pub slug: String,
+    pub label: String,
+}

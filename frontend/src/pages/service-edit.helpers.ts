@@ -15,6 +15,9 @@ export function serviceFormValues(
   service: DownstreamService,
 ): UpdateServiceFormData {
   return {
+    offering_kind: service.offering_kind ?? "ai_service",
+    topics: [...(service.topics ?? [])],
+    supplier: service.supplier ?? "",
     proxy_operation_policy: service.proxy_operation_policy ?? null,
     inference: service.inference ?? null,
     platform_key: service.platform_key
@@ -120,6 +123,9 @@ export function serviceFormPayload(
         },
       }
     : {
+        offering_kind: data.offering_kind,
+        topics: normalizedSet(data.topics ?? []),
+        supplier: data.supplier || null,
         name: data.name,
         description: data.description || "",
         visibility: data.visibility,

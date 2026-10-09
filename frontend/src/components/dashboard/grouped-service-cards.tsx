@@ -385,6 +385,9 @@ function GroupCard({
                   {count === 1 ? "connection" : "connections"}
                 </p>
               </div>
+              {group.connections.some((connection) => connection.offering_kind === "tool") && (
+                <Badge variant="secondary">Tool · your key</Badge>
+              )}
               {!expanded && preferred?.preference_rank === 1 && (
                 <button
                   type="button"

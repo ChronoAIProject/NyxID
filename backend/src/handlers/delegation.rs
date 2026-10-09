@@ -1207,6 +1207,10 @@ mod tests {
     ) -> ServiceEndpoint {
         let now = Utc::now();
         ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             async_operation: None,
             target_id: None,
             id: id.to_string(),

@@ -1,0 +1,181 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "apollo research import example",
+    "version": "0.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.apollo.io"
+    }
+  ],
+  "paths": {
+    "/api/v1/organizations/enrich": {
+      "get": {
+        "operationId": "apollo_organizations_enrich",
+        "summary": "Apollo Organization Enrichment",
+        "description": "Resolve a company into a complete firmographic profile: industry, employee count, revenue, funding history, technology stack, locations, corporate phone, social profiles, description, and the parent / subsidiary hierarchy (owned_by_organization, owned_by_chain, ultimate_parent_organization, suborganizations). Identify the company by domain, LinkedIn URL, or website; add name to improve the match. Best for qualifying inbound leads, enriching CRM accounts, and pre-outreach company research.",
+        "x-monid-source-id": "apollo#organizations/enrich",
+        "x-nyxid-audit-status": "candidate_requires_live_validation",
+        "responses": {
+          "200": {
+            "description": "Upstream response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/organizations/{organization_id}/job_postings": {
+      "get": {
+        "operationId": "apollo_organizations_job_postings",
+        "summary": "Apollo Organization Job Postings",
+        "description": "List the jobs a company is actively hiring for — title, location, posting URL, and dates — by its Apollo organization id (from Organization Search). Hiring activity is a strong growth and buying signal; best for signal-based prospecting, competitive intelligence, and timing outreach to expanding teams.",
+        "x-monid-source-id": "apollo#organizations/job_postings",
+        "x-nyxid-audit-status": "candidate_requires_live_validation",
+        "responses": {
+          "200": {
+            "description": "Upstream response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Apollo organization id of the company (from Organization Search)."
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991,
+              "description": "Page of postings to retrieve (1-based)."
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991,
+              "description": "Postings per page."
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/organizations/{id}": {
+      "get": {
+        "operationId": "apollo_organizations_show",
+        "summary": "Apollo Get Complete Organization Info",
+        "description": "Direct lookup of everything Apollo knows about one company by its Apollo organization id (from Organization Search): full firmographics, revenue, funding events, technology stack, locations, social profiles, and description. Use Organization Enrichment instead when you only have the company's domain, LinkedIn URL, or website.",
+        "x-monid-source-id": "apollo#organizations/show",
+        "x-nyxid-audit-status": "candidate_requires_live_validation",
+        "responses": {
+          "200": {
+            "description": "Upstream response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Apollo organization id (from Organization Search)."
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/people/match": {
+      "post": {
+        "operationId": "apollo_people_match",
+        "summary": "Apollo People Enrichment",
+        "description": "Resolve a known person into a complete profile: verified work email, job title, seniority, department, employment history, location, and current employer details. Accepts any identifier — email, name plus company, LinkedIn URL, or Apollo person id — and more identifiers improve the match; match_confidence in the response says how sure Apollo is (none = no record enriched). The step that reveals the contact data People Search withholds; best for lead enrichment, contact appending, and CRM hygiene. Phone numbers are not available through this endpoint.",
+        "x-monid-source-id": "apollo#people/match",
+        "x-nyxid-audit-status": "candidate_requires_live_validation",
+        "responses": {
+          "200": {
+            "description": "Upstream response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/people/{id}": {
+      "get": {
+        "operationId": "apollo_people_show",
+        "summary": "Apollo Get Complete Person Info",
+        "description": "Direct lookup of everything Apollo knows about one person by their Apollo person id (from People Search): name, title, headline, employment history, location, email status, and their current organization. Use People Enrichment instead when you only have an email, name, or LinkedIn URL, or when you need the email address itself.",
+        "x-monid-source-id": "apollo#people/show",
+        "x-nyxid-audit-status": "candidate_requires_live_validation",
+        "responses": {
+          "200": {
+            "description": "Upstream response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Apollo person id (from People Search)."
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "providerCredential": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key"
+      }
+    }
+  },
+  "security": [
+    {
+      "providerCredential": []
+    }
+  ]
+}

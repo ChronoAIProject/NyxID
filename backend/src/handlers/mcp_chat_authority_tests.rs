@@ -638,6 +638,10 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
         .db
         .collection(crate::models::service_endpoint::COLLECTION_NAME)
         .insert_one(ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),

@@ -1,3 +1,4 @@
+import { useSearch } from "@tanstack/react-router";
 import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
@@ -23,6 +24,9 @@ import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 
 export function ApiKeyDetailPage() {
+  const { grant_service } = useSearch({ strict: false }) as {
+    grant_service?: string;
+  };
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const { data: apiKey, isLoading, error, refetch } = useApiKey(keyId);
   useBreadcrumbLabel(apiKey?.name);
@@ -122,6 +126,7 @@ export function ApiKeyDetailPage() {
         <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
 
         <ServiceScopeCard
+          initialCatalogServiceId={grant_service}
           canWrite={canWrite}
           keyId={apiKey.id}
           allowAllServices={apiKey.allow_all_services}

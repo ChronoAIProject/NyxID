@@ -58,6 +58,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: CatalogCommands,
     },
+    /// Browse NyxID-provided tools
+    Tools {
+        #[command(subcommand)]
+        command: ToolsCommands,
+    },
     /// List configured service keys and their credential binding
     Keys(AuthArgs),
     /// Manage AI services (external APIs)
@@ -838,6 +843,36 @@ pub enum TelemetryCommands {
 
 #[derive(Subcommand)]
 pub enum CatalogCommands {
+    /// Manage catalog endpoint operations
+    Endpoint {
+        #[command(subcommand)]
+        command: CatalogEndpointCommands,
+    },
+    /// Discover operations from the configured OpenAPI URL
+    Discover {
+        /// Catalog service UUID or slug
+        service: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Change publication for named operations
+    Publish {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Operation name to transition (repeatable, at most 200)
+        #[arg(long = "operation", required = true)]
+        operations: Vec<String>,
+        /// Publication state to apply atomically to all selected operations
+        #[arg(long, default_value = "published", value_parser = ["published", "paused", "draft", "validated"])]
+        state: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List the controlled topic vocabulary
+    Topics {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List available services from the catalog
     List {
         /// Include all active services (including system services without auth)
@@ -877,6 +912,24 @@ pub enum CatalogCommands {
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
+    /// Catalog category: provider, connection, or internal
+    #[arg(long, value_parser = ["provider", "connection", "internal"])]
+    pub service_category: Option<String>,
+    /// Catalog offering: AI service or Tool
+    #[arg(long, value_parser = ["ai_service", "tool"])]
+    pub offering_kind: Option<String>,
+    /// Controlled topic slug (repeatable; replaces the list on update)
+    #[arg(long = "topic", conflicts_with = "clear_topics")]
+    pub topics: Vec<String>,
+    /// Clear all catalog topics on update
+    #[arg(long)]
+    pub clear_topics: bool,
+    /// API operator name for the catalog offering
+    #[arg(long)]
+    pub supplier: Option<String>,
+    /// Clear the catalog supplier metadata (catalog updates only)
+    #[arg(long, conflicts_with = "supplier")]
+    pub clear_supplier: bool,
     /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
     #[arg(long)]
     pub catalog_admin: bool,
@@ -990,6 +1043,9 @@ pub enum ServiceCommands {
         /// Custom slug for this service (omit to auto-derive from the label/catalog slug; must be unique per user).
         #[arg(long = "slug", value_name = "SLUG")]
         custom_slug: Option<String>,
+        /// Clone a catalog service into a credential-free tool twin
+        #[arg(long, requires = "catalog_admin")]
+        twin_of: Option<String>,
         /// Use OAuth flow for authentication
         #[arg(long)]
         oauth: bool,
@@ -6030,6 +6086,99 @@ pub enum OraclePoolCommands {
     RotateToken {
         /// Pool slug or id
         pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ToolsCommands {
+    /// List visible published Tool offerings
+    List {
+        /// Filter by a controlled topic slug
+        #[arg(long)]
+        topic: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show a Tool offering and its published operations
+    Show {
+        /// Catalog Tool slug
+        slug: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Args, Default)]
+pub struct CatalogEndpointArgs {
+    /// Unique operation name (required for add)
+    #[arg(long)]
+    pub name: Option<String>,
+    /// HTTP method (required for add)
+    #[arg(long, value_parser = ["GET", "POST", "PUT", "PATCH", "DELETE"])]
+    pub method: Option<String>,
+    /// Path template (required for add)
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Human-readable operation description
+    #[arg(long)]
+    pub description: Option<String>,
+    /// JSON parameter schema file
+    #[arg(long)]
+    pub parameters_file: Option<std::path::PathBuf>,
+    /// JSON request-body schema file
+    #[arg(long)]
+    pub body_schema_file: Option<std::path::PathBuf>,
+    /// Data accessible to the operation
+    #[arg(long, value_parser = ["public", "account", "owned_resource"])]
+    pub data_scope: Option<String>,
+    /// Operation cost classification
+    #[arg(long, value_parser = ["free", "metered", "resource_backed"])]
+    pub cost_class: Option<String>,
+    /// Operation execution kind
+    #[arg(long, value_parser = ["http_operation", "job_start", "job_poll"])]
+    pub execution: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum CatalogEndpointCommands {
+    /// List catalog operations and publication states
+    List {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Show only published operations
+        #[arg(long)]
+        published_only: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Add an operation (new Tool operations start as drafts)
+    Add {
+        /// Catalog service UUID or slug
+        service: String,
+        #[command(flatten)]
+        endpoint: CatalogEndpointArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update an operation contract
+    Update {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Endpoint UUID or operation name
+        endpoint_id: String,
+        #[command(flatten)]
+        endpoint: CatalogEndpointArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Pause an operation
+    Disable {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Endpoint UUID or operation name
+        endpoint_id: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

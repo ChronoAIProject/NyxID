@@ -2840,8 +2840,13 @@ for line in sys.stdin:
                 )
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !marker.exists() {
+        let pid = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&marker)
+                    .and_then(|contents| contents.parse::<i32>().map_err(std::io::Error::other))
+                {
+                    break pid;
+                }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -2871,10 +2876,7 @@ for line in sys.stdin:
                 .unwrap(),
             Err(MachineError::OwnerInControl)
         ));
-        let pid = std::fs::read_to_string(marker)
-            .unwrap()
-            .parse::<i32>()
-            .unwrap();
+
         tokio::time::timeout(Duration::from_secs(5), async {
             while unsafe { libc::kill(pid, 0) } == 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;

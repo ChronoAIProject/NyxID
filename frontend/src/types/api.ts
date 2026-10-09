@@ -233,6 +233,12 @@ export interface OAuthClient {
 }
 
 export interface DownstreamService {
+  readonly offering_kind?: "ai_service" | "tool";
+  readonly topics?: readonly string[];
+  readonly supplier?: string | null;
+  readonly import_source?:
+    | import("zod").infer<typeof import("@/schemas/tools").importSourceSchema>
+    | null;
   readonly provider_config_id?: string | null;
   readonly credential_configured?: boolean | null;
   readonly proxy_operation_policy?: ProxyOperationPolicy | null;
@@ -451,6 +457,9 @@ export type CreateServicePayload =
 
 export type UpdateServicePayload =
   | {
+      readonly offering_kind?: "ai_service" | "tool";
+      readonly topics?: readonly string[];
+      readonly supplier?: string | null;
       readonly proxy_operation_policy?: ProxyOperationPolicy | null;
       readonly name?: string;
       readonly description?: string;
@@ -504,6 +513,10 @@ export type UpdateServicePayload =
     };
 
 export interface ServiceEndpoint {
+  readonly publication?: import("@/schemas/tools").PublicationState;
+  readonly data_scope?: "public" | "account" | "owned_resource" | null;
+  readonly cost_class?: "free" | "metered" | "resource_backed" | null;
+  readonly execution?: "http_operation" | "job_start" | "job_poll";
   readonly id: string;
   readonly service_id: string;
   readonly name: string;

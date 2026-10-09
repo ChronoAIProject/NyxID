@@ -1,3 +1,5 @@
+import { ToolsPage } from "@/pages/tools";
+import { AdminToolsPage } from "@/pages/admin-tools";
 import { parseAutomationSearch } from "@/lib/automation-search";
 import {
   parseMachinesSearch,
@@ -490,10 +492,25 @@ const apiKeysRedirectRoute = createRoute({
 
 // -- Redirect old paths --
 
+const toolsRoute = createRoute({
+  path: "/tools",
+  getParentRoute: () => dashboardLayout,
+  component: ToolsPage,
+});
+const adminToolsRoute = createRoute({
+  path: "/admin/tools",
+  getParentRoute: () => dashboardLayout,
+  beforeLoad: () => {
+    if (!useAuthStore.getState().user?.is_admin)
+      throw redirect({ to: "/tools" });
+  },
+  component: AdminToolsPage,
+});
+
 const servicesRedirectRoute = createRoute({
   path: "/services",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: () => {
+  beforeLoad: async () => {
     const { user } = useAuthStore.getState();
     if (user?.is_admin) {
       // Admin users can still access the services management pages
@@ -847,6 +864,14 @@ const keyDetailRoute = createRoute({
 
 const apiKeyDetailRoute = createRoute({
   path: "/keys/api-key/$keyId",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { grant_service?: string } => ({
+    grant_service:
+      typeof search.grant_service === "string"
+        ? search.grant_service
+        : undefined,
+  }),
   getParentRoute: () => dashboardLayout,
   component: ApiKeyDetailPage,
 });
@@ -1123,7 +1148,8 @@ const adminUploadRetentionRoute = createRoute({
   getParentRoute: () => adminLayout,
   beforeLoad: () => {
     const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && !canAdminWrite(user)) throw redirect({ to: "/dashboard" });
+    if (!isLoading && !canAdminWrite(user))
+      throw redirect({ to: "/dashboard" });
   },
   component: AdminUploadRetentionPage,
 });
@@ -1172,6 +1198,8 @@ const routeTree = rootRoute.addChildren([
   designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
+    toolsRoute,
+    adminToolsRoute,
     apiKeysRedirectRoute,
     servicesRedirectRoute.addChildren([
       servicesIndexRoute,

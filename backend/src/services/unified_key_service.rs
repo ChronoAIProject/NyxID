@@ -550,6 +550,7 @@ pub struct CreateKeyResult {
 /// Combined view for GET /keys and GET /keys/:id.
 #[derive(Debug)]
 pub struct KeyView {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub id: String,
     pub label: String,
     pub slug: String,
@@ -1484,6 +1485,10 @@ async fn create_key_inner(
         let empty_credential = encryption_keys.encrypt(b"").await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -1871,7 +1876,7 @@ pub async fn auto_provision_no_auth_services(
     auto_provision_with_grants(db, user_id, &grants, &providers).await
 }
 
-async fn auto_provision_with_grants(
+pub(crate) async fn auto_provision_with_grants(
     db: &mongodb::Database,
     user_id: &str,
     grants: &OwnerGrants,
@@ -2527,6 +2532,18 @@ pub async fn list_keys_read_only_with_grants(
     grants: &OwnerGrants,
     providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
+    list_keys_read_only_with_tool_bindings(db, encryption_keys, user_id, grants, providers, false)
+        .await
+}
+
+pub async fn list_keys_read_only_with_tool_bindings(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+    include_tool_bindings: bool,
+) -> AppResult<Vec<KeyView>> {
     // Disabled services are included here and nowhere else: `/keys` is the
     // management surface that owns the Enable control, so a paused row has to
     // stay visible for the pause to be reversible. Each `KeyView` carries
@@ -2621,6 +2638,19 @@ pub async fn list_keys_read_only_with_grants(
     let mut views: Vec<KeyView> = tagged
         .into_iter()
         .filter_map(|t| {
+            if !include_tool_bindings
+                && t.service
+                    .catalog_service_id
+                    .as_deref()
+                    .and_then(|id| cat_map.get(id))
+                    .is_some_and(|catalog| {
+                        catalog.offering_kind
+                            == crate::models::downstream_service::OfferingKind::Tool
+                    })
+                && super::platform_key_service::binding(&t.service) == "platform"
+            {
+                return None;
+            }
             let ep = ep_map.get(t.service.endpoint_id.as_str())?;
             let ak = t
                 .service
@@ -4510,6 +4540,7 @@ fn build_key_view(
         .and_then(|id| app_name_map.get(id).cloned());
 
     KeyView {
+        offering_kind: catalog_ds.map(|c| c.offering_kind).unwrap_or_default(),
         inference: catalog_ds.and_then(|c| super::inference_service::view(c, None, false)),
         capabilities: catalog_ds.and_then(super::inference_service::capabilities),
         platform_key_available: false,
@@ -4673,6 +4704,107 @@ async fn enrich_view_with_oauth_client_id(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn tools_hide_only_platform_bindings_and_preserve_byok_inventory() {
+        let db = crate::test_utils::connect_test_database("tool_key_inventory")
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        catalog.service_category = "internal".into();
+        catalog.auth_method = "none".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let mut byok_id = String::new();
+        for binding in ["platform", "user"] {
+            let endpoint_id = uuid::Uuid::new_v4().to_string();
+            let id = uuid::Uuid::new_v4().to_string();
+            let endpoint = crate::test_utils::test_user_endpoint(
+                &endpoint_id,
+                &owner,
+                binding,
+                "https://api.example.com",
+                None,
+                Some(&catalog.id),
+            );
+            db.collection::<crate::models::user_endpoint::UserEndpoint>(
+                crate::models::user_endpoint::COLLECTION_NAME,
+            )
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+            let mut service = crate::test_utils::test_user_service(
+                &id,
+                &owner,
+                binding,
+                &endpoint_id,
+                Some(&catalog.id),
+                None,
+            );
+            service.credential_binding = Some(binding.into());
+            service.auth_method = "bearer".into();
+            db.collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .insert_one(service)
+            .await
+            .unwrap();
+            if binding == "user" {
+                byok_id = id;
+            }
+        }
+        let state = crate::test_utils::test_app_state(db.clone());
+        let grants = OwnerGrants::load_for_listing(&db, &owner).await.unwrap();
+        let views = list_keys_read_only_with_grants(
+            &db,
+            &state.encryption_keys,
+            &owner,
+            &grants,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].id, byok_id);
+        assert_eq!(
+            views[0].offering_kind,
+            crate::models::downstream_service::OfferingKind::Tool
+        );
+        assert_eq!(views[0].credential_binding, "user");
+        let auth = crate::test_utils::test_auth_user(&owner);
+        let axum::Json(hidden) =
+            crate::handlers::keys::list_keys(axum::extract::State(state.clone()), auth.clone())
+                .await
+                .unwrap();
+        assert_eq!(hidden.keys.len(), 1);
+        assert_eq!(hidden.keys[0].id, byok_id);
+        let axum::Json(included) =
+            crate::handlers::keys::list_keys_with_tool_bindings(state, auth, true)
+                .await
+                .unwrap();
+        assert_eq!(included.keys.len(), 2);
+        assert!(
+            included
+                .keys
+                .iter()
+                .any(|key| key.id == byok_id && key.credential_binding == "user")
+        );
+        assert!(included.keys.iter().any(|key| key.offering_kind
+            == crate::models::downstream_service::OfferingKind::Tool
+            && key.credential_binding == "platform"));
+        db.drop().await.unwrap();
+    }
+
     use std::collections::HashMap;
     use std::sync::{
         Arc,
@@ -4697,15 +4829,17 @@ mod tests {
 
     use super::{
         AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
-        OpenApiSpecUrlInput, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy, SshCreateParams,
-        UpdateCredentialAction, auto_provision_no_auth_services, auto_provision_source_id,
-        build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
-        direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
+        OpenApiSpecUrlInput, OwnerGrants, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy,
+        SshCreateParams, UpdateCredentialAction, auto_provision_no_auth_services,
+        auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
+        derive_effective_auth, direct_credential_type_for_service,
+        direct_credential_type_from_auth_method, ensure_user_api_key_for_update,
+        exact_slug_conflict, generate_slug_from_label, get_key,
         identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
-        is_duplicate_slug_app_error, list_keys, oauth_connection_status, random_slug_suffix,
-        reconcile_provider_key_for_service_routing, resolve_openapi_spec_url, resolve_unique_slug,
-        revoke_key_if_pending, slug_candidate_with_suffix, validate_catalog_credential,
+        is_duplicate_slug_app_error, list_keys, list_keys_read_only_with_grants,
+        oauth_connection_status, random_slug_suffix, reconcile_provider_key_for_service_routing,
+        resolve_openapi_spec_url, resolve_unique_slug, revoke_key_if_pending,
+        slug_candidate_with_suffix, validate_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
@@ -4963,6 +5097,10 @@ mod tests {
 
     fn sample_catalog_service() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,

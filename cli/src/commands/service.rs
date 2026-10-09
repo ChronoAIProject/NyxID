@@ -280,6 +280,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             slug,
             custom,
             custom_slug,
+            twin_of,
             oauth,
             device_code,
             via_node,
@@ -314,17 +315,38 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 {
                     bail!("Catalog administration cannot be combined with connection options");
                 }
+                catalog_admin::validate_creation_source(
+                    endpoint_url.as_deref(),
+                    twin_of.as_deref(),
+                )?;
+                if catalog.clear_supplier {
+                    bail!("--clear-supplier is only supported for catalog updates");
+                }
                 let mut api = ApiClient::from_auth_checked(&auth).await?;
                 let slug = slug
                     .as_deref()
+                    .or(custom_slug.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("Catalog creation requires a slug"))?;
-                let mut body = serde_json::json!({ "slug": slug, "name": label.as_deref().unwrap_or(slug),
-                    "base_url": endpoint_url.as_deref().ok_or_else(|| anyhow::anyhow!("Catalog creation requires --endpoint-url"))?,
-                    "auth_method": auth_method.as_deref().unwrap_or("bearer"), "auth_key_name": auth_key_name.as_deref().unwrap_or("Authorization") });
+                let mut body =
+                    serde_json::json!({ "slug": slug, "name": label.as_deref().unwrap_or(slug) });
+                if let Some(source) = twin_of.as_ref() {
+                    body["twin_of_service_id"] = source.clone().into();
+                }
+                if let Some(url) = endpoint_url.as_deref() {
+                    body["base_url"] = url.into();
+                    body["auth_method"] = auth_method.as_deref().unwrap_or("bearer").into();
+                    body["auth_key_name"] =
+                        auth_key_name.as_deref().unwrap_or("Authorization").into();
+                } else if auth_method.is_some() || auth_key_name.is_some() {
+                    bail!("Transport configuration requires --endpoint-url");
+                }
                 let secret =
                     catalog_admin::credential_from_env(credential_env.as_deref())?.or(credential);
                 if let Some(secret) = secret {
                     body["credential"] = Value::String(secret);
+                }
+                if let Some(url) = openapi_spec_url {
+                    body["openapi_spec_url"] = url.into();
                 }
                 catalog.apply(&mut api, &mut body).await?;
                 let result: Value = api.post("/services", &body).await?;
@@ -3726,6 +3748,7 @@ mod command_tests {
             slug: None,
             custom: true,
             custom_slug: Some("my-custom".to_string()),
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,
@@ -3987,6 +4010,7 @@ mod branch_tests {
             slug: Some(slug.to_string()),
             custom: false,
             custom_slug: None,
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,
@@ -4618,6 +4642,7 @@ mod branch_tests {
             slug: None,
             custom: true,
             custom_slug: Some("my-custom".to_string()),
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,

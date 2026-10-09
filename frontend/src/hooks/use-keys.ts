@@ -17,11 +17,13 @@ import type { WsFrameInjection } from "@/schemas/services";
 
 // -- Queries --
 
-export function useKeys() {
+export function useKeys(options: { includeTools?: boolean } = {}) {
   const identity = useAuthStore((state) => state.user?.id);
   const authority = modeAQueryIdentity() ?? identity;
   const query = useQuery({
-    queryKey: ["keys", "list", authority],
+    queryKey: options.includeTools
+      ? ["keys", "list", authority, true]
+      : ["keys", "list", authority],
     enabled: Boolean(authority),
     queryFn: async ({ queryKey }): Promise<readonly KeyInfo[]> => {
       const actor = queryKey[2];
@@ -33,7 +35,10 @@ export function useKeys() {
           throw new Error("Account changed before loading connections");
       };
       authorityGuard();
-      const res = await api.get<KeyListResponse>("/keys", { authorityGuard });
+      const res = await api.get<KeyListResponse>(
+        options.includeTools ? "/keys?include_tool_bindings=true" : "/keys",
+        { authorityGuard },
+      );
       return res.keys;
     },
     staleTime: 0,

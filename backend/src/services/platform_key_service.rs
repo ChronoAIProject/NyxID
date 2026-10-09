@@ -468,3 +468,22 @@ pub async fn validate_config(
 
 #[cfg(test)]
 mod tests;
+
+pub fn no_auth_available_with_grants(
+    service: &DownstreamService,
+    owner_id: &str,
+    grants: &OwnerGrants,
+) -> bool {
+    service.is_active
+        && service.auth_method == "none"
+        && service.service_type == "http"
+        && service.service_category == "internal"
+        && service
+            .platform_key
+            .as_ref()
+            .map_or(service.visibility == "public", |config| {
+                config.enabled
+                    && (config.audience == PlatformKeyAudience::Public
+                        || grants.permits(owner_id, &config.allowed_owner_ids))
+            })
+}

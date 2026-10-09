@@ -1438,6 +1438,10 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,

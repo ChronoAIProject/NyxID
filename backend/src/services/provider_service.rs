@@ -6328,6 +6328,10 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: if super::google_workspace::GoogleProduct::from_slug(
                 seed.service_slug,
             )
