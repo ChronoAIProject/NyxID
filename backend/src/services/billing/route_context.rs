@@ -350,9 +350,9 @@ mod tests {
                 else {
                     panic!("missing price must fail closed");
                 };
-                assert!(message.contains("api-twitter"), "{message}");
-                assert!(message.contains(label), "{message}");
-                assert!(message.contains("Requests"), "{message}");
+                assert!(message.contains("api-twitter"));
+                assert!(message.contains(label));
+                assert!(message.contains("Requests"));
                 assert_eq!(
                     message.contains("no lane prices and legacy platform billing is disabled"),
                     !lane_mode

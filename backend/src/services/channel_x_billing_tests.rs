@@ -873,7 +873,8 @@ async fn x_billing_rollout_disabled_meters_without_wallet_charge() {
 fn configuration_message(result: AppResult<reqwest::Response>) -> String {
     match result {
         Err(AppError::BillingNotConfigured(message)) => message,
-        other => panic!("expected BillingNotConfigured, got {other:?}"),
+        Ok(_) => panic!("expected BillingNotConfigured, got a provider response"),
+        Err(_) => panic!("expected BillingNotConfigured, got a different error"),
     }
 }
 
@@ -914,7 +915,7 @@ async fn x_billing_platform_key_only_price_preflights_before_owner_and_x_request
     else {
         panic!("required billing must reject the missing BYOK lane");
     };
-    assert!(message.contains("Your own key (BYOK)"), "{message}");
+    assert!(message.contains("Your own key (BYOK)"));
     // A missing owner must not hide the catalog configuration problem.
     state
         .db
@@ -928,8 +929,8 @@ async fn x_billing_platform_key_only_price_preflights_before_owner_and_x_request
             .verify_account(state.http_client.get(server.uri()))
             .await,
     );
-    assert!(message.contains("api-twitter"), "{message}");
-    assert!(message.contains("Your own key (BYOK)"), "{message}");
+    assert!(message.contains("api-twitter"));
+    assert!(message.contains("Your own key (BYOK)"));
     assert_eq!(
         message,
         "The X service (api-twitter) has no synced price on the Your own key (BYOK) lane that shared-app X channels bill through; configure a Requests price on that lane"
