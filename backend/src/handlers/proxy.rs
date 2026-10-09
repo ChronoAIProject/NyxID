@@ -4043,18 +4043,21 @@ async fn execute_resolved_proxy_inner(
     } else {
         None
     };
-    if target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-        let canonical =
-            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
-        crate::services::tool_publication_service::gate(
-            &state.db,
-            &target.service,
-            request.method().as_str(),
-            &canonical,
-        )
-        .await?;
-    }
-    let pool_authority_path = path;
+    let tool_operation =
+        if target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            let canonical =
+                crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+            crate::services::tool_publication_service::gate(
+                &state.db,
+                &target.service,
+                request.method().as_str(),
+                &canonical,
+            )
+            .await?
+        } else {
+            None
+        };
+    let requested_path = path;
     let canonical_forward_path = if target.service.proxy_operation_policy.is_some()
         || !target.service.destination_targets.is_empty()
     {
@@ -4168,6 +4171,19 @@ async fn execute_resolved_proxy_inner(
         target.service.billing.as_ref(),
         state.billing.resale_enabled(),
     );
+    // Price operations on the path the caller requested, before any
+    // destination or scope rewrite of the forwarding path.
+    let priced_operation =
+        if target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            tool_operation
+        } else {
+            state
+                .billing
+                .http_operation(&billing_ctx, request.method().as_str(), requested_path)
+                .await
+                .inspect_err(|error| request_audit.admission_error(error))?
+        };
+    let billing_ctx = billing_ctx.with_operation(priced_operation.as_deref());
 
     // === Request Decomposition ===
     // Extract method, query, headers BEFORE body consumption.
@@ -4524,7 +4540,7 @@ async fn execute_resolved_proxy_inner(
             &snapshot,
             Some(&authority.scope),
             method.as_str(),
-            pool_authority_path,
+            requested_path,
         ))
         .await?
             != authority.scope
@@ -4553,7 +4569,7 @@ async fn execute_resolved_proxy_inner(
             &resolved,
             Some(&authority.scope),
             method.as_str(),
-            pool_authority_path,
+            requested_path,
         ))
         .await?
             != authority.scope
@@ -4600,7 +4616,7 @@ async fn execute_resolved_proxy_inner(
             &snapshot,
             Some(&authority.scope),
             method.as_str(),
-            pool_authority_path,
+            requested_path,
         ))
         .await?
             != authority.scope

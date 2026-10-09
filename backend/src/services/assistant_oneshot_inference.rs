@@ -984,8 +984,15 @@ async fn request_inner(
             .as_ref()
             .or(service.billing.as_ref()),
         state.billing.resale_enabled(),
-    )
-    .with_request_body(body.as_deref());
+    );
+    let operation = state
+        .billing
+        .http_operation(&ctx, if body.is_some() { "POST" } else { "GET" }, path)
+        .await
+        .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
+    let ctx = ctx
+        .with_operation(operation.as_deref())
+        .with_request_body(body.as_deref());
     let metered = Box::pin(state.billing.open(&ctx))
         .await
         .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;

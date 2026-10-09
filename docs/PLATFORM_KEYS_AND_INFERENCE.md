@@ -217,6 +217,52 @@ and additional components of each lane. Supported units are `tokens` (provider t
 accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
 `schemas/billing-metrics.ts` / CLI `commands/billing_units.rs` centralize unit names and labels.
 
+### Operation prices
+
+A lane whose primary metric is `requests` may also define `operations`, a list of
+`OperationPrice` objects (`operation`, `credits_per_unit`, plus server-owned
+`lago_metric_code`, `sync_status` and `sync_error`). A request that selects a synced
+operation price is charged that rate instead of the lane's primary request rate.
+Additive components are unchanged, and allowances, grants and wallet funding follow the
+usual order because operation rows remain `requests` usage of the same service.
+
+- **Keys.** An operation key is the `ServiceEndpoint.name` of an active endpoint of the
+  service (for hosted overlays, the `operationId`), or a channel operation the channel
+  billing layer declares for that service (`api-twitter`: `get_me`, `create_tweet`,
+  `channel_dm_send`, `channel_dm_received`, `channel_chat_received`,
+  `channel_post_received`). Create and update validate added keys; keys already priced
+  on the lane stay valid if their endpoint is later deactivated, and simply never match.
+  Keys are unique per lane, operation prices are rejected on non-`requests` lanes, and
+  validation errors use the ordinary validation error.
+- **Lago.** Each price has its own sum metric and standard charge,
+  `platform_svc_{slug}_{byok|pk}_op_{key}`, with the key lower-cased and every character
+  outside `[a-z0-9_]` replaced by `_`. Keys that normalize to the same code, or produce a
+  code longer than 255 characters, are rejected rather than truncated. Sync, plan charge
+  round-trips, cleanup markers (`component_cleanup_metric_codes`), reconciliation retry
+  and rate retirement reuse the component lifecycle; removing a price or its whole lane
+  removes the charge and retires the rate, which keeps pricing historical usage.
+- **Selection.** `BillingRouteContext::new` captures the synced operation prices of the
+  selected lane only when that lane's primary is synced; `with_operation` then replaces the
+  Lago code. Unpriced, pending and failed operations, and unmatched requests, keep the
+  primary rate; `"0"` makes an operation free. An unsynced primary keeps the existing
+  whole-lane legacy/free fallback and ignores operation prices.
+  `platform_charge_nyxid_credentials_only` still applies after selection.
+- **Matching.** Tools reuse the operation selected by the publication gate. Other catalog
+  HTTP requests on the proxy, pool attempts, the LLM provider and gateway routes and
+  NyxAgent one-shot inference read the service's active endpoints once, and only when
+  billing is enabled and the selected lane has synced operation prices, then apply the
+  same most-specific rule as the publication gate. Equally specific endpoints with
+  different names select no operation. MCP tool calls use the endpoint name directly;
+  generic MCP dispatch exists only for services without endpoint rows. SSH, voice and
+  public anonymous routes have no catalog operation and keep the lane's primary rate.
+- **Usage.** Meter rows store `operation` only when an operation price was selected.
+  `GET /billing/usage` rows and admin usage `by_service[].by_operation` report it; admin
+  usage derives it from the existing rollup `code` dimension, so rollup documents and
+  indexes are unchanged.
+
+Upgrade every replica before authoring operation prices: older binaries ignore the field
+and charge the lane's base rate.
+
 | Final credential class                                                | Lane              |
 | --------------------------------------------------------------------- | ----------------- |
 | UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK              |

@@ -131,7 +131,7 @@ impl XAdapter {
             .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| AppError::ValidationError("A public X reply requires text".into()))?;
         let request = http
-            .post(format!("{}/2/tweets", base(self, credentials)))
+            .post(format!("{}{X_POST_PATH}", base(self, credentials)))
             .bearer_auth(credentials.token)
             .json(&json!({"text": text, "reply": {"in_reply_to_tweet_id": target}}));
         let response = match credentials.billing {
@@ -147,6 +147,12 @@ impl XAdapter {
     }
 }
 
+pub(crate) const X_API_BASE: &str = "https://api.x.com";
+/// `GET`, priced as the catalog `get_me` operation.
+pub(crate) const X_ACCOUNT_PATH: &str = "/2/users/me";
+/// `POST`, priced as the catalog `create_tweet` operation.
+pub(crate) const X_POST_PATH: &str = "/2/tweets";
+
 fn base<'a>(adapter: &'a XAdapter, credentials: &'a BotCredentials<'_>) -> &'a str {
     #[cfg(test)]
     if let Some(base) = &adapter.api_base {
@@ -155,7 +161,7 @@ fn base<'a>(adapter: &'a XAdapter, credentials: &'a BotCredentials<'_>) -> &'a s
     // Only the adapter's own test override may change the host; credential
     // material never influences request URLs.
     let _ = (adapter, credentials);
-    "https://api.x.com"
+    X_API_BASE
 }
 
 fn protocol_error() -> AppError {
@@ -525,7 +531,7 @@ impl PlatformAdapter for XAdapter {
         credentials: &BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
         let request = http
-            .get(format!("{}/2/users/me", base(self, credentials)))
+            .get(format!("{}{X_ACCOUNT_PATH}", base(self, credentials)))
             .query(&[("user.fields", "username,name")])
             .bearer_auth(credentials.token);
         let response = match credentials.billing {

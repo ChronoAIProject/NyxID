@@ -89,6 +89,6 @@ Catalog targets accept UUIDs or slugs; endpoint targets accept IDs or names. Tab
 
 ## Billing and planned Phase 2
 
-Tools reuse `ServiceBilling.platform_key_pricing` and optional `byok_pricing`. Free/absent platform lanes display Free; priced lanes display decimal credits per metric. Cost-class metadata does not override prices. Existing platform ACLs, personal billing ownership, allowances, grants and metering remain authoritative.
+Tools reuse `ServiceBilling.platform_key_pricing` and optional `byok_pricing`. Free/absent platform lanes display Free; priced lanes display decimal credits per metric. Cost-class metadata does not override prices. A Requests lane can also price published operations individually by endpoint name (see [Operation prices](PLATFORM_KEYS_AND_INFERENCE.md#operation-prices)). The tools card shows the effective request price range and each operation's price in its operation list; pending prices show the base rate until they sync. Upgrade every replica before authoring operation prices: older binaries ignore them and charge the base rate. Existing platform ACLs, personal billing ownership, allowances, grants and metering remain authoritative.
 
 Runtime curated overlay storage, editor roles/scopes, an Imports tab and `catalog spec import|show|delete` are planned for Phase 2 and are absent from Phase 1. Existing embedded hosted specs remain supported.

@@ -1052,6 +1052,7 @@ fn duration_billing_requires_synced_authored_prices_and_meters_unpriced_byok() {
             sync_status: PricingSyncStatus::Synced,
             sync_error: None,
         }],
+        operations: vec![],
     };
     assert!(
         duration_billing(&VoiceKeySource::Own, None)

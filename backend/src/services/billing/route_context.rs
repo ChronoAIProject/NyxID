@@ -62,6 +62,11 @@ pub struct BillingRouteContext {
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
     pub platform_lago_metric_code: String,
+    /// Operation key whose price replaced the primary request rate.
+    pub operation: Option<String>,
+    /// Synced operation prices of the selected, synced Requests lane:
+    /// `(operation key, Lago metric code)`.
+    operation_prices: Vec<(String, String)>,
     pub resale: Option<ResaleSpec>,
     /// Additional platform rows, each with independent funding and Lago identity.
     pub platform_components: Vec<ResaleSpec>,
@@ -113,6 +118,7 @@ impl BillingRouteContext {
             .to_string();
 
         let mut platform_components = Vec::new();
+        let mut operation_prices = Vec::new();
         let mut platform_metric = platform_metric;
         if let Some(billing) =
             service_billing.filter(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some())
@@ -136,6 +142,14 @@ impl BillingRouteContext {
                             lago_metric_code: component.lago_metric_code.clone(),
                         })
                         .collect();
+                    if lane.metric == BillingMetric::Requests {
+                        operation_prices = lane
+                            .operations
+                            .iter()
+                            .filter(|price| price.sync_status == PricingSyncStatus::Synced)
+                            .map(|price| (price.operation.clone(), price.lago_metric_code.clone()))
+                            .collect();
+                    }
                 }
             } else {
                 service_platform_billable = false;
@@ -165,6 +179,8 @@ impl BillingRouteContext {
             credential_class,
             platform_metric,
             platform_lago_metric_code,
+            operation: None,
+            operation_prices,
             resale,
             platform_components,
             capture_tokens: platform_metric.is_token_family()
@@ -194,6 +210,27 @@ impl BillingRouteContext {
             platform_metered: false,
             platform_billable: false,
         }
+    }
+
+    /// Whether the selected lane prices any operation, so callers resolve
+    /// the request's operation only when it can change the charge.
+    pub fn prices_operations(&self) -> bool {
+        !self.operation_prices.is_empty()
+    }
+
+    /// Replaces the primary request rate with the operation's synced price.
+    /// Unpriced, pending and failed operations keep the primary rate.
+    pub fn with_operation(mut self, operation: Option<&str>) -> Self {
+        if let Some(operation) = operation
+            && let Some((key, code)) = self
+                .operation_prices
+                .iter()
+                .find(|(key, _)| key == operation)
+        {
+            self.platform_lago_metric_code = code.clone();
+            self.operation = Some(key.clone());
+        }
+        self
     }
 
     pub(crate) fn require_platform_price(&self) -> crate::errors::AppResult<()> {
@@ -368,6 +405,7 @@ mod tests {
         use crate::models::service_billing::{LanePricing, PricingSyncStatus};
         let lane = |metric, code: &str| LanePricing {
             components: Vec::new(),
+            operations: Vec::new(),
             metric,
             credits_per_unit: "0.125".into(),
             lago_metric_code: code.into(),

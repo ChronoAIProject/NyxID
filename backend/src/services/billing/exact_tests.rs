@@ -2110,6 +2110,7 @@ async fn voice_and_reported_token_components_settle_independently_without_replay
                     sync_status: PricingSyncStatus::Synced,
                     sync_error: None,
                 }],
+                operations: vec![],
             }),
             ..Default::default()
         };
@@ -2259,6 +2260,7 @@ async fn voice_without_byok_duration_price_records_seconds_without_charges_or_be
                 sync_status: PricingSyncStatus::Synced,
                 sync_error: None,
                 components: vec![],
+                operations: vec![],
             }),
             ..legacy.clone()
         };

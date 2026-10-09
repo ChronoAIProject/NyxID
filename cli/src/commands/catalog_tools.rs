@@ -209,6 +209,55 @@ fn format_price(price: &Value) -> String {
         price["metric"].as_str().unwrap_or("request")
     )
 }
+/// Effective platform price of one operation: its synced price, else the base.
+fn operation_price<'a>(price: &'a Value, operation: &str) -> Option<&'a str> {
+    let base = price["credits_per_unit"].as_str()?;
+    Some(
+        price["operations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|candidate| {
+                candidate["operation"] == operation
+                    && candidate["sync_status"]
+                        .as_str()
+                        .is_none_or(|status| status == "synced")
+            })
+            .and_then(|candidate| candidate["credits_per_unit"].as_str())
+            .unwrap_or(base),
+    )
+}
+/// Exact ordering for decimal credit strings with at most 12 fractional digits.
+fn picocredits(value: &str) -> u128 {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let fraction = format!("{fraction:0<12}");
+    whole.parse::<u128>().unwrap_or(0) * 1_000_000_000_000
+        + fraction[..12].parse::<u128>().unwrap_or(0)
+}
+fn format_tool_price(row: &Value) -> String {
+    let price = &row["pricing"]["platform"];
+    let operations = row["operations"].as_array().into_iter().flatten();
+    let prices: Vec<&str> = if price["operations"]
+        .as_array()
+        .is_some_and(|operations| !operations.is_empty())
+    {
+        operations
+            .filter_map(|operation| operation_price(price, operation["name"].as_str()?))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    match (
+        prices.iter().min_by_key(|value| picocredits(value)),
+        prices.iter().max_by_key(|value| picocredits(value)),
+    ) {
+        (Some(min), Some(max)) if picocredits(min) != picocredits(max) => {
+            format!("From {min} to {max} credits / request")
+        }
+        (Some(only), Some(_)) => format!("{only} credits / request"),
+        _ => format_price(price),
+    }
+}
 fn format_limits(limits: &Value) -> String {
     if limits.is_null() {
         return "none".into();
@@ -232,10 +281,28 @@ fn format_topics(topics: &Value) -> String {
 }
 fn table_offering(row: &Value) -> Value {
     let mut display = row.clone();
-    display["pricing"] = format_price(&row["pricing"]["platform"]).into();
+    display["pricing"] = format_tool_price(row).into();
     display["limits"] = format_limits(&row["limits"]).into();
     display["topics"] = format_topics(&row["topics"]).into();
     display
+}
+
+/// Table rows for `tools show`, with each operation's effective price.
+fn operation_rows(row: &Value) -> Value {
+    let price = &row["pricing"]["platform"];
+    let mut operations = row["operations"].clone();
+    for operation in operations.as_array_mut().into_iter().flatten() {
+        let label = match operation["name"].as_str() {
+            Some(name) if price["metric"] == "requests" => operation_price(price, name)
+                .map_or_else(
+                    || format_price(price),
+                    |value| format!("{value} credits / request"),
+                ),
+            _ => format_price(price),
+        };
+        operation["price"] = label.into();
+    }
+    operations
 }
 
 pub async fn run_tools(command: ToolsCommands) -> Result<()> {
@@ -293,13 +360,14 @@ pub async fn run_tools(command: ToolsCommands) -> Result<()> {
                 ],
             )?;
             output::print_rows(
-                &result["operations"],
+                &operation_rows(&result),
                 auth.output,
                 None,
                 &[
                     ("Name", "name"),
                     ("Method", "method"),
                     ("Path", "path"),
+                    ("Price", "price"),
                     ("Risk", "risk"),
                     ("Data scope", "data_scope"),
                     ("Cost class", "cost_class"),
@@ -320,6 +388,39 @@ mod tests {
             format_price(&json!({"credits_per_unit":"0.012","metric":"requests"})),
             "0.012 credits / requests"
         );
+        let tool = json!({
+            "pricing": {"platform": {"metric": "requests", "credits_per_unit": "0.1", "operations": [
+                {"operation": "search", "credits_per_unit": "0.25", "sync_status": "synced"},
+                {"operation": "lookup", "credits_per_unit": "0.05", "sync_status": "synced"},
+                {"operation": "export", "credits_per_unit": "9", "sync_status": "pending"},
+            ]}},
+            "operations": [{"name": "search"}, {"name": "lookup"}, {"name": "export"}],
+        });
+        assert_eq!(
+            format_tool_price(&tool),
+            "From 0.05 to 0.25 credits / request"
+        );
+        assert_eq!(
+            operation_rows(&tool)
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["price"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "0.25 credits / request",
+                "0.05 credits / request",
+                // A pending price is not charged yet.
+                "0.1 credits / request",
+            ]
+        );
+        assert_eq!(
+            format_tool_price(
+                &json!({"pricing": {"platform": "free"}, "operations": [{"name": "search"}]})
+            ),
+            "Free"
+        );
+        assert_eq!(picocredits("1.000000000001"), 1_000_000_000_001);
         assert_eq!(format_limits(&Value::Null), "none");
         assert_eq!(
             format_limits(&json!({"rate_limit_per_second":5,"burst":10})),

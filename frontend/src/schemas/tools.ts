@@ -55,6 +55,16 @@ export const addToolSchema = z
       });
   });
 export type PublicationState = z.infer<typeof publicationSchema>;
+export type ToolLanePrice = {
+  metric: string;
+  credits_per_unit: string;
+  operations?: {
+    operation: string;
+    label?: string;
+    credits_per_unit: string;
+    sync_status?: string;
+  }[];
+};
 export type ToolOffering = {
   id: string;
   slug: string;
@@ -67,8 +77,8 @@ export type ToolOffering = {
   offering_kind: "tool";
   access: { platform: boolean; byok: boolean };
   pricing: {
-    platform: "free" | { metric: string; credits_per_unit: string };
-    byok: "free" | { metric: string; credits_per_unit: string } | null;
+    platform: "free" | ToolLanePrice;
+    byok: "free" | ToolLanePrice | null;
   };
   limits: { rate_limit_per_second: number; burst: number } | null;
   credential_configured: boolean;

@@ -1529,6 +1529,7 @@ mod tests {
             service_slug: Some(service_slug.to_string()),
             metric: BillingMetric::Requests,
             lago_metric_code: "platform_funding".to_string(),
+            operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,

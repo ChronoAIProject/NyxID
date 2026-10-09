@@ -47,9 +47,14 @@ export const usageServiceIdentitySchema = z.object({
 export const usageCredentialSchema = usageStatsSchema.extend({
   credential_class: z.string(),
 });
+export const usageOperationSchema = usageStatsSchema.extend({
+  operation: z.string(),
+});
 export const usageServiceSchema = usageStatsSchema.extend({
   ...usageServiceIdentitySchema.shape,
   by_credential_class: z.array(usageCredentialSchema),
+  // Usage charged at operation prices; absent from older servers.
+  by_operation: z.array(usageOperationSchema).default([]),
 });
 export const usageRankingSchema = usageStatsSchema.extend({
   ...usageServiceIdentitySchema.shape,

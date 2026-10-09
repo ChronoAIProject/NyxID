@@ -3169,6 +3169,7 @@ mod tests {
             service_slug: Some("service-one".to_string()),
             metric: crate::models::service_billing::BillingMetric::Requests,
             lago_metric_code: "platform_svc_service-one".to_string(),
+            operation: None,
             credential_class: crate::models::usage_meter::CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,

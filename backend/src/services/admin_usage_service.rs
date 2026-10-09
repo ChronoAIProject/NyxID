@@ -132,6 +132,14 @@ pub struct UsageCredentialClass {
     pub usage: UsageStats,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UsageOperation {
+    /// Operation price key that replaced the service's base request rate.
+    pub operation: String,
+    #[serde(flatten)]
+    pub usage: UsageStats,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageService {
     #[serde(flatten)]
@@ -139,6 +147,9 @@ pub struct UsageService {
     #[serde(flatten)]
     pub usage: UsageStats,
     pub by_credential_class: Vec<UsageCredentialClass>,
+    /// Usage charged at operation prices; base-rate usage is not listed.
+    #[serde(default)]
+    pub by_operation: Vec<UsageOperation>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -718,14 +729,30 @@ async fn get_usage_inner(
             .or_default()
             .push(class_row(&row)?);
     }
+    let mut service_operations: HashMap<_, Vec<_>> = HashMap::new();
+    for row in documents(summary, "service_operations")? {
+        let key = id(&row)?;
+        let Ok(operation) = key.get_str("operation") else {
+            continue;
+        };
+        service_operations
+            .entry(service_key(key))
+            .or_default()
+            .push(UsageOperation {
+                operation: operation.to_owned(),
+                usage: stats(&row)?,
+            });
+    }
     let mut by_service = Vec::new();
     for row in service_rows {
+        let key = service_key(id(&row)?);
+        let mut by_operation = service_operations.remove(&key).unwrap_or_default();
+        by_operation.sort_by(|a, b| a.operation.cmp(&b.operation));
         by_service.push(UsageService {
             service: service_identity(id(&row)?),
             usage: stats(&row)?,
-            by_credential_class: service_classes
-                .remove(&service_key(id(&row)?))
-                .unwrap_or_default(),
+            by_credential_class: service_classes.remove(&key).unwrap_or_default(),
+            by_operation,
         });
     }
     by_service.sort_by(|a, b| {
@@ -850,6 +877,7 @@ fn partition_credit_expr(field: &str, normalized: bool) -> Bson {
 fn fast_pipeline(
     params: &UsageParams,
     rates: Document,
+    operations: Document,
     folded_before: Option<DateTime<Utc>>,
     daily_ready: bool,
     rollup_normalized: bool,
@@ -1045,13 +1073,68 @@ fn fast_pipeline(
     total.push(doc! { "$count": "count" });
     let mut freshness = selected();
     freshness.push(doc! { "$group": { "_id": null, "tail_rows": { "$sum": "$tail_rows" } } });
+    // Each operation price has its own Lago metric code, so the existing code
+    // dimension identifies operation usage without another rollup field.
+    let mut service_operations = selected();
+    service_operations.extend([
+        doc! { "$match": { "_id.code": { "$regex": OPERATION_CODE_PATTERN } } },
+        doc! { "$set": { "_id.operation": { "$ifNull": [
+            { "$getField": { "field": "$_id.code", "input": { "$literal": operations } } },
+            { "$arrayElemAt": [{ "$getField": { "field": "captures", "input": {
+                "$regexFind": { "input": "$_id.code", "regex": OPERATION_CODE_PATTERN },
+            } } }, 0] },
+        ] } } },
+    ]);
+    service_operations.extend(rollup(&["service_id", "service_slug", "operation"]));
     pipeline.push(doc! { "$facet": {
         "totals": reduced(&[]), "services": reduced(&["service_id", "service_slug"]),
         "classes": reduced(&["class"]), "service_classes": reduced(&["service_id", "service_slug", "class"]),
+        "service_operations": service_operations,
         "ranking": ranking, "total": total, "freshness": freshness,
         "options": [ { "$group": { "_id": { "service_id": "$_id.service_id", "service_slug": "$_id.service_slug" } } }, { "$sort": { "_id.service_slug": 1, "_id.service_id": 1 } } ],
     } });
     pipeline
+}
+
+/// Operation price codes, `platform_svc_{slug}_{byok|pk}_op_{key}`; the
+/// capture is the normalized key of a price that is no longer configured.
+const OPERATION_CODE_PATTERN: &str = "^platform_svc_.+?_(?:byok|pk)_op_(.+)$";
+
+/// Configured operation keys by Lago metric code. Codes are normalized keys,
+/// so this map restores the exact key that `/billing/usage` reports.
+async fn operation_keys(db: &mongodb::Database) -> AppResult<Document> {
+    const LANES: [&str; 2] = ["byok_pricing", "platform_key_pricing"];
+    let services: Vec<Document> = db
+        .collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .find(doc! { "$or": LANES.map(|lane| doc! { format!("billing.{lane}.operations.0"): { "$exists": true } }).to_vec() })
+        .projection(LANES.into_iter().map(|lane| (format!("billing.{lane}.operations"), Bson::Int32(1))).collect::<Document>())
+        .max_time(QUERY_TIMEOUT)
+        .await
+        .map_err(query_error)?
+        .try_collect()
+        .await
+        .map_err(query_error)?;
+    let mut keys = Document::new();
+    for service in &services {
+        for lane in LANES {
+            let Ok(prices) = service
+                .get_document("billing")
+                .and_then(|billing| billing.get_document(lane))
+                .and_then(|lane| lane.get_array("operations"))
+            else {
+                continue;
+            };
+            for price in prices.iter().filter_map(Bson::as_document) {
+                if let (Ok(code), Ok(key)) = (
+                    price.get_str("lago_metric_code"),
+                    price.get_str("operation"),
+                ) {
+                    keys.insert(code, key);
+                }
+            }
+        }
+    }
+    Ok(keys)
 }
 
 async fn cached_rates(db: &mongodb::Database) -> AppResult<Document> {
@@ -1088,6 +1171,7 @@ async fn fast_aggregate_with_mode(
 ) -> AppResult<(Document, UsageFreshness)> {
     use crate::services::billing::usage_rollup;
     let rates = cached_rates(db).await?;
+    let operations = operation_keys(db).await?;
     let mut last_completed = None;
     for attempt in 0..MAX_READ_ATTEMPTS {
         let before = usage_rollup::state(db).await?;
@@ -1107,6 +1191,7 @@ async fn fast_aggregate_with_mode(
             db,
             params,
             rates.clone(),
+            operations.clone(),
             bound,
             daily_ready,
             rollup_normalized,
@@ -1152,15 +1237,26 @@ async fn fast_aggregate_with_mode(
     // Standalone concurrent writes can skew it by an in-flight bounded batch;
     // freshness explicitly reports that validation was not obtained.
     let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
-    let result =
-        run_fast_pipeline(db, params, rates, None, false, rollup_normalized, false).await?;
+    let result = run_fast_pipeline(
+        db,
+        params,
+        rates,
+        operations,
+        None,
+        false,
+        rollup_normalized,
+        false,
+    )
+    .await?;
     with_freshness(result, usage_rollup::state(db).await?, false)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_fast_pipeline(
     db: &mongodb::Database,
     params: &UsageParams,
     rates: Document,
+    operations: Document,
     folded_before: Option<DateTime<Utc>>,
     daily_ready: bool,
     rollup_normalized: bool,
@@ -1171,6 +1267,7 @@ async fn run_fast_pipeline(
         .aggregate(fast_pipeline(
             params,
             rates,
+            operations,
             folded_before,
             daily_ready,
             rollup_normalized,

@@ -68,6 +68,17 @@ pub fn component(raw: &str) -> Result<String, String> {
     Ok(format!("{metric}={}", price(value)?))
 }
 
+/// `<operation>=<price>`, where the operation is an endpoint name or a
+/// declared channel operation; the server validates that it exists.
+pub fn operation(raw: &str) -> Result<String, String> {
+    let (operation, value) = raw.split_once('=').ok_or("Use <operation>=<price>")?;
+    let operation = operation.trim();
+    if operation.is_empty() {
+        return Err("Operation name must not be empty".into());
+    }
+    Ok(format!("{operation}={}", price(value)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

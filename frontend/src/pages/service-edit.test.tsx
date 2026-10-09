@@ -40,6 +40,9 @@ vi.mock("@/hooks/use-services", () => ({
   }),
   useUpdateService: () => ({ mutateAsync: mutate, isPending: false }),
 }));
+vi.mock("@/hooks/use-endpoints", () => ({
+  useEndpoints: () => ({ data: [] }),
+}));
 vi.mock("@/hooks/use-developer-apps", () => ({
   useDeveloperApps: () => ({ data: { clients: [] } }),
 }));
@@ -145,6 +148,48 @@ describe("service editor curation concurrency", () => {
       components: [
         { metric: "cache_read_tokens", credits_per_unit: "0.000000250001" },
       ],
+    });
+  });
+
+  it("preserves operation prices on unrelated edits and sends only editable operation fields", () => {
+    const service = makeService({
+      billing: {
+        platform_billable: false,
+        resale_billable: false,
+        resale_metric: "tokens",
+        byok_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.1",
+          sync_status: "synced",
+          operations: [
+            {
+              operation: "get_me",
+              credits_per_unit: "0.25",
+              sync_status: "synced",
+            },
+          ],
+        },
+      },
+    });
+    const values = serviceFormValues(service);
+    expect(serviceFormPatch(values, service)).toEqual({});
+    expect(
+      serviceFormPatch({ ...values, name: "Renamed" }, service),
+    ).not.toHaveProperty("billing");
+    const patch = serviceFormPatch(
+      {
+        ...values,
+        byok_pricing: {
+          ...values.byok_pricing!,
+          operations: [{ operation: "get_me", credits_per_unit: "0.5" }],
+        },
+      },
+      service,
+    );
+    expect(patch.billing?.byok_pricing).toEqual({
+      metric: "requests",
+      credits_per_unit: "0.1",
+      operations: [{ operation: "get_me", credits_per_unit: "0.5" }],
     });
   });
 

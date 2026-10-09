@@ -166,6 +166,12 @@
     ),
     components(
         schemas(
+            crate::models::service_billing::OperationPrice,
+            crate::services::inference_service::OperationPricingView,
+            crate::services::inference_service::LanePricingView,
+            crate::handlers::services::DeclaredOperationResponse,
+            crate::services::admin_usage_service::UsageService,
+            crate::services::admin_usage_service::UsageOperation,
             crate::handlers::service_history::HistoryResponse,
             crate::handlers::service_history::ArchiveResponse,
             crate::handlers::service_history::AuthorshipResponse,
@@ -405,8 +411,31 @@ mod tests {
             ("UpdateServiceRequest", vec!["credential"]),
             (
                 "ServiceResponse",
-                vec!["legacy_public_master", "x_channel_billing"],
+                vec![
+                    "legacy_public_master",
+                    "x_channel_billing",
+                    "declared_operations",
+                ],
             ),
+            ("DeclaredOperationResponse", vec!["operation", "label"]),
+            ("LanePricing", vec!["operations"]),
+            (
+                "OperationPrice",
+                vec![
+                    "operation",
+                    "credits_per_unit",
+                    "lago_metric_code",
+                    "sync_status",
+                ],
+            ),
+            ("LanePricingView", vec!["operations"]),
+            (
+                "OperationPricingView",
+                vec!["operation", "label", "credits_per_unit", "sync_status"],
+            ),
+            ("BillingUsageRow", vec!["operation"]),
+            ("UsageService", vec!["by_operation"]),
+            ("UsageOperation", vec!["operation"]),
             ("UpdateKeyRequest", vec!["use_platform_key"]),
             (
                 "ServiceBilling",
@@ -414,9 +443,13 @@ mod tests {
             ),
             ("CreateConnectLinkRequest", vec!["use_platform_key"]),
         ] {
+            // Flattened structs render as allOf parts.
+            let parts = std::iter::once(&schemas[schema])
+                .chain(schemas[schema]["allOf"].as_array().into_iter().flatten());
+            let properties: Vec<_> = parts.map(|part| &part["properties"]).collect();
             for field in fields {
                 assert!(
-                    schemas[schema]["properties"].get(field).is_some(),
+                    properties.iter().any(|p| p.get(field).is_some()),
                     "{schema}.{field}"
                 );
             }

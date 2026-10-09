@@ -557,6 +557,11 @@ pub(super) fn reserved_row(
             ..Default::default()
         }
     });
+    // Only the primary row is repriced by an operation; components keep theirs.
+    let operation = (layer == BillingLayer::Platform
+        && lago_metric_code == ctx.platform_lago_metric_code)
+        .then(|| ctx.operation.clone())
+        .flatten();
     UsageMeterRow {
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
@@ -576,6 +581,7 @@ pub(super) fn reserved_row(
         service_slug: ctx.service_slug.clone(),
         metric,
         lago_metric_code,
+        operation,
         credential_class: ctx.credential_class,
         model: None,
         token_breakdown: None,

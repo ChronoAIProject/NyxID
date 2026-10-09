@@ -364,6 +364,18 @@ function ServiceTable({
                 </Badge>
               ))}
             </DataTableBadgeCell>
+            {service.by_operation.length > 0 && (
+              <DataTableBadgeCell>
+                {service.by_operation.map((operation) => (
+                  <Badge key={operation.operation} variant="info">
+                    {operation.operation}:{" "}
+                    <span className="font-mono">
+                      {formatNumber(operation.requests)}
+                    </span>
+                  </Badge>
+                ))}
+              </DataTableBadgeCell>
+            )}
           </div>
         ),
         usage: service,
@@ -388,9 +400,7 @@ function UserServices({
   });
   return (
     <div className="space-y-3 p-3">
-      <p className="text-12 font-medium">
-        Services for {user.display_name}
-      </p>
+      <p className="text-12 font-medium">Services for {user.display_name}</p>
       {usage.isPending ? (
         <Skeleton className="h-20" />
       ) : usage.isError ? (

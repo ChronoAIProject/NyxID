@@ -192,6 +192,11 @@ pub(crate) async fn connect_test_database_with_command_handler(
     prefix: &str,
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
 ) -> Option<mongodb::Database> {
+    // Same process-wide precondition as `connect_test_database`; nextest runs
+    // each test in its own process, so it cannot rely on another test.
+    crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+        crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+    ));
     let db_name = new_test_db_name(prefix);
     let client = probe_test_mongo_client(&db_name, Some(handler)).await.expect(
         "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
@@ -2463,6 +2468,41 @@ pub(crate) fn test_membership(
         allowed_service_ids,
         created_at: chrono::Utc::now(),
         revoked_at: None,
+    }
+}
+
+/// An active, published catalog operation without parameters or a body.
+pub(crate) fn test_service_endpoint(
+    service_id: &str,
+    name: &str,
+    method: &str,
+    path: &str,
+) -> crate::models::service_endpoint::ServiceEndpoint {
+    crate::models::service_endpoint::ServiceEndpoint {
+        async_operation: None,
+        id: Uuid::new_v4().to_string(),
+        service_id: service_id.to_string(),
+        name: name.to_string(),
+        description: Some(name.to_string()),
+        method: method.to_string(),
+        path: path.to_string(),
+        target_id: None,
+        parameters: None,
+        request_body_schema: None,
+        request_content_type: None,
+        request_body_required: false,
+        response_description: None,
+        response: Default::default(),
+        risk: None,
+        supports_idempotency_key: false,
+        data_scope: None,
+        cost_class: None,
+        execution: Default::default(),
+        publication: Default::default(),
+        is_active: true,
+        operation_generation: 1,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
 }
 

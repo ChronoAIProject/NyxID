@@ -715,6 +715,7 @@ mod tests {
             service_slug: Some("service-one".to_string()),
             metric: BillingMetric::Requests,
             lago_metric_code: "platform_requests".to_string(),
+            operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,

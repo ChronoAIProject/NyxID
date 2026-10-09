@@ -149,6 +149,60 @@ it("groups suppliers and renders lane prices, topics and BYOK actions", async ()
     screen.queryByRole("heading", { name: "Free search" }),
   ).not.toBeInTheDocument();
 });
+
+it("renders the effective operation price range and each operation price", () => {
+  const operation = (name: string) => ({
+    name,
+    description: name,
+    method: "GET",
+    path: `/${name}`,
+    data_scope: "public" as const,
+    cost_class: "metered" as const,
+    execution: "http_operation" as const,
+    risk: "read" as const,
+  });
+  mocks.tools = [
+    {
+      ...tool(
+        "Ranged search",
+        {
+          metric: "requests",
+          credits_per_unit: "0.1",
+          operations: [
+            {
+              operation: "search",
+              label: "search",
+              credits_per_unit: "0.25",
+              sync_status: "synced",
+            },
+            {
+              operation: "lookup",
+              label: "lookup",
+              credits_per_unit: "0.05",
+              sync_status: "synced",
+            },
+            {
+              operation: "export",
+              label: "export",
+              credits_per_unit: "9",
+              sync_status: "pending",
+            },
+          ],
+        },
+        false,
+      ),
+      operations: ["search", "lookup", "export"].map(operation),
+    },
+  ];
+  mount(<ToolsPage />);
+  expect(
+    screen.getByText("From 0.05 to 0.25 credits per request"),
+  ).toBeInTheDocument();
+  // A pending price is not charged yet, so its operation shows the base price.
+  for (const price of ["0.25", "0.05", "0.1"])
+    expect(screen.getByText(`${price} credits / request`)).toBeInTheDocument();
+  expect(screen.queryByText("9 credits / request")).not.toBeInTheDocument();
+});
 it("publishes through the publication route from the Tools tab", async () => {
   mount(<AdminToolsPage />);
   await userEvent.click(screen.getByRole("tab", { name: "Tools" }));

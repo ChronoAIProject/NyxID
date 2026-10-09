@@ -24,6 +24,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         service_slug: Some("llm-test".into()),
         metric: BillingMetric::Tokens,
         lago_metric_code: "platform_tokens".into(),
+        operation: None,
         credential_class: CredentialClass::NyxidManagedMaster,
         model: Some("test-model".into()),
         token_breakdown: None,
@@ -1032,4 +1033,64 @@ async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
     )
     .await;
     assert!(matches!(invalid, Err(AppError::ValidationError(_))));
+}
+
+#[tokio::test]
+async fn operation_rows_report_the_operation_and_keep_pricing_from_retired_rates() {
+    let Some(db) = connect_test_database("billing_usage_operations").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    let code = "platform_svc_x_byok_op_get_me";
+    let now = Utc::now();
+    // Removing the operation price retired its rate; history must still price.
+    for (rate_code, micros, retired_at) in [
+        (code, 3_000_000, Some(now)),
+        ("platform_svc_x_byok", 1_000_000, None),
+    ] {
+        db.collection::<BillingRateCache>(BILLING_RATE_CACHE)
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id(rate_code, None),
+                lago_metric_code: rate_code.into(),
+                model: None,
+                credits_per_unit_micros: micros,
+                credits_per_unit_pico: None,
+                synced_at: now,
+                retired_at,
+            })
+            .await
+            .unwrap();
+    }
+    for (lago_metric_code, operation, quantity) in
+        [(code, Some("get_me"), 2), ("platform_svc_x_byok", None, 1)]
+    {
+        let mut row = meter(&owner, quantity);
+        row.service_slug = Some("x".into());
+        row.metric = BillingMetric::Requests;
+        row.lago_metric_code = lago_metric_code.into();
+        row.operation = operation.map(str::to_string);
+        row.model = None;
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(row)
+            .await
+            .unwrap();
+    }
+    let result = read_usage(&state, &owner).await;
+    assert_eq!(result.rows.len(), 2);
+    let priced = result
+        .rows
+        .iter()
+        .find(|row| row.operation.as_deref() == Some("get_me"))
+        .unwrap();
+    assert_eq!(priced.lago_metric_code, code);
+    assert_eq!(priced.quantity, 2);
+    assert_eq!(priced.estimated_credits_micros, Some(6_000_000));
+    let base = result
+        .rows
+        .iter()
+        .find(|row| row.operation.is_none())
+        .unwrap();
+    assert_eq!(base.estimated_credits_micros, Some(1_000_000));
+    db.drop().await.unwrap();
 }
