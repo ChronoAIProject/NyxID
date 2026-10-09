@@ -2054,6 +2054,8 @@ async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasse
                     ..Default::default()
                 },
             ],
+            contract_digest: None,
+            inputs: Default::default(),
         },
         true,
     )
@@ -2320,6 +2322,8 @@ async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructiv
             all_operations: false,
             endpoint_ids: vec![],
             rules: vec![],
+            contract_digest: None,
+            inputs: Default::default(),
         },
         true,
     )
@@ -2357,7 +2361,17 @@ async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructiv
     acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
         .await
         .unwrap();
-    let mut confirmed = args;
+    // The card binds the compiled contract: the retry sends retry_arguments.
+    assert!(card["retry_arguments"]["selection"]["contract_digest"].is_string());
+    let mut stale = args;
+    stale["acknowledgement_id"] = json!(ack);
+    let refused = result(
+        call(&f, &auth, "nyxid__set_agent_operations", stale).await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "acknowledgement_invalid");
+    let mut confirmed = card["retry_arguments"].clone();
     confirmed["acknowledgement_id"] = json!(ack);
     let _ = result(
         call(&f, &auth, "nyxid__set_agent_operations", confirmed.clone()).await,
@@ -2435,6 +2449,8 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
         all_operations: false,
         endpoint_ids: vec![ids[0].clone()],
         rules: vec![],
+        contract_digest: None,
+        inputs: Default::default(),
     };
     scopes::set(
         &f.state.db,
@@ -2711,6 +2727,8 @@ async fn assistant_operation_scopes_specialist_request_cannot_silently_widen() {
             all_operations: false,
             endpoint_ids: vec![],
             rules: vec![],
+            contract_digest: None,
+            inputs: Default::default(),
         },
         true,
     )

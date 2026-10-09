@@ -1,5 +1,5 @@
 //! Specialist operation policy: management compiles once; execution only matches.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures::TryStreamExt;
 use mongodb::{
@@ -14,6 +14,7 @@ use crate::{
         agent_operation_scope::{
             AgentOperationScope, OperationScopes, OperationSelection, ScopedOperation,
         },
+        api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS},
         assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS},
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         downstream_service::{ProxyOperationPolicy, ProxyOperationRule},
@@ -39,6 +40,28 @@ pub fn applicable<'a>(
             || (catalog_id.is_none() && scope.catalog_service_id.as_deref() == Some(service_id)))
         .then_some(scope)
     })
+}
+
+/// Whether any saved scope applies to this execution identity.
+pub fn is_scoped(scopes: &OperationScopes, service_id: &str, catalog_id: Option<&str>) -> bool {
+    applicable(scopes, service_id, catalog_id).next().is_some()
+}
+
+/// A selection reviewed against a contract digest must still compile to it.
+fn ensure_reviewed(
+    input: &OperationSelection,
+    scope: Option<&AgentOperationScope>,
+) -> AppResult<()> {
+    if input
+        .contract_digest
+        .as_deref()
+        .is_some_and(|expected| expected != contract_digest(scope))
+    {
+        return Err(AppError::Conflict(
+            "Operations changed since this selection was reviewed; review it again".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn refused(scope: &AgentOperationScope) -> AppError {
@@ -146,6 +169,67 @@ pub fn authorize(
     Ok(forwarding)
 }
 
+/// Names of a template's `{variable}` segments (custom-method suffixes ignored).
+fn template_variables(template: &str) -> BTreeSet<&str> {
+    template
+        .split('/')
+        .filter_map(|segment| segment.strip_prefix('{')?.split_once('}'))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Value limits of the matched operations, checked against the final request.
+/// Call after `authorize` wherever the query and body are known. A request
+/// passes a scope when any operation it matches accepts its inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn check_inputs(
+    scopes: &OperationScopes,
+    service_id: &str,
+    catalog_id: Option<&str>,
+    endpoint_id: Option<&str>,
+    method: &str,
+    path: &CanonicalPath,
+    query: Option<&str>,
+    body: &[u8],
+    content_type: Option<&str>,
+) -> AppResult<()> {
+    for scope in applicable(scopes, service_id, catalog_id) {
+        let mut refusal = None;
+        let accepted = scope
+            .operations
+            .iter()
+            .filter(|operation| {
+                endpoint_id.is_none_or(|id| {
+                    operation
+                        .endpoint_id
+                        .as_deref()
+                        .is_none_or(|selected| selected == id)
+                }) && proxy_authorization::rule_matches(&operation.rule, method, path)
+            })
+            .any(|operation| {
+                let Some(inputs) = &operation.inputs else {
+                    return true;
+                };
+                let arguments = proxy_authorization::match_path_arguments(&operation.rule, path)
+                    .unwrap_or_default();
+                match inputs.check(&arguments, query, body, content_type) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        refusal = Some(error);
+                        false
+                    }
+                }
+            });
+        if !accepted {
+            return Err(AppError::ApiKeyScopeForbidden(match refusal {
+                Some(error) => format!("Operation scope input limit: {error}"),
+                None => "Operation scope denied this call".into(),
+            }));
+        }
+    }
+    Ok(())
+}
+
 pub fn mcp_catalog_id(service: &mcp_service::McpToolService) -> Option<&str> {
     match &service.source {
         mcp_service::McpToolSource::UserManaged {
@@ -209,17 +293,30 @@ pub fn widens(old: Option<&AgentOperationScope>, new: Option<&AgentOperationScop
     }
 }
 
+/// The whole compiled operation is the contract: an identical entry covers;
+/// otherwise only replacing a single-use, unconstrained variable with a literal
+/// it matches narrows. Renaming variables, changing parameter grammars or
+/// narrowing a repeated variable can widen what matches, so it never covers.
 fn operation_covers(old: &ScopedOperation, new: &ScopedOperation) -> bool {
+    if old == new {
+        return true;
+    }
     if old.endpoint_id != new.endpoint_id
         || old.rule.method != new.rule.method
+        || old.rule.target_id != new.rule.target_id
+        || !old.rule.path_parameter_constraints.is_empty()
+        || !new.rule.path_parameter_constraints.is_empty()
         || old.risk != new.risk
         || old.destructive != new.destructive
         || old.changes_existing != new.changes_existing
+        // Adding input limits narrows; changing or removing existing ones may widen.
+        || (old.inputs.is_some() && old.inputs != new.inputs)
     {
         return false;
     }
     let old_segments: Vec<_> = old.rule.path_template.split('/').collect();
     let new_segments: Vec<_> = new.rule.path_template.split('/').collect();
+    let uses = |segment: &str| old_segments.iter().filter(|s| **s == segment).count();
     old_segments.len() == new_segments.len()
         && old_segments
             .iter()
@@ -228,18 +325,19 @@ fn operation_covers(old: &ScopedOperation, new: &ScopedOperation) -> bool {
                 *previous == next
                     || (previous.starts_with('{')
                         && previous.ends_with('}')
-                        && ((next.starts_with('{') && next.ends_with('}'))
-                            || CanonicalPath::from_mcp_literal(next).is_ok_and(|path| {
-                                proxy_authorization::rule_matches(
-                                    &ProxyOperationRule {
-                                        method: old.rule.method.clone(),
-                                        path_template: format!("/{previous}"),
-                                        ..Default::default()
-                                    },
-                                    &old.rule.method,
-                                    &path,
-                                )
-                            })))
+                        && uses(previous) == 1
+                        && !(next.starts_with('{') && next.ends_with('}'))
+                        && (CanonicalPath::from_mcp_literal(next).is_ok_and(|path| {
+                            proxy_authorization::rule_matches(
+                                &ProxyOperationRule {
+                                    method: old.rule.method.clone(),
+                                    path_template: format!("/{previous}"),
+                                    ..Default::default()
+                                },
+                                &old.rule.method,
+                                &path,
+                            )
+                        })))
             })
 }
 
@@ -257,6 +355,14 @@ fn revision(agent: &AssistantAgent, service: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// What a scope holder (specialist or Agent Key) may scope: its granted
+/// instances and platform catalog services, and the service's current revision.
+struct Holder<'a> {
+    service_ids: &'a [String],
+    platform_service_ids: &'a [String],
+    revision: i64,
+}
+
 async fn compile(
     db: &Database,
     agent: &AssistantAgent,
@@ -264,18 +370,32 @@ async fn compile(
     input: &OperationSelection,
     session: &mut ClientSession,
 ) -> AppResult<Option<AgentOperationScope>> {
-    if !agent
-        .grants
+    let holder = Holder {
+        service_ids: &agent.grants.service_ids,
+        platform_service_ids: &agent.grants.platform_service_ids,
+        revision: revision(agent, service),
+    };
+    Box::pin(compile_for(db, &holder, service, input, session)).await
+}
+
+async fn compile_for(
+    db: &Database,
+    holder: &Holder<'_>,
+    service: &str,
+    input: &OperationSelection,
+    session: &mut ClientSession,
+) -> AppResult<Option<AgentOperationScope>> {
+    if !holder
         .service_ids
         .iter()
-        .chain(&agent.grants.platform_service_ids)
+        .chain(holder.platform_service_ids)
         .any(|id| id == service)
     {
         return Err(AppError::ValidationError(
             "Operation scopes require an existing service grant".into(),
         ));
     }
-    if input.expected_revision != revision(agent, service) {
+    if input.expected_revision != holder.revision {
         return Err(AppError::Conflict(
             "Operation scope changed; reload its revision".into(),
         ));
@@ -293,12 +413,7 @@ async fn compile(
         }
         return Ok(None);
     }
-    let catalog_service_id = if agent
-        .grants
-        .platform_service_ids
-        .iter()
-        .any(|id| id == service)
-    {
+    let catalog_service_id = if holder.platform_service_ids.iter().any(|id| id == service) {
         Some(service.to_owned())
     } else {
         db.collection::<UserService>(SERVICES)
@@ -364,13 +479,29 @@ async fn compile(
                 )
             })
             .unwrap_or_default();
+        let rule = policy.rules[0].clone();
+        let inputs = match input.inputs.get(id) {
+            Some(inputs) if !inputs.is_empty() => {
+                inputs
+                    .validate(&rule.method, &template_variables(&rule.path_template))
+                    .map_err(|error| AppError::ValidationError(error.to_string()))?;
+                Some(inputs.clone())
+            }
+            _ => None,
+        };
         operations.push(ScopedOperation {
             endpoint_id: Some(id.clone()),
-            rule: policy.rules[0].clone(),
+            rule,
             risk: endpoint.risk,
             destructive: marks.destructive,
             changes_existing: marks.changes_existing,
+            inputs,
         });
+    }
+    if input.inputs.keys().any(|id| !ids.contains(id)) {
+        return Err(AppError::ValidationError(
+            "Input limits must name selected endpoint IDs".into(),
+        ));
     }
     for rule in &input.rules {
         if rule.target_id.is_some() || !rule.path_parameter_constraints.is_empty() {
@@ -400,6 +531,54 @@ async fn compile(
         catalog_service_id,
         operations,
     }))
+}
+
+/// Digest of the compiled contract a selection resolves to, excluding its
+/// revision. Owner cards carry it so endpoint edits cannot ride an approval.
+pub fn contract_digest(scope: Option<&AgentOperationScope>) -> String {
+    use sha2::{Digest, Sha256};
+    let value = scope.map(|scope| (&scope.catalog_service_id, &scope.operations));
+    let bytes = serde_json::to_vec(&value).unwrap_or_default();
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Compile a selection without saving it, returning the digest an owner card binds.
+pub async fn preview_digest(
+    db: &Database,
+    owner: &str,
+    agent_id: &str,
+    service: &str,
+    input: &OperationSelection,
+) -> AppResult<String> {
+    let agent = team::maintained_agent(db, owner, agent_id).await?;
+    preview_agent_digest(db, &agent, service, input).await
+}
+
+/// Server-internal preview for a specialist's own permission request; the
+/// decision path re-authorizes the decider before anything is applied.
+pub async fn preview_request_digest(
+    db: &Database,
+    agent_id: &str,
+    service: &str,
+    input: &OperationSelection,
+) -> AppResult<String> {
+    let agent = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find_one(doc! {"_id": agent_id, "kind": "specialist", "destroyed_at": bson::Bson::Null})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Specialist not found".into()))?;
+    preview_agent_digest(db, &agent, service, input).await
+}
+
+async fn preview_agent_digest(
+    db: &Database,
+    agent: &AssistantAgent,
+    service: &str,
+    input: &OperationSelection,
+) -> AppResult<String> {
+    let mut session = db.client().start_session().await?;
+    let scope = Box::pin(compile(db, agent, service, input, &mut session)).await?;
+    Ok(contract_digest(scope.as_ref()))
 }
 
 /// `allow_widening` is supplied only by a human handler or after a digest-bound
@@ -464,6 +643,8 @@ pub struct ServiceOptions {
     pub allows_explicit_rules: bool,
     pub endpoint_ids: Vec<String>,
     pub rules: Vec<ProxyOperationRule>,
+    /// Saved value limits per selected endpoint ID; clients send them back.
+    pub inputs: std::collections::BTreeMap<String, nyxid_permissions::values::InputRules>,
     pub operations: Vec<OperationOption>,
 }
 
@@ -499,9 +680,28 @@ pub async fn options(
             .service_ids
             .retain(|id| instances.iter().any(|row| &row.id == id));
     }
-    let catalog_ids: Vec<&str> = agent
-        .grants
-        .platform_service_ids
+    let service_ids = agent.grants.service_ids.clone();
+    let platform_ids = agent.grants.platform_service_ids.clone();
+    Box::pin(build_options(
+        db,
+        &instances,
+        &service_ids,
+        &platform_ids,
+        &agent.operation_scopes,
+        |service| revision(&agent, service),
+    ))
+    .await
+}
+
+async fn build_options(
+    db: &Database,
+    instances: &[UserService],
+    service_ids: &[String],
+    platform_ids: &[String],
+    scopes: &OperationScopes,
+    revision_of: impl Fn(&str) -> i64,
+) -> AppResult<Vec<ServiceOptions>> {
+    let catalog_ids: Vec<&str> = platform_ids
         .iter()
         .map(String::as_str)
         .chain(
@@ -517,9 +717,7 @@ pub async fn options(
         .await?
         .try_collect()
         .await?;
-    let endpoint_owners: Vec<&str> = agent
-        .grants
-        .service_ids
+    let endpoint_owners: Vec<&str> = service_ids
         .iter()
         .map(String::as_str)
         .chain(catalogs.iter().filter_map(|row| row.get_str("_id").ok()))
@@ -531,19 +729,12 @@ pub async fn options(
         .try_collect()
         .await?;
     let mut result = Vec::new();
-    for service_id in agent
-        .grants
-        .service_ids
-        .iter()
-        .chain(&agent.grants.platform_service_ids)
-    {
+    for service_id in service_ids.iter().chain(platform_ids) {
         let instance = instances.iter().find(|row| &row.id == service_id);
         let catalog_id = instance
             .and_then(|row| row.catalog_service_id.as_deref())
             .or_else(|| {
-                agent
-                    .grants
-                    .platform_service_ids
+                platform_ids
                     .contains(service_id)
                     .then_some(service_id.as_str())
             });
@@ -558,7 +749,7 @@ pub async fn options(
         let service_name = catalog
             .and_then(|row| row.get_str("name").ok())
             .unwrap_or(service_slug);
-        let scope = agent.operation_scopes.get(service_id);
+        let scope = scopes.get(service_id);
         let endpoints: Vec<&ServiceEndpoint> = all_endpoints
             .iter()
             .filter(|row| {
@@ -598,7 +789,7 @@ pub async fn options(
             });
         }
         result.push(ServiceOptions {
-            revision: revision(&agent, service_id),
+            revision: revision_of(service_id),
             service_id: service_id.clone(),
             service_slug: service_slug.to_owned(),
             service_name: service_name.to_owned(),
@@ -621,6 +812,14 @@ pub async fn options(
                         .collect()
                 })
                 .unwrap_or_default(),
+            inputs: scope
+                .map(|s| {
+                    s.operations
+                        .iter()
+                        .filter_map(|op| Some((op.endpoint_id.clone()?, op.inputs.clone()?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
             operations,
         });
     }
@@ -629,13 +828,19 @@ pub async fn options(
 
 /// Raw requests retain the same guest/effect classification. Webhook calls
 /// requiring an action card must use the MCP card protocol.
+///
+/// Conversation keys are checked whether or not the service is scoped: guest
+/// and webhook limits are turn authority, not a property of the scope. Other
+/// keys carry only their operation scope, which `authorize` enforces, and
+/// acquire no database reads here.
 pub async fn check_non_mcp_context(
     db: &Database,
     auth: &crate::mw::auth::AuthUser,
+    scoped: bool,
     service: &str,
     catalog: Option<&str>,
     method: &str,
-    path: &CanonicalPath,
+    path: Option<&CanonicalPath>,
 ) -> AppResult<bool> {
     if let Some(chat) = auth.assistant_chat.as_deref() {
         return check_non_mcp_chat_context(
@@ -649,6 +854,12 @@ pub async fn check_non_mcp_context(
         )
         .await;
     }
+    if !scoped || (auth.assistant_agent_owner_id.is_none() && auth.assistant_group_id.is_none()) {
+        return Ok(false);
+    }
+    let path = path.ok_or_else(|| {
+        AppError::ApiKeyScopeForbidden("Scoped operations require a canonical path".into())
+    })?;
     check_non_mcp_key_context(
         db,
         &auth.user_id.to_string(),
@@ -683,7 +894,22 @@ pub async fn check_non_mcp_key_context(
             "Specialist operation authority requires a live conversation".into(),
         ));
     };
-    check_non_mcp_chat_context(db, &chat, scopes, service, catalog, method, path).await
+    check_non_mcp_chat_context(db, &chat, scopes, service, catalog, method, Some(path)).await
+}
+
+/// Whether an assistant key's live conversation is a guest turn. Used where
+/// guests are refused outright, so no operation effects are needed.
+pub async fn key_is_guest(
+    db: &Database,
+    actor: &str,
+    key: Option<&str>,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<bool> {
+    Ok(
+        super::assistant_acknowledgement_service::for_key_with_access(db, actor, key, access)
+            .await?
+            .is_some_and(|chat| chat.guest),
+    )
 }
 
 async fn check_non_mcp_chat_context(
@@ -693,35 +919,44 @@ async fn check_non_mcp_chat_context(
     service: &str,
     catalog: Option<&str>,
     method: &str,
-    path: &CanonicalPath,
+    path: Option<&CanonicalPath>,
 ) -> AppResult<bool> {
     use crate::models::assistant_agent::GuestAccess;
     let method_value = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|_| AppError::BadRequest("Invalid method".into()))?;
-    let mut reads = true;
-    let mut uses = true;
-    let mut destructive = false;
-    for scope in applicable(scopes, service, catalog) {
-        for operation in scope
-            .operations
-            .iter()
-            .filter(|op| proxy_authorization::rule_matches(&op.rule, method, path))
-        {
-            let effects = mcp_service::operation_effects(
-                &method_value,
-                mcp_service::McpDurableEndpointMetadata {
-                    risk: operation.risk,
-                    destructive: operation.destructive,
-                    changes_existing: operation.changes_existing,
-                    catalog_contract: operation.endpoint_id.is_some(),
-                    ..Default::default()
-                },
-            );
-            reads &= effects.reads;
-            uses &= effects.uses;
-            destructive |= effects.destructive;
+    let mut matched: Option<mcp_service::OperationEffects> = None;
+    if let Some(path) = path {
+        for scope in applicable(scopes, service, catalog) {
+            for operation in scope
+                .operations
+                .iter()
+                .filter(|op| proxy_authorization::rule_matches(&op.rule, method, path))
+            {
+                let effects = mcp_service::operation_effects(
+                    &method_value,
+                    mcp_service::McpDurableEndpointMetadata {
+                        risk: operation.risk,
+                        destructive: operation.destructive,
+                        changes_existing: operation.changes_existing,
+                        catalog_contract: operation.endpoint_id.is_some(),
+                        ..Default::default()
+                    },
+                );
+                matched = Some(intersect_effects(matched, effects));
+            }
         }
     }
+    let effect_limited = chat.guest || chat.confirmation_policy.is_some();
+    let effects = match matched {
+        Some(effects) => effects,
+        // Unscoped services keep their guest and webhook limits: classify from
+        // the stored endpoint contract, or conservatively from the method.
+        None if effect_limited => {
+            Box::pin(unscoped_effects(db, service, catalog, &method_value, path)).await?
+        }
+        None => mcp_service::operation_effects(&method_value, Default::default()),
+    };
+    let (reads, uses, destructive) = (effects.reads, effects.uses, effects.destructive);
     if chat.guest {
         let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
         let access = agent
@@ -751,6 +986,88 @@ async fn check_non_mcp_chat_context(
         ));
     }
     Ok(chat.guest)
+}
+
+fn intersect_effects(
+    current: Option<mcp_service::OperationEffects>,
+    next: mcp_service::OperationEffects,
+) -> mcp_service::OperationEffects {
+    match current {
+        None => next,
+        Some(current) => mcp_service::OperationEffects {
+            reads: current.reads && next.reads,
+            uses: current.uses && next.uses,
+            destructive: current.destructive || next.destructive,
+        },
+    }
+}
+
+/// Effects of a raw call on a service without a saved scope. Stored endpoint
+/// rows are catalog contracts; with no matching row the method decides, which
+/// never treats a POST as a read.
+async fn unscoped_effects(
+    db: &Database,
+    service: &str,
+    catalog: Option<&str>,
+    method: &reqwest::Method,
+    path: Option<&CanonicalPath>,
+) -> AppResult<mcp_service::OperationEffects> {
+    let fallback = mcp_service::operation_effects(method, Default::default());
+    let Some(path) = path else {
+        return Ok(fallback);
+    };
+    let owners: Vec<&str> = std::iter::once(service).chain(catalog).collect();
+    let endpoints: Vec<ServiceEndpoint> = db
+        .collection::<ServiceEndpoint>(ENDPOINTS)
+        .find(doc! {"service_id": {"$in": &owners}, "is_active": true})
+        .await?
+        .try_collect()
+        .await?;
+    let candidates: Vec<&ServiceEndpoint> = endpoints
+        .iter()
+        .filter(|row| row.method.eq_ignore_ascii_case(method.as_str()))
+        .filter(|row| {
+            proxy_authorization::rule_from_endpoint(&row.method, &row.path, row.parameters.as_ref())
+                .is_ok_and(|rule| proxy_authorization::rule_matches(&rule, method.as_str(), path))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(fallback);
+    }
+    let catalog_slug = db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .find_one(doc! {"_id": catalog.unwrap_or(service)})
+        .projection(doc! {"slug": 1})
+        .await?
+        .and_then(|row| row.get_str("slug").ok().map(str::to_owned));
+    let mut effects = None;
+    for endpoint in candidates {
+        let marks = catalog_slug
+            .as_deref()
+            .map(|slug| {
+                super::catalog_spec_registry::operation_marks(
+                    slug,
+                    &endpoint.method,
+                    &endpoint.path,
+                    &endpoint.name,
+                )
+            })
+            .unwrap_or_default();
+        effects = Some(intersect_effects(
+            effects,
+            mcp_service::operation_effects(
+                method,
+                mcp_service::McpDurableEndpointMetadata {
+                    risk: endpoint.risk,
+                    catalog_contract: true,
+                    destructive: marks.destructive,
+                    changes_existing: marks.changes_existing,
+                    ..Default::default()
+                },
+            ),
+        ));
+    }
+    Ok(effects.unwrap_or(fallback))
 }
 
 /// Guests share a thread key, never the owner's approval grants or ability to
@@ -793,6 +1110,7 @@ pub(crate) async fn apply_in_session(
         .await?
         .ok_or_else(|| AppError::NotFound("Specialist not found".into()))?;
     let scope = Box::pin(compile(db, &agent, service, input, session)).await?;
+    ensure_reviewed(input, scope.as_ref())?;
     if !allow_widening && widens(agent.operation_scopes.get(service), scope.as_ref()) {
         return Err(AppError::Forbidden(
             "Widening operation access requires an owner action card".into(),
@@ -897,10 +1215,67 @@ pub async fn selection_summary(
             labels.join(", ")
         }
     };
+    let limits = limit_changes(current, selection);
     Ok(format!(
-        "{}: {} → {} (revision {}).",
-        current.service_name, before, after, selection.expected_revision
+        "{}: {} → {} (revision {}).{}",
+        current.service_name, before, after, selection.expected_revision, limits
     ))
+}
+
+/// Spell out value-limit changes so an owner never approves an opaque digest.
+pub(crate) fn limit_changes(current: &ServiceOptions, selection: &OperationSelection) -> String {
+    const MAX_VALUE: usize = 300;
+    let kept = |id: &String| !selection.all_operations && selection.endpoint_ids.contains(id);
+    let ids: BTreeSet<&String> = current
+        .inputs
+        .keys()
+        .chain(selection.inputs.keys())
+        .collect();
+    let mut changes = Vec::new();
+    for id in ids {
+        // Empty limits compile away, so they read as no limits.
+        let before = current.inputs.get(id).filter(|rules| !rules.is_empty());
+        let after = selection
+            .inputs
+            .get(id)
+            .filter(|rules| kept(id) && !rules.is_empty());
+        if before == after {
+            continue;
+        }
+        let label = current
+            .operations
+            .iter()
+            .find(|op| &op.endpoint_id == id)
+            .map_or_else(|| id.clone(), |op| format!("{} {}", op.method, op.path));
+        let change = match after {
+            None => "limits removed".to_owned(),
+            Some(rules) => {
+                let mut value = serde_json::to_string(rules).unwrap_or_default();
+                if value.len() > MAX_VALUE {
+                    let mut end = MAX_VALUE;
+                    while !value.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    value.truncate(end);
+                    value.push('…');
+                }
+                format!(
+                    "limits {} {value}",
+                    if before.is_some() {
+                        "changed to"
+                    } else {
+                        "set to"
+                    }
+                )
+            }
+        };
+        changes.push(format!("{label}: {change}"));
+    }
+    if changes.is_empty() {
+        String::new()
+    } else {
+        format!(" Value limits — {}.", changes.join("; "))
+    }
 }
 
 /// Defaults and credential injection must not change the authorized verb.
@@ -956,4 +1331,231 @@ pub fn execution_identity<'a>(
         }
         _ => (catalog, None),
     }
+}
+
+// Agent Key operation scopes. The same compiled scopes as specialists, stored
+// on the key itself; the owner is a human, so widening needs no action card.
+
+/// Ordinary general-purpose keys only. Conversation keys mirror their agent's
+/// scopes and permission-bound keys carry their own immutable policy.
+fn ensure_scopable_key(key: &ApiKey) -> AppResult<()> {
+    if !key.is_active
+        || key.purpose != ApiKeyPurpose::General
+        || key.assistant_agent_owner_id.is_some()
+        || key.assistant_group_id.is_some()
+        || crate::mw::auth::is_assistant_conversation_key_candidate(key)
+    {
+        return Err(AppError::ValidationError(
+            "Operation scopes can only be set on ordinary Agent Keys".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn accessible_key(
+    db: &Database,
+    actor: &str,
+    key_id: &str,
+    write: bool,
+) -> AppResult<(ApiKey, super::org_service::OwnerAccess)> {
+    let key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": key_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".into()))?;
+    let access = super::org_service::resolve_owner_access(db, actor, &key.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("API key not found".into()));
+    }
+    if write && !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to change operations on this API key".into(),
+        ));
+    }
+    ensure_scopable_key(&key)?;
+    Ok((key, access))
+}
+
+/// Services a key may scope: its effective allowlist (including auto-connected
+/// rows), or every live service of its owner when it allows all services.
+async fn key_instances(
+    db: &Database,
+    key: &ApiKey,
+    access: &super::org_service::OwnerAccess,
+) -> AppResult<Vec<UserService>> {
+    let filter = if key.allow_all_services {
+        doc! {"user_id": &key.user_id, "is_active": true}
+    } else {
+        let ids =
+            super::key_service::effective_allowed_service_ids_with_access(db, key, None).await?;
+        doc! {"_id": {"$in": ids}, "is_active": true}
+    };
+    let mut instances: Vec<UserService> = db
+        .collection::<UserService>(SERVICES)
+        .find(filter)
+        .await?
+        .try_collect()
+        .await?;
+    // SSH services have no HTTP operations; the allowlist governs them.
+    instances.retain(|row| row.service_type != "ssh" && access.allows_resource(&row.id));
+    instances.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Ok(instances)
+}
+
+/// Per-service revision counters kept beside the key's scopes. They survive a
+/// return to all operations, so a writer who last saw revision 0 cannot
+/// overwrite a newer change. Read separately: `ApiKey` does not carry them.
+const KEY_REVISIONS: &str = "operation_scope_revisions";
+
+async fn key_revisions(db: &Database, key_id: &str) -> AppResult<BTreeMap<String, i64>> {
+    let row = db
+        .collection::<bson::Document>(API_KEYS)
+        .find_one(doc! {"_id": key_id})
+        .projection(doc! {KEY_REVISIONS: 1})
+        .await?;
+    Ok(row
+        .and_then(|row| row.get_document(KEY_REVISIONS).ok().cloned())
+        .map(|revisions| {
+            revisions
+                .iter()
+                .filter_map(|(service, value)| Some((service.clone(), value.as_i64()?)))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn key_revision(key: &ApiKey, revisions: &BTreeMap<String, i64>, service: &str) -> i64 {
+    revisions.get(service).copied().unwrap_or_else(|| {
+        key.assistant_operation_scopes
+            .get(service)
+            .map_or(0, |scope| scope.revision)
+    })
+}
+
+pub async fn key_options(
+    db: &Database,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<Vec<ServiceOptions>> {
+    let (key, access) = accessible_key(db, actor, key_id, false).await?;
+    let revisions = key_revisions(db, &key.id).await?;
+    let instances = key_instances(db, &key, &access).await?;
+    let ids: Vec<String> = instances.iter().map(|row| row.id.clone()).collect();
+    Box::pin(build_options(
+        db,
+        &instances,
+        &ids,
+        &[],
+        &key.assistant_operation_scopes,
+        |service| key_revision(&key, &revisions, service),
+    ))
+    .await
+}
+
+/// Save one service's selection on an Agent Key. The stored revision fences
+/// concurrent writers; requests already admitted keep their auth snapshot.
+pub async fn set_key(
+    db: &Database,
+    actor: &str,
+    key_id: &str,
+    service: &str,
+    input: &OperationSelection,
+) -> AppResult<(ApiKey, i64)> {
+    Box::pin(require_configuration_enabled(db, actor)).await?;
+    let (key, access) = accessible_key(db, actor, key_id, true).await?;
+    let instances = key_instances(db, &key, &access).await?;
+    let ids: Vec<String> = instances.iter().map(|row| row.id.clone()).collect();
+    let revisions = key_revisions(db, &key.id).await?;
+    let current = key_revision(&key, &revisions, service);
+    let holder = Holder {
+        service_ids: &ids,
+        platform_service_ids: &[],
+        revision: current,
+    };
+    let mut session = db.client().start_session().await?;
+    let scope = Box::pin(compile_for(db, &holder, service, input, &mut session)).await?;
+    ensure_reviewed(input, scope.as_ref())?;
+    if scope.is_some()
+        && !key.assistant_operation_scopes.contains_key(service)
+        && key.assistant_operation_scopes.len() >= 256
+    {
+        return Err(AppError::ValidationError(
+            "At most 256 scoped services per key".into(),
+        ));
+    }
+    // Service IDs come from stored rows, but never let one address another field.
+    if service.contains(['.', '$']) {
+        return Err(AppError::ValidationError("Invalid service ID".into()));
+    }
+    let field = format!("assistant_operation_scopes.{service}");
+    let revision_field = format!("{KEY_REVISIONS}.{service}");
+    let mut filter = doc! {"_id": &key.id, "user_id": &key.user_id, "is_active": true};
+    if revisions.contains_key(service) {
+        filter.insert(&revision_field, current);
+    } else {
+        filter.insert(&revision_field, doc! {"$exists": false});
+        if current == 0 {
+            filter.insert(&field, doc! {"$exists": false});
+        } else {
+            filter.insert(format!("{field}.revision"), current);
+        }
+    }
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| AppError::Conflict("Operation revision exhausted".into()))?;
+    let update = match &scope {
+        Some(scope) => doc! {"$set": {
+            &field: bson::to_bson(scope)
+                .map_err(|_| AppError::Internal("Operation scope encoding failed".into()))?,
+            &revision_field: next,
+            "updated_at": bson::DateTime::now(),
+        }},
+        None => doc! {
+            "$unset": {&field: ""},
+            "$set": {&revision_field: next, "updated_at": bson::DateTime::now()},
+        },
+    };
+    let result = db
+        .collection::<ApiKey>(API_KEYS)
+        .update_one(filter, update)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Operation scope changed; reload its revision".into(),
+        ));
+    }
+    let mut updated = key;
+    match scope {
+        Some(scope) => {
+            updated
+                .assistant_operation_scopes
+                .insert(service.to_owned(), scope);
+        }
+        None => {
+            updated.assistant_operation_scopes.remove(service);
+        }
+    }
+    super::audit_service::log_actor_event(
+        db.clone(),
+        &super::audit_service::AuditActor {
+            user_id: actor.into(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        "api_key_operations_changed",
+        Some(serde_json::json!({
+            "owner_id": updated.user_id,
+            "api_key_id": updated.id,
+            "service_id": service,
+            "revision": next,
+            "operation_count": updated
+                .assistant_operation_scopes
+                .get(service)
+                .map(|scope| scope.operations.len()),
+        })),
+    )
+    .await?;
+    Ok((updated, next))
 }

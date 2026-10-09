@@ -1067,6 +1067,7 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
             continuation_receipt_id: None,
             skill_selection: None,
             operation_selection: None,
+            operation_contract_digest: None,
             id: ack_id.clone(),
             conversation_id: thread.id.clone(),
             user_id: OWNER.into(),

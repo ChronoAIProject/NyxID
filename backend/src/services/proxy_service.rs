@@ -4037,6 +4037,23 @@ impl From<reqwest::Error> for ForwardRequestError {
 #[cfg(test)]
 tokio::task_local! { pub(crate) static TARGET_HTTP_CLIENT_BUILDER: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>; }
 
+/// Pool attempts, operation-scoped and permission-bound requests authorize one
+/// exact URL, so a redirect must come back to the caller instead of being
+/// followed to a route nobody evaluated.
+pub fn no_redirect_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // Tests share this process-wide client while starting and dropping many
+        // local mock servers whose ports the OS reuses. A pooled idle socket to
+        // a dropped server would then fail after dispatch and look like an
+        // upstream transport error, so tests never keep idle connections.
+        #[cfg(test)]
+        let builder = builder.pool_max_idle_per_host(0);
+        builder.build().expect("no-redirect HTTP client")
+    });
+    &CLIENT
+}
+
 fn target_http_client() -> Client {
     #[cfg(test)]
     if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
@@ -4048,7 +4065,7 @@ fn target_http_client() -> Client {
 }
 
 fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
-    // See `pool_no_redirect_http_client`: reused mock-server ports make idle
+    // See `no_redirect_http_client`: reused mock-server ports make idle
     // sockets in this process-wide client fail after dispatch in tests.
     #[cfg(test)]
     let builder = builder.pool_max_idle_per_host(0);

@@ -16,7 +16,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::oracle_session::OracleSession;
 use crate::models::oracle_task::OracleTask;
 use crate::mw::auth::AuthUser;
@@ -286,6 +286,18 @@ fn submitter_identity(auth_user: &AuthUser) -> oracle_task_service::SubmitterIde
     }
 }
 
+/// Oracle pools have no operation identity, so operation-scoped keys cannot
+/// spend them; their limits would otherwise not apply.
+fn refuse_operation_scoped(auth_user: &AuthUser) -> AppResult<()> {
+    if auth_user.assistant_operation_scopes.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::ApiKeyScopeForbidden(
+            "Oracle is not available to operation-scoped keys".into(),
+        ))
+    }
+}
+
 pub async fn submit_task(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -295,6 +307,7 @@ pub async fn submit_task(
     auth_user
         .ensure_live_assistant_turn(&state.db, "oracle.submit")
         .await?;
+    refuse_operation_scoped(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
@@ -361,6 +374,7 @@ pub async fn attach_conversation(
     auth_user
         .ensure_live_assistant_turn(&state.db, "oracle.attach")
         .await?;
+    refuse_operation_scoped(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
@@ -405,6 +419,7 @@ pub async fn extract_url(
     auth_user
         .ensure_live_assistant_turn(&state.db, "oracle.extract")
         .await?;
+    refuse_operation_scoped(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;

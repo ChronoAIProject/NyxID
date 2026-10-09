@@ -7,6 +7,7 @@ pub mod hooks;
 pub mod http_transport;
 pub mod mock;
 pub mod server;
+pub mod values;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -97,7 +98,7 @@ pub enum ParameterLocation {
     Body,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ValueRule {
     Exact { value: Value },

@@ -154,6 +154,12 @@ nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # explici
 # To restrict an agent to ONLY access bound services:
 nyxid api-key update <ID> --allow-all-services false
 
+# Operation scopes: limit a key to selected operations within a service
+nyxid api-key operations <ID_OR_NAME>                                   # list operations and selection
+nyxid api-key operations <ID_OR_NAME> --service <SLUG> --allow-endpoint <OP_ID>  # allow only these
+nyxid api-key operations <ID_OR_NAME> --service <SLUG> --deny-all|--all
+# Scoped keys cannot use Oracle, SSH meta-tools, or services that inject delegation tokens.
+
 # Callback URL for channel bot relay
 nyxid api-key update <ID> --callback-url "https://my-agent.example.com/webhook"
 nyxid api-key update <ID> --callback-url ""    # clear

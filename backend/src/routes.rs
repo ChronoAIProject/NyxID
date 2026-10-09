@@ -636,6 +636,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::api_keys::revoke_durable_grant),
         )
         .route(
+            "/{key_id}/operations",
+            get(handlers::api_keys::list_key_operations),
+        )
+        .route(
+            "/{key_id}/operations/{service_id}",
+            put(handlers::api_keys::set_key_operations),
+        )
+        .route(
             "/{key_id}/bindings",
             get(handlers::agent_bindings::list_bindings)
                 .post(handlers::agent_bindings::create_binding),

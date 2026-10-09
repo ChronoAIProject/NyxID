@@ -1915,6 +1915,51 @@ pub async fn reauthorize_durable_grants(
     Ok(Json(DurableGrantListResponse { grants: receipts }))
 }
 
+/// GET /api/v1/api-keys/{key_id}/operations
+///
+/// Per-service operation choices for an ordinary Agent Key: every service it
+/// may use, with the current selection and revision.
+pub async fn list_key_operations(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+) -> AppResult<Json<Vec<crate::services::agent_operation_scope_service::ServiceOptions>>> {
+    Ok(Json(
+        Box::pin(crate::services::agent_operation_scope_service::key_options(
+            &state.db,
+            &auth_user.user_id.to_string(),
+            &key_id,
+        ))
+        .await?,
+    ))
+}
+
+/// PUT /api/v1/api-keys/{key_id}/operations/{service_id}
+///
+/// Save the operations this key may call on one service. `all_operations`
+/// removes the restriction; an empty selection denies every operation.
+pub async fn set_key_operations(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((key_id, service_id)): Path<(String, String)>,
+    Json(body): Json<crate::models::agent_operation_scope::OperationSelection>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (key, revision) = Box::pin(crate::services::agent_operation_scope_service::set_key(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &key_id,
+        &service_id,
+        &body,
+    ))
+    .await?;
+    Ok(Json(serde_json::json!({
+        "api_key_id": key.id,
+        "service_id": service_id,
+        "revision": revision,
+        "all_operations": !key.assistant_operation_scopes.contains_key(&service_id),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

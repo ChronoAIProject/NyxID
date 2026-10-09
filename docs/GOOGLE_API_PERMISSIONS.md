@@ -45,6 +45,12 @@ Effective access is the intersection of the upstream Google grant, NyxID's
 catalog rules, the permission key's rules, and every configured hook. An allow
 from a hook cannot override a denial from another layer.
 
+The path, query and body rules below are evaluated by the shared
+`permissions/src/values.rs` evaluator, which also checks the optional input
+limits on [operation scopes](AGENT_OPERATION_SCOPES.md) for specialists and
+ordinary Agent Keys. The same rule means the same thing on both. Like every
+scoped request, permission-bound execution never follows upstream redirects.
+
 ## Service coverage
 
 | Service | Example permission | Credential connection |

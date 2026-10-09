@@ -1,111 +1,185 @@
-# Specialist operation scopes (B1)
+# Operation scopes
 
-Status: implementation contract for the 0.42.0 feature series. B2/B3 are out of scope.
+Status: implementation contract. Introduced for specialist agents in 0.42.0 (B1);
+extended to ordinary Agent Keys and converged with the permission engine
+(`permissions/`, see [Google API permission keys](GOOGLE_API_PERMISSIONS.md)).
 
-## Authority and storage
+An operation scope limits a holder to selected operations within a service it
+can already use. Scopes never confer service access; they only narrow it.
 
-NyxID, never agent hooks or instructions, enforces specialist operation scopes.
-`AssistantAgent.operation_scopes` lives beside `grants`, keyed by the granted
-UserService or platform DownstreamService ID. The scope contains a monotonically
-increasing revision, stable ServiceEndpoint IDs and server-compiled operation
-rules. Absence means the whole granted service; a present empty selection denies
-every operation. Scopes never confer service access. Removing and re-adding a
-grant must not silently discard a saved restriction.
+## Holders
 
-Endpoint selections bind the stored endpoint ID and its method/path contract at
-selection time. Changing an endpoint cannot silently widen a saved selection;
-the owner must explicitly save the new contract. Where no stored endpoint rows
-exist, explicit `ProxyOperationPolicy` rules are permitted. Rules use the existing
-matcher: exact method, root-anchored template, one segment per variable, no globs.
-Scope rules cannot select destinations or inject credentials.
+- **Specialist agents.** `AssistantAgent.operation_scopes` lives beside `grants`,
+  keyed by the granted UserService or platform DownstreamService ID. The compiled
+  map is mirrored onto every thread ApiKey in the same MongoDB transaction as the
+  agent change; creation, turn start, replacement and rotation converge through
+  the fenced authority path. NyxBot and other non-specialist keys keep their
+  existing behaviour.
+- **Ordinary Agent Keys.** General-purpose keys store scopes directly in
+  `ApiKey.assistant_operation_scopes`, keyed by UserService ID from the key's
+  effective allowlist (or any of the owner's live services for allow-all keys).
+  Conversation keys (managed through their agent), scheduled-invocation keys and
+  permission-bound keys cannot be scoped this way. Agent Key login children and
+  relay tokens inherit the parent's live map; rotation copies it.
 
-The complete compiled map is mirrored onto every thread ApiKey in the same
-MongoDB transaction as the agent change. Creation, turn start, replacement and
-rotation converge through the existing fenced authority path. Auth contexts
-carry the map from their existing key read. Relay tokens inherit the live map
-from their existing parent-key liveness read, never stale JWT claims. Unrelated keys, proxy requests, MCP
-requests and turns acquire no scope-specific database reads. No global scope
-cache is authoritative. An already admitted request retains its auth snapshot;
-subsequent requests see committed changes.
+Absence means the whole service; a present empty selection denies every
+operation. Removing and re-adding a grant must not silently discard a saved
+restriction.
+
+## Compiled contract
+
+A scope holds a monotonically increasing revision, stable ServiceEndpoint IDs
+and server-compiled operation rules. Endpoint selections bind the stored
+endpoint ID and its method/path contract at selection time; changing an endpoint
+cannot silently widen a saved selection. Where no endpoint rows exist, explicit
+`ProxyOperationPolicy` rules are permitted: exact method, root-anchored
+template, one segment per variable, no globs, no targets, no credential
+injection.
+
+Each selected endpoint may also carry **input limits** (`ScopedOperation.inputs`,
+type `nyxid_permissions::values::InputRules`), the same closed rules the Google
+permission engine uses:
+
+- `path`: template variables pinned to literal `exact` / `one_of` strings;
+- `query`: when present, a closed map: undeclared parameters are refused,
+  `required` stops a filter from being dropped, and authentication, method
+  override and NyxID routing parameters cannot be declared;
+- `body`: when present, a closed JSON schema (`object`, `array`, `string`,
+  `integer`, `boolean`, `exact`, `one_of`; every object closed, bounded depth).
+
+Absent parts stay unconstrained. Limits are validated at save time against the
+operation's method and template, and checked by `check_inputs` against the final
+request on every transport after `authorize`. A request satisfies a scope when
+any operation it matches accepts its inputs. Streamed uploads have no buffered
+body, so a body limit refuses them. Authoring is through the API or CLI
+(`--inputs`); the UI shows a "Value limits" mark and preserves saved limits for
+operations that stay selected.
+
+The **contract digest** (`contract_digest`) is a SHA-256 over the compiled
+catalog identity and operations, excluding the revision. A selection that
+carries `contract_digest` fails with a conflict if it now compiles differently.
 
 ## Execution and discovery
 
-Every specialist execution must pass the operation scope AND service grants,
-live ownership/access, guest access, owner approval, destructive confirmation
-and webhook automation policy. NyxBot and non-assistant keys retain their
-existing behavior. Guests cannot request or approve wider permissions.
+Every scoped execution must pass the operation scope AND service grants, live
+ownership/access, guest access, owner approval, destructive confirmation and
+webhook automation policy.
 
-MCP endpoint tools and `nyx__call_tool` enforce stored endpoint identity and
-the final method/path. Dynamic instance-spec and generic calls have no durable
-endpoint identity; they enforce the selected method/path contract, as raw HTTP does.
-Search, list and discovery omit out-of-scope operations. Refusals identify the
-allowed operation IDs/methods/templates, never request bodies or arguments.
-Refusals show at most 20 entries within a 2 KiB message, retaining each shown
-endpoint ID, shortening long paths at UTF-8 boundaries, and reporting the omitted
-count. They point to MCP search/list discovery for the complete allowed list.
+- Raw UUID/slug proxy, LLM provider and gateway, pools (each actual member,
+  including fallbacks; pool admission never substitutes for member
+  authorization), node-routed proxy, exact-approval redemption, the machine
+  gateway, MCP endpoint tools, `nyx__call_tool`, generic proxy calls, Ornn skill
+  reads and voice enforce the same rules before service dispatch and billing.
+- The pre-resolution preflight checks scopes only when the instance is
+  explicitly selected (`_nyxid_via` or a pool member); otherwise the full check
+  after resolution applies, so sibling connections to one catalog never
+  intersect.
+- Voice resolves the selected BYOK connection's identity first, like proxy/LLM.
+- MCP endpoint tools enforce stored endpoint identity and the final method/path;
+  dynamic instance-spec and generic calls enforce the selected method/path
+  contract. Search, list and discovery omit out-of-scope operations. Refusals
+  name at most 20 allowed operations within 2 KiB and never echo arguments.
+- Canonicalization reuses `proxy_authorization::CanonicalPath` and the raw URI
+  guard on REST routes; LLM routes canonicalize the Axum-decoded path (decoded
+  separators, percent signs and controls are rejected). Path case is
+  significant, HEAD requires HEAD, method overrides are refused, and forwarding
+  uses the matched canonical path.
+- Scoped requests and permission-bound requests never follow upstream
+  redirects: the authorized URL is the only URL requested, and a 3xx is
+  returned to the caller.
+- WebSocket upgrades are denied for any scoped service.
+- Services that inject a delegation token are refused for any key holding
+  operation scopes: a delegated token carries service/node allowlists but no
+  operation limits.
+- Oracle tools and Oracle REST submission/attach/extract are refused for keys
+  holding operation scopes, because pools have no operation identity.
+- SSH has no HTTP operations: SSH services are excluded from key scoping, SSH
+  REST routes are human-only, and MCP SSH meta-tools are hidden from scoped keys.
 
-Raw UUID/slug proxy, LLM, pools, node, exact-approval redemption and machine gateway dispatch enforce the
-same rules before service dispatch and billing admission. Pools check the actual member service;
-pool admission never substitutes for member authorization. Explicit member hints
-retain instance identity; scopes on sibling connections do not intersect. AI pool aliases are
-visible only when a viable member permits its translated native chat operation;
-discovery checks the loaded candidates without additional database reads. The assistant model
-inference exception does not bypass a configured scope. Machine jobs retain
-the live thread key restriction as well as their explicit service declaration.
+**Granularity.** Scopes and input limits constrain method, path, declared query
+parameters and JSON bodies. Operations a service selects through an undeclared
+query or body field (RPC-style `?action=…`, GraphQL operation names) are only
+limited when the operation declares closed query/body rules.
 
-Canonicalization reuses `proxy_authorization::CanonicalPath` and the raw URI
-guard. Percent encoding is decoded exactly once; encoded separators, nested
-escapes, dot segments, duplicate slashes, trailing slashes (except `/`), invalid
-escapes, control characters and backslashes are rejected. Path case is
-significant. Forwarding uses the matched canonical path. HEAD requires HEAD;
-GET never implies it. Query parameters cannot choose another operation;
-method-override headers/query fields are refused. WebSocket upgrades are denied
-for any scoped service because an HTTP operation grant cannot bound later
-frames. Scope checks do not replace the existing service operation policy.
-Raw guest calls intersect read/use/all access using compiled endpoint effect
-metadata and the live guest setting. Guests never request owner approvals or
-spend the owner's approval grants, including through raw, LLM and exact-approval routes.
-Management operation options intentionally
-include candidates outside the current selection so an owner can review changes;
-execution discovery does not. Webhook calls needing an owner action card
-must use MCP; raw forwarding never spends an action card implicitly.
+**Guests and webhooks are turn authority, not scope authority.** Conversation
+keys run the guest, guest-approval and webhook checks on raw proxy, LLM and
+exact-approval routes whether or not the service is scoped. Without a matching
+scoped operation, effects come from the stored endpoint contract, else from the
+method (a POST is never a read). Guests may not send method overrides. Guests
+never request owner approvals or spend the owner's approval grants. Webhook
+calls needing an owner action card must use MCP. Ordinary keys acquire no
+database reads for these checks.
+
+Relay tokens intersect their claimed service/node allowlists with the parent
+key's live allowlists, so a grant removed from the key stops working
+immediately; they also inherit the parent's live operation map.
+
+An already admitted request retains its auth snapshot; subsequent requests see
+committed changes. No global scope cache is authoritative.
 
 ## Management
 
-Human owner writes use an expected revision; stale writes return conflict.
 Configuration is gated by the default-off, admin-managed runtime feature flag
-`assistant:operation-scopes`, resolved for the owner through the existing feature
-flag service. While disabled, owner and NyxBot writes and specialist operation
-requests explain that the feature is not enabled yet; the Grants UI shows that
-note instead of the selector. Pending scope requests cannot be applied either.
-Enforcement of saved scopes is always on and never reads this flag.
-The Grants UI offers all operations or a selection, searchable method/path/
-summary rows, read-only and changes-existing marks, and select-all reads.
-Services without endpoint rows accept explicit rules. Revisions remain visible
-after changes, including a return to all operations.
+`assistant:operation-scopes`, resolved for the acting person. While disabled,
+writes explain that the feature is not enabled yet and the UI hides the
+selector. Enforcement of saved scopes never reads this flag.
 
-NyxBot's `nyxid__set_agent_operations` may narrow immediately. Any widening,
-including removing a restriction, requires a one-use owner action card bound to
-the exact agent, service, expected revision and proposed selection; the global
-skip-destructive setting cannot bypass this card. Specialists cannot mutate
-their own scopes. Their requests use the existing permission flow with NyxBot
-as decider; NyxBot may narrow immediately but must seek owner confirmation for
-widening. Existing destructive account confirmations remain unchanged.
+Specialists:
 
-Audits contain agent/service/endpoint IDs, revisions and counts only. No request
-bodies, tool arguments, secrets, credential material or scope-change prose.
+- `GET /api/v1/assistant/nyxagent/agents/{id}/operations`,
+  `PUT .../operations/{service_id}` (human owner, expected revision).
+- NyxBot's `nyxid__set_agent_operations` may narrow immediately. Widening,
+  including removing a restriction or changing input limits, requires a one-use
+  owner action card. The card binds the selection's compiled contract digest;
+  the model must retry with the refusal's `retry_arguments` plus
+  `acknowledgement_id`, and an endpoint change after the card was shown makes
+  the retry conflict. The global skip-destructive setting cannot bypass it.
+- Specialists cannot change their own scopes; their requests use the
+  permission flow with NyxBot as decider and are bound to the contract digest
+  computed when the request is raised.
 
-## Compatibility and later phases
+Agent Keys:
 
-Legacy missing fields deserialize to empty maps, preserving whole-service grants.
-Deploy every auth/proxy/MCP replica with enforcement support, then enable
-`assistant:operation-scopes` through the existing admin feature-flag controls.
-Rollback starts by disabling the flag (including any enabling cohort/user overrides)
-to stop configuration. Existing scopes remain enforced; remove scoped specialists
-from execution before returning traffic to old binaries, which cannot enforce them.
-Older writers of `grants` cannot erase sibling scopes.
+- `GET /api/v1/api-keys/{key_id}/operations`,
+  `PUT /api-keys/{key_id}/operations/{service_id}` on the human-only key router.
+  Personal keys require their owner; org keys require org write access, with
+  member resource ACLs applied to listed services. The stored scope revision
+  fences concurrent writers. A human owner may widen directly.
+- UI: the key detail page's **Service operations** card.
+- CLI: `nyxid api-key operations <key>` lists; add `--service <slug|id>` with
+  `--allow-endpoint <id>…`, `--allow METHOD:/path…`, `--deny-all` or `--all`,
+  and optionally `--inputs <file.json>` keyed by operation ID.
 
-Scopes contain no person-specific ownership assumptions. B3 can make `user_id`
-polymorphic and resolve maintainer ACLs without changing this model; execution
-and billing remain the acting person's. B2 skill pins will be separate sibling
-metadata using `SkillReference`; untrusted skill guidance never changes scopes.
+Widening detection compares the whole compiled operation: an identical entry
+covers; otherwise only replacing a single-use, unconstrained variable with a
+literal it matches, or adding input limits, narrows. Renaming variables,
+changing parameter grammars, narrowing a repeated variable, or changing or
+removing input limits widens.
+
+Audits contain holder/service/endpoint IDs, revisions and counts only
+(`assistant_agent_operations_changed`, `api_key_operations_changed`). No request
+bodies, tool arguments, input-limit values, secrets or credential material.
+
+## Relationship to permission-bound keys
+
+Permission-bound keys (`purpose: permission_bound`) remain an immutable,
+single-connection pilot with their own ingress and Drive folder adapter. Both
+systems now share one input-rule evaluator (`permissions/src/values.rs`); the
+Google adapter's query and body checks call the same functions. The intended
+next steps are to express Google policies as scoped operations with input
+limits, move the Drive ancestry check into the shared pipeline as a resource
+adapter, and fold `/permission-execution` into `/proxy`.
+
+## Compatibility
+
+Legacy missing fields deserialize to empty maps or `None`, preserving
+whole-service grants. **Upgrade every auth/proxy/MCP replica before enabling the
+flag or saving Agent Key scopes or input limits**: older binaries ignore
+`inputs` (under-enforcing), and refuse scoped Agent Keys on raw proxy and LLM
+routes because they require a live conversation. Rollback starts by disabling the flag; existing scopes remain enforced by
+current binaries, so remove scopes (or the keys/specialists holding them) before
+returning traffic to old binaries. Older writers of `grants` cannot erase
+sibling scopes.
+
+Scopes contain no person-specific ownership assumptions; execution and billing
+remain the acting person's.

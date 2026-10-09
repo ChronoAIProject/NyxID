@@ -1636,6 +1636,9 @@ async fn handle_tools_list(
     if is_scoped_api_key(auth) {
         tool_defs.retain(|t| !SSH_META_TOOL_NAMES.contains(&t.name.as_str()));
     }
+    if !auth.assistant_operation_scopes.is_empty() {
+        tool_defs.retain(|t| !t.name.starts_with("nyx__oracle_"));
+    }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
@@ -2070,6 +2073,17 @@ fn dispatch_meta_tool<'a>(
             client_accepts_sse,
             billing_egress_permit,
         )),
+        // Oracle pools have no operation identity, so an operation-scoped key
+        // could otherwise spend the owner's pool outside every scope.
+        name if name.starts_with("nyx__oracle_") && !auth.assistant_operation_scopes.is_empty() => {
+            Box::pin(async move {
+                tool_result(
+                    request.id.clone(),
+                    "Oracle tools are not available to operation-scoped keys.",
+                    true,
+                )
+            })
+        }
         "nyx__oracle_pools" => Box::pin(handle_oracle_pools(state, auth, request.id.clone())),
         "nyx__oracle_ask" => Box::pin(handle_oracle_ask(
             state,

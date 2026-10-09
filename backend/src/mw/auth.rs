@@ -1165,7 +1165,26 @@ impl FromRequestParts<AppState> for AuthUser {
                         api_key_id,
                         api_key_name,
                     ) = if auth_method == AuthMethod::Relay {
-                        relay_scope_from_claims(&claims)
+                        let (claim_all, claim_nodes_all, claim_ids, claim_nodes, key_id, key_name) =
+                            relay_scope_from_claims(&claims);
+                        // The token's snapshot can only narrow the live parent:
+                        // a grant removed from the key stops working at once.
+                        let key = relay_key.as_ref().ok_or_else(|| {
+                            AppError::Unauthorized("Relay token's agent key is unavailable".into())
+                        })?;
+                        let key_ids = crate::services::key_service::effective_allowed_service_ids_with_access(
+                            &state.db, key, None,
+                        )
+                        .await?;
+                        let (all_services, service_ids) =
+                            intersect_allowlists(claim_all, claim_ids, key.allow_all_services, key_ids);
+                        let (all_nodes, node_ids) = intersect_allowlists(
+                            claim_nodes_all,
+                            claim_nodes,
+                            key.allow_all_nodes,
+                            key.allowed_node_ids.clone(),
+                        );
+                        (all_services, all_nodes, service_ids, node_ids, key_id, key_name)
                     } else if matches!(auth_method, AuthMethod::AccessToken | AuthMethod::Delegated)
                     {
                         (
@@ -1408,6 +1427,24 @@ impl FromRequestParts<AppState> for AuthUser {
 /// without reading these claims, silently treating relay tokens as unrestricted
 /// (`allow_all_*` = true); routing both paths through this helper closes that
 /// divergence.
+/// Intersect two allow-all/allowlist pairs; either side can only narrow the other.
+fn intersect_allowlists(
+    left_all: bool,
+    left: Vec<String>,
+    right_all: bool,
+    right: Vec<String>,
+) -> (bool, Vec<String>) {
+    match (left_all, right_all) {
+        (true, true) => (true, Vec::new()),
+        (true, false) => (false, right),
+        (false, true) => (false, left),
+        (false, false) => (
+            false,
+            left.into_iter().filter(|id| right.contains(id)).collect(),
+        ),
+    }
+}
+
 pub fn relay_scope_from_claims(
     claims: &crate::crypto::jwt::Claims,
 ) -> (
@@ -1758,6 +1795,28 @@ fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_allowlists_only_narrow_the_live_parent_key() {
+        let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            intersect_allowlists(true, ids(&[]), true, ids(&[])),
+            (true, ids(&[]))
+        );
+        assert_eq!(
+            intersect_allowlists(true, ids(&[]), false, ids(&["a"])),
+            (false, ids(&["a"]))
+        );
+        assert_eq!(
+            intersect_allowlists(false, ids(&["a", "b"]), true, ids(&[])),
+            (false, ids(&["a", "b"]))
+        );
+        // A grant removed from the key stops working for an older relay token.
+        assert_eq!(
+            intersect_allowlists(false, ids(&["a", "b"]), false, ids(&["b"])),
+            (false, ids(&["b"]))
+        );
+    }
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use axum::{Router, middleware, routing::get};

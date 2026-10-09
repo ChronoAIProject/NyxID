@@ -1154,7 +1154,7 @@ pub async fn options(
                 super::feature_flag_service::VOICE_GROK_FLAG_KEY,
             )
             .await?
-                || super::voice::credentials::authorize_inference(db, thread, service)
+                || super::voice::credentials::authorize_inference(db, thread, service, None)
                     .await
                     .is_err()
                 || !super::voice::credentials::official_provider_origin(
