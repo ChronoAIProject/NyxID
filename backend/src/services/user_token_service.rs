@@ -954,6 +954,10 @@ pub async fn initiate_oauth_connect(
         urlencoding::encode(&state_id),
     );
 
+    if oauth_flow::is_stripe_apps(&provider) {
+        auth_url = auth_url.replace("&response_type=code", "");
+    }
+
     // Scope resolution (NyxID#917) — see `resolve_scope_param`. `None` means
     // omit `scope` entirely; a `Some("")` is only produced for an admin-seeded
     // `default_scopes: Some(vec![])`, preserving the byte-identical
@@ -1911,12 +1915,17 @@ pub async fn handle_oauth_callback(
     // SEC-H2: Use no-redirect client for token exchange
     let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
-        request = request.basic_auth(&resolved.client_id, resolved.client_secret.as_deref());
+        let (username, password) = oauth_flow::token_basic_auth_credentials(
+            &provider,
+            &resolved.client_id,
+            resolved.client_secret.as_deref(),
+        )?;
+        request = request.basic_auth(username, password);
     }
     let token_response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("OAuth token exchange failed: {e}")))?;
+        .map_err(|_| AppError::Internal("OAuth token exchange failed".into()))?;
 
     let status = token_response.status();
     // Read the body once as text so we can both (a) parse provider-shaped
@@ -1971,7 +1980,7 @@ pub async fn handle_oauth_callback(
     };
 
     let refresh_token = token_payload["refresh_token"].as_str();
-    let expires_in = token_payload["expires_in"].as_i64();
+    let expires_in = oauth_flow::token_expires_in(&provider, token_payload);
     let scope = token_payload["scope"].as_str();
 
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
@@ -2566,13 +2575,18 @@ async fn refresh_user_api_key_under_lease(
 
     let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
-        request = request.basic_auth(&client_id, client_secret.as_deref());
+        let (username, password) = oauth_flow::token_basic_auth_credentials(
+            &provider,
+            &client_id,
+            client_secret.as_deref(),
+        )?;
+        request = request.basic_auth(username, password);
     }
 
     let response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Token refresh request failed".into()))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -2699,7 +2713,7 @@ async fn refresh_user_api_key_under_lease(
         AppError::Internal("Missing access_token in refresh response".to_string())
     })?;
     let new_refresh_token = payload["refresh_token"].as_str();
-    let expires_in = payload["expires_in"].as_i64();
+    let expires_in = oauth_flow::token_expires_in(&provider, payload);
     let new_scope = payload["scope"].as_str();
     let now = Utc::now();
 
@@ -4164,7 +4178,7 @@ mod tests {
             .unwrap();
         let server = MockServer::start().await;
 
-        for slug in ["cloudflare", "supabase-management", "railway"] {
+        for slug in ["cloudflare", "supabase-management", "railway", "stripe"] {
             server.reset().await;
             let mut provider = provider_service::get_provider_by_slug(&db, slug)
                 .await
@@ -4213,8 +4227,13 @@ mod tests {
                     query["redirect_uri"],
                     "https://nyxid.example/api/v1/providers/callback"
                 );
-                assert_eq!(query["code_challenge_method"], "S256");
-                if slug == "supabase-management" {
+                if slug == "stripe" {
+                    assert!(!query.contains_key("code_challenge"));
+                    assert!(!query.contains_key("response_type"));
+                } else {
+                    assert_eq!(query["code_challenge_method"], "S256");
+                }
+                if matches!(slug, "supabase-management" | "stripe") {
                     assert!(!query.contains_key("scope"));
                     assert!(
                         super::ensure_additional_scopes_supported(&provider, &["all".into()])
@@ -4241,7 +4260,13 @@ mod tests {
                     );
                 }
 
-                let basic = if byo {
+                let basic = if slug == "stripe" {
+                    if byo {
+                        "Basic YnlvLXNlY3JldDo="
+                    } else {
+                        "Basic Y2xpZW50LXNlY3JldDo="
+                    }
+                } else if byo {
                     "Basic YnlvLWNsaWVudDpieW8tc2VjcmV0"
                 } else {
                     "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
@@ -4250,10 +4275,14 @@ mod tests {
                     .and(path("/token"))
                     .and(header("authorization", basic))
                     .and(header("content-type", "application/x-www-form-urlencoded"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "access_token": "connected-access", "refresh_token": "connected-refresh", "expires_in": 3600
-                    })))
-                    .expect(1).mount(&server).await;
+                    .respond_with(ResponseTemplate::new(200).set_body_json({
+                        let mut payload = serde_json::json!({"access_token": "connected-access", "refresh_token": "connected-refresh"});
+                        if slug != "stripe" { payload["expires_in"] = serde_json::json!(3600); }
+                        payload
+                    }))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
                 super::handle_oauth_callback(
                     &db,
                     &enc,
@@ -4270,10 +4299,16 @@ mod tests {
                     .collect();
                 assert_eq!(form["grant_type"], "authorization_code");
                 assert_eq!(form["code"], "cloud-code");
-                assert_eq!(form["redirect_uri"], query["redirect_uri"]);
-                let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(Sha256::digest(form["code_verifier"].as_bytes()));
-                assert_eq!(challenge, query["code_challenge"]);
+                if slug == "stripe" {
+                    assert!(!form.contains_key("redirect_uri"));
+                    assert!(!form.contains_key("code_verifier"));
+                    assert!(!form.contains_key("client_id"));
+                } else {
+                    assert_eq!(form["redirect_uri"], query["redirect_uri"]);
+                    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(Sha256::digest(form["code_verifier"].as_bytes()));
+                    assert_eq!(challenge, query["code_challenge"]);
+                }
                 assert!(!form.contains_key("client_secret"));
 
                 let connected = db
@@ -4283,6 +4318,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(connected.status, "active");
+                assert!(connected.expires_at.is_some());
                 assert_eq!(
                     enc.decrypt(connected.access_token_encrypted.as_ref().unwrap())
                         .await
@@ -4294,10 +4330,14 @@ mod tests {
                     .and(path("/token"))
                     .and(header("authorization", basic))
                     .and(header("content-type", "application/x-www-form-urlencoded"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "access_token": "refreshed-access", "refresh_token": "rotated-refresh", "expires_in": 3600
-                    })))
-                    .expect(1).mount(&server).await;
+                    .respond_with(ResponseTemplate::new(200).set_body_json({
+                        let mut payload = serde_json::json!({"access_token": "refreshed-access", "refresh_token": "rotated-refresh"});
+                        if slug != "stripe" { payload["expires_in"] = serde_json::json!(3600); }
+                        payload
+                    }))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
                 let refreshed = super::refresh_user_api_key_in_place(&db, &enc, &connected, None)
                     .await
                     .unwrap();
@@ -4308,6 +4348,7 @@ mod tests {
                     b"rotated-refresh"
                 );
                 assert_eq!(refreshed.credential_epoch, connected.credential_epoch);
+                assert!(refreshed.expires_at.is_some());
                 let request = &server.received_requests().await.unwrap()[0];
                 let form: HashMap<_, _> = url::form_urlencoded::parse(&request.body)
                     .into_owned()
@@ -4358,6 +4399,7 @@ mod tests {
         let server = MockServer::start().await;
         for (slug, encoding, basic) in [
             ("notion", "json", true),
+            ("stripe", "form", true),
             ("lark", "json", false),
             ("feishu", "json", false),
             ("ordinary", "form", false),
@@ -4371,6 +4413,10 @@ mod tests {
                 Some(enc.encrypt(b"client-secret").await.unwrap()),
             );
             provider.slug = slug.into();
+            if slug == "stripe" {
+                provider.authorization_url =
+                    Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+            }
             if basic {
                 provider.token_endpoint_auth_method = "client_secret_basic".into();
             }
@@ -4428,7 +4474,7 @@ mod tests {
                     .unwrap(),
                 b"rotated-refresh"
             );
-            assert!(refreshed.expires_at.is_none());
+            assert_eq!(refreshed.expires_at.is_some(), slug == "stripe");
             assert_eq!(refreshed.credential_epoch, key.credential_epoch);
 
             let mut legacy = make_oauth_token(
@@ -4461,7 +4507,7 @@ mod tests {
                     .unwrap(),
                 b"rotated-refresh"
             );
-            assert!(saved.expires_at.is_none());
+            assert_eq!(saved.expires_at.is_some(), slug == "stripe");
 
             let requests = server.received_requests().await.unwrap();
             assert_eq!(requests.len(), 2);
@@ -4475,7 +4521,11 @@ mod tests {
                 if basic {
                     assert_eq!(
                         request.headers["authorization"],
-                        "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
+                        if slug == "stripe" {
+                            "Basic Y2xpZW50LXNlY3JldDo="
+                        } else {
+                            "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
+                        }
                     );
                 } else {
                     assert!(!request.headers.contains_key("authorization"));

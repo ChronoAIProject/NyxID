@@ -82,6 +82,17 @@ pub fn encode_oauth_request(
     }
 }
 
+pub fn is_stripe_apps(provider: &ProviderConfig) -> bool {
+    provider.slug == "stripe"
+        && provider.authorization_url.as_deref().is_some_and(|url| {
+            reqwest::Url::parse(url).is_ok_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str() == Some("marketplace.stripe.com")
+                    && url.path() == "/oauth/v2/authorize"
+            })
+        })
+}
+
 pub fn token_request(
     provider: &ProviderConfig,
     token_url: &str,
@@ -89,12 +100,49 @@ pub fn token_request(
 ) -> AppResult<reqwest::RequestBuilder> {
     let mut params = params.to_vec();
     apply_token_resource(provider, &mut params);
+    if is_stripe_apps(provider) {
+        params.retain(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "redirect_uri" | "client_id" | "client_secret" | "code_verifier"
+            )
+        });
+    }
     encode_oauth_request(
         expect_json_response(token_exchange_client().post(token_url)),
         provider,
         token_request_encoding(provider),
         &params,
     )
+}
+
+/// Stripe Apps authenticates token requests with the developer API key as
+/// the Basic username, rather than the OAuth client ID.
+pub fn token_basic_auth_credentials<'a>(
+    provider: &ProviderConfig,
+    client_id: &'a str,
+    client_secret: Option<&'a str>,
+) -> AppResult<(&'a str, Option<&'a str>)> {
+    if is_stripe_apps(provider) {
+        let secret = client_secret
+            .filter(|secret| !secret.is_empty())
+            .ok_or_else(|| {
+                AppError::ValidationError(
+                    "Stripe OAuth requires the app developer secret API key".into(),
+                )
+            })?;
+        Ok((secret, Some("")))
+    } else {
+        Ok((client_id, client_secret))
+    }
+}
+
+/// Stripe Apps documents a one-hour lifetime but omits expires_in in its
+/// example responses. Preserve explicit lifetimes from every provider.
+pub fn token_expires_in(provider: &ProviderConfig, payload: &serde_json::Value) -> Option<i64> {
+    payload["expires_in"]
+        .as_i64()
+        .or_else(|| is_stripe_apps(provider).then_some(3600))
 }
 
 fn apply_token_resource(provider: &ProviderConfig, params: &mut Vec<(String, String)>) {
@@ -228,12 +276,14 @@ pub async fn refresh_oauth_token(
         &params,
     )?;
     if use_basic_auth {
-        request = request.basic_auth(&client_id, client_secret.as_deref());
+        let (username, password) =
+            token_basic_auth_credentials(&provider, &client_id, client_secret.as_deref())?;
+        request = request.basic_auth(username, password);
     }
     let response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Token refresh request failed".into()))?;
 
     if !response.status().is_success() {
         let now = Utc::now();
@@ -280,7 +330,7 @@ pub async fn refresh_oauth_token(
     })?;
 
     let new_refresh_token = token_data["refresh_token"].as_str();
-    let expires_in = token_data["expires_in"].as_i64();
+    let expires_in = token_expires_in(&provider, &token_data);
     let now = Utc::now();
 
     let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
@@ -377,6 +427,117 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn stripe_token_request_uses_developer_key_and_only_grant_parameters() {
+        let mut provider = test_provider();
+        provider.slug = "stripe".into();
+        provider.authorization_url =
+            Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+        provider.token_endpoint_auth_method = "client_secret_basic".into();
+        let params = vec![
+            ("grant_type".into(), "authorization_code".into()),
+            ("code".into(), "ac_fixture".into()),
+            ("redirect_uri".into(), "https://nyx.example/callback".into()),
+            ("client_id".into(), "ca_fixture".into()),
+            ("client_secret".into(), "sk_fixture".into()),
+        ];
+        for grant in ["authorization_code", "refresh_token"] {
+            let mut params = params.clone();
+            params[0].1 = grant.into();
+            if grant == "refresh_token" {
+                params[1] = ("refresh_token".into(), "rt_fixture".into());
+            }
+            let (username, password) =
+                token_basic_auth_credentials(&provider, "ca_fixture", Some("sk_fixture")).unwrap();
+            let request =
+                token_request(&provider, "https://api.stripe.com/v1/oauth/token", &params)
+                    .unwrap()
+                    .basic_auth(username, password)
+                    .build()
+                    .unwrap();
+            use base64::Engine;
+            assert_eq!(
+                request.headers()[reqwest::header::AUTHORIZATION],
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("sk_fixture:")
+                )
+            );
+            let body = String::from_utf8_lossy(request.body().unwrap().as_bytes().unwrap());
+            assert!(body.contains(grant));
+            assert!(!body.contains("client_id"));
+            assert!(!body.contains("client_secret"));
+            assert!(!body.contains("redirect_uri"));
+        }
+        assert!(token_basic_auth_credentials(&provider, "ca_fixture", None).is_err());
+    }
+
+    #[test]
+    fn stripe_expiry_defaults_to_one_hour_and_respects_explicit_expiry() {
+        let mut provider = test_provider();
+        assert_eq!(token_expires_in(&provider, &serde_json::json!({})), None);
+        provider.slug = "stripe".into();
+        provider.authorization_url =
+            Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+        assert_eq!(
+            token_expires_in(&provider, &serde_json::json!({})),
+            Some(3600)
+        );
+        assert_eq!(
+            token_expires_in(&provider, &serde_json::json!({"expires_in": 1800})),
+            Some(1800)
+        );
+    }
+
+    #[test]
+    fn existing_stripe_connect_preserves_generic_oauth_contract() {
+        let mut provider = test_provider();
+        provider.slug = "stripe".into();
+        provider.authorization_url = Some("https://connect.stripe.com/oauth/authorize".into());
+        assert!(!is_stripe_apps(&provider));
+        let params = vec![
+            ("redirect_uri".into(), "https://nyx.example/callback".into()),
+            ("client_id".into(), "client".into()),
+            ("code_verifier".into(), "verifier".into()),
+        ];
+        let (username, password) =
+            token_basic_auth_credentials(&provider, "client", Some("secret")).unwrap();
+        let request = token_request(&provider, "https://example.com/token", &params)
+            .unwrap()
+            .basic_auth(username, password)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Basic Y2xpZW50OnNlY3JldA=="
+        );
+        let body = String::from_utf8_lossy(request.body().unwrap().as_bytes().unwrap());
+        for field in ["redirect_uri", "client_id", "code_verifier"] {
+            assert!(body.contains(field));
+        }
+        assert_eq!(token_expires_in(&provider, &serde_json::json!({})), None);
+        assert_eq!(
+            token_expires_in(&provider, &serde_json::json!({"expires_in": 1800})),
+            Some(1800)
+        );
+    }
+
+    #[test]
+    fn basic_auth_for_other_providers_preserves_client_credentials() {
+        let provider = test_provider();
+        let (username, password) =
+            token_basic_auth_credentials(&provider, "client", Some("secret")).unwrap();
+        let request = reqwest::Client::new()
+            .post("https://example.com")
+            .basic_auth(username, password)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Basic Y2xpZW50OnNlY3JldA=="
+        );
     }
 
     #[test]

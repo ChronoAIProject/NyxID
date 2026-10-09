@@ -1,6 +1,6 @@
 # Managed OAuth Connectors
 
-NyxID seeds 26 OAuth 2.0 providers with fixed authorization and token
+NyxID seeds 27 OAuth 2.0 providers with fixed authorization and token
 endpoints, each paired with an `api-{slug}` catalog service that injects the
 connection's access token as a bearer header. The registry is
 `MANAGED_OAUTH_PROVIDER_SEEDS` in `backend/src/services/provider_service.rs`.
@@ -27,6 +27,7 @@ credentials. A connection needs one of:
   api-{slug} --from-catalog` runs the flow on the node and keeps the token
   there. The node listens on `http://127.0.0.1:{random port}/callback`, so
   this only works with providers that accept a loopback redirect on any port.
+  Stripe requires the hosted flow; see [Stripe setup](STRIPE_OAUTH.md).
 
 Without a platform app or user-supplied credentials, the OAuth start fails
 with "requires either admin-configured OAuth app credentials or your own OAuth
@@ -53,9 +54,10 @@ the scope picker aligned with the scopes registered upstream.
 | Productboard | `productboard` | Sentry | `sentry` |
 | Shippo | `shippo` | Square | `square` |
 | Todoist | `todoist` | Zoom | `zoom` |
+| Stripe | `stripe` | | |
 
-The seed adds connection metadata and a generic proxy service only. None of
-the services has a curated OpenAPI overlay yet. Curated read operations, scope
+The seed adds connection metadata and a generic proxy service only. Stripe has a curated read-only OpenAPI overlay. The other services in this
+registry do not yet have curated overlays. Curated read operations, scope
 menus, refresh and revocation behaviour, and provider-specific adapters should
 be added and tested separately for each service.
 
@@ -64,6 +66,13 @@ refresh rotation, reconnection, and deletion before a deployment offers it
 broadly.
 
 ## Provider notes
+
+### Stripe
+
+Stripe uses Stripe Apps OAuth, with permissions configured in the app manifest.
+The client-secret field holds the app developer API key. Its curated overlay
+provides eight read-only operations. See [Stripe setup](STRIPE_OAUTH.md) for
+registration, publication, test/live configuration, and disconnect behavior.
 
 ### Todoist
 
