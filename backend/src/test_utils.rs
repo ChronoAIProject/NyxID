@@ -192,6 +192,11 @@ pub(crate) async fn connect_test_database_with_command_handler(
     prefix: &str,
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
 ) -> Option<mongodb::Database> {
+    // Same process-wide precondition as `connect_test_database`; nextest runs
+    // each test in its own process, so it cannot rely on another test.
+    crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+        crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+    ));
     let db_name = new_test_db_name(prefix);
     let client = probe_test_mongo_client(&db_name, Some(handler)).await.expect(
         "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
