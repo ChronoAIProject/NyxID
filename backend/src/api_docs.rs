@@ -196,6 +196,7 @@
             crate::handlers::services::CreateServiceRequest,
             crate::handlers::services::SshServiceConfigRequest,
             crate::handlers::services::SshServiceConfigResponse,
+            crate::handlers::services::XChannelBillingResponse,
             crate::handlers::services::UpdateServiceRequest,
             crate::handlers::services::ServiceResponse,
             crate::handlers::services::ServiceListResponse,
@@ -402,7 +403,10 @@ mod tests {
             ),
             ("CreateKeyRequest", vec!["use_platform_key"]),
             ("UpdateServiceRequest", vec!["credential"]),
-            ("ServiceResponse", vec!["legacy_public_master"]),
+            (
+                "ServiceResponse",
+                vec!["legacy_public_master", "x_channel_billing"],
+            ),
             ("UpdateKeyRequest", vec!["use_platform_key"]),
             (
                 "ServiceBilling",

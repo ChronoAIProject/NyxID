@@ -244,6 +244,7 @@ export interface DownstreamService {
   readonly proxy_operation_policy?: ProxyOperationPolicy | null;
   readonly inference?: InferenceMetadata | null;
   readonly platform_key?: PlatformKeyConfig | null;
+  readonly x_channel_billing?: { readonly lane: string } | null;
   readonly id: string;
   readonly name: string;
   readonly slug: string;

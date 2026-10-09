@@ -8,14 +8,25 @@ import { PlatformServiceFields } from "./platform-service-fields";
 vi.mock("@/components/admin-credits/credit-pickers", () => ({
   UserPicker: () => <span>Owner picker</span>,
 }));
-function Harness({ implicit = false }: { readonly implicit?: boolean }) {
+function Harness({
+  implicit = false,
+  xChannelBilling,
+}: {
+  readonly implicit?: boolean;
+  readonly xChannelBilling?: DownstreamService["x_channel_billing"];
+}) {
   const form = useAppForm<UpdateServiceFormData>({
     defaultValues: { name: "Service", service_type: "http" },
   });
   return (
     <Form {...form}>
       <PlatformServiceFields
-        service={{ legacy_public_master: implicit } as DownstreamService}
+        service={
+          {
+            legacy_public_master: implicit,
+            x_channel_billing: xChannelBilling,
+          } as DownstreamService
+        }
       />
       <button disabled={!form.formState.isDirty}>Save settings</button>
     </Form>
@@ -160,4 +171,13 @@ it("adds and removes component prices while keeping the lane editable", async ()
     screen.queryByRole("textbox", { name: "Component 1 price" }),
   ).not.toBeInTheDocument();
   expect(screen.getByLabelText("Credits per unit")).toBeInTheDocument();
+});
+
+it("shows X channel billing guidance", () => {
+  render(<Harness xChannelBilling={{ lane: "Your own key (BYOK)" }} />);
+  expect(screen.getByText(/X channels bill through the Your own key/)).toBeInTheDocument();
+});
+it("omits X channel guidance when absent", () => {
+  render(<Harness />);
+  expect(screen.queryByText(/X channels bill through/)).not.toBeInTheDocument();
 });

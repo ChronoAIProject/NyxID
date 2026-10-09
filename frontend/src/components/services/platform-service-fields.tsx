@@ -337,6 +337,12 @@ export function PlatformServiceFields({
       </section>
       <section className="space-y-3">
         <h3 className="text-13 font-semibold">Billing lanes</h3>
+        {service?.x_channel_billing && (
+          <p className="text-12 text-muted-foreground">
+            X channels bill through the {service.x_channel_billing.lane} lane.
+            Configure a synced Requests price on that lane to enable paid X channels.
+          </p>
+        )}
         {!form.watch("byok_pricing") && !form.watch("platform_key_pricing") && (
           <p className="text-xs text-muted-foreground">
             No lane prices are configured. Legacy billing below still applies.

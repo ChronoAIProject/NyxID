@@ -268,11 +268,24 @@ pub async fn service_to_response_with_viewer(
         .inference
         .as_ref()
         .map(crate::services::inference_service::normalized);
+    let x_channel_billing = (s.slug
+        == crate::services::channel_billing_service::X_CHANNEL_SERVICE_SLUG)
+        .then(|| super::services::XChannelBillingResponse {
+            lane: crate::services::billing::route_context::BillingLane::for_credential(
+                crate::services::channel_billing_service::X_CHANNEL_CREDENTIAL_CLASS,
+            )
+            .map_or(
+                "None (meter only)",
+                crate::services::billing::route_context::BillingLane::label,
+            )
+            .into(),
+        });
     ServiceResponse {
         offering_kind: s.offering_kind,
         topics: s.topics.clone(),
         supplier: s.supplier.clone(),
         import_source: s.import_source.clone().map(Into::into),
+        x_channel_billing,
         provider_config_id: s.provider_config_id.clone(),
         credential_configured: match inspection_keys {
             Some(keys) => {
@@ -425,7 +438,9 @@ pub struct DeleteServiceResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedService, resolve_service_or_user_service};
+    use super::{
+        ResolvedService, resolve_service_or_user_service, service_to_response_with_viewer,
+    };
     use crate::errors::AppError;
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -848,5 +863,23 @@ mod tests {
             .await
             .unwrap();
         assert!(!routing.contains_key(&catalog_id));
+    }
+
+    #[tokio::test]
+    async fn service_response_exposes_x_channel_billing_only_for_x_catalog_service() {
+        let mut service = crate::test_utils::test_auto_connected_catalog_service();
+        service.slug = "api-twitter".into();
+        let response = service_to_response_with_viewer(None, service, None).await;
+        assert_eq!(
+            response
+                .x_channel_billing
+                .as_ref()
+                .map(|value| value.lane.as_str()),
+            Some("Your own key (BYOK)")
+        );
+        let mut unrelated = crate::test_utils::test_auto_connected_catalog_service();
+        unrelated.slug = "other-service".into();
+        let response = service_to_response_with_viewer(None, unrelated, None).await;
+        assert!(response.x_channel_billing.is_none());
     }
 }

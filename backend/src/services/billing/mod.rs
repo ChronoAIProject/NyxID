@@ -387,13 +387,13 @@ impl BillingService {
         ctx: &BillingRouteContext,
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
-        if required
-            && self.config.billing_enabled
-            && (!ctx.service_platform_billable || self.lago.is_none())
-        {
-            return Err(crate::errors::AppError::BillingNotConfigured(
-                "Configure the channel service price and billing provider before enabling paid channels".into(),
-            ));
+        if required && self.config.billing_enabled {
+            ctx.require_platform_price()?;
+            if self.lago.is_none() {
+                return Err(crate::errors::AppError::BillingNotConfigured(
+                    "The billing provider (Lago) is not configured; configure Lago before enabling paid channels".into(),
+                ));
+            }
         }
         let ctx = if self.config.billing_enabled {
             // Staged rollout: charging applies only to owners covered by the
@@ -435,7 +435,7 @@ impl BillingService {
                     .await?;
                 if required && !chargeable {
                     return Err(crate::errors::AppError::BillingNotConfigured(
-                        "A billing wallet and subscription are required for this channel".into(),
+                        "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding".into(),
                     ));
                 }
                 chargeable

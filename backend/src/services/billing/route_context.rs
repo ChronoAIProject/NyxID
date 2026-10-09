@@ -4,6 +4,42 @@ use crate::models::usage_meter::CredentialClass;
 use super::route_inventory::BillingIngress;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BillingLane {
+    Byok,
+    PlatformKey,
+}
+
+impl BillingLane {
+    pub fn for_credential(class: CredentialClass) -> Option<Self> {
+        match class {
+            CredentialClass::NyxidPlatformOauthApp
+            | CredentialClass::UserOwned
+            | CredentialClass::AgentOverrideUserOwned
+            | CredentialClass::NodeManaged => Some(Self::Byok),
+            CredentialClass::NyxidManagedMaster => Some(Self::PlatformKey),
+            CredentialClass::NoAuth => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Byok => "Your own key (BYOK)",
+            Self::PlatformKey => "NyxID platform key",
+        }
+    }
+
+    fn pricing(
+        self,
+        billing: &ServiceBilling,
+    ) -> Option<&crate::models::service_billing::LanePricing> {
+        match self {
+            Self::Byok => billing.byok_pricing.as_ref(),
+            Self::PlatformKey => billing.platform_key_pricing.as_ref(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeIntent {
     Direct,
     Node,
@@ -38,6 +74,7 @@ pub struct BillingRouteContext {
     /// Admin opt-in from the service's billing config: only services
     /// explicitly marked platform_billable charge the platform layer.
     pub(crate) service_platform_billable: bool,
+    lane_pricing_configured: bool,
     pub(crate) platform_metered: bool,
     pub(crate) platform_billable: bool,
 }
@@ -80,15 +117,8 @@ impl BillingRouteContext {
         if let Some(billing) =
             service_billing.filter(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some())
         {
-            let lane = match credential_class {
-                // Shared-app OAuth tokens retain their existing user-token price lane.
-                CredentialClass::NyxidPlatformOauthApp
-                | CredentialClass::UserOwned
-                | CredentialClass::AgentOverrideUserOwned
-                | CredentialClass::NodeManaged => billing.byok_pricing.as_ref(),
-                CredentialClass::NyxidManagedMaster => billing.platform_key_pricing.as_ref(),
-                CredentialClass::NoAuth => None,
-            };
+            let lane = BillingLane::for_credential(credential_class)
+                .and_then(|lane| lane.pricing(billing));
             if let Some(lane) = lane {
                 use crate::models::service_billing::PricingSyncStatus;
                 // Until the primary syncs, the entire lane uses legacy billing.
@@ -159,9 +189,37 @@ impl BillingRouteContext {
             requested_voice_seconds: 0,
             voice_initial_window: false,
             service_platform_billable,
+            lane_pricing_configured: service_billing
+                .is_some_and(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some()),
             platform_metered: false,
             platform_billable: false,
         }
+    }
+
+    pub(crate) fn require_platform_price(&self) -> crate::errors::AppResult<()> {
+        if self.service_platform_billable {
+            return Ok(());
+        }
+        let slug = self.service_slug.as_deref().unwrap_or("unknown");
+        let lane = BillingLane::for_credential(self.credential_class)
+            .map_or("None (meter only)", BillingLane::label);
+        let traffic = if self.credential_class == CredentialClass::NyxidPlatformOauthApp {
+            " used by shared-app channel traffic"
+        } else {
+            ""
+        };
+        let cause = if self.lane_pricing_configured {
+            format!(
+                "has no synced price on the {lane} lane{traffic}; configure a Requests price there"
+            )
+        } else {
+            format!(
+                "has no lane prices and legacy platform billing is disabled; enable legacy Requests billing or configure a synced Requests price on the {lane} lane{traffic}"
+            )
+        };
+        Err(crate::errors::AppError::BillingNotConfigured(format!(
+            "The service ({slug}) {cause}"
+        )))
     }
 
     pub fn with_request_body(mut self, body: Option<&[u8]>) -> Self {
@@ -272,6 +330,37 @@ mod tests {
             Some(&billing),
             true,
         )
+    }
+
+    #[test]
+    fn required_price_reports_lane_and_legacy_configuration() {
+        use crate::errors::AppError;
+        for (class, label) in [
+            (
+                CredentialClass::NyxidPlatformOauthApp,
+                "Your own key (BYOK)",
+            ),
+            (CredentialClass::NyxidManagedMaster, "NyxID platform key"),
+        ] {
+            let mut ctx = context_for(class);
+            ctx.service_slug = Some("api-twitter".into());
+            for lane_mode in [false, true] {
+                ctx.lane_pricing_configured = lane_mode;
+                let Err(AppError::BillingNotConfigured(message)) = ctx.require_platform_price()
+                else {
+                    panic!("missing price must fail closed");
+                };
+                assert!(message.contains("api-twitter"));
+                assert!(message.contains(label));
+                assert!(message.contains("Requests"));
+                assert_eq!(
+                    message.contains("no lane prices and legacy platform billing is disabled"),
+                    !lane_mode
+                );
+            }
+            ctx.service_platform_billable = true;
+            assert!(ctx.require_platform_price().is_ok());
+        }
     }
 
     #[test]

@@ -153,12 +153,17 @@ pub struct SshServiceConfigResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct XChannelBillingResponse {
+    pub lane: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
     pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub topics: Vec<String>,
     pub supplier: Option<String>,
     pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
-
+    pub x_channel_billing: Option<XChannelBillingResponse>,
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
     pub provider_config_id: Option<String>,
