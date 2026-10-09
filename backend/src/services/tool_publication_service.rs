@@ -118,17 +118,22 @@ pub async fn change_publication(
         ));
     }
     let mut session = db.client().start_session().await?;
+    let transaction_db = db.clone();
+    let service_id = service_id.to_owned();
+    let endpoint_ids = endpoint_ids.to_vec();
+    let actor = actor.clone();
+    let audit_key = zeroize::Zeroizing::new(audit_key.to_vec());
     session
         .start_transaction()
-        .and_run2(async |session| {
+        .and_run2(async move |session| {
             let result = change_publication_in_session(
-                db,
+                &transaction_db,
                 session,
-                service_id,
-                endpoint_ids,
+                &service_id,
+                &endpoint_ids,
                 state,
-                actor,
-                audit_key,
+                &actor,
+                &audit_key,
             )
             .await;
             super::api_key_mutation_service::transaction_result(result)
