@@ -6,7 +6,7 @@ Tools are catalog services offered through NyxID-held credentials or without aut
 
 `DownstreamService.offering_kind` defaults to `ai_service`; curated offerings use `tool`. Tools require `service_category = internal` and `requires_user_credential = false`, with either `auth_method = none`, a stored master credential, or platform-key configuration. A master credential and `provider_config_id` remain mutually exclusive. Authenticated runtime twins are provider-less and use the existing encrypted master credential and live public/restricted platform ACL.
 
-`topics` allows up to 20 unique slugs from `GET /api/v1/tools/topics`. `supplier` identifies the API operator (128 characters maximum). `import_source` records kind (`monid`, `vendor_spec`, `manual`, `catalog_twin`), reference (512 characters), optional version (128 characters) and optional `imported_at` (RFC3339 in the API, BSON datetime in MongoDB).
+`topics` allows up to 20 unique slugs from `GET /api/v1/tools/topics`. `supplier` identifies the API operator (128 characters maximum). `import_source` records kind (`monid`, `vendor_spec`, `manual`, `catalog_twin`), reference (512 characters), optional version (128 characters) and optional `imported_at` (RFC3339 in the API, BSON datetime in MongoDB). Twins set `imported_at` to their creation time. On update, omitted `supplier` or `import_source` remains unchanged, while JSON `null` clears it.
 
 Endpoint classifications are optional `data_scope` (`public`, `account`, `owned_resource`), optional `cost_class` (`free`, `metered`, `resource_backed`) and default `execution = http_operation` (`job_start` and `job_poll` are metadata options). They neither override billing nor introduce a job engine. All additions are serde-defaulted for legacy records.
 
@@ -14,7 +14,7 @@ Endpoint classifications are optional `data_scope` (`public`, `account`, `owned_
 
 New endpoints on tool rows start inactive and `draft`, whether created manually, discovered, or synchronized from a spec. Non-tool creation retains its existing behavior. Legacy endpoint rows default to `published`; flipping an existing service does not reset its live operations.
 
-States are `draft`, `validated`, `published` and `paused`. Only published endpoints are active. Each publication request advances the positive `operation_generation` and appends `catalog_endpoint_publication_changed` through the audit service. HTTP and WebSocket execution require a published, active method/path-template match. Unmatched or unpublished operations return HTTP 404 / code 12600. Unconfigured public twins also receive this publication error before credential readiness checks. MCP omits unpublished operations and returns `isError` carrying 12600 when one is called.
+States are `draft`, `validated`, `published` and `paused`. Only published endpoints are active. Bulk publication and its audit appends commit in one transaction; any failure rolls back the entire batch. Equally specific matching rows must all be published and active. Each publication request advances the positive `operation_generation` and appends `catalog_endpoint_publication_changed` through the audit service. HTTP and WebSocket execution require a published, active method/path-template match. Unmatched or unpublished operations return HTTP 404 / code 12600. Unconfigured public twins also receive this publication error before credential readiness checks. MCP omits unpublished operations and returns `isError` carrying 12600 when one is called.
 
 MCP names remain `{service_slug}__{endpoint.name}`. A source connection and its twin have distinct slugs and tool sets. MCP discovery includes tools; human catalog browsing excludes them unless `offering_kind=tool` or `include_all=true` is requested.
 
@@ -76,13 +76,13 @@ Phase 1 catalog administration and publication require platform admin authority;
 | POST | `/api/v1/services/{id}/endpoints/{endpoint_id}/publication` | One operation's state |
 | POST | `/api/v1/services/{id}/publication` | 1–200 distinct explicit endpoint names |
 
-The Tools API batches memberships, provider metadata and published operations. Ordinary users do not see authenticated offerings without credentials or offerings without published operations. `/keys` hides only platform tool bindings; BYOK bindings and key details remain available. Agent grant selection includes hidden platform tool connections.
+The Tools API batches memberships, provider metadata and published operations, and checks credential presence without decrypting secrets. `limits` is `null` when `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0` (disabled), otherwise `{ rate_limit_per_second, burst }`; the UI displays “No per-user rate limit” for null. Ordinary users do not see authenticated offerings without credentials or offerings without published operations. `GET /keys?include_tool_bindings=true` includes platform Tool bindings in the same key response shape (`offering_kind: "tool"`, `credential_binding: "platform"`) without widening owner, API-key scope or delegated access. Default `/keys` hides only platform tool bindings; BYOK bindings and key details remain available. Agent grant selection includes hidden platform tool connections.
 
 ## CLI
 
-Catalog targets accept UUIDs or slugs; endpoint targets accept IDs or names. Tables include publication state; `--output json` emits raw API responses.
+Catalog targets accept UUIDs or slugs; endpoint targets accept IDs or names. Tables include publication state; `--output json` emits raw API responses. Catalog creation requires `--endpoint-url` or `--twin-of` and otherwise fails locally with `Catalog creation requires --endpoint-url or --twin-of`. Tools tables render pricing as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and comma-joined topics. `tools show` prints an operation table with name, method, path, risk, data scope and cost class.
 
-- `service add|update --catalog-admin`: offering kind, service category, repeated topics, supplier and spec URL; add accepts `--twin-of` and `--slug`; update accepts `--clear-topics`.
+- `service add|update --catalog-admin`: offering kind, service category, repeated topics, supplier and spec URL; add accepts `--twin-of` and `--slug`; update accepts `--clear-topics` and `--clear-supplier` (mutually exclusive with `--supplier`).
 - `catalog endpoint list <service> [--published-only]`; add/update support operation metadata, parameter/body JSON files and classifications; disable pauses an endpoint.
 - `catalog discover <service>`; `catalog publish <service> --operation … [--state …]`; `catalog topics`.
 - `tools list [--topic …]`; `tools show <slug>`.
