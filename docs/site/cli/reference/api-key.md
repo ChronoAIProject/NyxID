@@ -61,6 +61,24 @@ nyxid api-key bind <id> --service <slug> [--credential <label>]
 
 Bind a per-agent credential override for one service. Omit `--credential` to auto-resolve it from the service. Without a binding, the proxy uses the service's default credential.
 
+## api-key operations
+
+```bash
+nyxid api-key operations <id|name>
+nyxid api-key operations <id|name> --service <slug|id> --allow-endpoint <operation-id> [--allow-endpoint …] [--inputs limits.json]
+nyxid api-key operations <id|name> --service <slug|id> --allow GET:/items/{id}
+nyxid api-key operations <id|name> --service <slug|id> --deny-all | --all
+```
+
+Limit a key to selected operations within each service it can use. Without `--service`, lists every service with its operations, effect (read, write or changes existing), which are allowed, and which carry value limits.
+
+- `--allow-endpoint <id>` — allow a catalog operation by the ID shown in the listing (repeatable).
+- `--allow METHOD:/path` — explicit rule for a service without catalog operations; `{name}` matches one segment (repeatable).
+- `--deny-all` — block every operation on the service; `--all` — remove the restriction.
+- `--inputs <file>` — JSON object of value limits keyed by operation ID: `path` pins variables to exact values, `query` closes the query (with `required` filters and caps), `body` is a closed JSON schema. Without it, saved limits are kept for operations that stay selected.
+
+Requires the `assistant:operation-scopes` feature. Approvals still apply to every allowed call. See [operation scopes](https://github.com/ChronoAIProject/NyxID/blob/main/docs/AGENT_OPERATION_SCOPES.md).
+
 ## api-key rotate
 
 ```bash

@@ -1261,18 +1261,20 @@ async fn resolve_exact_catalog(
     let exact_view_digest = mcp_service::exact_operation_view_digest(&exact_view);
     let legacy_exact_view_digest = mcp_service::legacy_exact_operation_view_digest(&exact_view);
     let endpoint = &catalog.services[service_index].endpoints[endpoint_index];
+    let assistant_key = caller.agent_owner.is_some() || caller.assistant_group_id.is_some();
+    let mut guest_checked = false;
     if !caller.operation_scopes.is_empty() {
         let service = &catalog.services[service_index];
         let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, arguments)?;
         prepared.authorize_agent_operations(&caller.operation_scopes, service, endpoint)?;
-        if super::agent_operation_scope_service::applicable(
-            &caller.operation_scopes,
-            &service.service_id,
-            super::agent_operation_scope_service::mcp_catalog_id(service),
-        )
-        .next()
-        .is_some()
+        if assistant_key
+            && super::agent_operation_scope_service::is_scoped(
+                &caller.operation_scopes,
+                &service.service_id,
+                super::agent_operation_scope_service::mcp_catalog_id(service),
+            )
         {
+            guest_checked = true;
             let guest = Box::pin(
                 super::agent_operation_scope_service::check_non_mcp_key_context(
                     &state.db,
@@ -1293,6 +1295,21 @@ async fn resolve_exact_catalog(
                 ));
             }
         }
+    }
+    // Guests never reach owner approvals, scoped or not.
+    if assistant_key
+        && !guest_checked
+        && Box::pin(super::agent_operation_scope_service::key_is_guest(
+            &state.db,
+            &caller.actor_user_id,
+            caller.api_key_id.as_deref(),
+            caller.org_agent_access.as_ref(),
+        ))
+        .await?
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Guests cannot request or use exact owner approvals".into(),
+        ));
     }
     let producer_operation_generation =
         mcp_service::producer_operation_generation(&catalog.services[service_index], endpoint);

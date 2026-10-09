@@ -70,6 +70,9 @@ vi.mock("@/components/dashboard/api-key-detail/rate-limit-card", () => ({
 vi.mock("@/components/dashboard/api-key-detail/bindings-card", () => ({
   BindingsCard: () => null,
 }));
+vi.mock("@/components/dashboard/api-key-detail/operation-scope-card", () => ({
+  OperationScopeCard: () => null,
+}));
 vi.mock("@/components/dashboard/api-key-detail/usage-stats-card", () => ({
   UsageStatsCard: () => null,
 }));

@@ -345,11 +345,15 @@ pub(crate) async fn dispatch(
             true,
         ));
     }
+    // Ornn reads run as the thread key, so they keep its agent's operation scopes.
+    let thread_scopes = team::agent(&state.db, &chat.user_id, &chat.agent_id)
+        .await?
+        .operation_scopes;
     let reader = Reader {
         state,
         person: &chat.user_id,
         thread_key: Some(&chat.api_key_id),
-        scopes: None,
+        scopes: Some(&thread_scopes),
         chat: Some(std::sync::Arc::new(chat.clone())),
     };
     let db = &state.db;

@@ -76,6 +76,30 @@ export function ServiceOperationForm({
   readonly disabled?: boolean;
 }) {
   const mutation = useSetAgentOperations(agentId);
+  return (
+    <OperationSelectionForm
+      service={service}
+      disabled={disabled}
+      isSaving={mutation.isPending}
+      save={(selection) =>
+        mutation.mutateAsync({ serviceId: service.service_id, selection })
+      }
+    />
+  );
+}
+
+/** One service's operation picker; the holder (specialist or Agent Key) supplies `save`. */
+export function OperationSelectionForm({
+  service,
+  disabled = false,
+  isSaving,
+  save: persist,
+}: {
+  readonly service: AgentServiceOperations;
+  readonly disabled?: boolean;
+  readonly isSaving: boolean;
+  readonly save: (selection: OperationSelection) => Promise<unknown>;
+}) {
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string>();
   const form = useAppForm<OperationSelection>({
@@ -87,6 +111,7 @@ export function ServiceOperationForm({
       rules: service.rules,
     },
   });
+  const savedInputs = service.inputs ?? {};
   const all = form.watch("all_operations");
   const selected = form.watch("endpoint_ids");
   const rules = form.watch("rules");
@@ -100,11 +125,8 @@ export function ServiceOperationForm({
     try {
       const next = selection.all_operations
         ? { ...selection, endpoint_ids: [], rules: [] }
-        : selection;
-      await mutation.mutateAsync({
-        serviceId: service.service_id,
-        selection: next,
-      });
+        : withSavedInputs(selection, savedInputs);
+      await persist(next);
       form.reset(next);
     } catch (cause) {
       setError(
@@ -206,6 +228,9 @@ export function ServiceOperationForm({
                         ) : null}
                         {operation.changes_existing ? (
                           <Badge variant="warning">Changes existing</Badge>
+                        ) : null}
+                        {savedInputs[operation.endpoint_id] ? (
+                          <Badge variant="secondary">Value limits</Badge>
                         ) : null}
                       </span>
                     </span>
@@ -352,11 +377,22 @@ export function ServiceOperationForm({
           variant="primary"
           size="sm"
           disabled={disabled || !form.formState.isDirty}
-          isLoading={mutation.isPending}
+          isLoading={isSaving}
         >
           Save operations
         </Button>
       </div>
     </form>
   );
+}
+
+/** Keep saved value limits for operations that stay selected; deselecting drops them. */
+function withSavedInputs(
+  selection: OperationSelection,
+  saved: Readonly<Record<string, unknown>>,
+): OperationSelection {
+  const inputs = Object.fromEntries(
+    Object.entries(saved).filter(([id]) => selection.endpoint_ids.includes(id)),
+  );
+  return Object.keys(inputs).length ? { ...selection, inputs } : selection;
 }

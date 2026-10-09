@@ -909,8 +909,11 @@ pub(crate) fn codex_user_agent() -> String {
 /// Build a `reqwest::Client` for ChatGPT backend requests.
 /// Configures proxy from environment if set.
 fn chatgpt_http_client() -> AppResult<reqwest::Client> {
+    // The backend endpoint is fixed; a redirect would carry the bearer token
+    // to a URL no scope or policy evaluated, so return it instead.
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10));
 
     if let Ok(proxy_url) = std::env::var("CHATGPT_PROXY_URL")

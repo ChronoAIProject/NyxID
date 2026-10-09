@@ -433,6 +433,8 @@ async fn machine_gateway_uses_live_specialist_scope_and_server_credentials() {
             expected_revision: 0,
             all_operations: false,
             endpoint_ids: vec![],
+            contract_digest: None,
+            inputs: Default::default(),
             rules: vec![crate::models::downstream_service::ProxyOperationRule {
                 method: "GET".into(),
                 path_template: "/allowed".into(),

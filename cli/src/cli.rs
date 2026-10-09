@@ -1924,6 +1924,33 @@ pub enum ApiKeyCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Show or limit the operations a key may call within each service.
+    /// Without --service, lists every service's operations and selection.
+    Operations {
+        /// Key ID or name
+        id: String,
+        /// Service slug or UUID to change
+        #[arg(long)]
+        service: Option<String>,
+        /// Allow a catalog operation by its ID from the listing (repeatable)
+        #[arg(long = "allow-endpoint", requires = "service")]
+        allow_endpoints: Vec<String>,
+        /// Allow METHOD:/path on a service without catalog operations (repeatable)
+        #[arg(long = "allow", requires = "service")]
+        allow_rules: Vec<String>,
+        /// Remove the restriction so every operation is allowed
+        #[arg(long, requires = "service", conflicts_with_all = ["allow_endpoints", "allow_rules", "deny_all"])]
+        all: bool,
+        /// Block every operation on the service
+        #[arg(long = "deny-all", requires = "service", conflicts_with_all = ["allow_endpoints", "allow_rules"])]
+        deny_all: bool,
+        /// JSON file of value limits keyed by operation ID ({"<id>": {"path": …, "query": …, "body": …}}).
+        /// Without it, saved limits are kept for operations that stay selected.
+        #[arg(long, requires = "allow_endpoints")]
+        inputs: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Update key scope
     Update {
         id: String,

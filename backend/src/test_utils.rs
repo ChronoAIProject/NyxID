@@ -2746,6 +2746,8 @@ pub async fn scoped_specialist_auth(
                 all_operations: false,
                 endpoint_ids: vec![],
                 rules: rules.clone(),
+                contract_digest: None,
+                inputs: Default::default(),
             },
             true,
         )

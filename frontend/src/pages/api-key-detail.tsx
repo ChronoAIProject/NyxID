@@ -17,6 +17,7 @@ import { PlatformCard } from "@/components/dashboard/api-key-detail/platform-car
 import { CallbackUrlCard } from "@/components/dashboard/api-key-detail/callback-url-card";
 import { RateLimitCard } from "@/components/dashboard/api-key-detail/rate-limit-card";
 import { BindingsCard } from "@/components/dashboard/api-key-detail/bindings-card";
+import { OperationScopeCard } from "@/components/dashboard/api-key-detail/operation-scope-card";
 import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stats-card";
 import { VerifyKeyCard } from "@/components/dashboard/api-key-detail/verify-key-card";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -130,6 +131,10 @@ export function ApiKeyDetailPage() {
           allowedServices={apiKey.allowed_services}
           apiKeySource={apiKey.credential_source}
         />
+
+        {apiKey.assistant_conversation_id ? null : (
+          <OperationScopeCard keyId={apiKey.id} canWrite={canWrite} />
+        )}
 
         <NodeScopeCard
           keyId={apiKey.id}

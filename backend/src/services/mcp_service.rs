@@ -3598,19 +3598,30 @@ impl PreparedProxyCall {
         } else {
             super::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)?
         };
+        let endpoint_id = (!self.is_generic_proxy_endpoint
+            && producer_operation_generation(service, endpoint).is_some())
+        .then_some(endpoint.endpoint_id.as_str());
         operations::authorize(
             scopes,
             &service.service_id,
             operations::mcp_catalog_id(service),
-            (!self.is_generic_proxy_endpoint
-                && producer_operation_generation(service, endpoint).is_some())
-            .then_some(endpoint.endpoint_id.as_str()),
+            endpoint_id,
             self.method.as_str(),
             &path,
             self.carries_override(true),
             false,
         )?;
-        Ok(())
+        operations::check_inputs(
+            scopes,
+            &service.service_id,
+            operations::mcp_catalog_id(service),
+            endpoint_id,
+            self.method.as_str(),
+            &path,
+            self.query.as_deref(),
+            self.body.as_deref().unwrap_or_default(),
+            self.body_content_type.as_deref(),
+        )
     }
 
     pub(crate) fn canonical_path(&self) -> AppResult<super::proxy_authorization::CanonicalPath> {
@@ -4253,6 +4264,17 @@ pub async fn execute_tool(
     .map(|response| (response.status, response.text))
 }
 
+/// A scoped call authorized one exact operation; never follow a redirect away from it.
+fn scoped_execution(exec_ctx: &McpExecContext<'_>, service: &McpToolService) -> bool {
+    exec_ctx.operation_scopes.is_some_and(|scopes| {
+        super::agent_operation_scope_service::is_scoped(
+            scopes,
+            &service.service_id,
+            super::agent_operation_scope_service::mcp_catalog_id(service),
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool_response(
     http_client: &reqwest::Client,
@@ -4285,6 +4307,11 @@ pub async fn execute_tool_response(
     if let Some(scopes) = exec_ctx.operation_scopes {
         prepared.authorize_agent_operations(scopes, service, endpoint)?;
     }
+    let http_client = if scoped_execution(exec_ctx, service) {
+        proxy_service::no_redirect_http_client()
+    } else {
+        http_client
+    };
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
     let resolved = match &service.source {
@@ -4861,20 +4888,22 @@ async fn execute_tool_resolved_inner(
     .await?;
     if let Some(scopes) = exec_ctx.operation_scopes {
         prepared.authorize_agent_operations(scopes, service, endpoint)?;
-        if super::agent_operation_scope_service::applicable(
+        if super::agent_operation_scope_service::is_scoped(
             scopes,
             &service.service_id,
             super::agent_operation_scope_service::mcp_catalog_id(service),
-        )
-        .next()
-        .is_some()
-        {
+        ) {
             super::agent_operation_scope_service::validate_target(
                 &target,
                 prepared.method().as_str(),
             )?;
         }
     }
+    let http_client = if scoped_execution(exec_ctx, service) {
+        proxy_service::no_redirect_http_client()
+    } else {
+        http_client
+    };
 
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -5002,6 +5031,16 @@ async fn execute_tool_resolved_inner(
 
     // Build before the direct/node split, exactly as the REST proxy does.
     if target.service.inject_delegation_token {
+        // See the REST proxy: delegated tokens cannot carry operation limits.
+        if exec_ctx
+            .operation_scopes
+            .is_some_and(|scopes| !scopes.is_empty())
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Services that receive a delegation token are unavailable to operation-scoped keys"
+                    .into(),
+            ));
+        }
         let subject = uuid::Uuid::parse_str(user_id)
             .map_err(|_| AppError::Internal("Invalid authenticated MCP subject".into()))?;
         match identity_service::generate_proxy_delegation_token(

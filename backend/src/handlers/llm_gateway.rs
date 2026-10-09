@@ -394,9 +394,6 @@ pub async fn llm_proxy_request(
         &auth_user,
         &service_id,
         &path,
-        &operation_path,
-        &headers,
-        query.as_deref(),
         &request_method_str,
         if body_bytes.is_empty() {
             None
@@ -480,7 +477,7 @@ pub async fn llm_proxy_request(
                 (legacy, false, false, None)
             }
         };
-    let (scoped_path, operation_guest) = Box::pin(enforce_agent_llm_operations(
+    let llm_scope = Box::pin(enforce_agent_llm_operations(
         &state.db,
         &auth_user,
         operation_user_service_id.as_deref(),
@@ -492,14 +489,41 @@ pub async fn llm_proxy_request(
         &body_bytes,
     ))
     .await?;
-    if scoped_path.is_some() {
+    if llm_scope.identity.is_some() {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
     }
     let path = if provider_slug == "openai-codex" {
         path
     } else {
-        scoped_path.unwrap_or(path)
+        llm_scope.forwarding.clone().unwrap_or(path)
     };
+    // Input limits check the bytes dispatch will send (Codex translation or
+    // stream-usage normalization are deterministic), before approvals and billing.
+    if llm_scope.identity.is_some() {
+        if provider_slug == "openai-codex" && !body_bytes.is_empty() {
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+            let translated = llm_gateway_service::get_translator(&provider_slug)
+                .translate_request(&path, &json)?;
+            llm_scope.check_outbound(
+                &auth_user,
+                method.as_str(),
+                &translated.path,
+                query.as_deref(),
+                &serde_json::to_vec(&translated.body).unwrap_or_default(),
+                &headers,
+            )?;
+        } else {
+            llm_scope.check_outbound(
+                &auth_user,
+                method.as_str(),
+                &path,
+                query.as_deref(),
+                &force_stream_usage_bytes_for_provider(&provider_slug, &path, body_bytes.clone()),
+                &headers,
+            )?;
+        }
+    }
 
     // Check approval against the owner selected by credential resolution.
     // Legacy credentials are personal, so `None` retains the actor fallback.
@@ -517,7 +541,7 @@ pub async fn llm_proxy_request(
         },
         owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
-        operation_guest,
+        llm_scope.guest,
     )
     .await?;
 
@@ -641,18 +665,6 @@ pub async fn llm_proxy_request(
 
             let translator = llm_gateway_service::get_translator(&provider_slug);
             let translated = translator.translate_request(&path, &body_json)?;
-            Box::pin(enforce_agent_llm_operations(
-                &state.db,
-                &auth_user,
-                operation_user_service_id.as_deref(),
-                &service_id,
-                method.as_str(),
-                &translated.path,
-                &headers,
-                query.as_deref(),
-                &body_bytes,
-            ))
-            .await?;
 
             let request_len = serde_json::to_vec(&translated.body)
                 .map(|bytes| bytes.len() as i64)
@@ -706,7 +718,7 @@ pub async fn llm_proxy_request(
 
             state.billing.mark_forwarded(&metered).await?;
             let downstream_response = proxy_service::forward_request(
-                &state.http_client,
+                llm_scope.client(&state.http_client),
                 &target,
                 reqwest_method,
                 &path,
@@ -951,9 +963,6 @@ async fn gateway_provider_request(
         &auth_user,
         &service_id,
         &path,
-        &final_path,
-        &headers,
-        query.as_deref(),
         "POST",
         if body_bytes.is_empty() {
             None
@@ -1087,7 +1096,7 @@ async fn gateway_provider_request(
             }
         };
 
-    let (scoped_path, operation_guest) = Box::pin(enforce_agent_llm_operations(
+    let llm_scope = Box::pin(enforce_agent_llm_operations(
         &state.db,
         &auth_user,
         operation_user_service_id.as_deref(),
@@ -1099,10 +1108,19 @@ async fn gateway_provider_request(
         final_body_bytes.as_deref().unwrap_or_default(),
     ))
     .await?;
-    if scoped_path.is_some() {
+    if llm_scope.identity.is_some() {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
     }
-    let final_path = scoped_path.unwrap_or(final_path);
+    let final_path = llm_scope.forwarding.clone().unwrap_or(final_path);
+    // The gateway sends `final_body_bytes` unchanged on every branch.
+    llm_scope.check_outbound(
+        &auth_user,
+        method.as_str(),
+        &final_path,
+        query.as_deref(),
+        final_body_bytes.as_deref().unwrap_or_default(),
+        &headers,
+    )?;
 
     // Check approval if user has it enabled (uses cascade if the service
     // turned out to be org-owned).
@@ -1120,7 +1138,7 @@ async fn gateway_provider_request(
         },
         effective_owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
-        operation_guest,
+        llm_scope.guest,
     )
     .await?;
 
@@ -1318,7 +1336,7 @@ async fn gateway_provider_request(
         } else {
             state.billing.mark_forwarded(&metered).await?;
             let downstream_response = proxy_service::forward_request(
-                &state.http_client,
+                llm_scope.client(&state.http_client),
                 &target,
                 reqwest_method,
                 &final_path,
@@ -2015,15 +2033,11 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
 /// `UserService` (the actor for personal credentials, an org for
 /// org-shared credentials). When `None`, the caller couldn't determine
 /// the owner -- the function falls back to the actor's policy only.
-#[allow(clippy::too_many_arguments)]
 async fn preflight_llm_deny_before_resolution(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
     path: &str,
-    operation_path: &str,
-    headers: &axum::http::HeaderMap,
-    query: Option<&str>,
     method_str: &str,
     body: Option<&[u8]>,
 ) -> AppResult<()> {
@@ -2041,19 +2055,9 @@ async fn preflight_llm_deny_before_resolution(
         is_auto_connected: false,
     });
 
-    Box::pin(enforce_agent_llm_operations(
-        &state.db,
-        auth_user,
-        (hint.service_id != service_id).then_some(hint.service_id.as_str()),
-        service_id,
-        method_str,
-        operation_path,
-        headers,
-        query,
-        body.unwrap_or_default(),
-    ))
-    .await?;
-
+    // Operation scopes are checked after credential resolution, which runs
+    // before approvals, billing and dispatch. Checking here would use the
+    // catalog-only identity and intersect sibling connections' scopes.
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
     let denied = approval_service::evaluate_deny_only(
         &state.db,
@@ -2194,7 +2198,7 @@ async fn enforce_agent_llm_operations(
     headers: &axum::http::HeaderMap,
     query: Option<&str>,
     body: &[u8],
-) -> AppResult<(Option<String>, bool)> {
+) -> AppResult<LlmOperationScope> {
     use crate::services::agent_operation_scope_service as operations;
     Box::pin(crate::services::org_agent_service::authorize_execution(
         db,
@@ -2203,11 +2207,38 @@ async fn enforce_agent_llm_operations(
     ))
     .await?;
     let (id, catalog_id) = operations::execution_identity(auth, user_service, catalog);
-    if operations::applicable(&auth.assistant_operation_scopes, id, catalog_id)
-        .next()
-        .is_none()
-    {
-        return Ok((None, false));
+    let scoped = operations::is_scoped(&auth.assistant_operation_scopes, id, catalog_id);
+    let method_override =
+        crate::services::mcp_service::http_carries_method_override(method, headers, query, body);
+    if !scoped {
+        // Guest and webhook limits are turn authority and apply to unscoped
+        // services too; ordinary keys return without database reads.
+        if method_override
+            && auth
+                .assistant_chat
+                .as_deref()
+                .is_some_and(|chat| chat.guest || chat.confirmation_policy.is_some())
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Guest and webhook calls forbid method overrides".into(),
+            ));
+        }
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path).ok();
+        let guest = Box::pin(operations::check_non_mcp_context(
+            db,
+            auth,
+            false,
+            id,
+            catalog_id,
+            method,
+            canonical.as_ref(),
+        ))
+        .await?;
+        return Ok(LlmOperationScope {
+            guest,
+            ..Default::default()
+        });
     }
     let canonical = crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?;
     let forwarding = operations::authorize(
@@ -2217,14 +2248,71 @@ async fn enforce_agent_llm_operations(
         None,
         method,
         &canonical,
-        crate::services::mcp_service::http_carries_method_override(method, headers, query, body),
+        method_override,
         headers.contains_key(axum::http::header::UPGRADE),
     )?;
     let guest = Box::pin(operations::check_non_mcp_context(
-        db, auth, id, catalog_id, method, &canonical,
+        db,
+        auth,
+        true,
+        id,
+        catalog_id,
+        method,
+        Some(&canonical),
     ))
     .await?;
-    Ok((forwarding, guest))
+    Ok(LlmOperationScope {
+        forwarding,
+        guest,
+        identity: Some((id.to_owned(), catalog_id.map(str::to_owned))),
+    })
+}
+
+/// The operation scope that applied to an LLM call, kept until dispatch: input
+/// limits check the bytes actually sent (after translation and stream-usage
+/// normalization), and a scoped call never follows a redirect.
+#[derive(Default)]
+struct LlmOperationScope {
+    forwarding: Option<String>,
+    guest: bool,
+    identity: Option<(String, Option<String>)>,
+}
+
+impl LlmOperationScope {
+    fn check_outbound(
+        &self,
+        auth: &AuthUser,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        body: &[u8],
+        headers: &axum::http::HeaderMap,
+    ) -> AppResult<()> {
+        let Some((id, catalog)) = &self.identity else {
+            return Ok(());
+        };
+        crate::services::agent_operation_scope_service::check_inputs(
+            &auth.assistant_operation_scopes,
+            id,
+            catalog.as_deref(),
+            None,
+            method,
+            &crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?,
+            query,
+            body,
+            headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+        )
+    }
+
+    fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
+        if self.identity.is_some() {
+            proxy_service::no_redirect_http_client()
+        } else {
+            shared
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2807,6 +2895,8 @@ mod agent_operation_tests {
                 all_operations: false,
                 endpoint_ids: vec![],
                 rules: vec![],
+                contract_digest: None,
+                inputs: Default::default(),
             },
             true,
         )

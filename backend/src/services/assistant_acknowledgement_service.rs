@@ -647,6 +647,7 @@ async fn request_tracked_with_machine_context(
         } else {
             None
         },
+        operation_contract_digest: None,
         operation_selection: if request.kind == "operations" {
             Some(
                 serde_json::from_value(request.arguments.cloned().ok_or_else(not_found)?).map_err(
@@ -682,6 +683,23 @@ async fn request_tracked_with_machine_context(
         reason: None,
         machine_context,
     };
+    let mut candidate = candidate;
+    // Bind the request to the compiled contract shown to its decider.
+    if let (Some(selection), Some(service)) = (
+        candidate.operation_selection.as_ref(),
+        candidate.service_id.as_deref(),
+    ) {
+        let digest = Box::pin(
+            super::agent_operation_scope_service::preview_request_digest(
+                db,
+                &chat.agent_id,
+                service,
+                selection,
+            ),
+        )
+        .await?;
+        candidate.operation_contract_digest = Some(digest);
+    }
     let db = db.clone();
     let chat = chat.clone();
     let mut session = db.client().start_session().await?;
@@ -1257,12 +1275,14 @@ pub(crate) async fn decide_with_voice(
                     }
                 }
                 if allow && subagent && row.kind == "operations" {
+                    let mut selection = row.operation_selection.clone().ok_or_else(not_found)?;
+                    selection.contract_digest = row.operation_contract_digest.clone();
                     Box::pin(super::agent_operation_scope_service::apply_in_session(
                         &db,
                         &user,
                         target.agent_id.as_deref().ok_or_else(not_found)?,
                         row.service_id.as_deref().ok_or_else(not_found)?,
-                        row.operation_selection.as_ref().ok_or_else(not_found)?,
+                        &selection,
                         allow_operation_widening,
                         session,
                     ))

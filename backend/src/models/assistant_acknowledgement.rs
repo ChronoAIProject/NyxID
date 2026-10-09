@@ -25,6 +25,10 @@ pub struct AssistantAcknowledgement {
     /// Operation permission proposal; IDs and templates only, never call arguments.
     #[serde(default)]
     pub operation_selection: Option<super::agent_operation_scope::OperationSelection>,
+    /// Compiled contract the request was raised against. Kept beside the
+    /// selection, whose strict schema older replicas still read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_contract_digest: Option<String>,
     #[serde(default)]
     pub skill_selection: Option<super::assistant_agent::SkillSelection>,
     pub summary: String,

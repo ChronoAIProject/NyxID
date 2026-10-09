@@ -1405,20 +1405,6 @@ fn mark_pool_attempt_dispatched(state: Option<&PoolAttemptDispatchState>) {
     }
 }
 
-fn pool_no_redirect_http_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-        // Tests share this process-wide client while starting and dropping many
-        // local mock servers whose ports the OS reuses. A pooled idle socket to
-        // a dropped server would then fail after dispatch and look like an
-        // upstream transport error, so tests never keep idle connections.
-        #[cfg(test)]
-        let builder = builder.pool_max_idle_per_host(0);
-        builder.build().expect("pool HTTP client")
-    });
-    &CLIENT
-}
-
 enum PoolResponseGate {
     Response(Response),
     BodyFailure {
@@ -3151,24 +3137,22 @@ async fn preflight_proxy_deny_before_resolution(
         return Ok(());
     };
 
-    if !auth_user.assistant_operation_scopes.is_empty() {
-        // Approval hints use catalog identity. An explicitly selected instance
-        // (including a pool member) must keep its own scope, without intersecting
-        // unrelated sibling connections to the same catalog.
+    // Approval hints use catalog identity. Only an explicitly selected instance
+    // (including a pool member) can be checked this early without intersecting
+    // unrelated sibling connections to the same catalog; otherwise the full
+    // check after resolution runs before approvals, billing and dispatch.
+    if !auth_user.assistant_operation_scopes.is_empty() && via_service.is_some() {
         let (scope_id, catalog) =
             crate::services::agent_operation_scope_service::execution_identity(
                 auth_user,
                 via_service,
                 &hint.service_id,
             );
-        if crate::services::agent_operation_scope_service::applicable(
+        if crate::services::agent_operation_scope_service::is_scoped(
             &auth_user.assistant_operation_scopes,
             scope_id,
             catalog,
-        )
-        .next()
-        .is_some()
-        {
+        ) {
             let canonical =
                 crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
             crate::services::agent_operation_scope_service::authorize(
@@ -4025,13 +4009,11 @@ async fn execute_resolved_proxy_inner(
             resolved_user_service_id.as_deref(),
             &operation_target_id,
         );
-    let operation_scoped = crate::services::agent_operation_scope_service::applicable(
+    let operation_scoped = crate::services::agent_operation_scope_service::is_scoped(
         &auth_user.assistant_operation_scopes,
         operation_scope_id,
         operation_catalog_id,
-    )
-    .next()
-    .is_some();
+    );
     let scoped_forward_path = if operation_scoped {
         let canonical =
             crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
@@ -4270,32 +4252,67 @@ async fn execute_resolved_proxy_inner(
         (bytes, None, None, None)
     };
 
-    let operation_guest = if operation_scoped {
+    // Guest and webhook limits classify by method, so neither may disguise it.
+    let effect_limited_chat = auth_user
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.guest || chat.confirmation_policy.is_some());
+    if operation_scoped {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
-        if crate::services::mcp_service::http_carries_method_override(
+    }
+    if (operation_scoped || effect_limited_chat)
+        && crate::services::mcp_service::http_carries_method_override(
             method.as_str(),
             &all_headers,
             query.as_deref(),
             &body_bytes,
-        ) {
-            return Err(AppError::ApiKeyScopeForbidden(
-                "Specialist operation scopes forbid method overrides".into(),
-            ));
-        }
-        Box::pin(
-            crate::services::agent_operation_scope_service::check_non_mcp_context(
-                &state.db,
-                auth_user,
-                operation_scope_id,
-                operation_catalog_id,
-                method.as_str(),
-                &crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?,
-            ),
         )
-        .await?
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Operation scopes, guest and webhook calls forbid method overrides".into(),
+        ));
+    }
+    let operation_path = if operation_scoped {
+        Some(crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?)
     } else {
-        false
+        crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path).ok()
     };
+    if let (true, Some(canonical)) = (operation_scoped, operation_path.as_ref()) {
+        // Check the bytes that will be sent: the stream-usage normalization
+        // applied before dispatch, on a cheap reference-counted copy. A
+        // streamed upload has no buffered body, so body limits refuse it.
+        let outbound = force_stream_usage_for_service(
+            &target.service.slug,
+            path,
+            (!body_bytes.is_empty()).then(|| body_bytes.clone()),
+        )
+        .unwrap_or_default();
+        crate::services::agent_operation_scope_service::check_inputs(
+            &auth_user.assistant_operation_scopes,
+            operation_scope_id,
+            operation_catalog_id,
+            None,
+            method.as_str(),
+            canonical,
+            query.as_deref(),
+            &outbound,
+            all_headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+        )?;
+    }
+    let operation_guest = Box::pin(
+        crate::services::agent_operation_scope_service::check_non_mcp_context(
+            &state.db,
+            auth_user,
+            operation_scoped,
+            operation_scope_id,
+            operation_catalog_id,
+            method.as_str(),
+            operation_path.as_ref(),
+        ),
+    )
+    .await?;
 
     proxy_service::validate_ifttt_request(
         &target,
@@ -4746,6 +4763,15 @@ async fn execute_resolved_proxy_inner(
     }
 
     if target.service.inject_delegation_token {
+        // A delegated token carries service/node allowlists but no operation
+        // limits, so its holder could call any operation; refuse rather than
+        // mint one for an operation-scoped caller.
+        if !auth_user.assistant_operation_scopes.is_empty() {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Services that receive a delegation token are unavailable to operation-scoped keys"
+                    .into(),
+            ));
+        }
         let user_uuid = auth_user.user_id;
         let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
 
@@ -5980,8 +6006,8 @@ async fn execute_resolved_proxy_inner(
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
-            if is_pool_attempt {
-                pool_no_redirect_http_client()
+            if is_pool_attempt || operation_scoped || permission_ingress.is_some() {
+                proxy_service::no_redirect_http_client()
             } else {
                 &state.http_client
             },

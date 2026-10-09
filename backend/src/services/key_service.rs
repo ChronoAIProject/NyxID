@@ -1179,7 +1179,9 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     allowed_platform_service_ids: Vec::new(),
                     assistant_group_id: None,
                     assistant_agent_owner_id: None,
-                    assistant_operation_scopes: Default::default(),
+                    // Ordinary keys keep their operation scopes; conversation
+                    // keys are overwritten from agent authority below.
+                    assistant_operation_scopes: old_key.assistant_operation_scopes.clone(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
                     allow_all_services: old_key.allow_all_services,
                     allow_auto_connected_services: old_key.allow_auto_connected_services,

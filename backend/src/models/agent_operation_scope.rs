@@ -26,6 +26,10 @@ pub struct ScopedOperation {
     pub destructive: bool,
     #[serde(default)]
     pub changes_existing: Option<bool>,
+    /// Optional value limits on this operation's path variables, query and
+    /// JSON body, evaluated by the shared permissions engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<nyxid_permissions::values::InputRules>,
 }
 
 /// Closed management input; compiled rules are always resolved by the server.
@@ -39,4 +43,11 @@ pub struct OperationSelection {
     pub endpoint_ids: Vec<String>,
     #[serde(default)]
     pub rules: Vec<ProxyOperationRule>,
+    /// Server-computed digest of the compiled selection an owner reviewed. When
+    /// present, applying a selection whose endpoints have since changed fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_digest: Option<String>,
+    /// Optional value limits per selected endpoint ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, nyxid_permissions::values::InputRules>,
 }

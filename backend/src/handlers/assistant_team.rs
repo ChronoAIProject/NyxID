@@ -1281,6 +1281,14 @@ async fn dispatch_operation_scopes(
                 serde_json::from_value(args["selection"].clone())
                     .map_err(|_| AppError::ValidationError("Invalid operation selection".into()))?;
             let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
+                // A widening card binds the compiled contract the owner saw.
+                if selection.contract_digest.is_none() {
+                    return Ok((
+                        json!({"error":"acknowledgement_invalid",
+                        "instructions":"Retry with the card's retry_arguments, including selection.contract_digest."}),
+                        true,
+                    ));
+                }
                 if !acks::consume_action(db, chat, id, "nyxid__set_agent_operations", args).await? {
                     return Ok((json!({"error":"acknowledgement_invalid"}), true));
                 }
@@ -1289,17 +1297,40 @@ async fn dispatch_operation_scopes(
                 false
             };
             if !confirmed && acks::webhook_confirmation_required(chat, false, false) {
-                return operation_owner_card(
+                let digest = Box::pin(
+                    crate::services::agent_operation_scope_service::preview_digest(
+                        db, owner, &agent.id, service, &selection,
+                    ),
+                )
+                .await?;
+                // Show the owner exactly what changes, as the widening card does.
+                let summary = Box::pin(
+                    crate::services::agent_operation_scope_service::selection_summary(
+                        db,
+                        &state.node_ws_manager,
+                        owner,
+                        &agent.id,
+                        service,
+                        &selection,
+                    ),
+                )
+                .await?;
+                let mut card_args = args.clone();
+                card_args["selection"]["contract_digest"] = json!(digest);
+                let (mut refusal, error) = operation_owner_card(
                     db,
                     chat,
                     "nyxid__set_agent_operations",
-                    args,
+                    &card_args,
                     &format!(
-                        "Confirm operation selection for {} service {} at revision {}.",
-                        agent.name, service, selection.expected_revision
+                        "Confirm for {}: {summary} Contract {}.",
+                        agent.name,
+                        &digest[..12]
                     ),
                 )
-                .await;
+                .await?;
+                with_retry_arguments(&mut refusal, card_args);
+                return Ok((refusal, error));
             }
             match Box::pin(crate::services::agent_operation_scope_service::set(
                 db, owner, &agent.id, service, &selection, confirmed,
@@ -1311,6 +1342,12 @@ async fn dispatch_operation_scopes(
                     false,
                 ),
                 Err(error) if error.is_forbidden() && !confirmed => {
+                    let digest = Box::pin(
+                        crate::services::agent_operation_scope_service::preview_digest(
+                            db, owner, &agent.id, service, &selection,
+                        ),
+                    )
+                    .await?;
                     let summary = Box::pin(
                         crate::services::agent_operation_scope_service::selection_summary(
                             db,
@@ -1322,6 +1359,12 @@ async fn dispatch_operation_scopes(
                         ),
                     )
                     .await?;
+                    let summary = format!("{summary} Contract {}.", &digest[..12]);
+                    let mut card_args = args.clone();
+                    card_args["selection"]["contract_digest"] = json!(digest);
+                    if let Some(map) = card_args.as_object_mut() {
+                        map.remove("acknowledgement_id");
+                    }
                     let card = Box::pin(acks::request(
                         db,
                         chat,
@@ -1329,13 +1372,15 @@ async fn dispatch_operation_scopes(
                             kind: "action",
                             service: None,
                             tool: Some("nyxid__set_agent_operations"),
-                            arguments: Some(args),
+                            arguments: Some(&card_args),
                             summary: &summary,
                             platform: false,
                         },
                     ))
                     .await?;
-                    (acks::refusal(&card), true)
+                    let mut refusal = acks::refusal(&card);
+                    with_retry_arguments(&mut refusal, card_args);
+                    (refusal, true)
                 }
                 Err(error) => return Err(error),
             }
@@ -2779,6 +2824,17 @@ pub async fn set_agent_operations(
     Ok(Json(
         json!({"agent_id":agent.id,"service_id":service_id,"revision":agent.operation_scope_revisions.get(&service_id)}),
     ))
+}
+
+/// Operation cards bind the compiled contract the owner reviews; the model
+/// must retry with exactly these arguments plus the acknowledgement ID.
+fn with_retry_arguments(refusal: &mut Value, arguments: Value) {
+    if let Some(text) = refusal["instructions"].as_str() {
+        refusal["instructions"] = json!(format!(
+            "{text} When retrying, send retry_arguments unchanged plus acknowledgement_id."
+        ));
+    }
+    refusal["retry_arguments"] = arguments;
 }
 
 pub(crate) async fn operation_owner_card(

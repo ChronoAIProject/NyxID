@@ -804,6 +804,8 @@ async fn org_agent_grants_scopes_sync_across_person_owned_keys() {
         expected_revision: 0,
         all_operations: false,
         endpoint_ids: vec![],
+        contract_digest: None,
+        inputs: Default::default(),
         rules: vec![],
     };
     super::agent_operation_scope_service::set(
@@ -1903,6 +1905,8 @@ async fn org_agent_nyxbot_widening_card_belongs_to_requesting_member() {
             expected_revision: 0,
             all_operations: false,
             endpoint_ids: vec![],
+            contract_digest: None,
+            inputs: Default::default(),
             rules: vec![],
         },
         false,
@@ -1937,6 +1941,10 @@ async fn org_agent_nyxbot_widening_card_belongs_to_requesting_member() {
     .await;
     assert!(error);
     assert_eq!(card["decider"], "user");
+    // The card binds the compiled contract; its original arguments no longer apply.
+    let original = args.clone();
+    args = card["retry_arguments"].clone();
+    assert!(args["selection"]["contract_digest"].is_string());
     let id = card["acknowledgement_id"].as_str().unwrap();
     assert!(
         acks::decide(&f.state.db, &f.admin, &home.id, id, true)
@@ -1946,6 +1954,16 @@ async fn org_agent_nyxbot_widening_card_belongs_to_requesting_member() {
     acks::decide(&f.state.db, &f.member, &home.id, id, true)
         .await
         .unwrap();
+    let mut without_digest = original;
+    without_digest["acknowledgement_id"] = json!(id);
+    let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &chat,
+        "nyxid__set_agent_operations",
+        &without_digest,
+    ))
+    .await;
+    assert!(error, "a confirmed retry must carry the reviewed contract");
     args["acknowledgement_id"] = json!(id);
     let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
         &f.state,

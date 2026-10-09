@@ -9,6 +9,8 @@ export const operationSelectionSchema = z.object({
   all_operations: z.boolean(),
   endpoint_ids: z.array(z.string()).max(256),
   rules: z.array(operationRuleSchema).max(256),
+  /** Value limits per selected endpoint ID, authored through the API or CLI. */
+  inputs: z.record(z.string(), z.unknown()).optional(),
 });
 export const agentServiceOperationsSchema = z.object({
   service_id: z.string(),
@@ -19,6 +21,7 @@ export const agentServiceOperationsSchema = z.object({
   allows_explicit_rules: z.boolean(),
   endpoint_ids: z.array(z.string()),
   rules: z.array(operationRuleSchema),
+  inputs: z.record(z.string(), z.unknown()).optional(),
   operations: z.array(
     z.object({
       endpoint_id: z.string(),

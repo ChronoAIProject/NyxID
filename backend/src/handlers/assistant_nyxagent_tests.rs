@@ -1124,6 +1124,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         continuation_receipt_id: None,
         skill_selection: None,
         operation_selection: None,
+        operation_contract_digest: None,
         id: Uuid::new_v4().to_string(),
         conversation_id: row.id.clone(),
         user_id: OWNER.into(),

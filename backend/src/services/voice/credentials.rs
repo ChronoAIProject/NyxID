@@ -71,7 +71,10 @@ pub async fn resolve(
     }
     let voice_billing = duration_billing(&p.key_source, service.billing.as_ref())
         .map_err(|e| Stage::BillingReservation.error(e))?;
-    authorize_inference(&state.db, &thread, &service).await?;
+    let selected_connection = (p.key_source == VoiceKeySource::Own)
+        .then_some(p.connection_id.as_deref())
+        .flatten();
+    authorize_inference(&state.db, &thread, &service, selected_connection).await?;
     let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(user);
     let (mut target, class, owner, key_id, revision) = match p.key_source {
         VoiceKeySource::Platform => {
@@ -286,6 +289,7 @@ pub(crate) async fn authorize_inference(
     db: &mongodb::Database,
     thread: &crate::models::assistant_conversation::AssistantConversation,
     service: &DownstreamService,
+    connection: Option<&str>,
 ) -> AppResult<()> {
     let key =
         super::super::key_service::get_api_key(db, &thread.user_id, &thread.credential_api_key_id)
@@ -312,29 +316,53 @@ pub(crate) async fn authorize_inference(
         "/live/sessions"
     })?;
     super::super::proxy_authorization::authorize_proxy_operation(service, method, &path)?;
+    // Resolve the selected connection's identity like proxy/LLM do, so a scope
+    // saved on that connection applies; catalog-only intersects every scope
+    // bound to the catalog.
+    let (scope_id, catalog_id) = super::super::agent_operation_scope_service::execution_identity(
+        &auth,
+        connection,
+        &service.id,
+    );
+    let scoped = super::super::agent_operation_scope_service::is_scoped(
+        &auth.assistant_operation_scopes,
+        scope_id,
+        catalog_id,
+    );
     super::super::agent_operation_scope_service::authorize(
         &auth.assistant_operation_scopes,
-        &service.id,
-        Some(&service.id),
+        scope_id,
+        catalog_id,
         None,
         method,
         &path,
         false,
         grok,
     )?;
-    if !auth.assistant_operation_scopes.is_empty() {
-        Box::pin(
-            super::super::agent_operation_scope_service::check_non_mcp_context(
-                db,
-                &auth,
-                &service.id,
-                Some(&service.id),
-                method,
-                &path,
-            ),
-        )
-        .await?;
-    }
+    // Voice sessions send no caller query or body; any input limit refuses them.
+    super::super::agent_operation_scope_service::check_inputs(
+        &auth.assistant_operation_scopes,
+        scope_id,
+        catalog_id,
+        None,
+        method,
+        &path,
+        None,
+        &[],
+        None,
+    )?;
+    Box::pin(
+        super::super::agent_operation_scope_service::check_non_mcp_context(
+            db,
+            &auth,
+            scoped,
+            scope_id,
+            catalog_id,
+            method,
+            Some(&path),
+        ),
+    )
+    .await?;
     Ok(())
 }
 
