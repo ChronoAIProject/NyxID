@@ -54,9 +54,9 @@ describe("EndpointFormDialog", () => {
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledWith(
         {
-          data_scope:null,
-          cost_class:null,
-          execution:"http_operation",
+          data_scope: null,
+          cost_class: null,
+          execution: "http_operation",
           name: endpoint.name,
           description: existingDescription,
           method: "GET",

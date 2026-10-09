@@ -97,17 +97,16 @@ function ServiceScopeEditor({
   const [allowPlatform, setAllowPlatform] = useState(
     initialCatalogServiceId ? false : allowAutoConnectedServices,
   );
-  const preselected = canWrite && initialCatalogServiceId
-    ? allKeys.find(
-        (key) =>
-          key.catalog_service_id === initialCatalogServiceId &&
-          canScopeServiceToApiKey(key.credential_source, apiKeySource),
-      )
-    : undefined;
+  const preselected =
+    canWrite && initialCatalogServiceId
+      ? allKeys.find(
+          (key) =>
+            key.catalog_service_id === initialCatalogServiceId &&
+            canScopeServiceToApiKey(key.credential_source, apiKeySource),
+        )
+      : undefined;
   const [editing, setEditing] = useState(Boolean(preselected));
-  const [allowAll, setAllowAll] = useState(
-    preselected ? false : allowAllServices,
-  );
+  const [allowAll, setAllowAll] = useState(preselected ? false : allowAllServices);
   const [selectedIds, setSelectedIds] = useState<readonly string[]>(
     preselected && !allowedServiceIds.includes(preselected.id)
       ? [...allowedServiceIds, preselected.id]

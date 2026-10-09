@@ -195,7 +195,9 @@ function KeyCardContent({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          {keyInfo.offering_kind === "tool" && <Badge variant="secondary">Tool · your key</Badge>}
+          {keyInfo.offering_kind === "tool" && (
+            <Badge variant="secondary">Tool · your key</Badge>
+          )}
           {isOrgInherited && (
             <Badge variant="info">Org</Badge>
           )}

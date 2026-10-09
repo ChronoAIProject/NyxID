@@ -16,9 +16,9 @@ export function formToPayload(
   data: CreateEndpointFormData,
 ): CreateEndpointPayload {
   return {
-    data_scope:data.data_scope,
-    cost_class:data.cost_class,
-    execution:data.execution,
+    data_scope: data.data_scope,
+    cost_class: data.cost_class,
+    execution: data.execution,
     name: data.name,
     description: data.description || null,
     method: data.method,

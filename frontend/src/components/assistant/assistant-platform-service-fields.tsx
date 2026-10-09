@@ -19,7 +19,7 @@ export function AssistantPlatformServiceFields({
   readonly onAllowAllChange: (value: boolean) => void;
   readonly disabled: boolean;
 }) {
-  const services = useKeys({includeTools:true});
+  const services = useKeys({ includeTools: true });
   const key = useApiKey(keyId ?? "");
   if (keyId && !key.data)
     return (

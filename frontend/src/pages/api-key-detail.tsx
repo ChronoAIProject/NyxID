@@ -24,7 +24,9 @@ import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 
 export function ApiKeyDetailPage() {
-  const {grant_service}=useSearch({strict:false}) as {grant_service?:string};
+  const { grant_service } = useSearch({ strict: false }) as {
+    grant_service?: string;
+  };
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const { data: apiKey, isLoading, error, refetch } = useApiKey(keyId);
   useBreadcrumbLabel(apiKey?.name);

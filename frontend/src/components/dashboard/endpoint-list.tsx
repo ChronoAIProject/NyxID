@@ -22,8 +22,8 @@ import { toast } from "sonner";
 
 interface EndpointListProps {
   readonly serviceId: string;
-  readonly service?:import("@/types/api").DownstreamService;
-  readonly canWrite?:boolean;
+  readonly service?: import("@/types/api").DownstreamService;
+  readonly canWrite?: boolean;
   readonly hasApiSpecUrl: boolean;
 }
 
@@ -45,7 +45,12 @@ export function EndpointList(props: EndpointListProps) {
   return <EndpointListEditor key={props.serviceId} {...props} />;
 }
 
-function EndpointListEditor({ serviceId, hasApiSpecUrl,service,canWrite=true }: EndpointListProps) {
+function EndpointListEditor({
+  serviceId,
+  hasApiSpecUrl,
+  service,
+  canWrite = true,
+}: EndpointListProps) {
   const { data: endpoints, isLoading } = useEndpoints(serviceId);
   const createMutation = useCreateEndpoint();
   const updateMutation = useUpdateEndpoint();
@@ -182,7 +187,15 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl,service,canWrite=true }: 
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs">{ep.name}</span>
-                      <Badge variant={(ep.publication??"published")==="published"?"success":"secondary"}>{ep.publication??"published"}</Badge>
+                      <Badge
+                        variant={
+                          (ep.publication ?? "published") === "published"
+                            ? "success"
+                            : "secondary"
+                        }
+                      >
+                        {ep.publication ?? "published"}
+                      </Badge>
                       {!ep.is_active && (
                         <Badge variant="secondary" className="text-10">
                           Inactive
@@ -241,7 +254,9 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl,service,canWrite=true }: 
         </div>
       )}
 
-      {service?.offering_kind === "tool" && <PublicationOperations tool={service} disabled={!canWrite}/>}
+      {service?.offering_kind === "tool" && (
+        <PublicationOperations tool={service} disabled={!canWrite} />
+      )}
       <EndpointFormDialog
         serviceId={serviceId}
         currentEndpoint={

@@ -67,7 +67,7 @@ export function ServiceGrantPicker({
   readonly onChange: (slugs: string[]) => void;
   readonly disabled?: boolean;
 }) {
-  const keys = useKeys({includeTools:true});
+  const keys = useKeys({ includeTools: true });
   const services = (keys.data ?? [])
     .filter((key) => key.is_active &&
         (!org ||

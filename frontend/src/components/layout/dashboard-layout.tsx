@@ -312,7 +312,12 @@ function TopBar({
   }
 
   const ROOT_PATHS = new Set([
-    "/dashboard", "/keys", "/tools", "/orgs", "/nodes", "/channel-bots",
+    "/dashboard",
+    "/keys",
+    "/tools",
+    "/orgs",
+    "/nodes",
+    "/channel-bots",
     "/settings", "/guide", "/approvals/settings", "/approvals/history",
     "/approvals/grants", "/developer/apps", "/ai-setup", "/integration-guide",
   ]);

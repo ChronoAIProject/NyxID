@@ -41,7 +41,7 @@ export function AccessScopeCard({
   onChange,
   ownerId,
 }: AccessScopeCardProps) {
-  const services = useKeys({includeTools:true})
+  const services = useKeys({ includeTools: true });
   const nodes = useNodes()
 
   function toggleService(id: string) {
