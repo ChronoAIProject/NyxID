@@ -5,6 +5,7 @@ import { isTauriHost, TauriCompanionRuntime } from "./tauri-runtime";
 
 export * from "./browser-runtime";
 export * from "./companion-runtime";
+export * from "./nyxid";
 export * from "./tauri-runtime";
 
 export function createCompanionRuntime(

@@ -1,6 +1,7 @@
 mod commands;
 mod desktop;
 mod model;
+mod nyxid;
 mod persistence;
 mod scheduler;
 mod state;
@@ -71,6 +72,8 @@ pub fn run() {
             }
             let quiet_mode = snapshot.settings.quiet_mode;
             app.manage(CompanionState::new(snapshot, store));
+            let nyxid_state = nyxid::NyxIdState::system()?;
+            app.manage(nyxid_state.clone());
 
             window::configure_main_window(app.handle())?;
             desktop::install_tray(app, quiet_mode)?;
@@ -80,6 +83,7 @@ pub fn run() {
                 window::show(app.handle())?;
             }
             desktop::start_scheduler(app.handle().clone());
+            nyxid_state.bootstrap(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -101,6 +105,11 @@ pub fn run() {
             commands::get_launch_at_login,
             commands::set_launch_at_login,
             commands::open_nyxid_assistant,
+            commands::nyxid_status,
+            commands::start_nyxid_login,
+            commands::cancel_nyxid_login,
+            commands::refresh_nyxid_capabilities,
+            commands::logout_nyxid,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run NyxID Companion");

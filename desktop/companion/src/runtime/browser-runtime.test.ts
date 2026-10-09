@@ -18,6 +18,10 @@ class MemoryStorage implements RuntimeStorage {
   setItem(key: string, value: string): void {
     this.values.set(key, value);
   }
+
+  serializedValues(): string {
+    return JSON.stringify(Object.fromEntries(this.values));
+  }
 }
 
 const utcTimezone = () => "UTC";
@@ -447,5 +451,31 @@ describe("browser companion runtime", () => {
       "_blank",
       "noopener,noreferrer",
     );
+  });
+
+  it("keeps NyxID authentication unavailable and out of browser storage", async () => {
+    const storage = new MemoryStorage();
+    const runtime = new BrowserCompanionRuntime({
+      storage,
+      timezone: utcTimezone,
+      autoStart: false,
+    });
+    const listener = vi.fn();
+
+    expect(await runtime.nyxidStatus()).toEqual({ state: "unavailable" });
+    expect(await runtime.startNyxidLogin()).toEqual({ state: "unavailable" });
+    expect(await runtime.cancelNyxidLogin()).toEqual({ state: "unavailable" });
+    expect(await runtime.refreshNyxidCapabilities()).toEqual({
+      state: "unavailable",
+    });
+    expect(await runtime.logoutNyxid()).toEqual({ state: "unavailable" });
+    await runtime.onNyxidChanged(listener);
+
+    const persisted = storage.serializedValues().toLocaleLowerCase();
+    expect(persisted).not.toContain("access_token");
+    expect(persisted).not.toContain("refresh_token");
+    expect(persisted).not.toContain("device_code");
+    expect(persisted).not.toContain("bearer");
+    expect(listener).not.toHaveBeenCalled();
   });
 });

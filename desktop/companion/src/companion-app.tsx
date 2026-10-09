@@ -18,6 +18,7 @@ import {
   createCompanionRuntime,
   isTauriHost,
   type CompanionRuntime,
+  type NyxIdView,
   type Unlisten,
 } from "./runtime";
 
@@ -114,6 +115,9 @@ export function CompanionApp({ runtime: suppliedRuntime }: CompanionAppProps) {
     [suppliedRuntime],
   );
   const [snapshot, setSnapshot] = useState<CompanionSnapshot>();
+  const [nyxIdView, setNyxIdView] = useState<NyxIdView>({
+    state: "checking",
+  });
   const [screen, setScreen] = useState<Screen>("idle");
   const [mood, setMood] = useState<RecommendationMood>();
   const [refreshRound, setRefreshRound] = useState(0);
@@ -206,6 +210,49 @@ export function CompanionApp({ runtime: suppliedRuntime }: CompanionAppProps) {
       for (const unlisten of unlisteners) {
         void unlisten();
       }
+    };
+  }, [runtime]);
+
+  useEffect(() => {
+    let alive = true;
+    let receivedLiveState = false;
+    let unlisten: Unlisten | undefined;
+
+    async function bootNyxId() {
+      try {
+        unlisten = await runtime.onNyxidChanged((next) => {
+          if (!alive) return;
+          receivedLiveState = true;
+          setNyxIdView(next);
+        });
+        if (!alive) {
+          await unlisten();
+          return;
+        }
+
+        const initial = await runtime.nyxidStatus();
+        if (alive && !receivedLiveState) {
+          setNyxIdView(initial);
+        }
+      } catch (error) {
+        if (alive) {
+          setNyxIdView({
+            state: "error",
+            error: {
+              code: "status_unavailable",
+              message: errorMessage(error),
+              retryable: true,
+              retryAction: "refresh",
+            },
+          });
+        }
+      }
+    }
+
+    void bootNyxId();
+    return () => {
+      alive = false;
+      if (unlisten) void unlisten();
     };
   }, [runtime]);
 
@@ -428,6 +475,7 @@ export function CompanionApp({ runtime: suppliedRuntime }: CompanionAppProps) {
       <SettingsPanel
         settings={snapshot.settings}
         launchAtLogin={launchAtLogin}
+        nyxIdView={nyxIdView}
         onClose={() =>
           setScreen(snapshot.runtime.activePrompt ? "meal" : "idle")
         }
@@ -442,7 +490,19 @@ export function CompanionApp({ runtime: suppliedRuntime }: CompanionAppProps) {
           setLaunchAtLoginState(actual);
         }}
         onDemoReminder={triggerMealPicker}
-        onOpenNyxid={() => runtime.openNyxidAssistant()}
+        onConnectNyxId={async () => {
+          setNyxIdView(await runtime.startNyxidLogin());
+        }}
+        onCancelNyxId={async () => {
+          setNyxIdView(await runtime.cancelNyxidLogin());
+        }}
+        onRefreshNyxId={async () => {
+          setNyxIdView(await runtime.refreshNyxidCapabilities());
+        }}
+        onLogoutNyxId={async () => {
+          setNyxIdView(await runtime.logoutNyxid());
+        }}
+        onOpenNyxIdAssistant={() => runtime.openNyxidAssistant()}
       />
     );
   } else if (screen === "celebration" && celebration) {

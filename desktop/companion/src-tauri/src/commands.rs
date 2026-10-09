@@ -4,6 +4,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::desktop::{emit_state_changed, present_due_prompt, sync_pause_item};
 use crate::model::{CompanionSettings, CompanionSnapshot, MealId, Mood};
+use crate::nyxid::{NyxIdState, NyxIdView};
 use crate::scheduler::DEFAULT_SNOOZE_MINUTES;
 use crate::state::CompanionState;
 use crate::window::{self, WindowMode};
@@ -160,4 +161,41 @@ pub fn set_launch_at_login(app: AppHandle, enabled: bool) -> Result<bool, String
 #[tauri::command]
 pub fn open_nyxid_assistant(app: AppHandle) -> Result<(), String> {
     crate::desktop::open_nyxid_assistant(&app)
+}
+
+#[tauri::command]
+pub fn nyxid_status(state: State<'_, NyxIdState>) -> NyxIdView {
+    state.view()
+}
+
+#[tauri::command]
+pub async fn start_nyxid_login(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+) -> Result<NyxIdView, String> {
+    Ok(state.inner().clone().start_login(app).await)
+}
+
+#[tauri::command]
+pub async fn cancel_nyxid_login(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+) -> Result<NyxIdView, String> {
+    Ok(state.inner().clone().cancel_login(app).await)
+}
+
+#[tauri::command]
+pub async fn refresh_nyxid_capabilities(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+) -> Result<NyxIdView, String> {
+    Ok(state.inner().clone().refresh_capabilities(app).await)
+}
+
+#[tauri::command]
+pub async fn logout_nyxid(
+    app: AppHandle,
+    state: State<'_, NyxIdState>,
+) -> Result<NyxIdView, String> {
+    Ok(state.inner().clone().logout(app).await)
 }

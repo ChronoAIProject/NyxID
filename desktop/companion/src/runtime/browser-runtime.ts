@@ -18,6 +18,7 @@ import type {
   Unlisten,
   WindowMode,
 } from "./companion-runtime";
+import type { NyxIdView } from "./nyxid";
 
 export const BROWSER_SNAPSHOT_KEY = "nyxid.companion.snapshot.v1";
 export const BROWSER_LAUNCH_AT_LOGIN_KEY = "nyxid.companion.launch-at-login.v1";
@@ -459,6 +460,26 @@ export class BrowserCompanionRuntime implements CompanionRuntime {
     }
   }
 
+  async nyxidStatus(): Promise<NyxIdView> {
+    return { state: "unavailable" };
+  }
+
+  async startNyxidLogin(): Promise<NyxIdView> {
+    return { state: "unavailable" };
+  }
+
+  async cancelNyxidLogin(): Promise<NyxIdView> {
+    return { state: "unavailable" };
+  }
+
+  async refreshNyxidCapabilities(): Promise<NyxIdView> {
+    return { state: "unavailable" };
+  }
+
+  async logoutNyxid(): Promise<NyxIdView> {
+    return { state: "unavailable" };
+  }
+
   async getLaunchAtLogin(): Promise<boolean> {
     try {
       return this.storage?.getItem(BROWSER_LAUNCH_AT_LOGIN_KEY) === "true";
@@ -490,6 +511,11 @@ export class BrowserCompanionRuntime implements CompanionRuntime {
     return () => {
       this.mealListeners.delete(listener);
     };
+  }
+
+  async onNyxidChanged(listener: (view: NyxIdView) => void): Promise<Unlisten> {
+    void listener;
+    return () => undefined;
   }
 
   dispose(): void {

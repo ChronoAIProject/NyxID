@@ -39,6 +39,7 @@ const AUTH_DEVICE_SLOW_DOWN_INCREMENT_SECS: i64 = 5;
 const AUTH_DEVICE_USER_CODE_LEN: usize = 8;
 const AUTH_DEVICE_USER_CODE_WRITE_RETRIES: usize = 5;
 const AUTH_DEVICE_TERMINAL_RETENTION_SECS: i64 = 86_400;
+const AUTH_DEVICE_RECOVERY_SECRET_BYTES: usize = 32;
 const AUTH_DEVICE_USER_CODE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub(crate) use super::login_client_context::*;
 pub use crate::models::login_client_context::LoginClientContext as InitiateInput;
@@ -123,6 +124,30 @@ pub async fn initiate(
     initiate_with_user_code_generator(db, hmac_key, input, generate_user_code).await
 }
 
+pub async fn initiate_with_recovery(
+    db: &Database,
+    hmac_key: &[u8],
+    input: InitiateInput,
+    recovery_secret: &str,
+) -> AppResult<InitiateOutput> {
+    validate_recovery_secret(recovery_secret).map_err(|_| {
+        AppError::ValidationError(
+            "recovery_secret must be 32 random bytes encoded as unpadded base64url".into(),
+        )
+    })?;
+    initiate_reserved_with_recovery(
+        db,
+        hmac_key,
+        sanitize_context(input),
+        false,
+        generate_user_code,
+        Some(recovery_secret_hmac(hmac_key, recovery_secret)),
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
 /// New grants live outside the legacy TTL and delivery protocol during rollout.
 pub async fn initiate_v2(
     db: &Database,
@@ -187,7 +212,32 @@ async fn initiate_reserved<F>(
     hmac_key: &[u8],
     input: InitiateInput,
     supports_grant_choice: bool,
+    user_code_generator: F,
+    #[cfg(test)] reservation_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
+) -> AppResult<InitiateOutput>
+where
+    F: FnMut() -> String,
+{
+    initiate_reserved_with_recovery(
+        db,
+        hmac_key,
+        input,
+        supports_grant_choice,
+        user_code_generator,
+        None,
+        #[cfg(test)]
+        reservation_barrier,
+    )
+    .await
+}
+
+async fn initiate_reserved_with_recovery<F>(
+    db: &Database,
+    hmac_key: &[u8],
+    input: InitiateInput,
+    supports_grant_choice: bool,
     mut user_code_generator: F,
+    recovery_secret_hmac: Option<String>,
     #[cfg(test)] reservation_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
 ) -> AppResult<InitiateOutput>
 where
@@ -249,6 +299,7 @@ where
             supports_grant_choice,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: hmac_hex(hmac_key, device_code.as_bytes()),
+            recovery_secret_hmac: recovery_secret_hmac.clone(),
             user_code_hmac: user_code_hmac.clone(),
             user_code_reservation_hmac: Some(user_code_hmac),
             status: AuthDeviceCodeStatus::Pending,
@@ -337,6 +388,140 @@ pub async fn poll_and_claim(
     poll_internal(db, hmac_key, device_code, None, true).await
 }
 
+/// Revoke an account grant using the two requester-held capabilities created
+/// with a legacy device-login request. Requests without an opt-in recovery
+/// secret and all v2/Agent Key requests fail closed.
+pub async fn cancel_account_delivery(
+    db: &Database,
+    hmac_key: &[u8],
+    device_code: &str,
+    recovery_secret: &str,
+) -> AppResult<()> {
+    if !device_code.starts_with(AUTH_DEVICE_CODE_PREFIX)
+        || validate_recovery_secret(recovery_secret).is_err()
+    {
+        return Err(AppError::AuthDeviceCodeNotFound);
+    }
+
+    let collection = collection_for_protocol(db, false);
+    let device_code_hmac = hmac_hex(hmac_key, device_code.as_bytes());
+    let recovery_secret_hmac = recovery_secret_hmac(hmac_key, recovery_secret);
+
+    loop {
+        let row = collection
+            .find_one(doc! {
+                "device_code_hmac": &device_code_hmac,
+                "recovery_secret_hmac": &recovery_secret_hmac,
+            })
+            .await?
+            .ok_or(AppError::AuthDeviceCodeNotFound)?;
+
+        if row.login_approval_id.is_some()
+            || row.supports_grant_choice
+            || row.agent_key_grant.is_some()
+        {
+            return Err(AppError::AuthDeviceCodeNotFound);
+        }
+
+        let now = Utc::now();
+        if row.status == AuthDeviceCodeStatus::Pending {
+            let cancelled = collection
+                .update_one(
+                    doc! {
+                        "_id": &row.id,
+                        "status": "pending",
+                        "device_code_hmac": &device_code_hmac,
+                        "recovery_secret_hmac": &recovery_secret_hmac,
+                    },
+                    doc! {
+                        "$set": {
+                            "status": "expired",
+                            "expires_at": bson::DateTime::from_chrono(now),
+                            "purge_at": bson::DateTime::from_chrono(
+                                now + Duration::seconds(AUTH_DEVICE_TERMINAL_RETENTION_SECS),
+                            ),
+                        },
+                        "$unset": {
+                            "delivery_access_token_encrypted": "",
+                            "delivery_refresh_token_encrypted": "",
+                        },
+                    },
+                )
+                .await?;
+            if cancelled.modified_count == 1 {
+                return Ok(());
+            }
+            // Approval may have won the pending-row race. Reload and revoke
+            // the session it created rather than terminalizing it blindly.
+            continue;
+        }
+
+        if let Some(session_id) = row.approved_session_id.as_deref() {
+            token_service::revoke_session(db, session_id, None).await?;
+            let cancelled = collection
+                .update_one(
+                    doc! {
+                        "_id": &row.id,
+                        "device_code_hmac": &device_code_hmac,
+                        "recovery_secret_hmac": &recovery_secret_hmac,
+                        "approved_session_id": session_id,
+                    },
+                    doc! {
+                        "$set": {
+                            "status": "expired",
+                            "expires_at": bson::DateTime::from_chrono(now),
+                            "purge_at": bson::DateTime::from_chrono(
+                                account_delivery_purge_at(&row, now),
+                            ),
+                        },
+                        "$unset": {
+                            "delivery_access_token_encrypted": "",
+                            "delivery_refresh_token_encrypted": "",
+                        },
+                    },
+                )
+                .await?;
+            if cancelled.modified_count == 1 {
+                return Ok(());
+            }
+            // Browser delivery replaces the approved session id transactionally.
+            // If it won this race, revoke the replacement before reporting success.
+            continue;
+        } else if matches!(
+            row.status,
+            AuthDeviceCodeStatus::Approved | AuthDeviceCodeStatus::Delivered
+        ) {
+            return Err(AppError::Internal(
+                "auth-device account grant is missing its session id".into(),
+            ));
+        }
+
+        collection
+            .update_one(
+                doc! {
+                    "_id": &row.id,
+                    "device_code_hmac": &device_code_hmac,
+                    "recovery_secret_hmac": &recovery_secret_hmac,
+                },
+                doc! {
+                    "$set": {
+                        "status": "expired",
+                        "expires_at": bson::DateTime::from_chrono(now),
+                        "purge_at": bson::DateTime::from_chrono(
+                            account_delivery_purge_at(&row, now),
+                        ),
+                    },
+                    "$unset": {
+                        "delivery_access_token_encrypted": "",
+                        "delivery_refresh_token_encrypted": "",
+                    },
+                },
+            )
+            .await?;
+        return Ok(());
+    }
+}
+
 pub async fn poll_and_prepare(
     db: &Database,
     encryption: &EncryptionKeys,
@@ -382,11 +567,13 @@ pub async fn poll_for_browser(
     let original_id = delivery.session_id.clone();
     let device_hash = hmac_hex(hmac_key, device_code.as_bytes());
     let codes = collection_for_device_code(db, device_code);
-    let request_id = codes
+    let request = codes
         .find_one(doc! {"device_code_hmac": &device_hash})
         .await?
-        .ok_or(AppError::AuthDeviceCodeNotFound)?
-        .id;
+        .ok_or(AppError::AuthDeviceCodeNotFound)?;
+    let request_id = request.id.clone();
+    let purge_at = account_delivery_purge_at(&request, now);
+    let recorded_browser_id = browser_id.clone();
     let db_owned = db.clone();
     let transaction_codes = codes.clone();
     let mut transaction = db.client().start_session().await?;
@@ -398,7 +585,8 @@ pub async fn poll_for_browser(
                 "device_code_hmac": &device_hash, "status": "approved", "agent_key_grant": Bson::Null,
                 "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
             }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-                "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
+                "approved_session_id": &recorded_browser_id,
+                "purge_at": bson::DateTime::from_chrono(purge_at)},
                 "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
                 .session(&mut *session).await?;
             if claimed.is_none() { return Err(AppError::AuthDeviceCodeAlreadyDelivered); }
@@ -864,6 +1052,23 @@ pub(crate) fn hmac_hex(hmac_key: &[u8], payload: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+fn validate_recovery_secret(secret: &str) -> Result<(), ()> {
+    let decoded = URL_SAFE_NO_PAD.decode(secret).map_err(|_| ())?;
+    if decoded.len() != AUTH_DEVICE_RECOVERY_SECRET_BYTES
+        || URL_SAFE_NO_PAD.encode(decoded) != secret
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn recovery_secret_hmac(hmac_key: &[u8], secret: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(hmac_key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(b"auth-device-recovery-secret\0");
+    mac.update(secret.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 fn approve_session_user_agent(approver_user_agent: Option<&str>) -> String {
     match approver_user_agent {
         Some(user_agent) if user_agent.starts_with("nyxid-cli/") => user_agent.to_string(),
@@ -970,7 +1175,7 @@ async fn mark_expired(
 
 async fn claim_approved_delivery(
     collection: &Collection<AuthDeviceCode>,
-    row_id: &str,
+    row: &AuthDeviceCode,
     now: DateTime<Utc>,
 ) -> AppResult<Option<AuthDeviceCode>> {
     let delivered_status = bson::to_bson(&AuthDeviceCodeStatus::Delivered)
@@ -978,13 +1183,13 @@ async fn claim_approved_delivery(
 
     let claimed = collection
         .find_one_and_update(
-            doc! { "_id": row_id, "status": "approved", "agent_key_grant": Bson::Null, "expires_at": {"$gt": bson::DateTime::from_chrono(now)} },
+            doc! { "_id": &row.id, "status": "approved", "agent_key_grant": Bson::Null, "expires_at": {"$gt": bson::DateTime::from_chrono(now)} },
             doc! {
                 "$set": {
                     "status": delivered_status,
                     "delivered_at": bson::DateTime::from_chrono(now),
                     "last_polled_at": bson::DateTime::from_chrono(now),
-                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+                    "purge_at": bson::DateTime::from_chrono(account_delivery_purge_at(row, now)),
                 },
                 "$unset": {
                     "delivery_access_token_encrypted": "",
@@ -996,6 +1201,16 @@ async fn claim_approved_delivery(
         .await?;
 
     Ok(claimed)
+}
+
+fn account_delivery_purge_at(row: &AuthDeviceCode, now: DateTime<Utc>) -> DateTime<Utc> {
+    if row.recovery_secret_hmac.is_some() && row.approved_session_id.is_some() {
+        return row
+            .purge_at
+            .filter(|purge_at| *purge_at > now)
+            .unwrap_or_else(|| now + Duration::seconds(token_service::SESSION_TTL_SECS));
+    }
+    now + Duration::seconds(AUTH_DEVICE_TERMINAL_RETENTION_SECS)
 }
 
 #[tracing::instrument(name = "auth_device.deliver", skip_all, fields(row_id = %row.id, latency_ms = (now - row.created_at).num_milliseconds()))]
@@ -1043,7 +1258,7 @@ async fn deliver_approved_claim(
             .map(|delivery| PollClaim::Account(Box::new(delivery)))
             .ok_or_else(|| AppError::Internal("Missing prepared delivery".into()));
     }
-    match claim_approved_delivery(collection, &row.id, Utc::now()).await? {
+    match claim_approved_delivery(collection, row, Utc::now()).await? {
         Some(claimed) => {
             if let Some(delivery) = prepared {
                 return Ok(PollClaim::Account(Box::new(delivery)));
@@ -2512,6 +2727,7 @@ mod tests {
             supports_grant_choice: false,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: hmac_hex(TEST_HMAC_KEY, b"device-code"),
+            recovery_secret_hmac: None,
             user_code_hmac: hmac_hex(TEST_HMAC_KEY, b"ABCD1234"),
             requested_profile: None,
             user_code_reservation_hmac: None,
@@ -2597,6 +2813,7 @@ mod tests {
             supports_grant_choice: false,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),
+            recovery_secret_hmac: None,
             user_code_hmac: "def456aa".repeat(8),
             requested_profile: None,
             user_code_reservation_hmac: None,

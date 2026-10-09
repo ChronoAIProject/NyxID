@@ -11,8 +11,10 @@ offering a few explainable meal ideas, and learning from explicit choices.
 - Deterministic on-device recommendations based on mood, budget, dietary
   preferences, avoided ingredients, and explicit accept/dislike history.
 - Atomic local persistence and reminder recovery after an app restart.
-- A fixed external link to the NyxID Assistant for connected services and
-  authorization. The local UI never receives a NyxID credential.
+- Native NyxID device authorization, account-session refresh/logout, and a
+  live summary of the user's authorized services from `GET /api/v1/keys`.
+- A fixed external link to the NyxID Assistant. Embedded Assistant chat is not
+  part of this slice.
 
 Nearby restaurant search, delivery ordering, payment, cloud preference sync,
 and embedded Assistant chat are intentionally outside this first slice. The
@@ -45,7 +47,10 @@ The Tauri app uses a transparent, always-on-top window. It stores
 `companion-snapshot.json` in the OS application-data directory for
 `dev.nyxid.companion`. The file contains meal settings and compact explicit
 feedback only; it contains no passwords, API keys, NyxID tokens, browsing
-history, or ambient activity data.
+history, or ambient activity data. NyxID access/refresh tokens and unfinished
+device-login recovery material remain in Rust and are stored only through the
+operating system keychain. React receives only public confirmation details,
+the sanitized account profile, and service-state summaries.
 
 ## Focused verification
 
@@ -55,15 +60,16 @@ npx vitest run \
   src/domain/companion.test.ts \
   src/domain/meal-clock.test.ts \
   src/domain/recommendations.test.ts \
-  src/runtime/browser-runtime.test.ts
-npm run typecheck
-npm run lint
-npm run format:check
+  src/runtime/browser-runtime.test.ts \
+  src/runtime/nyxid.test.ts \
+  src/runtime/tauri-runtime.test.ts
 
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 ```
 
-Production frontend and native release builds run in the scoped GitHub Actions
-workflow rather than as part of routine local validation.
+Run ESLint and Prettier only for the changed frontend files selected by the
+repository scope analyzer. Affected typechecking, the complete frontend suite,
+and production/native release builds run in GitHub Actions rather than as part
+of routine local validation.

@@ -924,21 +924,37 @@ h1 {
   color: var(--ink-faint);
 }
 
-.nyxid-row {
+.nyxid-account {
+  display: grid;
+  gap: 13px;
+}
+
+.nyxid-account-header {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
 }
 
-.nyxid-mark {
+.nyxid-mark,
+.nyxid-avatar {
   width: 34px;
   height: 34px;
   display: grid;
   place-items: center;
   border-radius: 7px;
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.nyxid-mark {
   color: #46359b;
   background: var(--violet-soft);
+}
+
+.nyxid-avatar {
+  color: #174f40;
+  background: var(--mint-soft);
 }
 
 .nyxid-mark svg {
@@ -946,19 +962,187 @@ h1 {
   height: 17px;
 }
 
-.nyxid-row h2,
-.nyxid-row p {
+.nyxid-account-heading {
+  min-width: 0;
+}
+
+.nyxid-account-heading h2,
+.nyxid-account-heading p {
   margin: 0;
 }
 
-.nyxid-row h2 {
+.nyxid-account-heading h2 {
+  overflow: hidden;
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.nyxid-row p {
+.nyxid-account-heading p {
   margin-top: 3px;
+  overflow: hidden;
   color: var(--ink-faint);
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nyxid-account .inline-action {
+  min-height: 32px;
+}
+
+.nyxid-spinner {
+  width: 18px;
+  height: 18px;
+  margin-right: 7px;
+  color: var(--ink-faint);
+}
+
+.nyxid-header-action {
+  box-shadow: none;
+}
+
+.nyxid-approval {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 12px;
+  align-items: center;
+  padding: 9px 11px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.nyxid-approval > span,
+.nyxid-approval small {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.nyxid-approval code {
+  justify-self: end;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 14px;
+  font-weight: 760;
+  user-select: text;
+}
+
+.nyxid-approval small {
+  grid-column: 1 / -1;
+}
+
+.nyxid-problem {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: #8f352b;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.nyxid-problem svg {
+  width: 15px;
+  height: 15px;
+}
+
+.nyxid-capability-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.nyxid-capability-counts > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 9px 4px;
+  text-align: center;
+}
+
+.nyxid-capability-counts > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.nyxid-capability-counts strong {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.nyxid-capability-counts span {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.nyxid-service-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nyxid-service-list li {
+  min-height: 30px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+
+.nyxid-service-list li:first-child {
+  border-top: 0;
+}
+
+.nyxid-service-list li > span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 640;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nyxid-service-list small {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.nyxid-service-state {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mint);
+}
+
+.nyxid-service-state--attention {
+  background: var(--coral);
+}
+
+.nyxid-service-state--disabled {
+  background: #92949b;
+}
+
+.nyxid-service-list .nyxid-service-more {
+  display: block;
+  min-height: 0;
+  padding-top: 6px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  text-align: right;
+}
+
+.nyxid-empty {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.nyxid-account-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
 }
 
 .privacy-note {

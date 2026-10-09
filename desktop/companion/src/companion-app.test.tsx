@@ -13,7 +13,12 @@ import {
   type MealId,
   type RecommendationMood,
 } from "./domain";
-import type { CompanionRuntime, Unlisten, WindowMode } from "./runtime";
+import type {
+  CompanionRuntime,
+  NyxIdView,
+  Unlisten,
+  WindowMode,
+} from "./runtime";
 
 function clone(snapshot: CompanionSnapshot): CompanionSnapshot {
   return parseCompanionSnapshot(snapshot, snapshot.settings.timezone);
@@ -30,12 +35,50 @@ function onboardedSnapshot(): CompanionSnapshot {
   return snapshot;
 }
 
+function connectedNyxIdView(): NyxIdView {
+  return {
+    state: "connected",
+    user: {
+      id: "user-1",
+      email: "xiaokui@example.com",
+      displayName: "小葵",
+    },
+    capabilities: {
+      enabledCount: 2,
+      disabledCount: 1,
+      attentionCount: 1,
+      checkedAt: "2026-10-09T10:00:00Z",
+      services: [
+        {
+          id: "service-1",
+          slug: "api-github",
+          label: "GitHub",
+          state: "enabled",
+        },
+        {
+          id: "service-2",
+          slug: "api-google",
+          label: "Google",
+          state: "attention",
+        },
+        {
+          id: "service-3",
+          slug: "llm-openai",
+          label: "OpenAI",
+          state: "disabled",
+        },
+      ],
+    },
+  };
+}
+
 class TestRuntime implements CompanionRuntime {
   private current: CompanionSnapshot;
   private readonly stateListeners = new Set<
     (snapshot: CompanionSnapshot) => void
   >();
   private readonly mealListeners = new Set<(prompt: ActivePrompt) => void>();
+  private readonly nyxIdListeners = new Set<(view: NyxIdView) => void>();
 
   readonly saveSettingsCall = vi.fn();
   readonly dislikeCall = vi.fn();
@@ -44,19 +87,30 @@ class TestRuntime implements CompanionRuntime {
   readonly skipCall = vi.fn();
   readonly setWindowModeCall = vi.fn();
   readonly openNyxidAssistantCall = vi.fn();
+  readonly startNyxIdLoginCall = vi.fn();
+  readonly cancelNyxIdLoginCall = vi.fn();
+  readonly refreshNyxIdCall = vi.fn();
+  readonly logoutNyxIdCall = vi.fn();
+  readonly nyxIdStatusCall = vi.fn();
   readonly triggerDemoCall = vi.fn();
   readonly snapshotCall = vi.fn();
   private readonly launchAtLoginResult: Promise<boolean>;
   private readonly saveSettingsGate: Promise<void>;
+  private readonly nyxIdStatusResult: Promise<NyxIdView>;
+  private currentNyxId: NyxIdView = { state: "signed_out" };
 
   constructor(
     snapshot: CompanionSnapshot,
     launchAtLoginResult: Promise<boolean> = Promise.resolve(false),
     saveSettingsGate: Promise<void> = Promise.resolve(),
+    nyxIdStatusResult: Promise<NyxIdView> = Promise.resolve({
+      state: "signed_out",
+    }),
   ) {
     this.current = clone(snapshot);
     this.launchAtLoginResult = launchAtLoginResult;
     this.saveSettingsGate = saveSettingsGate;
+    this.nyxIdStatusResult = nyxIdStatusResult;
   }
 
   private commit(snapshot: CompanionSnapshot): CompanionSnapshot {
@@ -79,6 +133,13 @@ class TestRuntime implements CompanionRuntime {
   emitMealDue(prompt: ActivePrompt): void {
     for (const listener of this.mealListeners) {
       listener(prompt);
+    }
+  }
+
+  emitNyxIdView(view: NyxIdView): void {
+    this.currentNyxId = view;
+    for (const listener of this.nyxIdListeners) {
+      listener(view);
     }
   }
 
@@ -160,6 +221,43 @@ class TestRuntime implements CompanionRuntime {
     this.openNyxidAssistantCall();
   }
 
+  async nyxidStatus(): Promise<NyxIdView> {
+    this.nyxIdStatusCall();
+    return this.nyxIdStatusResult;
+  }
+
+  async startNyxidLogin(): Promise<NyxIdView> {
+    this.startNyxIdLoginCall();
+    const view: NyxIdView = {
+      state: "authorizing",
+      userCode: "ABCD-1234",
+      verificationUrl:
+        "https://nyx.chrono-ai.fun/login/device?user_code=ABCD-1234",
+      expiresAt: "2026-10-09T10:10:00Z",
+    };
+    this.emitNyxIdView(view);
+    return view;
+  }
+
+  async cancelNyxidLogin(): Promise<NyxIdView> {
+    this.cancelNyxIdLoginCall();
+    const view: NyxIdView = { state: "signed_out" };
+    this.emitNyxIdView(view);
+    return view;
+  }
+
+  async refreshNyxidCapabilities(): Promise<NyxIdView> {
+    this.refreshNyxIdCall();
+    return this.currentNyxId;
+  }
+
+  async logoutNyxid(): Promise<NyxIdView> {
+    this.logoutNyxIdCall();
+    const view: NyxIdView = { state: "signed_out" };
+    this.emitNyxIdView(view);
+    return view;
+  }
+
   async getLaunchAtLogin(): Promise<boolean> {
     return this.launchAtLoginResult;
   }
@@ -184,9 +282,17 @@ class TestRuntime implements CompanionRuntime {
     };
   }
 
+  async onNyxidChanged(listener: (view: NyxIdView) => void): Promise<Unlisten> {
+    this.nyxIdListeners.add(listener);
+    return () => {
+      this.nyxIdListeners.delete(listener);
+    };
+  }
+
   dispose(): void {
     this.stateListeners.clear();
     this.mealListeners.clear();
+    this.nyxIdListeners.clear();
   }
 }
 
@@ -254,7 +360,7 @@ describe("CompanionApp", () => {
     expect(screen.getByText(/下次会更懂你的口味/)).toBeInTheDocument();
   });
 
-  it("opens NyxID from settings and can start a demo reminder", async () => {
+  it("starts NyxID device login from settings and can open Assistant once connected", async () => {
     const user = userEvent.setup();
     const runtime = new TestRuntime(onboardedSnapshot());
     const openSpy = vi.spyOn(runtime, "openNyxidAssistant");
@@ -265,16 +371,214 @@ describe("CompanionApp", () => {
     expect(
       screen.getByRole("heading", { name: "陪伴设置" }),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "打开" }));
+    await user.click(screen.getByRole("button", { name: "连接" }));
     await waitFor(() => {
-      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(runtime.startNyxIdLoginCall).toHaveBeenCalledTimes(1);
     });
+    expect(screen.getByLabelText("NyxID 登录确认码")).toHaveTextContent(
+      "ABCD-1234",
+    );
+
+    act(() => runtime.emitNyxIdView(connectedNyxIdView()));
+    expect(screen.getByText("xiaokui@example.com")).toBeInTheDocument();
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "打开 NyxID Assistant" }),
+    );
+    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
 
     await user.click(screen.getByRole("button", { name: "现在试一次提醒" }));
     expect(
       await screen.findByRole("heading", { name: "小葵，今天想怎么吃？" }),
     ).toBeInTheDocument();
     expect(runtime.triggerDemoCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a pending NyxID login and retries terminal outcomes", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(onboardedSnapshot());
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("button", { name: "连接" }));
+    expect(await screen.findByText("等待浏览器确认")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "取消连接" }));
+    await waitFor(() => {
+      expect(runtime.cancelNyxIdLoginCall).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.getByText("未连接")).toBeInTheDocument();
+
+    act(() =>
+      runtime.emitNyxIdView({
+        state: "denied",
+        message: "这次连接没有被批准",
+      }),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("这次连接没有被批准");
+    await user.click(screen.getByRole("button", { name: "重新连接" }));
+    expect(runtime.startNyxIdLoginCall).toHaveBeenCalledTimes(2);
+
+    act(() =>
+      runtime.emitNyxIdView({
+        state: "expired",
+        message: "确认已过期，请重新连接",
+      }),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("确认已过期");
+  });
+
+  it.each([
+    {
+      retryAction: "connect",
+      label: "重试连接",
+      calls: (runtime: TestRuntime) => runtime.startNyxIdLoginCall,
+    },
+    {
+      retryAction: "cancel",
+      label: "重试取消",
+      calls: (runtime: TestRuntime) => runtime.cancelNyxIdLoginCall,
+    },
+    {
+      retryAction: "refresh",
+      label: "重试刷新",
+      calls: (runtime: TestRuntime) => runtime.refreshNyxIdCall,
+    },
+    {
+      retryAction: "logout",
+      label: "重试断开",
+      calls: (runtime: TestRuntime) => runtime.logoutNyxIdCall,
+    },
+  ] as const)(
+    "retries the originating NyxID $retryAction action",
+    async ({ retryAction, label, calls }) => {
+      const user = userEvent.setup();
+      const runtime = new TestRuntime(onboardedSnapshot());
+
+      render(<CompanionApp runtime={runtime} />);
+      await user.click(await screen.findByRole("button", { name: "设置" }));
+      act(() =>
+        runtime.emitNyxIdView({
+          state: "error",
+          error: {
+            code: `${retryAction}_failed`,
+            message: "刚才没有完成",
+            retryable: true,
+            retryAction,
+          },
+        }),
+      );
+
+      await user.click(screen.getByRole("button", { name: label }));
+      await waitFor(() => expect(calls(runtime)).toHaveBeenCalledTimes(1));
+    },
+  );
+
+  it("does not offer a retry for a terminal NyxID error", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(onboardedSnapshot());
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    act(() =>
+      runtime.emitNyxIdView({
+        state: "error",
+        error: {
+          code: "auth_device_already_delivered",
+          message: "这次登录已经被领取",
+          retryable: false,
+          retryAction: null,
+        },
+      }),
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("这次登录已经被领取");
+    expect(
+      screen.queryByRole("button", { name: /重试|重新连接/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("refreshes the connected service summary and disconnects locally", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(onboardedSnapshot());
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    act(() => runtime.emitNyxIdView(connectedNyxIdView()));
+
+    expect(screen.getByLabelText("NyxID 服务状态")).toHaveTextContent(
+      "2已启用1需处理1已停用",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "刷新 NyxID 服务状态" }),
+    );
+    await waitFor(() => {
+      expect(runtime.refreshNyxIdCall).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "断开 NyxID" }));
+    await waitFor(() => {
+      expect(runtime.logoutNyxIdCall).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.getByText("未连接")).toBeInTheDocument();
+  });
+
+  it("keeps meal settings editable while a NyxID action is pending", async () => {
+    const user = userEvent.setup();
+    const runtime = new TestRuntime(onboardedSnapshot());
+    let finishLogin: ((view: NyxIdView) => void) | undefined;
+    const startLogin = vi.spyOn(runtime, "startNyxidLogin").mockImplementation(
+      () =>
+        new Promise<NyxIdView>((resolve) => {
+          finishLogin = resolve;
+        }),
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("button", { name: "连接" }));
+    await waitFor(() => expect(startLogin).toHaveBeenCalled());
+
+    const companionName = screen.getByRole("textbox", { name: "搭子名字" });
+    expect(companionName).toBeEnabled();
+    await user.clear(companionName);
+    await user.type(companionName, "Momo");
+    expect(companionName).toHaveValue("Momo");
+
+    await act(async () => {
+      finishLogin?.({
+        state: "authorizing",
+        userCode: "ABCD-1234",
+        verificationUrl:
+          "https://nyx.chrono-ai.fun/login/device?user_code=ABCD-1234",
+        expiresAt: "2026-10-09T10:10:00Z",
+      });
+    });
+  });
+
+  it("does not overwrite a live NyxID event with stale boot status", async () => {
+    const user = userEvent.setup();
+    let finishStatus: ((view: NyxIdView) => void) | undefined;
+    const statusResult = new Promise<NyxIdView>((resolve) => {
+      finishStatus = resolve;
+    });
+    const runtime = new TestRuntime(
+      onboardedSnapshot(),
+      Promise.resolve(false),
+      Promise.resolve(),
+      statusResult,
+    );
+
+    render(<CompanionApp runtime={runtime} />);
+    await waitFor(() => expect(runtime.nyxIdStatusCall).toHaveBeenCalled());
+    await act(async () => {
+      runtime.emitNyxIdView(connectedNyxIdView());
+      finishStatus?.({ state: "signed_out" });
+    });
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    expect(screen.getByText("xiaokui@example.com")).toBeInTheDocument();
+    expect(screen.queryByText("未连接")).not.toBeInTheDocument();
   });
 
   it("keeps a dirty settings draft open when a meal becomes due", async () => {

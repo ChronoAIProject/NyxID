@@ -1801,6 +1801,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::auth_device::poll_auth_device_web_v2),
         )
         .route("/request", post(handlers::auth_device::request_auth_device))
+        .route("/cancel", post(handlers::auth_device::cancel_auth_device))
         .route("/poll", post(handlers::auth_device::poll_auth_device))
         .route(
             "/poll-web",

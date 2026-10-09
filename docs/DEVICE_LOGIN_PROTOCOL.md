@@ -12,6 +12,15 @@ for HTTP response shapes.
   `/api/v1/auth/device/v2/request` (selectable account/Agent Key). The independent
   `/auth/agent-key` exchange is restricted to Agent Keys. The private poll secret
   selects the protocol; human code spelling does not grant capability.
+- A legacy account requester may include `recovery_secret`, exactly 32 random
+  bytes encoded as unpadded base64url, in its request. The server stores only a
+  domain-separated HMAC. If an approved poll response is lost, the requester may
+  call `POST /api/v1/auth/device/cancel` with both `device_code` and
+  `recovery_secret`; only `200 {"ok":true}` proves that the account session and
+  refresh tokens were revoked. Unknown or mismatched pairs return the same
+  not-found response. Legacy requests that omit the additive field continue to
+  work but cannot use recovery cancellation. Selectable v2 and Agent Key requests
+  reject the field and cannot use this endpoint.
 - Legacy and v2 codes default to eight characters, displayed `XXXX-XXXX`, for
   installed app compatibility. `AUTH_DEVICE_EIGHT_CHAR_CODES=false` restores
   `2-XXXX-XXXX` v2 issuance for rollout rollback. Incompatible readers/writers
@@ -42,6 +51,10 @@ for HTTP response shapes.
   An account grant produces an account session. Only the requester holding the
   private poll secret can collect the selected result once. Approval starts the
   bounded delivery window; abandoned delivery is cleaned up.
+- Successful account delivery still erases encrypted token payloads immediately.
+  For requests that opted into recovery, the remaining HMAC and account session
+  identifier are retained through the session's revocable lifetime so a client
+  that restarts after the former one-day terminal retention can still cancel.
 - Normal `/login` retains the legacy account-only browser exchange. Restricted
   credentials are not silently installed as browser sessions. The existing v2
   browser-poll login-code result is a separate explicit exchange, not a scoped

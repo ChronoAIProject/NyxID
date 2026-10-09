@@ -1,26 +1,25 @@
 import { useState } from "react";
-import {
-  ArrowLeft,
-  BellRing,
-  Cloud,
-  ExternalLink,
-  LoaderCircle,
-  Power,
-  Save,
-} from "lucide-react";
+import { ArrowLeft, BellRing, LoaderCircle, Power, Save } from "lucide-react";
 
 import type { CompanionSettings, MealId } from "../domain/companion";
 import { MEAL_LABELS } from "../meal-copy";
 import { BUDGET_OPTIONS, DIET_OPTIONS } from "../preference-options";
+import type { NyxIdView } from "../runtime";
+import { NyxIdAccountPanel } from "./nyxid-account-panel";
 
 interface SettingsPanelProps {
   readonly settings: CompanionSettings;
   readonly launchAtLogin: boolean;
+  readonly nyxIdView: NyxIdView;
   readonly onClose: () => void;
   readonly onSave: (settings: CompanionSettings) => Promise<CompanionSettings>;
   readonly onSetLaunchAtLogin: (enabled: boolean) => Promise<void>;
   readonly onDemoReminder: () => Promise<void>;
-  readonly onOpenNyxid: () => Promise<void>;
+  readonly onConnectNyxId: () => Promise<void>;
+  readonly onCancelNyxId: () => Promise<void>;
+  readonly onRefreshNyxId: () => Promise<void>;
+  readonly onLogoutNyxId: () => Promise<void>;
+  readonly onOpenNyxIdAssistant: () => Promise<void>;
 }
 
 function SwitchControl({
@@ -49,11 +48,16 @@ function SwitchControl({
 export function SettingsPanel({
   settings,
   launchAtLogin,
+  nyxIdView,
   onClose,
   onSave,
   onSetLaunchAtLogin,
   onDemoReminder,
-  onOpenNyxid,
+  onConnectNyxId,
+  onCancelNyxId,
+  onRefreshNyxId,
+  onLogoutNyxId,
+  onOpenNyxIdAssistant,
 }: SettingsPanelProps) {
   const [draftOverrides, setDraftOverrides] = useState<
     Partial<CompanionSettings>
@@ -62,6 +66,7 @@ export function SettingsPanel({
   const [saving, setSaving] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [runningAction, setRunningAction] = useState(false);
+  const [nyxIdActionPending, setNyxIdActionPending] = useState(false);
   const [error, setError] = useState<string>();
   const draft: CompanionSettings = { ...settings, ...draftOverrides };
   const avoidText = avoidTextOverride ?? settings.avoid.join("、");
@@ -161,6 +166,22 @@ export function SettingsPanel({
       );
     } finally {
       setRunningAction(false);
+    }
+  }
+
+  async function runNyxIdAction(action: () => Promise<void>) {
+    setNyxIdActionPending(true);
+    setError(undefined);
+    try {
+      await action();
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "NyxID 操作失败，请再试一次",
+      );
+    } finally {
+      setNyxIdActionPending(false);
     }
   }
 
@@ -366,24 +387,15 @@ export function SettingsPanel({
           </div>
         </section>
 
-        <section className="settings-section nyxid-row">
-          <div className="nyxid-mark" aria-hidden="true">
-            <Cloud />
-          </div>
-          <div>
-            <h2>NyxID</h2>
-            <p>打开你的 Assistant、服务和授权</p>
-          </div>
-          <button
-            type="button"
-            className="inline-action"
-            disabled={runningAction}
-            onClick={() => void runAction(onOpenNyxid)}
-          >
-            打开
-            <ExternalLink aria-hidden="true" />
-          </button>
-        </section>
+        <NyxIdAccountPanel
+          view={nyxIdView}
+          pending={nyxIdActionPending}
+          onConnect={() => runNyxIdAction(onConnectNyxId)}
+          onCancel={() => runNyxIdAction(onCancelNyxId)}
+          onRefresh={() => runNyxIdAction(onRefreshNyxId)}
+          onLogout={() => runNyxIdAction(onLogoutNyxId)}
+          onOpenAssistant={() => runNyxIdAction(onOpenNyxIdAssistant)}
+        />
 
         <section className="privacy-note">
           <Power aria-hidden="true" />

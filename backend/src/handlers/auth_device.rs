@@ -24,8 +24,12 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDeviceRequestBody {
+    /// Optional requester-held recovery capability for legacy account delivery.
+    /// Must be 32 random bytes encoded as unpadded base64url.
+    #[serde(default)]
+    pub recovery_secret: Option<String>,
     #[serde(default)]
     pub requested_profile: Option<String>,
     #[serde(default)]
@@ -69,6 +73,12 @@ pub struct AuthDeviceRequestResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AuthDevicePollBody {
     pub device_code: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AuthDeviceCancelBody {
+    pub device_code: String,
+    pub recovery_secret: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -194,7 +204,7 @@ async fn request_device(
     state: AppState,
     addr: SocketAddr,
     headers: HeaderMap,
-    body: AuthDeviceRequestBody,
+    mut body: AuthDeviceRequestBody,
     supports_grant_choice: bool,
 ) -> AppResult<Json<AuthDeviceRequestResponse>> {
     let resolved_client = resolve_client_context(&headers, addr, &state)?;
@@ -211,6 +221,12 @@ async fn request_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
+    let recovery_secret = body.recovery_secret.take().map(zeroize::Zeroizing::new);
+    if supports_grant_choice && recovery_secret.is_some() {
+        return Err(AppError::ValidationError(
+            "recovery_secret is supported only by legacy account device login".into(),
+        ));
+    }
     let context = capture_client_context(&headers, addr, &state, body)?;
     let initiated = if supports_grant_choice {
         auth_device_service::initiate_v2(
@@ -218,6 +234,14 @@ async fn request_device(
             state.auth_device_hmac_key.as_slice(),
             context,
             state.config.auth_device_eight_char_codes,
+        )
+        .await?
+    } else if let Some(recovery_secret) = recovery_secret.as_deref() {
+        auth_device_service::initiate_with_recovery(
+            &state.db,
+            state.auth_device_hmac_key.as_slice(),
+            context,
+            recovery_secret,
         )
         .await?
     } else {
@@ -242,6 +266,52 @@ async fn request_device(
         expires_in: initiated.expires_in,
         interval: initiated.interval,
     }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/cancel",
+    request_body = AuthDeviceCancelBody,
+    responses(
+        (status = 200, body = AuthDeviceDecisionResponse),
+        (status = 404, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    tag = "Auth Device Login"
+)]
+#[tracing::instrument(skip_all, fields(client_ip_hash, route = "cancel"))]
+pub async fn cancel_auth_device(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AuthDeviceCancelBody>,
+) -> AppResult<Json<AuthDeviceDecisionResponse>> {
+    let client_ip = resolve_client_ip(&headers, addr, &state)?;
+    let client_ip_hash = client_ip_hash(&state, client_ip);
+    tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
+    if !state
+        .auth_device_poll_limiter
+        .check_shared(client_ip)
+        .await?
+    {
+        rate_limit_hit("cancel", &client_ip_hash);
+        return Err(AppError::AuthDeviceCodeRateLimited);
+    }
+
+    auth_device_service::cancel_account_delivery(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        &body.device_code,
+        &body.recovery_secret,
+    )
+    .await?;
+
+    tracing::info!(
+        client_ip_hash = %client_ip_hash,
+        status_code = 200_u16,
+        "auth_device.handler.cancel"
+    );
+    Ok(Json(AuthDeviceDecisionResponse { ok: true }))
 }
 
 #[utoipa::path(post, path = "/api/v1/auth/device/v2/poll", request_body = AuthDevicePollBody,
@@ -898,6 +968,7 @@ mod tests {
     use super::*;
     use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
     use axum::http::{StatusCode, header};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use mongodb::bson::doc;
     use reqwest::Client;
     use serde_json::Value;
@@ -1178,6 +1249,53 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response, serde_json::json!({ "ok": true }));
         request_json
+    }
+
+    fn recovery_secret(byte: u8) -> String {
+        URL_SAFE_NO_PAD.encode([byte; 32])
+    }
+
+    async fn request_and_approve_with_recovery(
+        state: &AppState,
+        server: &TestServer,
+        user_id: &str,
+        recovery_secret: &str,
+    ) -> Value {
+        let token = access_token(state, user_id);
+        let (status, request_json) = post_json(
+            server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({ "recovery_secret": recovery_secret }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, response) = post_json(
+            server,
+            "/api/v1/auth/device/approve",
+            Some(&token),
+            serde_json::json!({ "user_code": request_json["user_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, serde_json::json!({ "ok": true }));
+        request_json
+    }
+
+    async fn row_for_device_code(state: &AppState, device_code: &str) -> AuthDeviceCode {
+        state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .find_one(doc! {
+                "device_code_hmac": auth_device_service::hmac_hex(
+                    state.auth_device_hmac_key.as_slice(),
+                    device_code.as_bytes(),
+                )
+            })
+            .await
+            .expect("query auth-device row")
+            .expect("auth-device row exists")
     }
 
     #[tokio::test]
@@ -2130,6 +2248,385 @@ mod tests {
         assert_eq!(statuses, [StatusCode::OK, StatusCode::GONE]);
         let gone = if a.0 == StatusCode::GONE { a.1 } else { b.1 };
         assert_error(&gone, "auth_device_already_delivered", 11205);
+    }
+
+    #[tokio::test]
+    async fn auth_device_lost_poll_response_can_be_revoked_and_cancel_retried() {
+        let Some(state) = setup_state("auth_device_lost_poll_recovery").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let recovery_secret = recovery_secret(0x41);
+        let request =
+            request_and_approve_with_recovery(&state, &server, &user_id, &recovery_secret).await;
+        let device_code = request["device_code"].as_str().expect("device code");
+        let approved = row_for_device_code(&state, device_code).await;
+        let session_id = approved.approved_session_id.expect("approved session");
+
+        // Simulate transport loss after the server has committed delivery but
+        // before the client has consumed the response body.
+        let response = server
+            .client
+            .post(format!("{}/api/v1/auth/device/poll", server.base_url))
+            .json(&serde_json::json!({ "device_code": device_code }))
+            .send()
+            .await
+            .expect("send first poll");
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": device_code }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_error(&json, "auth_device_already_delivered", 11205);
+
+        let delivered = row_for_device_code(&state, device_code).await;
+        assert_eq!(delivered.status, AuthDeviceCodeStatus::Delivered);
+        assert!(
+            delivered.purge_at.expect("recovery purge time")
+                > chrono::Utc::now() + chrono::Duration::days(29)
+        );
+
+        for _ in 0..2 {
+            let (status, json) = post_json(
+                &server,
+                "/api/v1/auth/device/cancel",
+                None,
+                serde_json::json!({
+                    "device_code": device_code,
+                    "recovery_secret": recovery_secret,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json, serde_json::json!({ "ok": true }));
+        }
+
+        let session = state
+            .db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &session_id })
+            .await
+            .expect("query session")
+            .expect("session exists");
+        assert!(session.revoked);
+        assert_eq!(
+            state
+                .db
+                .collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! { "session_id": &session_id, "revoked": false })
+                .await
+                .expect("count live refresh tokens"),
+            0
+        );
+        let cancelled = row_for_device_code(&state, device_code).await;
+        assert_eq!(cancelled.status, AuthDeviceCodeStatus::Expired);
+        assert!(cancelled.delivery_access_token_encrypted.is_none());
+        assert!(cancelled.delivery_refresh_token_encrypted.is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_device_cancel_revokes_browser_session_replacement() {
+        let Some(state) = setup_state("auth_device_browser_recovery").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let recovery_secret = recovery_secret(0x42);
+        let request =
+            request_and_approve_with_recovery(&state, &server, &user_id, &recovery_secret).await;
+        let device_code = request["device_code"].as_str().expect("device code");
+        let original_session_id = row_for_device_code(&state, device_code)
+            .await
+            .approved_session_id
+            .expect("original session");
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll-web",
+            None,
+            serde_json::json!({ "device_code": device_code }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["auth_kind"], "account_session");
+        let browser_session_id = row_for_device_code(&state, device_code)
+            .await
+            .approved_session_id
+            .expect("browser session");
+        assert_ne!(browser_session_id, original_session_id);
+        assert!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .find_one(doc! { "_id": original_session_id })
+                .await
+                .expect("query original session")
+                .expect("original session exists")
+                .revoked
+        );
+        assert!(
+            !state
+                .db
+                .collection::<Session>(SESSIONS)
+                .find_one(doc! { "_id": &browser_session_id })
+                .await
+                .expect("query browser session")
+                .expect("browser session exists")
+                .revoked
+        );
+
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/cancel",
+            None,
+            serde_json::json!({
+                "device_code": device_code,
+                "recovery_secret": recovery_secret,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .find_one(doc! { "_id": browser_session_id })
+                .await
+                .expect("query cancelled browser session")
+                .expect("browser session exists")
+                .revoked
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_device_cancel_requires_both_opt_in_requester_capabilities() {
+        let Some(state) = setup_state("auth_device_cancel_capabilities").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let recovery_token = recovery_secret(0x51);
+        let request =
+            request_and_approve_with_recovery(&state, &server, &user_id, &recovery_token).await;
+        let device_code = request["device_code"].as_str().expect("device code");
+        let session_id = row_for_device_code(&state, device_code)
+            .await
+            .approved_session_id
+            .expect("approved session");
+
+        for body in [
+            serde_json::json!({
+                "device_code": "nyx_adc_unknown",
+                "recovery_secret": &recovery_token,
+            }),
+            serde_json::json!({
+                "device_code": device_code,
+                "recovery_secret": recovery_secret(0x52),
+            }),
+        ] {
+            let (status, json) = post_json(&server, "/api/v1/auth/device/cancel", None, body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_error(&json, "auth_device_code_not_found", 11200);
+        }
+
+        let live = state
+            .db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &session_id })
+            .await
+            .expect("query session")
+            .expect("session exists");
+        assert!(!live.revoked);
+
+        let legacy = request_and_approve(&state, &server, &user_id).await;
+        let legacy_code = legacy["device_code"].as_str().expect("legacy device code");
+        let legacy_session_id = row_for_device_code(&state, legacy_code)
+            .await
+            .approved_session_id
+            .expect("legacy approved session");
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/cancel",
+            None,
+            serde_json::json!({
+                "device_code": legacy_code,
+                "recovery_secret": recovery_secret(0x53),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_error(&json, "auth_device_code_not_found", 11200);
+        assert!(
+            !state
+                .db
+                .collection::<Session>(SESSIONS)
+                .find_one(doc! { "_id": legacy_session_id })
+                .await
+                .expect("query legacy session")
+                .expect("legacy session exists")
+                .revoked
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_device_recovery_survives_original_one_day_retention_boundary() {
+        let Some(state) = setup_state("auth_device_cancel_after_one_day").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let recovery_secret = recovery_secret(0x61);
+        let request =
+            request_and_approve_with_recovery(&state, &server, &user_id, &recovery_secret).await;
+        let device_code = request["device_code"].as_str().expect("device code");
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": device_code }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let delivered = row_for_device_code(&state, device_code).await;
+        let session_id = delivered.approved_session_id.expect("approved session");
+        assert!(
+            delivered.purge_at.expect("recovery purge time")
+                > chrono::Utc::now() + chrono::Duration::days(29)
+        );
+
+        state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .update_one(
+                doc! { "_id": &delivered.id },
+                doc! { "$set": {
+                    "delivered_at": bson::DateTime::from_chrono(
+                        chrono::Utc::now() - chrono::Duration::days(2),
+                    ),
+                    "expires_at": bson::DateTime::from_chrono(
+                        chrono::Utc::now() - chrono::Duration::days(2),
+                    ),
+                } },
+            )
+            .await
+            .expect("age delivered row beyond old retention");
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/cancel",
+            None,
+            serde_json::json!({
+                "device_code": device_code,
+                "recovery_secret": recovery_secret,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!({ "ok": true }));
+        assert!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .find_one(doc! { "_id": session_id })
+                .await
+                .expect("query session")
+                .expect("session exists")
+                .revoked
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_device_pending_cancel_prevents_late_approval() {
+        let Some(state) = setup_state("auth_device_pending_cancel").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let recovery_secret = recovery_secret(0x71);
+        let (status, request) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({ "recovery_secret": recovery_secret }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let device_code = request["device_code"].as_str().expect("device code");
+
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/cancel",
+            None,
+            serde_json::json!({
+                "device_code": device_code,
+                "recovery_secret": recovery_secret,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/approve",
+            Some(&access_token(&state, &user_id)),
+            serde_json::json!({ "user_code": request["user_code"] }),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK);
+        assert_error(&json, "auth_device_expired_token", 11201);
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! { "user_id": user_id, "revoked": false })
+                .await
+                .expect("count sessions"),
+            0
+        );
+        assert_eq!(
+            row_for_device_code(&state, device_code).await.status,
+            AuthDeviceCodeStatus::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_device_recovery_secret_is_validated_and_legacy_only() {
+        let Some(state) = setup_state("auth_device_recovery_contract").await else {
+            return;
+        };
+        let server = spawn_test_server(state).await;
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({ "recovery_secret": "not-high-entropy" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "validation_error");
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/v2/request",
+            None,
+            serde_json::json!({ "recovery_secret": recovery_secret(0x72) }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "validation_error");
     }
 
     #[tokio::test]
