@@ -850,16 +850,20 @@ pub enum CatalogCommands {
     },
     /// Discover operations from the configured OpenAPI URL
     Discover {
+        /// Catalog service UUID or slug
         service: String,
         #[command(flatten)]
         auth: AuthArgs,
     },
     /// Change publication for named operations
     Publish {
+        /// Catalog service UUID or slug
         service: String,
+        /// Operation name to transition (repeatable, at most 200)
         #[arg(long = "operation", required = true)]
         operations: Vec<String>,
-        #[arg(long, default_value="published", value_parser=["published","paused","draft","validated"])]
+        /// Publication state to apply atomically to all selected operations
+        #[arg(long, default_value = "published", value_parser = ["published", "paused", "draft", "validated"])]
         state: String,
         #[command(flatten)]
         auth: AuthArgs,
@@ -908,16 +912,24 @@ pub enum CatalogCommands {
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
-    #[arg(long, value_parser=["provider","connection","internal"])]
+    /// Catalog category: provider, connection, or internal
+    #[arg(long, value_parser = ["provider", "connection", "internal"])]
     pub service_category: Option<String>,
-    #[arg(long, value_parser=["ai_service","tool"])]
+    /// Catalog offering: AI service or Tool
+    #[arg(long, value_parser = ["ai_service", "tool"])]
     pub offering_kind: Option<String>,
+    /// Controlled topic slug (repeatable; replaces the list on update)
     #[arg(long = "topic", conflicts_with = "clear_topics")]
     pub topics: Vec<String>,
+    /// Clear all catalog topics on update
     #[arg(long)]
     pub clear_topics: bool,
+    /// API operator name for the catalog offering
     #[arg(long)]
     pub supplier: Option<String>,
+    /// Clear the catalog supplier metadata (catalog updates only)
+    #[arg(long, conflicts_with = "supplier")]
+    pub clear_supplier: bool,
     /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
     #[arg(long)]
     pub catalog_admin: bool,
@@ -6039,13 +6051,17 @@ pub enum OraclePoolCommands {
 
 #[derive(Subcommand)]
 pub enum ToolsCommands {
+    /// List visible published Tool offerings
     List {
+        /// Filter by a controlled topic slug
         #[arg(long)]
         topic: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Show a Tool offering and its published operations
     Show {
+        /// Catalog Tool slug
         slug: String,
         #[command(flatten)]
         auth: AuthArgs,
@@ -6054,52 +6070,72 @@ pub enum ToolsCommands {
 
 #[derive(Args, Default)]
 pub struct CatalogEndpointArgs {
+    /// Unique operation name (required for add)
     #[arg(long)]
     pub name: Option<String>,
-    #[arg(long, value_parser=["GET","POST","PUT","PATCH","DELETE"])]
+    /// HTTP method (required for add)
+    #[arg(long, value_parser = ["GET", "POST", "PUT", "PATCH", "DELETE"])]
     pub method: Option<String>,
+    /// Path template (required for add)
     #[arg(long)]
     pub path: Option<String>,
+    /// Human-readable operation description
     #[arg(long)]
     pub description: Option<String>,
+    /// JSON parameter schema file
     #[arg(long)]
     pub parameters_file: Option<std::path::PathBuf>,
+    /// JSON request-body schema file
     #[arg(long)]
     pub body_schema_file: Option<std::path::PathBuf>,
-    #[arg(long,value_parser=["public","account","owned_resource"])]
+    /// Data accessible to the operation
+    #[arg(long, value_parser = ["public", "account", "owned_resource"])]
     pub data_scope: Option<String>,
-    #[arg(long,value_parser=["free","metered","resource_backed"])]
+    /// Operation cost classification
+    #[arg(long, value_parser = ["free", "metered", "resource_backed"])]
     pub cost_class: Option<String>,
-    #[arg(long,value_parser=["http_operation","job_start","job_poll"])]
+    /// Operation execution kind
+    #[arg(long, value_parser = ["http_operation", "job_start", "job_poll"])]
     pub execution: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum CatalogEndpointCommands {
+    /// List catalog operations and publication states
     List {
+        /// Catalog service UUID or slug
         service: String,
+        /// Show only published operations
         #[arg(long)]
         published_only: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Add an operation (new Tool operations start as drafts)
     Add {
+        /// Catalog service UUID or slug
         service: String,
         #[command(flatten)]
         endpoint: CatalogEndpointArgs,
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Update an operation contract
     Update {
+        /// Catalog service UUID or slug
         service: String,
+        /// Endpoint UUID or operation name
         endpoint_id: String,
         #[command(flatten)]
         endpoint: CatalogEndpointArgs,
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Pause an operation
     Disable {
+        /// Catalog service UUID or slug
         service: String,
+        /// Endpoint UUID or operation name
         endpoint_id: String,
         #[command(flatten)]
         auth: AuthArgs,

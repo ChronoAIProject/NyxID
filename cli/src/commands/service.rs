@@ -314,6 +314,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 {
                     bail!("Catalog administration cannot be combined with connection options");
                 }
+                catalog_admin::validate_creation_source(
+                    endpoint_url.as_deref(),
+                    twin_of.as_deref(),
+                )?;
+                if catalog.clear_supplier {
+                    bail!("--clear-supplier is only supported for catalog updates");
+                }
                 let mut api = ApiClient::from_auth_checked(&auth).await?;
                 let slug = slug
                     .as_deref()

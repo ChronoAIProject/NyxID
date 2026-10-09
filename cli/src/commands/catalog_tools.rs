@@ -199,6 +199,45 @@ pub async fn run_admin(command: CatalogCommands) -> Result<()> {
     }
 }
 
+fn format_price(price: &Value) -> String {
+    if price == "free" || price.is_null() {
+        return "Free".into();
+    }
+    format!(
+        "{} credits / {}",
+        price["credits_per_unit"].as_str().unwrap_or("?"),
+        price["metric"].as_str().unwrap_or("request")
+    )
+}
+fn format_limits(limits: &Value) -> String {
+    if limits.is_null() {
+        return "none".into();
+    }
+    format!(
+        "{}/s, burst {}",
+        limits["rate_limit_per_second"], limits["burst"]
+    )
+}
+fn format_topics(topics: &Value) -> String {
+    topics
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+fn table_offering(row: &Value) -> Value {
+    let mut display = row.clone();
+    display["pricing"] = format_price(&row["pricing"]["platform"]).into();
+    display["limits"] = format_limits(&row["limits"]).into();
+    display["topics"] = format_topics(&row["topics"]).into();
+    display
+}
+
 pub async fn run_tools(command: ToolsCommands) -> Result<()> {
     match command {
         ToolsCommands::List { topic, auth } => {
@@ -213,6 +252,12 @@ pub async fn run_tools(command: ToolsCommands) -> Result<()> {
                         .as_array()
                         .is_some_and(|topics| topics.iter().any(|t| t == &topic))
                 });
+            }
+            if !matches!(auth.output, crate::cli::OutputFormat::Json) {
+                display = display
+                    .as_array()
+                    .map(|rows| Value::Array(rows.iter().map(table_offering).collect()))
+                    .unwrap_or(display);
             }
             output::print_rows(
                 &display,
@@ -231,8 +276,11 @@ pub async fn run_tools(command: ToolsCommands) -> Result<()> {
         ToolsCommands::Show { slug, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get(&format!("/tools/{slug}")).await?;
+            if matches!(auth.output, crate::cli::OutputFormat::Json) {
+                return output::print_rows(&result, auth.output, None, &[]);
+            }
             output::print_rows(
-                &result,
+                &table_offering(&result),
                 auth.output,
                 None,
                 &[
@@ -240,7 +288,21 @@ pub async fn run_tools(command: ToolsCommands) -> Result<()> {
                     ("Name", "name"),
                     ("Supplier", "supplier"),
                     ("Pricing", "pricing"),
-                    ("Operations", "operations"),
+                    ("Limits", "limits"),
+                    ("Topics", "topics"),
+                ],
+            )?;
+            output::print_rows(
+                &result["operations"],
+                auth.output,
+                None,
+                &[
+                    ("Name", "name"),
+                    ("Method", "method"),
+                    ("Path", "path"),
+                    ("Risk", "risk"),
+                    ("Data scope", "data_scope"),
+                    ("Cost class", "cost_class"),
                 ],
             )
         }
@@ -251,6 +313,30 @@ pub async fn run_tools(command: ToolsCommands) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+    #[test]
+    fn tool_table_formatting_is_human_readable_without_mutating_json() {
+        assert_eq!(format_price(&json!("free")), "Free");
+        assert_eq!(
+            format_price(&json!({"credits_per_unit":"0.012","metric":"requests"})),
+            "0.012 credits / requests"
+        );
+        assert_eq!(format_limits(&Value::Null), "none");
+        assert_eq!(
+            format_limits(&json!({"rate_limit_per_second":5,"burst":10})),
+            "5/s, burst 10"
+        );
+        assert_eq!(
+            format_topics(&json!(["web-search", "page-fetch"])),
+            "web-search, page-fetch"
+        );
+        let original = json!({"pricing":{"platform":"free"},"limits":null,"topics":["web-search"],"operations":[{"name":"read","method":"GET","path":"/read","risk":"read","data_scope":"public","cost_class":"free"}]});
+        let display = table_offering(&original);
+        assert_eq!(display["pricing"], "Free");
+        assert_eq!(display["limits"], "none");
+        assert_eq!(display["topics"], "web-search");
+        assert!(original["pricing"].is_object());
+        assert_eq!(display["operations"], original["operations"]);
+    }
     #[test]
     fn catalog_and_tools_arguments_parse() {
         for args in [
@@ -341,10 +427,25 @@ mod tests {
         );
         crate::cli::CatalogServiceArgs {
             clear_topics: true,
+            clear_supplier: true,
             ..Default::default()
         }
         .apply_tool_fields(&mut body);
         assert_eq!(body["topics"], json!([]));
+        assert_eq!(body["supplier"], Value::Null);
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "service",
+                "update",
+                "tools-x",
+                "--catalog-admin",
+                "--clear-supplier",
+                "--supplier",
+                "Vendor"
+            ])
+            .is_err()
+        );
     }
 }
 

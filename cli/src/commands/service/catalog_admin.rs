@@ -14,6 +14,7 @@ impl CatalogServiceArgs {
             || !self.topics.is_empty()
             || self.clear_topics
             || self.supplier.is_some()
+            || self.clear_supplier
             || self.inference_protocol.is_some()
             || self.inference_model_list.is_some()
             || self.inference_realtime.is_some()
@@ -41,6 +42,9 @@ impl CatalogServiceArgs {
         }
         if self.clear_topics || !self.topics.is_empty() {
             body["topics"] = json!(self.topics);
+        }
+        if self.clear_supplier {
+            body["supplier"] = Value::Null;
         }
         if let Some(value) = &self.supplier {
             body["supplier"] = value.clone().into();
@@ -693,5 +697,28 @@ mod review_tests {
             .await
             .unwrap();
         assert_eq!(body["platform_key"]["audience"], "public");
+    }
+}
+
+pub fn validate_creation_source(endpoint_url: Option<&str>, twin_of: Option<&str>) -> Result<()> {
+    if endpoint_url.is_none() && twin_of.is_none() {
+        bail!("Catalog creation requires --endpoint-url or --twin-of");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod creation_source_tests {
+    use super::*;
+    #[test]
+    fn catalog_creation_requires_transport_or_twin_before_authentication() {
+        assert_eq!(
+            validate_creation_source(None, None)
+                .unwrap_err()
+                .to_string(),
+            "Catalog creation requires --endpoint-url or --twin-of"
+        );
+        assert!(validate_creation_source(Some("https://example.com"), None).is_ok());
+        assert!(validate_creation_source(None, Some("api-twitter")).is_ok());
     }
 }
