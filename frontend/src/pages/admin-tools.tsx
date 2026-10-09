@@ -15,6 +15,13 @@ import { useAppForm } from "@/components/ui/form";
 import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -38,7 +45,6 @@ export function AdminToolsPage() {
     null,
   );
   const tools = services.filter((s) => s.offering_kind === "tool");
-  const write = admin;
   const suppliers = Array.from(new Set(tools.map((s) => s.supplier ?? s.name)));
   if (!admin)
     return <ErrorBanner message="Platform admin authority required" />;
@@ -48,9 +54,7 @@ export function AdminToolsPage() {
         title="Tools"
         description="Curate providers, operation publication, and import provenance."
         actions={
-          write ? (
-            <AddCtaButton label="Add tool" onClick={() => setAdding(true)} />
-          ) : undefined
+          <AddCtaButton label="Add tool" onClick={() => setAdding(true)} />
         }
       />
       {isLoading ? (
@@ -115,16 +119,12 @@ export function AdminToolsPage() {
                           <summary className="cursor-pointer">
                             Edit metadata
                           </summary>
-                          <CatalogToolMetadata
-                            service={tool}
-                            disabled={!write}
-                            admin={admin}
-                          />
+                          <CatalogToolMetadata service={tool} />
                         </details>
                       </td>
                       <td className="p-4">{tool.supplier ?? tool.name}</td>
                       <td className="min-w-80 p-4">
-                        <PublicationOperations tool={tool} disabled={!write} />
+                        <PublicationOperations tool={tool} />
                       </td>
                     </tr>
                   ))}
@@ -143,7 +143,6 @@ export function AdminToolsPage() {
       <AddToolDialog
         open={adding}
         onOpenChange={setAdding}
-        admin={admin}
         services={services}
         onCreated={setCreatedTool}
       />
@@ -187,7 +186,6 @@ function ProviderStatus({ tool }: { tool: DownstreamService }) {
 function AddToolDialog({
   open,
   onOpenChange,
-  admin,
   services,
   onCreated,
 }: {
@@ -195,7 +193,6 @@ function AddToolDialog({
   onCreated: (tool: DownstreamService) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  admin: boolean;
 }) {
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
@@ -270,44 +267,57 @@ function AddToolDialog({
         >
           <label className="block text-12">
             Creation method
-            <select
-              aria-label="Creation method"
-              className="h-8 w-full rounded-lg border border-input bg-background"
-              {...form.register("creation_mode")}
+            <Select
+              value={form.watch("creation_mode")}
+              onValueChange={(value) =>
+                form.setValue("creation_mode", value as "twin" | "new")
+              }
             >
-              <option value="twin">From an existing catalog service</option>
-              <option value="new">New service</option>
-            </select>
+              <SelectTrigger aria-label="Creation method">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="twin">
+                  From an existing catalog service
+                </SelectItem>
+                <SelectItem value="new">New service</SelectItem>
+              </SelectContent>
+            </Select>
           </label>
           {form.watch("creation_mode") === "twin" && (
             <label className="block text-12">
               Source service
-              <select
-                aria-label="Source service"
-                className="h-8 w-full rounded-lg border border-input bg-background"
-                {...form.register("twin_of_service_id")}
+              <Select
+                value={form.watch("twin_of_service_id")}
+                onValueChange={(value) =>
+                  form.setValue("twin_of_service_id", value)
+                }
               >
-                <option value="">Choose a service</option>
-                {services
-                  .filter(
-                    (service) =>
-                      service.service_type === "http" &&
-                      service.offering_kind !== "tool" &&
-                      [
-                        "none",
-                        "bearer",
-                        "header",
-                        "query",
-                        "query_param",
-                        "basic",
-                      ].includes(service.auth_method),
-                  )
-                  .map((service) => (
-                    <option key={service.id} value={service.id}>
-                      {service.name} ({service.slug})
-                    </option>
-                  ))}
-              </select>
+                <SelectTrigger aria-label="Source service">
+                  <SelectValue placeholder="Choose a service" />
+                </SelectTrigger>
+                <SelectContent>
+                  {services
+                    .filter(
+                      (service) =>
+                        service.service_type === "http" &&
+                        service.offering_kind !== "tool" &&
+                        [
+                          "none",
+                          "bearer",
+                          "header",
+                          "query",
+                          "query_param",
+                          "basic",
+                        ].includes(service.auth_method),
+                    )
+                    .map((service) => (
+                      <SelectItem key={service.id} value={service.id}>
+                        {service.name} ({service.slug})
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
               <p className="mt-1 text-11 text-muted-foreground">
                 Copies transport and operations as drafts. Credentials stay with
                 the source.
@@ -325,29 +335,31 @@ function AddToolDialog({
             </label>
           ))}
           {form.watch("creation_mode") === "new" && (
-            <fieldset
-              disabled={!admin}
-              title={
-                !admin
-                  ? "Transport and credential configuration requires platform admin authority"
-                  : undefined
-              }
-              className="space-y-3"
-            >
+            <fieldset className="space-y-3">
               <label className="block text-12">
                 Base URL
                 <Input {...form.register("base_url")} />
               </label>
               <label className="block text-12">
                 Auth method
-                <select
-                  {...form.register("auth_method")}
-                  className="h-8 w-full rounded-lg border border-input bg-background"
+                <Select
+                  value={form.watch("auth_method")}
+                  onValueChange={(value) =>
+                    form.setValue(
+                      "auth_method",
+                      value as "none" | "bearer" | "header",
+                    )
+                  }
                 >
-                  <option value="none">None</option>
-                  <option value="bearer">Bearer</option>
-                  <option value="header">Header</option>
-                </select>
+                  <SelectTrigger aria-label="Auth method">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">None</SelectItem>
+                    <SelectItem value="bearer">Bearer</SelectItem>
+                    <SelectItem value="header">Header</SelectItem>
+                  </SelectContent>
+                </Select>
               </label>
               <label className="block text-12">
                 Key header

@@ -6,10 +6,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 export function PublicationOperations({
   tool,
-  disabled,
+  disabled = false,
 }: {
   tool: DownstreamService;
-  disabled: boolean;
+  disabled?: boolean;
 }) {
   const { data: operations = [] } = useEndpoints(tool.id);
   const mutation = usePublication();

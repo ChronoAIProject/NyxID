@@ -1,4 +1,4 @@
-import { CatalogToolMetadata } from "@/components/services/catalog-tool-metadata";
+import { ServiceToolFields } from "@/components/services/service-tool-fields";
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
 import {
   serviceFormPatch,
@@ -135,6 +135,9 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
       }
     }
     if (!user?.is_admin) {
+      delete patch.offering_kind;
+      delete patch.topics;
+      delete patch.supplier;
       delete patch.inference;
       delete patch.platform_key;
       delete patch.credential;
@@ -218,11 +221,18 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
         />
       )}
       {review.dialog}
-      {(service.offering_kind === "tool" || user?.is_admin) && <CatalogToolMetadata service={service} disabled={!user?.is_admin} admin={user?.is_admin??false} />}
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-          <fieldset className="space-y-4" disabled={service.offering_kind === "tool" && !user?.is_admin} title={service.offering_kind === "tool" && !user?.is_admin ? "Transport, credentials, and pricing require platform admin authority. Edit tool metadata above." : undefined}>
+          <fieldset
+            className="space-y-4"
+            disabled={service.offering_kind === "tool" && !user?.is_admin}
+            title={
+              service.offering_kind === "tool" && !user?.is_admin
+                ? "Tool settings require platform admin authority."
+                : undefined
+            }
+          >
             {form.formState.errors.root && (
               <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                 {form.formState.errors.root.message}
@@ -239,6 +249,10 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   service.service_category}
               </Badge>
             </div>
+
+            {user?.is_admin && service.service_type === "http" && (
+              <ServiceToolFields form={form} service={service} />
+            )}
 
             <FormField
               control={form.control}

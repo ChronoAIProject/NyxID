@@ -1,4 +1,3 @@
-vi.mock("@/components/services/catalog-tool-metadata",()=>({CatalogToolMetadata:()=>null}));
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +13,11 @@ const { source, mutate } = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
   useParams: () => ({ serviceId: source.data?.id }),
+}));
+vi.mock("@/hooks/use-tools", () => ({
+  useToolTopics: () => ({
+    data: [{ slug: "web-search", label: "Web Search" }],
+  }),
 }));
 vi.mock("@/hooks/use-services", () => ({
   useService: () => ({
@@ -130,6 +134,36 @@ describe("service editor curation concurrency", () => {
         { metric: "cache_read_tokens", credits_per_unit: "0.000000250001" },
       ],
     });
+  });
+
+  it("saves offering metadata through the existing service form and clears supplier", async () => {
+    source.data = makeService({
+      supplier: "Vendor",
+      offering_kind: "ai_service",
+      topics: [],
+      import_source: { kind: "manual", reference: "review-proof" },
+    });
+    const user = userEvent.setup();
+    const view = render(<ServiceEditPage />);
+    expect(view.container.querySelectorAll("form")).toHaveLength(1);
+    expect(screen.getByText(/Import source: manual/)).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Supplier"));
+    await user.click(screen.getByRole("button", { name: "Web Search" }));
+    await user.click(screen.getByRole("combobox", { name: "Offering kind" }));
+    await user.click(screen.getByRole("option", { name: "Tool" }));
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
+    expect(mutate.mock.calls[0]![0].data).toEqual(
+      expect.objectContaining({
+        offering_kind: "tool",
+        topics: ["web-search"],
+        supplier: null,
+      }),
+    );
+    expect(mutate.mock.calls[0]![0].data).not.toHaveProperty("import_source");
   });
 
   it("omits unchanged skills on metadata edits", async () => {

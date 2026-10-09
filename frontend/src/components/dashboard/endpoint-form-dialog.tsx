@@ -397,25 +397,29 @@ function EndpointFormEditor({
               ).map((field) => (
                 <label key={field.name} className="text-12">
                   {field.label}
-                  <select
-                    className="h-8 w-full rounded-lg border border-input bg-background"
-                    value={form.watch(field.name) ?? ""}
-                    onChange={(event) =>
+                  <Select
+                    value={form.watch(field.name) ?? "unspecified"}
+                    onValueChange={(value) =>
                       form.setValue(
                         field.name,
-                        (event.target.value || null) as never,
+                        (value === "unspecified" ? null : value) as never,
                       )
                     }
                   >
-                    {field.name !== "execution" && (
-                      <option value="">Unspecified</option>
-                    )}
-                    {field.values.map((value) => (
-                      <option key={value} value={value}>
-                        {value.replaceAll("_", " ")}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger aria-label={field.label}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {field.name !== "execution" && (
+                        <SelectItem value="unspecified">Unspecified</SelectItem>
+                      )}
+                      {field.values.map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value.replaceAll("_", " ")}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </label>
               ))}
             </div>

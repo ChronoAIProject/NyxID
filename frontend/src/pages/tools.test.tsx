@@ -176,9 +176,11 @@ it("creates a twin with the selected source and no transport or credential field
   mount(<AdminToolsPage />);
   await userEvent.click(screen.getByRole("button", { name: "Add tool" }));
   expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
-  await userEvent.selectOptions(
-    screen.getByLabelText("Source service"),
-    "source-1",
+  await userEvent.click(
+    screen.getByRole("combobox", { name: "Source service" }),
+  );
+  await userEvent.click(
+    screen.getByRole("option", { name: "Firecrawl (api-firecrawl)" }),
   );
   await userEvent.type(screen.getByLabelText("name"), "Firecrawl tools");
   await userEvent.type(screen.getByLabelText("slug"), "tools-firecrawl");
@@ -205,10 +207,21 @@ it("offers a new-service path without an Imports tab", async () => {
     screen.queryByRole("tab", { name: "Imports" }),
   ).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Add tool" }));
-  await userEvent.selectOptions(
-    screen.getByLabelText("Creation method"),
-    "new",
+  await userEvent.click(
+    screen.getByRole("combobox", { name: "Creation method" }),
   );
+  await userEvent.click(screen.getByRole("option", { name: "New service" }));
   expect(screen.getByLabelText("Base URL")).toBeEnabled();
   expect(screen.getByLabelText("OpenAPI spec URL")).toBeInTheDocument();
+});
+
+it("renders disabled limits and labels writes as changes to data", async () => {
+  mocks.tools = [tool("Write tool", "free", false)];
+  mocks.tools[0]!.limits = null;
+  mocks.tools[0]!.operations[0]!.risk = "write";
+  mount(<ToolsPage />);
+  expect(screen.getByText("No per-user rate limit")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("1 operations"));
+  expect(screen.getByText("Changes data")).toBeInTheDocument();
+  expect(screen.queryByText("Destructive")).not.toBeInTheDocument();
 });

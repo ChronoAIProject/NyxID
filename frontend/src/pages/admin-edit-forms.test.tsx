@@ -1,4 +1,6 @@
-vi.mock("@/components/services/catalog-tool-metadata",()=>({CatalogToolMetadata:()=>null}));
+vi.mock("@/hooks/use-tools", () => ({
+  useToolTopics: () => ({ data: [] }),
+}));
 import {
   providerFormPayload,
   providerFormValues,
