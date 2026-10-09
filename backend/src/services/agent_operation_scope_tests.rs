@@ -645,6 +645,10 @@ async fn key_fixture(
     let endpoint = uuid::Uuid::new_v4().to_string();
     db.collection(crate::models::service_endpoint::COLLECTION_NAME)
         .insert_one(crate::models::service_endpoint::ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             async_operation: None,
             target_id: None,
             id: endpoint.clone(),
@@ -887,6 +891,10 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
         .db
         .collection(ENDPOINTS)
         .insert_one(ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
             async_operation: None,
             target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
