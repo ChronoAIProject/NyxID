@@ -138,6 +138,20 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+    // Stale legacy release finds dispatched rows by `started` or by
+    // `uncertain_dispatch`; this keeps the second branch off a collection scan.
+    db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"publication.uncertain_dispatch":1,"status":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! {"publication.uncertain_dispatch":true})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     db.collection::<Document>("assistant_upload_limits")
         .create_index(
             IndexModel::builder()

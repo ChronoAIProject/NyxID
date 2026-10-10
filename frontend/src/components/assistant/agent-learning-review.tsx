@@ -107,6 +107,9 @@ export function AgentLearningReview({
         const isOpen = open === proposal.id;
         const card = cards[proposal.id];
         const checkOnly = proposal.evidence_available === false;
+        // An older NyxID prepared this package; it is rebuilt, never published.
+        const legacyPackage =
+          proposal.failure_code === "legacy_package_requires_reprepare";
         // A verified version NyxID refused to attach is settled; the server
         // refuses to check it again.
         const settled =
@@ -214,6 +217,26 @@ export function AgentLearningReview({
                     Confirm this authored skill from its conversation card.
                   </p>
                 )
+              ) : legacyPackage ? (
+                <Button
+                  size="sm"
+                  disabled={readOnly || review.reprepare.isPending}
+                  onClick={async () => {
+                    setErrors((current) => ({ ...current, [proposal.id]: "" }));
+                    try {
+                      await review.reprepare.mutateAsync({
+                        proposalId: proposal.id,
+                      });
+                    } catch (cause) {
+                      setErrors((current) => ({
+                        ...current,
+                        [proposal.id]: requestFailure(cause),
+                      }));
+                    }
+                  }}
+                >
+                  Review updated package
+                </Button>
               ) : settled ? null : <Button
                 size="sm"
                 disabled={readOnly || review.approve.isPending}

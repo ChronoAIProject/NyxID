@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use chrono::{Duration, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     Database,
     bson::{self, doc},
@@ -79,8 +79,59 @@ fn dispatched(p: &LearningPublication) -> bool {
     p.started || p.uncertain_dispatch || p.verified_at.is_some()
 }
 
+/// Card/panel code for an update package prepared before interface snapshots.
+pub(crate) const LEGACY_PACKAGE: &str = "legacy_package_requires_reprepare";
+const PACKAGE_FORMAT_SNAPSHOT: i64 = 2;
+
+/// An update package prepared before #1828: no interface snapshot, so it
+/// declares `category: plain` and would drop the base's tools and runtimes.
+/// It is never dispatched; only reconciliation or a rebuild remains. An
+/// unclassified row (`target_kind` absent) is an update iff its draft has a
+/// base, which callers pass when they decoded it.
+fn legacy_package(p: &LearningPublication, draft_is_update: Option<bool>) -> bool {
+    p.package_format < PACKAGE_FORMAT_SNAPSHOT
+        && p.interface_encrypted.is_none()
+        && match p.target_kind.as_deref() {
+            Some(kind) => kind == "update",
+            None => draft_is_update.unwrap_or(false),
+        }
+}
+
+/// Mongo form of the snapshot-less package fields. Pre-#1828 rows have no
+/// `package_format` or `interface_encrypted` at all, and absent must match.
+fn legacy_package_filter() -> bson::Document {
+    doc! {"publication.package_format":{"$not":{"$gte":PACKAGE_FORMAT_SNAPSHOT}},
+    "publication.interface_encrypted":bson::Bson::Null}
+}
+
 pub(super) fn non_effective(p: &LearningPublication, now: chrono::DateTime<Utc>) -> bool {
     !dispatched(p) && p.lease_expires_at.is_none_or(|expiry| expiry <= now)
+}
+
+/// Statuses an operation that never dispatched may hold. Pre-#1828 servers
+/// recorded pre-dispatch failures as `published_unpinned` and left crashed
+/// attempts `publishing`; without a dispatch, live lease or verified skill
+/// those are as undispatched as `pending` and `publication_failed`.
+const UNDISPATCHED_STATUSES: [&str; 4] = [
+    "pending",
+    "publication_failed",
+    "publishing",
+    "published_unpinned",
+];
+
+/// The row-level half of the undispatched fence; callers also require
+/// `non_effective` on its publication.
+fn undispatched_status(row: &AssistantAgentLearningProposal) -> bool {
+    UNDISPATCHED_STATUSES.contains(&row.status.as_str())
+        && row
+            .publication
+            .as_ref()
+            .is_none_or(|p| p.skill_id.is_none())
+}
+
+/// Mongo form of `undispatched_status` (absent `skill_id` matches null).
+fn undispatched_status_filter() -> bson::Document {
+    doc! {"status":{"$in":UNDISPATCHED_STATUSES.to_vec()},"publication.skill_id":bson::Bson::Null}
 }
 
 fn review_required_failure(row: &AssistantAgentLearningProposal) -> bool {
@@ -250,6 +301,65 @@ async fn report_unresolved_publication(
 /// One migration pass. `report_undecryptable` also reports drafts that still
 /// cannot be decrypted as unresolved (see `REPORT_UNDECRYPTABLE_ON_PASS`).
 pub async fn migrate_publication_targets(
+    state: &AppState,
+    report_undecryptable: bool,
+) -> AppResult<MigrationOutcome> {
+    backfill_package_format(&state.db).await?;
+    let outcome = migrate_targets(state, report_undecryptable).await?;
+    // After classification every dispatched legacy update has its kind.
+    stamp_legacy_dispatches(&state.db).await?;
+    Ok(outcome)
+}
+
+const PACKAGE_FORMAT_MIGRATION_ID: &str = "publication-package-format-v1";
+
+/// Once: a package with a stored snapshot is format 2 (rows written by #1828
+/// before `package_format` existed). Such a row is never legacy.
+async fn backfill_package_format(db: &Database) -> AppResult<()> {
+    let migrations = db.collection::<bson::Document>(MIGRATIONS_COLLECTION_NAME);
+    if migrations
+        .find_one(doc! {"_id":PACKAGE_FORMAT_MIGRATION_ID})
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_many(
+            doc! {"publication.interface_encrypted":{"$type":"binData"},
+            "publication.package_format":{"$not":{"$gte":PACKAGE_FORMAT_SNAPSHOT}}},
+            doc! {"$set":{"publication.package_format":PACKAGE_FORMAT_SNAPSHOT}},
+        )
+        .await?;
+    migrations
+        .update_one(
+            doc! {"_id":PACKAGE_FORMAT_MIGRATION_ID},
+            doc! {"$setOnInsert":{"completed_at":bson::DateTime::now()}},
+        )
+        .upsert(true)
+        .await?;
+    Ok(())
+}
+
+/// Every start: give each dispatched, unverified legacy update a set-once
+/// `legacy_classified_at`. Stale release measures age from it, so nothing is
+/// releasable until `min_age_hours` after this code first saw the row.
+/// Bounded by the `{publication.started, status}` index.
+async fn stamp_legacy_dispatches(db: &Database) -> AppResult<()> {
+    let mut filter = legacy_package_filter();
+    filter.extend(doc! {"publication.started":true,"status":{"$ne":"pinned"},
+    "publication.target_kind":"update","publication.verified_at":bson::Bson::Null,
+    "publication.legacy_classified_at":bson::Bson::Null});
+    db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_many(
+            filter,
+            doc! {"$set":{"publication.legacy_classified_at":bson::DateTime::now()}},
+        )
+        .await?;
+    Ok(())
+}
+
+async fn migrate_targets(
     state: &AppState,
     report_undecryptable: bool,
 ) -> AppResult<MigrationOutcome> {
@@ -635,6 +745,11 @@ fn revision_filter(revision: i64) -> bson::Bson {
     }
 }
 
+/// Rows written before #1828 have no `publication.attempt`; it reads as 0.
+fn attempt_filter(attempt: i64) -> bson::Bson {
+    revision_filter(attempt)
+}
+
 fn operation_filter(row: &AssistantAgentLearningProposal) -> bson::Document {
     let mut filter = doc! {"_id":&row.id,"revision":revision_filter(row.revision)};
     if let Some(p) = &row.publication {
@@ -716,6 +831,108 @@ async fn base_current(
     Ok(true)
 }
 
+/// What the decoded draft says about rebuilding a legacy package.
+#[derive(Clone, Copy, Default)]
+struct Recovery {
+    legacy: bool,
+    /// The draft's base is still the agent's attached pin.
+    base_current: bool,
+}
+
+async fn recovery(
+    db: &Database,
+    agent: &AssistantAgent,
+    row: &AssistantAgentLearningProposal,
+    body: Option<&GeneratedProposal>,
+) -> AppResult<Recovery> {
+    let Some(p) = row.publication.as_ref() else {
+        return Ok(Recovery::default());
+    };
+    let legacy = legacy_package(p, body.map(|b| b.base_skill.is_some()));
+    let base_current = match body {
+        Some(body) if legacy => base_current(db, agent, body, row.source).await?,
+        _ => false,
+    };
+    Ok(Recovery {
+        legacy,
+        base_current,
+    })
+}
+
+/// Recorded by a rebuild that found the base cannot be reproduced; another
+/// rebuild cannot cure them, only a revised draft.
+const NOT_REBUILDABLE: [PublicationFailureCode; 3] = [
+    PublicationFailureCode::BaseChanged,
+    PublicationFailureCode::BaseVerifyFailed,
+    PublicationFailureCode::BaseInterfaceIncompatible,
+];
+
+fn reprepare_offered(
+    row: &AssistantAgentLearningProposal,
+    recovery: Recovery,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    recovery.legacy
+        && recovery.base_current
+        && row
+            .publication
+            .as_ref()
+            .is_some_and(|p| non_effective(p, now))
+        && undispatched_status(row)
+        && !row
+            .failure_code
+            .as_deref()
+            .and_then(PublicationFailureCode::parse)
+            .is_some_and(|code| NOT_REBUILDABLE.contains(&code))
+}
+
+/// Pre-#1828 servers stored this for every failed attempt, whatever its stage.
+const LEGACY_RETRY_CODE: &str = "publication_retry_required";
+
+/// A legacy package that was never dispatched shows the rebuild prompt, or
+/// the source change when its base moved on. A dispatched attempt that a
+/// pre-#1828 server only marked for retry shows that its outcome is unknown.
+/// Anything else keeps its code.
+fn shown_failure_code(
+    row: &AssistantAgentLearningProposal,
+    recovery: Recovery,
+    now: chrono::DateTime<Utc>,
+) -> Option<&str> {
+    let undispatched_legacy = recovery.legacy
+        && row
+            .publication
+            .as_ref()
+            .is_some_and(|p| non_effective(p, now));
+    if reprepare_offered(row, recovery, now) {
+        Some(LEGACY_PACKAGE)
+    } else if undispatched_legacy && !recovery.base_current {
+        Some(PublicationFailureCode::BaseChanged.as_str())
+    } else if row.failure_code.as_deref() == Some(LEGACY_RETRY_CODE)
+        && row
+            .publication
+            .as_ref()
+            .is_some_and(|p| dispatched(p) && p.verified_at.is_none())
+    {
+        Some(PublicationFailureCode::PublishUncertain.as_str())
+    } else {
+        row.failure_code.as_deref()
+    }
+}
+
+/// Pre-#1828 servers stored a pre-dispatch failure as `published_unpinned`;
+/// without a verified version it is shown as the failure it was.
+fn shown_status(row: &AssistantAgentLearningProposal) -> &str {
+    let verified = row
+        .publication
+        .as_ref()
+        .is_some_and(|p| p.verified_at.is_some() || p.skill_id.is_some());
+    if row.status == "published_unpinned" && !verified {
+        "publication_failed"
+    } else {
+        &row.status
+    }
+}
+
 pub async fn list(
     state: &AppState,
     actor: &str,
@@ -759,6 +976,17 @@ pub async fn list(
         } else {
             None
         };
+        let failure_code = match body.as_ref() {
+            Some(draft) => shown_failure_code(
+                &row,
+                recovery(&state.db, &agent, &row, Some(draft)).await?,
+                Utc::now(),
+            )
+            .map(str::to_owned),
+            // Without the draft only the dispatch-state mappings apply.
+            None => shown_failure_code(&row, Recovery::default(), Utc::now()).map(str::to_owned),
+        };
+        let status = shown_status(&row).to_owned();
         let evidence = if include_drafts {
             row.evidence
                 .iter()
@@ -778,7 +1006,7 @@ pub async fn list(
             agent_id: row.agent_id,
             owner_id: row.owner_id,
             run_id: row.run_id,
-            status: row.status,
+            status,
             revision: row.revision,
             config_revision: row.config_revision,
             agent_skills_revision: row.agent_skills_revision,
@@ -787,7 +1015,7 @@ pub async fn list(
             evidence_count: row.evidence.len(),
             body_bytes: row.body_bytes,
             created_at: row.created_at,
-            failure_code: row.failure_code,
+            failure_code,
             evidence,
             draft: body,
             published_skill_id: row.publication.as_ref().and_then(|p| p.skill_id.clone()),
@@ -1033,10 +1261,11 @@ pub async fn reject(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
+                // Includes pre-#1828 pre-dispatch failures (see UNDISPATCHED_STATUSES).
                 let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
-                    .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(revision),"status":{"$in":["pending","publication_failed"]}})
+                    .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(revision),"status":{"$in":UNDISPATCHED_STATUSES.to_vec()}})
                     .session(&mut *session).await?.ok_or_else(conflict)?;
-                if fresh.publication.as_ref().is_some_and(|p| !non_effective(p, Utc::now())) { return Err(must_reconcile()); }
+                if fresh.publication.as_ref().is_some_and(|p| !non_effective(p, Utc::now())) || !undispatched_status(&fresh) { return Err(must_reconcile()); }
                 if let Some(p) = &fresh.publication && let Some(target) = target_id(p) {
                     db.collection::<bson::Document>(PUBLICATION_TARGETS_COLLECTION_NAME).delete_one(
                         doc! {"_id":target,"operation_id":&p.operation_id,"package_sha256":&p.sha256,"state":"reserved"}
@@ -1045,7 +1274,7 @@ pub async fn reject(
                 let changed = db
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
-                        { let mut filter = operation_filter(&fresh); filter.insert("status", doc! {"$in":["pending","publication_failed"]}); filter },
+                        { let mut filter = operation_filter(&fresh); filter.insert("status", doc! {"$in":UNDISPATCHED_STATUSES.to_vec()}); filter },
                         doc! {"$set":{"status":"rejected","body_bytes":0,"failure_code":&reason,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
                     )
                     .session(&mut *session)
@@ -1253,6 +1482,7 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
             ),
             target_skill_id: body.base_skill.as_ref().map(|base| base.skill_id.clone()),
             interface_encrypted: encrypted,
+            package_format: PACKAGE_FORMAT_SNAPSHOT,
             ..Default::default()
         };
         state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(doc! {"_id":id,"revision":revision_filter(row.revision),"status":"pending","publication":bson::Bson::Null},doc! {"$set":{"publication":bson::to_bson(&p).map_err(|_| conflict())?}}).await?;
@@ -1286,6 +1516,11 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
         (Some("create"), None) if p.target_skill_id.is_none() => {}
         _ => return Err(conflict().into()),
     }
+    // No new confirmation for a package that can never be dispatched; a
+    // dispatched one may still be checked.
+    if legacy_package(p, None) && !dispatched(p) {
+        return Err(AppError::Conflict(LEGACY_PACKAGE.into()).into());
+    }
     if p.lease_expires_at.is_some_and(|t| t > Utc::now()) {
         return Err(
             AppError::Conflict("Publication is in progress; retry when it settles".into()).into(),
@@ -1307,7 +1542,7 @@ async fn record_base_changed_if_current(
     db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
         .update_one(
             doc! {"_id":&row.id,"revision":revision_filter(row.revision),"publication.operation_id":&observed.operation_id,
-                "publication.attempt":observed.attempt,"publication.lease_expires_at":bson::Bson::Null,
+                "publication.attempt":attempt_filter(observed.attempt),"publication.lease_expires_at":bson::Bson::Null,
                 "publication.started":{"$ne":true},"publication.uncertain_dispatch":{"$ne":true},
                 "publication.verified_at":bson::Bson::Null,"status":{"$in":["pending","publication_failed"]},
                 "failure_code":{"$nin":package_refusal_codes()}},
@@ -1376,13 +1611,28 @@ pub fn require_renewal_of(
     Ok(())
 }
 
+/// The release transition shared by the single and the stale bulk release:
+/// the operation becomes conclusively non-effective.
+fn released_fields(status: &str) -> bson::Document {
+    let mut fields = doc! {"publication.started":false,"publication.uncertain_dispatch":false,
+    "publication.last_stage":"operator_released","updated_at":bson::DateTime::now()};
+    if matches!(status, "pending" | "publishing" | "publication_failed") {
+        fields.insert("status", "publication_failed");
+        fields.insert(
+            "failure_code",
+            PublicationFailureCode::OperatorReleased.as_str(),
+        );
+    }
+    fields
+}
+
 /// Admin recovery for a target reserved by an operation whose dispatch is
 /// uncertain (typically a migrated legacy attempt), used only after the
 /// operator holds authoritative evidence, from Ornn's version list and its own
 /// request records for this operation ID, that the request had no effect and
 /// can no longer have one. The operation becomes non-effective so its owner
-/// can retry the same reviewed package or discard it. NyxID never skips to
-/// another version on its own.
+/// can retry the same reviewed package (a legacy package is rebuilt first) or
+/// discard it. NyxID never skips to another version on its own.
 pub async fn operator_release_target(
     state: &AppState,
     operator: &super::audit_service::AuditActor,
@@ -1439,17 +1689,12 @@ pub async fn operator_release_target(
                     .delete_one(doc! {"_id":&target,"operation_id":&operation,"state":&holder.state})
                     .session(&mut *session)
                     .await?;
-                let mut fields = doc! {"publication.started":false,"publication.uncertain_dispatch":false,
-                    "publication.last_stage":"operator_released","updated_at":bson::DateTime::now()};
-                if matches!(row.status.as_str(), "pending" | "publishing" | "publication_failed") {
-                    fields.insert("status", "publication_failed");
-                    fields.insert("failure_code", PublicationFailureCode::OperatorReleased.as_str());
-                }
+                let fields = released_fields(&row.status);
                 let changed = db
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         doc! {"_id":&id,"revision":revision_filter(row.revision),"publication.operation_id":&operation,
-                            "publication.attempt":p.attempt,"publication.verified_at":bson::Bson::Null},
+                            "publication.attempt":attempt_filter(p.attempt),"publication.verified_at":bson::Bson::Null},
                         doc! {"$set":fields},
                     )
                     .session(&mut *session)
@@ -1522,6 +1767,10 @@ pub async fn approve(
                     .session(&mut *session).await?.ok_or_else(conflict)?;
                 let mut next = fresh.publication.clone().ok_or_else(conflict)?;
                 if publication::binding(&fresh, &next, agent_for_claim.skills_revision) != binding { return Err(conflict()); }
+                // An unclassified row is refused just below.
+                if legacy_package(&next, None) && !dispatched(&next) {
+                    return Err(AppError::Conflict(LEGACY_PACKAGE.into()));
+                }
                 if review_required_failure(&fresh) { return Err(conflict()); }
                 if attach_refused(&fresh) { return Err(attach_settled()); }
                 let classified = match next.target_kind.as_deref() {
@@ -1711,7 +1960,7 @@ async fn mark_started(
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
-                .update_one(filter.clone(), doc! {"$set":{"publication.started":true,"publication.last_stage":"publish"}})
+                .update_one(filter.clone(), vec![doc! {"$set":{"publication.started":true,"publication.dispatched_at":{"$ifNull":["$publication.dispatched_at",bson::DateTime::now()]},"publication.last_stage":"publish"}}])
                 .session(&mut *session).await?;
             if changed.modified_count != 1 { return Err(conflict()); }
             if let Some(target) = target.as_ref() {
@@ -2064,6 +2313,10 @@ async fn execute(
 #[path = "assistant_agent_learning_review_tests.rs"]
 mod tests;
 
+#[path = "assistant_learning_recovery.rs"]
+mod recovery;
+pub use recovery::{StaleRelease, release_stale, reprepare};
+
 /// First-party human preview of the exact package bound to an authored card.
 /// Without a card it keeps the original response; card actions are additive.
 pub async fn authored_preview(
@@ -2073,20 +2326,22 @@ pub async fn authored_preview(
     id: &str,
 ) -> AppResult<Value> {
     let (agent, row) = load(&state.db, actor, agent_id, id).await?;
-    preview_value(state, &agent, &row).await
+    Ok(preview_value(state, &agent, &row).await?.0)
 }
 
+/// The preview and, when it decoded, the draft it was built from.
 async fn preview_value(
     state: &AppState,
     agent: &AssistantAgent,
     row: &AssistantAgentLearningProposal,
-) -> AppResult<Value> {
+) -> AppResult<(Value, Option<GeneratedProposal>)> {
     if row.source != ProposalSource::Authored {
         return Err(not_found());
     }
     let p = row.publication.as_ref().ok_or_else(conflict)?;
     let mut files = Vec::new();
     let mut draft_unavailable = false;
+    let mut decoded = None;
     if !matches!(row.status.as_str(), "pinned" | "rejected" | "invalidated") {
         match draft(state, row).await {
             Ok(body) => {
@@ -2109,17 +2364,19 @@ async fn preview_value(
                     }
                     Err(_) => draft_unavailable = true,
                 }
+                decoded = Some(body);
             }
             Err(_) => draft_unavailable = true,
         }
     }
     let failure_code = row.failure_code.as_deref();
-    Ok(
+    Ok((
         json!({"id":row.id,"agent_id":row.agent_id,"agent_name":agent.display_name.as_deref().unwrap_or(&agent.name),"revision":row.revision,"skills_revision":p.skills_revision,
-        "current_skills_revision":agent.skills_revision,"status":row.status,"name":p.name,"version":p.version,"files":files,
+        "current_skills_revision":agent.skills_revision,"status":shown_status(row),"name":p.name,"version":p.version,"files":files,
         "failure_code":if draft_unavailable { Some("draft_unavailable") } else { failure_code },
         "lease_live":p.lease_expires_at.is_some_and(|t| t > Utc::now()),"base_scripts_not_copied":p.target_kind.as_deref()==Some("update")}),
-    )
+        decoded,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -2132,6 +2389,8 @@ pub enum AuthoredAction {
     Renew,
     Discard,
     DismissCard,
+    Reprepare,
+    ShowUpdatedDraft,
 }
 
 pub struct AuthoredCardActions {
@@ -2162,7 +2421,10 @@ impl AuthoredCardActions {
 /// that can succeed unchanged, files, a free target and a non-effective
 /// operation; Check needs a dispatched operation and a card that approved it
 /// (even after expiry) or can still decide; Renew is offered only when no card
-/// can act and no attempt holds a lease.
+/// can act and no attempt holds a lease. A legacy package that never
+/// dispatched offers only Reprepare (any card of the draft, live or expired)
+/// and Discard/Deny; after a rebuild, older cards offer ShowUpdatedDraft
+/// until the new package has its card.
 async fn actions_for_card(
     state: &AppState,
     actor: &str,
@@ -2170,6 +2432,7 @@ async fn actions_for_card(
     row: &AssistantAgentLearningProposal,
     card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
     files_present: bool,
+    recovery: Recovery,
 ) -> AppResult<AuthoredCardActions> {
     let p = row.publication.as_ref().ok_or_else(conflict)?;
     match row.status.as_str() {
@@ -2195,14 +2458,26 @@ async fn actions_for_card(
                     .as_str(),
             )
     {
-        return Ok(AuthoredCardActions::settled("changed"));
+        let mut changed = AuthoredCardActions::settled("changed");
+        if card.user_id == actor
+            && card.tool_name.as_deref() == Some(TOOL)
+            && reference.agent_id == row.agent_id
+            && reference.proposal_id == row.id
+            && updated_draft_unannounced(row)
+        {
+            changed.actions.push(AuthoredAction::ShowUpdatedDraft);
+        }
+        return Ok(changed);
     }
     let now = Utc::now();
     let effective = !non_effective(p, now);
     let lease_live = p.lease_expires_at.is_some_and(|expiry| expiry > now);
     let current_revision = reference.skills_revision == agent.skills_revision;
     let card_live = card.expires_at > now && card.status != "expired";
-    let package_publishable = !review_required_failure(row);
+    // A legacy package can never be dispatched; reconciling a dispatched one
+    // still uses the ordinary Check.
+    let undispatched_legacy = recovery.legacy && !effective;
+    let package_publishable = !review_required_failure(row) && !undispatched_legacy;
     let target_available = if let Some(target) = target_id(p) {
         state
             .db
@@ -2241,6 +2516,9 @@ async fn actions_for_card(
         Some(action) if target_available => actions.push(action),
         Some(_) => blocked_by = Some(PublicationFailureCode::TargetBusy),
         None => {}
+    }
+    if reprepare_offered(row, recovery, now) {
+        actions.push(AuthoredAction::Reprepare);
     }
     if current_revision
         && effective
@@ -2287,16 +2565,29 @@ async fn actions_for_card(
     })
 }
 
+/// A rebuilt package whose review card was not raised yet (the second phase
+/// of a rebuild did not finish).
+fn updated_draft_unannounced(row: &AssistantAgentLearningProposal) -> bool {
+    row.publication.as_ref().is_some_and(|p| {
+        p.review_card_pending
+            && p.package_format >= PACKAGE_FORMAT_SNAPSHOT
+            && non_effective(p, Utc::now())
+    }) && undispatched_status(row)
+}
+
+struct CardView {
+    agent: AssistantAgent,
+    row: AssistantAgentLearningProposal,
+    preview: Value,
+    actions: AuthoredCardActions,
+    recovery: Recovery,
+}
+
 async fn load_for_card(
     state: &AppState,
     actor: &str,
     card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
-) -> AppResult<(
-    AssistantAgent,
-    AssistantAgentLearningProposal,
-    Value,
-    AuthoredCardActions,
-)> {
+) -> AppResult<CardView> {
     let reference = card.authored_skill.as_ref().ok_or_else(not_found)?;
     let (agent, row) = load(
         &state.db,
@@ -2305,12 +2596,20 @@ async fn load_for_card(
         &reference.proposal_id,
     )
     .await?;
-    let preview = preview_value(state, &agent, &row).await?;
+    let (preview, body) = preview_value(state, &agent, &row).await?;
     let files_present = preview["files"]
         .as_array()
         .is_some_and(|files| !files.is_empty());
-    let actions = actions_for_card(state, actor, &agent, &row, card, files_present).await?;
-    Ok((agent, row, preview, actions))
+    let recovery = recovery(&state.db, &agent, &row, body.as_ref()).await?;
+    let actions =
+        actions_for_card(state, actor, &agent, &row, card, files_present, recovery).await?;
+    Ok(CardView {
+        agent,
+        row,
+        preview,
+        actions,
+        recovery,
+    })
 }
 
 pub async fn authored_actions(
@@ -2318,7 +2617,7 @@ pub async fn authored_actions(
     actor: &str,
     card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
 ) -> AppResult<AuthoredCardActions> {
-    Ok(load_for_card(state, actor, card).await?.3)
+    Ok(load_for_card(state, actor, card).await?.actions)
 }
 
 pub async fn authored_preview_for_card(
@@ -2331,18 +2630,30 @@ pub async fn authored_preview_for_card(
     let card = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
         .find_one(doc! {"_id":acknowledgement_id,"user_id":actor,"tool_name":TOOL,"authored_skill.proposal_id":id,"authored_skill.agent_id":agent_id})
         .await?.ok_or_else(not_found)?;
-    let (_, _, mut preview, computed) = load_for_card(state, actor, &card).await?;
+    let CardView {
+        row,
+        mut preview,
+        actions: computed,
+        recovery,
+        ..
+    } = load_for_card(state, actor, &card).await?;
     if let Some(code) = computed.blocked_by {
         preview["failure_code"] = json!(code.as_str());
-    } else if preview["failure_code"] == PublicationFailureCode::ApprovalExpired.as_str()
-        && computed.actions.iter().any(|action| {
-            matches!(
-                action,
-                AuthoredAction::Publish | AuthoredAction::Retry | AuthoredAction::Check
-            )
-        })
-    {
-        preview["failure_code"] = Value::Null;
+    } else if preview["failure_code"] != "draft_unavailable" {
+        let shown = shown_failure_code(&row, recovery, Utc::now());
+        let expired_but_actionable = shown
+            == Some(PublicationFailureCode::ApprovalExpired.as_str())
+            && computed.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    AuthoredAction::Publish | AuthoredAction::Retry | AuthoredAction::Check
+                )
+            });
+        preview["failure_code"] = if expired_but_actionable {
+            Value::Null
+        } else {
+            json!(shown)
+        };
     }
     preview["actions"] = json!(computed.actions);
     preview["state"] = json!(computed.state);
@@ -2398,7 +2709,7 @@ pub async fn record_pre_claim_failure(
     let replaceable =
         PublicationFailureCode::codes(PublicationFailureCode::replaceable_before_claim);
     let changed = state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
-        doc! {"_id":&row.id,"revision":revision_filter(row.revision),"publication.operation_id":&p.operation_id,"publication.attempt":expected_attempt,"publication.lease_expires_at":bson::Bson::Null,"status":{"$in":["pending","publication_failed"]},
+        doc! {"_id":&row.id,"revision":revision_filter(row.revision),"publication.operation_id":&p.operation_id,"publication.attempt":attempt_filter(expected_attempt),"publication.lease_expires_at":bson::Bson::Null,"status":{"$in":["pending","publication_failed"]},
             "$and":[{"failure_code":{"$nin":package_refusal_codes()}},{"$or":[{"failure_code":bson::Bson::Null},{"publication.last_stage":"pre_claim"},{"failure_code":{"$in":replaceable}}]}]},
         doc! {"$set":{"status":"publication_failed","failure_code":code.as_str(),"publication.last_stage":"pre_claim","updated_at":bson::DateTime::now()}},
     ).await?;

@@ -16,7 +16,7 @@ const failureCopy: Record<string, string> = {
   ornn_unavailable: "Ornn is unavailable. Try again later.",
   nyxid_refused: "Publication is temporarily unavailable. Try again later.",
   publish_uncertain: "NyxID cannot yet confirm whether Ornn published this version; nothing else will be written for it.",
-  version_conflict: "This version exists with different content. Ask NyxBot for a new draft after this publication is resolved.",
+  version_conflict: "This version exists with different content, for example because an earlier publication request landed late. NyxID did not attach it. Ask NyxBot for a new draft after this publication is resolved.",
   verify_failed: "NyxID could not verify the exact private version. Check again.",
   pin_conflict: "The version was verified but could not be attached. Check again.",
   approval_expired: "This confirmation expired. Request a new confirmation for the same draft.",
@@ -24,6 +24,7 @@ const failureCopy: Record<string, string> = {
   operator_released: "An operator confirmed the earlier attempt had no effect. Publish this draft again (request a new confirmation if this one expired) or discard it.",
   evidence_unavailable: "Learning evidence or consent is no longer available, so this draft cannot be attached.",
   draft_unavailable: "The draft files are unavailable. Publication cannot continue.",
+  legacy_package_requires_reprepare: "This draft was prepared by an older NyxID version that can't preserve the skill's tools/runtimes. Review the updated package.",
 };
 
 const notAttached: Record<string, string> = {

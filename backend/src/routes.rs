@@ -1045,6 +1045,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::assistant_agent_learning::admin_release_target),
         )
         .route(
+            "/assistant/learning/publications/release-stale",
+            post(handlers::assistant_agent_learning::admin_release_stale),
+        )
+        .route(
             "/usage/analytics",
             get(handlers::admin_usage::get_analytics),
         )
@@ -2180,6 +2184,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",
             post(handlers::assistant_agent_learning::approve),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/reprepare",
+            post(handlers::assistant_agent_learning::reprepare),
         )
         .route(
             "/nyxagent/agents/{id}/machines",

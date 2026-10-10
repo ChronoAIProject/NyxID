@@ -163,3 +163,11 @@ Another registry adapter would implement:
    `PublishOutcome`, where only conclusive refusals count as non-mutating.
 4. Exact-version reconciliation that verifies the downloaded bytes against the
    bound hash, and a mapping of its refusal codes to `FailureCode`.
+5. For releasing stale legacy dispatches, a read-only absence check of the
+   exact version under the owner's identity
+   (`assistant_learning_publication::legacy_release_evidence`: absent with the
+   latest version still the base, landed, latest moved on, or uncertain).
+
+Legacy recovery (`assistant_learning_recovery.rs`) sits above this boundary: it
+decides eligibility, fences and audits, and calls only the publication module
+for registry reads. No registry response detail reaches an admin.

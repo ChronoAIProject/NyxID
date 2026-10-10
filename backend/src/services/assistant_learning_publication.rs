@@ -790,6 +790,66 @@ pub(super) async fn reconcile(
         .ok_or(PublicationError::Ambiguous(None))
 }
 
+/// What the registry says about a legacy update's exact version, read with
+/// the owner's identity. Only `Absent` supports an absence-only release.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum LegacyReleaseEvidence {
+    /// A definitive "no such version", and the latest version is still the
+    /// exact base the operation extends. Without a known base (its draft is
+    /// gone), the version list must not contain the version either.
+    Absent { latest: String },
+    /// The exact version exists.
+    Landed,
+    /// The version is absent but the skill moved on from the base.
+    LatestMismatch,
+    /// Anything else, including timeouts and malformed or contradictory replies.
+    Uncertain,
+}
+
+pub(super) async fn legacy_release_evidence(
+    reader: &impl OrnnReader,
+    skill_id: &str,
+    version: &str,
+    base_version: Option<&str>,
+) -> LegacyReleaseEvidence {
+    match reader
+        .classified(
+            Method::GET,
+            &format!("/api/v1/skills/{skill_id}?version={version}"),
+            Vec::new(),
+        )
+        .await
+    {
+        OrnnOutcome::Ok(_) => return LegacyReleaseEvidence::Landed,
+        OrnnOutcome::Response {
+            status: 404,
+            code: OrnnCode::SkillVersionNotFound,
+        } => {}
+        _ => return LegacyReleaseEvidence::Uncertain,
+    }
+    let Ok(versions) = data(reader, &format!("/api/v1/skills/{skill_id}/versions")).await else {
+        return LegacyReleaseEvidence::Uncertain;
+    };
+    let Some(items) = versions["items"].as_array() else {
+        return LegacyReleaseEvidence::Uncertain;
+    };
+    let Some(latest) = items
+        .first()
+        .and_then(|item| item["version"].as_str())
+        .map(str::to_owned)
+    else {
+        return LegacyReleaseEvidence::Uncertain;
+    };
+    match base_version {
+        Some(base) if latest == base => LegacyReleaseEvidence::Absent { latest },
+        Some(_) => LegacyReleaseEvidence::LatestMismatch,
+        None if items.iter().any(|item| item["version"] == version) => {
+            LegacyReleaseEvidence::Uncertain
+        }
+        None => LegacyReleaseEvidence::Absent { latest },
+    }
+}
+
 pub(super) fn binding(
     row: &crate::models::assistant_agent_learning::AssistantAgentLearningProposal,
     p: &LearningPublication,

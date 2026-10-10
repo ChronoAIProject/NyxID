@@ -4,7 +4,9 @@ use crate::{
     errors::{AppError, AppResult},
     mw::auth::AuthUser,
     services::{
-        agent_skill_service::{self as skills, OrnnCode, OrnnLocalRefusal, OrnnOutcome},
+        agent_skill_service::{
+            self as skills, OrnnCode, OrnnLocalRefusal, OrnnOutcome, OrnnReader,
+        },
         assistant_acknowledgement_service::{self as acks, ChatAuthority},
         assistant_team_service as team,
     },
@@ -28,6 +30,47 @@ pub(crate) struct Reader<'a> {
     pub(crate) thread_key: Option<&'a str>,
     pub(crate) scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
     pub(crate) chat: Option<std::sync::Arc<ChatAuthority>>,
+}
+
+/// A proposal owner's signed identity (no chat key), for admin-initiated
+/// maintenance reads of that owner's private skills. Callers return only
+/// identifiers and decision codes to the admin.
+pub(crate) struct OwnerReader {
+    state: AppState,
+    person: String,
+}
+
+impl OwnerReader {
+    pub(crate) fn new(state: &AppState, person: &str) -> Self {
+        Self {
+            state: state.clone(),
+            person: person.to_owned(),
+        }
+    }
+
+    fn reader(&self) -> Reader<'_> {
+        Reader {
+            state: &self.state,
+            person: &self.person,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OrnnReader for OwnerReader {
+    async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
+        self.reader().get(path).await
+    }
+
+    async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
+        if method != http::Method::GET {
+            return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
+        }
+        self.reader().classified(method, path, body).await
+    }
 }
 
 struct OrnnFetch<'a> {

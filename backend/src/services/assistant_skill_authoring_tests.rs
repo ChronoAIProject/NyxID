@@ -18,6 +18,9 @@ use wiremock::{
 #[path = "assistant_skill_authoring_validation_tests.rs"]
 mod validation_regressions;
 
+#[path = "assistant_learning_recovery_tests.rs"]
+mod recovery;
+
 fn input(agent: &str) -> Value {
     json!({"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }

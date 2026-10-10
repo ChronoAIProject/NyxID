@@ -64,3 +64,67 @@ it("discards with a body encoded exactly once", async () => {
   expect(body).toBe(JSON.stringify({ revision: 4, reason: "rejected" }));
   expect(JSON.parse(body as string)).toEqual({ revision: 4, reason: "rejected" });
 });
+
+function respond(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+const legacy = { ...preview, status: "publication_failed", failure_code: "legacy_package_requires_reprepare", actions: ["reprepare", "discard"] };
+
+it("rebuilds a legacy package with a body encoded exactly once", async () => {
+  fetchMock.mockImplementation(async (_url: string, init?: RequestInit) =>
+    respond(200, init?.method === "POST" ? { status: "reprepared", acknowledgement_id: "new-card" } : legacy));
+  show();
+  expect(await screen.findByText(/older NyxID version that can't preserve the skill's tools\/runtimes/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Request a new confirmation" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review updated package" }));
+  await waitFor(() => expect(posted(`${proposalPath}/reprepare`)).toBeDefined());
+  expect(posted(`${proposalPath}/reprepare`).body).toBe(JSON.stringify({ acknowledgement_id: "card" }));
+  expect(await screen.findByText(/package was rebuilt from the source skill/)).toBeVisible();
+  // The card re-reads its state after the rebuild.
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method !== "POST").length).toBeGreaterThan(1));
+});
+
+it("raises the rebuilt package's card from an older card", async () => {
+  let rebuilt = false;
+  fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      rebuilt = true;
+      return respond(200, { status: "reprepared", acknowledgement_id: "new-card" });
+    }
+    return respond(200, { ...preview, state: "changed", actions: rebuilt ? [] : ["show_updated_draft"] });
+  });
+  show();
+  expect(await screen.findByText("This confirmation no longer matches the draft.")).toBeVisible();
+  expect(screen.getByText(/rebuilt package for this draft is waiting for its review card/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Show updated draft" }));
+  await waitFor(() => expect(posted(`${proposalPath}/reprepare`)).toBeDefined());
+  expect(posted(`${proposalPath}/reprepare`).body).toBe(JSON.stringify({ acknowledgement_id: "card" }));
+  expect(await screen.findByText(/Review the new confirmation posted in this conversation/)).toBeVisible();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Show updated draft" })).not.toBeInTheDocument());
+});
+
+it("keeps the rebuild visible when the server refuses it", async () => {
+  fetchMock.mockImplementation(async (_url: string, init?: RequestInit) =>
+    init?.method === "POST"
+      ? respond(409, { error: "conflict", error_code: 1004, message: "base_skill_changed" })
+      : respond(200, legacy));
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Review updated package" }));
+  expect(await screen.findByText("The package could not be rebuilt. The current state is shown below.")).toBeVisible();
+});
+
+it("points to Show updated draft when the rebuilt package's card was not posted", async () => {
+  let rebuilt = false;
+  fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      rebuilt = true;
+      return respond(200, { status: "reprepared", card_pending: true, proposal_id: "proposal" });
+    }
+    return respond(200, rebuilt ? { ...preview, state: "changed", actions: ["show_updated_draft"] } : legacy);
+  });
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Review updated package" }));
+  expect(await screen.findByText(/review card was not posted\. Use Show updated draft to post it\./)).toBeVisible();
+  expect(await screen.findByRole("button", { name: "Show updated draft" })).toBeVisible();
+  expect(screen.queryByText(/could not be rebuilt/)).not.toBeInTheDocument();
+});
