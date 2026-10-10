@@ -283,6 +283,46 @@ pub async fn approve(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReprepareBody {
+    /// The authored card the owner clicked; absent for learned drafts, which
+    /// are rebuilt from the review panel.
+    #[serde(default)]
+    acknowledgement_id: Option<String>,
+}
+
+/// Rebuilds a legacy update package with the source skill's interface. The
+/// base is read with the owner's own identity: this is a human action.
+pub async fn reprepare(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((agent_id, proposal_id)): Path<(String, String)>,
+    Json(body): Json<ReprepareBody>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let reader = super::agent_skills::Reader {
+        state: &state,
+        person: &actor,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    Ok(Json(
+        review::reprepare(
+            &state,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            &agent_id,
+            &proposal_id,
+            body.acknowledgement_id.as_deref(),
+            &reader,
+        )
+        .await?,
+    ))
+}
+
 pub async fn run_now(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -450,6 +490,51 @@ pub(crate) async fn decide_authored(
 pub struct ReleaseTargetBody {
     operation_id: String,
     evidence_ref: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseStaleBody {
+    #[serde(default = "default_dry_run")]
+    dry_run: bool,
+    #[serde(default = "default_min_age_hours")]
+    min_age_hours: i64,
+    #[serde(default = "default_release_limit")]
+    limit: usize,
+}
+fn default_dry_run() -> bool {
+    true
+}
+fn default_min_age_hours() -> i64 {
+    24
+}
+fn default_release_limit() -> usize {
+    200
+}
+
+/// Admin-only, audited release of stale legacy publications on absence-only
+/// evidence; dry run by default. See "Recovering drafts created before #1828"
+/// in docs/AGENT_LEARNING.md.
+pub async fn admin_release_stale(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ReleaseStaleBody>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    Ok(Json(
+        review::release_stale(
+            &state,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            review::StaleRelease {
+                dry_run: body.dry_run,
+                min_age_hours: body.min_age_hours,
+                limit: body.limit,
+            },
+            |owner: &str| super::agent_skills::OwnerReader::new(&state, owner),
+        )
+        .await?,
+    ))
 }
 
 /// Admin-only, audited operator recovery for a target held by an uncertain

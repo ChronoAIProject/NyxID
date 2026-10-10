@@ -263,6 +263,36 @@ pub struct LearningPublication {
     pub target_skill_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub interface_encrypted: Option<Vec<u8>>,
+    /// 2: prepared by snapshot-aware NyxID (an update carries the base
+    /// interface snapshot). Absent (0) on packages prepared before it existed;
+    /// such updates are never dispatched.
+    #[serde(default)]
+    pub package_format: i64,
+    /// First dispatch of this operation; never moved by later attempts.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub dispatched_at: Option<DateTime<Utc>>,
+    /// When startup first saw this dispatched legacy update. Stale-release age
+    /// counts from here, because legacy rows have no `dispatched_at`.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub legacy_classified_at: Option<DateTime<Utc>>,
+    /// A rebuilt package awaits its review card (second recovery phase).
+    #[serde(default)]
+    pub review_card_pending: bool,
+    #[serde(default)]
+    pub release_evidence: Option<ReleaseEvidence>,
+}
+
+/// Absence evidence an admin stale release relied on, read from Ornn during
+/// that apply (never from a dry run).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReleaseEvidence {
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub checked_at: DateTime<Utc>,
+    pub exact_version_status: i32,
+    pub latest_version: String,
+    pub package_sha256: String,
+    pub min_age_hours: i64,
+    pub batch_id: String,
 }
 
 impl std::fmt::Debug for LearningPublication {

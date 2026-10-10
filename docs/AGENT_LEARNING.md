@@ -492,8 +492,9 @@ target. In one transaction it deletes the reserved or uncertain target and
 marks the operation as never dispatched (`failure_code: operator_released`).
 The same reviewed package can then be published again from its card:
 **Retry publication** while the approving card is still live, otherwise
-**Request a new confirmation** (a legacy card has normally expired); or the
-owner can **Discard** the draft. The
+**Request a new confirmation**; or the owner can **Discard** the draft. A
+legacy package (prepared before #1828) is never published again: its owner
+rebuilds it first (see "Recovering drafts created before #1828"). The
 `assistant_learning_publication_target_released` audit event records the
 operator, proposal, operation, target, previous state and evidence reference
 (metadata only). Do not edit the target or proposal documents directly.
@@ -806,3 +807,123 @@ use `field: "draft"`. Other fixed rules cover required text, slug/path constrain
 duplicates, text-only content, input/schema/kind shape and base matching. Unknown
 JSON keys report their containing object. No matched text or raw parser errors
 enter diagnostics, logs or audit. No new permission or publication path is added.
+
+## Recovering drafts created before #1828
+
+Before #1828, NyxID packaged every update of an existing skill as
+`category: plain`, without the base skill's tools, runtimes or output type, so
+Ornn rejects the update of any non-plain base. Such a **legacy package** is an
+update whose publication has no interface snapshot (`package_format` below 2,
+which includes rows where the field is absent, and no `interface_encrypted`;
+an unclassified row counts as an update when its draft has a base skill).
+NyxID never dispatches a legacy package: no card, panel or approve request
+can confirm it, and only an operation that already dispatched may still be
+checked.
+
+A legacy operation counts as never dispatched when it has no dispatch flag,
+live lease or verified skill, whatever its status: besides `pending` and
+`publication_failed`, pre-#1828 servers recorded a failure before dispatch as
+`published_unpinned` (shown as `publication_failed`, since nothing was
+verified) and left a crashed attempt `publishing`. Their stored
+`publication_retry_required` code is shown as the rebuild prompt, or as
+`publish_uncertain` for an attempt that did dispatch. Such drafts can also be
+discarded.
+
+### Owner flow
+
+- **Authored drafts:** every card of the draft, live or expired, offers
+  **Review updated package** (the `reprepare` action) while the operation never
+  dispatched and the source skill is still the attached pin. The card shows "This
+  draft was prepared by an older NyxID version that can't preserve the skill's
+  tools/runtimes. Review the updated package." The click calls
+  `POST /api/v1/assistant/nyxagent/agents/{id}/learning/proposals/{proposal_id}/reprepare`
+  with `{"acknowledgement_id": "<clicked card>"}` (first-party human session,
+  live card authority as for a card decision). NyxID reads the exact attached
+  base with the owner's own identity, builds the snapshot, and in one
+  transaction replaces the operation (new operation ID, package and hash, next
+  revision), deletes only the old operation's own `reserved` target, clears the
+  failure code and writes the `assistant_learning_proposal_reprepared` audit
+  event. It then raises a new card in the clicked card's conversation. The
+  package changed, so the owner reviews every file before publishing; older
+  cards show "This confirmation no longer matches the draft."
+- **Interrupted rebuild:** if the process stopped after the swap and before the
+  new card existed, older cards of the draft offer **Show updated draft**,
+  which only raises the missing card (a live card for the new package is
+  reused). It authorizes nothing and changes no publication state. If the
+  swap committed but the card could not be raised, the request still succeeds
+  with `card_pending: true` and the card says to use **Show updated draft**.
+- **Learned drafts:** the learning panel shows the same copy and a **Review
+  updated package** button (the same route without `acknowledgement_id`). The
+  rebuilt draft is then confirmed from the panel as usual.
+- **Base no longer reproducible:** if the agent's pin changed, or Ornn's base
+  moved on or cannot be reproduced, the rebuild refuses (`base_skill_changed`,
+  `base_interface_incompatible`, `publication_integrity_failed`) and records
+  `base_changed`, `base_interface_incompatible` or `base_verify_failed`; the
+  operation is unchanged and the owner can only discard the draft and ask for
+  a revised one. A transient read failure records nothing
+  (`source_skill_unavailable`).
+
+### Operator flow for stalled legacy dispatches
+
+A legacy operation that dispatched with an unknown outcome holds its target
+and is check-only. A platform admin may release such operations in bulk with
+`POST /api/v1/admin/assistant/learning/publications/release-stale` (first-party
+admin session). Body: `{"dry_run": true, "min_age_hours": 24, "limit": 200}`;
+these are the defaults, `min_age_hours` is 24..=8760 and `limit` 1..=200.
+
+1. Run a dry run and review every row. A candidate is a dispatched (`started`
+   or `uncertain_dispatch`), unverified, unleased legacy update in `pending`,
+   `publishing` or `publication_failed`, or a draft discarded before the
+   migration (`rejected`, `invalidated`) whose dispatched operation still holds
+   its target. Its age is measured from the latest of its first dispatch, its
+   lease expiry and `legacy_classified_at`, which startup stamps once on every
+   dispatched legacy update. Nothing is releasable until `min_age_hours` after
+   the new version first ran. Releasable rows come first, oldest stamp first;
+   rows the stamp missed follow only while `limit` has room. At most `limit`
+   rows per call, read with bounded concurrency within a 60 second deadline.
+   Both dispatch branches of the query are indexed (`{publication.started,
+   status}` and the partial `{publication.uncertain_dispatch, status}`).
+2. For each row NyxID reads Ornn with the proposal owner's identity, never the
+   admin's: the exact version must be a definitive 404 `skill_version_not_found`
+   and the latest version must be exactly the base version in the operation's
+   own draft. A discarded draft no longer has its draft, so its version must
+   instead be missing from the version list; nothing is rebuilt from it.
+   Decisions: `release` (dry run), `released_audited` (applied),
+   `release_reservation` / `released_reservation_audited` (a discarded draft:
+   only its target reservation is released, it stays discarded),
+   `landed_check_again` (the version exists; the owner's **Check again**
+   reconciles it), `skip:landed` (the version of a discarded draft exists; its
+   reservation stays), `skip:uncertain`, `skip:latest_mismatch`,
+   `skip:age_unknown` (no stamp yet), `skip:legacy_target_unresolved`,
+   `skip:barrier_changed`, `skip:cas_changed`, `skip:deadline` and `skip:error`.
+   Responses carry identifiers and decision codes only.
+3. Repeat with `"dry_run": false`. The apply pass reads Ornn again (dry-run
+   results are never reused) and releases each row in one transaction fenced
+   on the full observed state (revision, status, operation, attempt, package
+   hash, target, legacy format, dispatch flags, no verification, no live lease)
+   and on the target barrier. The same transaction records
+   `publication.release_evidence` and the `assistant_learning_publication_target_released`
+   audit event with the admin actor, `evidence: "absence_only"`, the batch ID,
+   the evidence and `reservation_only`; a summary event
+   (`..._stale_release_summary`) lists the decision counts. A release
+   therefore never exists without its audit event.
+4. The released row shows **Review updated package**: the owner rebuilds and
+   reviews it as above before anything is written again. A discarded draft's
+   release only frees the version for new drafts.
+
+Every release is labelled `evidence: "absence_only"`. This is an explicit
+exception, limited to legacy operations, to the rule that absence never
+authorizes another write.
+
+### Residual risks
+
+- A request stalled longer than `min_age_hours` can still land after release.
+  The rebuilt operation targets the same version and pins only after exact
+  version and ZIP hash verification: if the old package landed first, the new
+  PUT is refused, reconciliation finds a different hash and the operation
+  becomes a terminal `version_conflict` (target retained, nothing attached;
+  the card explains that an earlier request may have landed late). If the old
+  request lands after the new version was pinned, Ornn may move its `latest`
+  tag back; the agent's pin stays on the verified new version.
+- The flags and drain procedure of "Rollout and compatibility" still apply;
+  keep learning disabled until the migration marker is present.

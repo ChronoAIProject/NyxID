@@ -91,6 +91,24 @@ fn release_predicate_requires_no_dispatch_checkpoint_or_live_lease() {
     assert!(!non_effective(&p, Utc::now()));
 }
 
+#[test]
+fn recovery_legacy_predicate_needs_an_update_without_snapshot() {
+    let mut p = proposal(false).publication.unwrap();
+    // Unclassified pre-#1828 rows are updates only when their draft has a base.
+    assert!(!legacy_package(&p, None));
+    assert!(!legacy_package(&p, Some(false)));
+    assert!(legacy_package(&p, Some(true)));
+    p.target_kind = Some("create".into());
+    assert!(!legacy_package(&p, Some(true)));
+    p.target_kind = Some("update".into());
+    assert!(legacy_package(&p, None));
+    p.package_format = PACKAGE_FORMAT_SNAPSHOT;
+    assert!(!legacy_package(&p, None));
+    p.package_format = 0;
+    p.interface_encrypted = Some(vec![1]);
+    assert!(!legacy_package(&p, None));
+}
+
 #[tokio::test]
 async fn stale_base_changed_binding_cannot_overwrite_new_attempt_or_refusal() {
     let fixture = orchestrator_fixture("learning_stale_base_binding").await;
@@ -2373,5 +2391,235 @@ async fn migration_retries_undecryptable_drafts_without_reporting_them_unresolve
             .unwrap(),
         1
     );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
+    let SeededLearned {
+        fixture: f,
+        agent,
+        id,
+        mut generated,
+    } = seed_learned_proposal("recovery_learned_rebuild").await;
+    let server = MockServer::start().await;
+    let mut service = crate::test_utils::test_auto_connected_catalog_service();
+    service.slug = "ornn-api".into();
+    service.base_url = server.uri();
+    service.identity_propagation_mode = "jwt".into();
+    f.state
+        .db
+        .collection(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(service)
+        .await
+        .unwrap();
+    // A tool-based base attached through L1 provenance.
+    let base_bytes =
+        publication::package_with_snapshot(&generated, "base-operation", "resumable", "1.0", None)
+            .unwrap();
+    let base = SkillPin {
+        source: "ornn".into(),
+        skill_id: Uuid::new_v4().to_string(),
+        name: "resumable".into(),
+        version: "1.0".into(),
+        sha256: publication::hash(&base_bytes),
+    };
+    let reference = SkillReference {
+        source: base.source.clone(),
+        skill_id: base.skill_id.clone(),
+        name: base.name.clone(),
+        version: base.version.clone(),
+        sha256: base.sha256.clone(),
+        dependencies: vec![],
+    };
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent.id},
+            doc! {"$set":{"skills":bson::to_bson(&vec![reference]).unwrap()}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<AssistantAgentLearningSkillRoot>(ROOTS_COLLECTION_NAME)
+        .insert_one(AssistantAgentLearningSkillRoot {
+            id: Uuid::new_v4().to_string(),
+            agent_id: agent.id.clone(),
+            owner_id: f.owner.clone(),
+            skill_id: base.skill_id.clone(),
+            version: base.version.clone(),
+            sha256: base.sha256.clone(),
+            operation_id: "base-operation".into(),
+            active: true,
+            proposal_id: "base-proposal".into(),
+            config_revision: 0,
+            agent_skills_revision: agent.skills_revision,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let skill_id = &base.skill_id;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill_id}")))
+        .and(wiremock::matchers::query_param("version", "1.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":skill_id,
+            "name":"resumable","version":"1.0","skillHash":base.sha256,"description":"safe guidance",
+            "isPrivate":true,"createdBy":f.owner,"sharedWithUsers":[],"sharedWithOrgs":[],"grants":[],
+            "metadata":{"category":"tool-based","tools":[{"tool":"search_web"}]}}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill_id}/closure")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/v1/skills/{skill_id}/versions/1.0/download"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(base_bytes.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill_id}/versions")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[{"version":"1.0"}]}})),
+        )
+        .mount(&server)
+        .await;
+    // The learned improvement as a pre-#1828 server stored it.
+    generated.kind = "improve".into();
+    generated.base_skill = Some(base.clone());
+    generated.skill_md = "# Guidance\nSearch first.".into();
+    let body = serde_json::to_vec(&generated).unwrap();
+    let encrypted = f.state.encryption_keys.encrypt(&body).await.unwrap();
+    let legacy = publication::package_with_snapshot(
+        &generated,
+        "legacy-operation",
+        "resumable",
+        "1.1",
+        None,
+    )
+    .unwrap();
+    let proposals = f
+        .state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+    proposals
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+            "body_bytes":body.len() as i64,"publication":{"operation_id":"legacy-operation","name":"resumable",
+            "version":"1.1","sha256":publication::hash(&legacy),"skill_id":bson::Bson::Null,"started":false,
+            "approved_by":bson::Bson::Null,"approval_digest":bson::Bson::Null,"acknowledgement_id":bson::Bson::Null,
+            "skills_revision":agent.skills_revision,"lease_id":bson::Bson::Null,"lease_expires_at":bson::Bson::Null}}},
+        )
+        .await
+        .unwrap();
+    let listed = list(&f.state, &f.owner, &agent.id, true).await.unwrap();
+    assert_eq!(listed[0].failure_code.as_deref(), Some(LEGACY_PACKAGE));
+    // The panel cannot raise a confirmation for the old package.
+    assert!(matches!(
+        approval_binding(&f.state, &f.owner, &agent.id, &id, 0, agent.skills_revision, &UnavailableReader).await,
+        Err(AppError::Conflict(message)) if message == LEGACY_PACKAGE));
+    let acknowledgements = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    let cards = || acknowledgements.count_documents(doc! {"user_id":&f.owner,"tool_name":TOOL});
+    let cards_before = cards().await.unwrap();
+    let rebuild = |body: Value| {
+        crate::handlers::assistant_agent_learning::reprepare(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((agent.id.clone(), id.clone())),
+            axum::Json(serde_json::from_value(body).unwrap()),
+        )
+    };
+    let axum::Json(result) = rebuild(json!({})).await.unwrap();
+    assert_eq!(result["status"], "reprepared");
+    let rebuilt = f
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    let p = rebuilt.publication.clone().unwrap();
+    assert_eq!((rebuilt.revision, rebuilt.status.as_str()), (1, "pending"));
+    assert_ne!(p.operation_id, "legacy-operation");
+    assert_eq!((p.package_format, p.version.as_str()), (2, "1.1"));
+    assert!(p.interface_encrypted.is_some() && !p.review_card_pending);
+    // Learned drafts are confirmed from the panel as usual: no card yet.
+    assert_eq!(cards().await.unwrap(), cards_before);
+    let listed = list(&f.state, &f.owner, &agent.id, true).await.unwrap();
+    assert_eq!(listed[0].failure_code, None);
+    let binding = approval_binding(
+        &f.state,
+        &f.owner,
+        &agent.id,
+        &id,
+        1,
+        agent.skills_revision,
+        &UnavailableReader,
+    )
+    .await
+    .unwrap();
+    assert_eq!(binding["operation_id"], p.operation_id);
+    assert_eq!(binding["package_sha256"], p.sha256);
+    assert!(rebuild(json!({})).await.is_err());
+    for request in server.received_requests().await.unwrap() {
+        assert!(request.method.as_str() == "GET");
+        let token = request
+            .headers
+            .get("x-nyxid-identity-token")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let claims: Value = serde_json::from_slice(
+            &base64::Engine::decode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                token.split('.').nth(1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["sub"], f.owner);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_stale_release_candidate_queries_use_indexes() {
+    let fixture = orchestrator_fixture("recovery_stale_release_indexes").await;
+    crate::db::ensure_indexes(&fixture.state.db).await.unwrap();
+    let (aged, unstamped) = recovery::stale_candidate_filters(bson::DateTime::now());
+    for filter in [aged, unstamped] {
+        let explained = fixture
+            .state
+            .db
+            .run_command(
+                doc! {"explain":{"find":PROPOSALS_COLLECTION_NAME,"filter":filter},
+                "verbosity":"queryPlanner"},
+            )
+            .await
+            .unwrap();
+        let plan = explained
+            .get_document("queryPlanner")
+            .unwrap()
+            .get_document("winningPlan")
+            .unwrap()
+            .to_string();
+        // Both `$or` branches (started, uncertain_dispatch) are index scans.
+        assert!(!plan.contains("COLLSCAN"), "{plan}");
+        assert!(
+            plan.contains("publication.uncertain_dispatch_1_status_1"),
+            "{plan}"
+        );
+        assert!(plan.contains("publication.started_1_status_1"), "{plan}");
+    }
     fixture.state.db.drop().await.unwrap();
 }

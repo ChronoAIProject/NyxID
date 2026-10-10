@@ -59,23 +59,61 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     catch { setError("Publication did not finish. The current state is shown below."); }
     finally { await refresh(); }
   }
-  async function postAction(action: "approve" | "reject") {
+  async function postAction(action: "approve" | "reject" | "reprepare") {
     setError(undefined);
     setNotice(undefined);
     try {
-      await assistantJson(`${path}/${action}`, {
+      const result = await assistantJson<{ card_pending?: boolean } | undefined>(`${path}/${action}`, {
         method: "POST",
-        body: action === "approve"
-          ? { revision: reference.revision, agent_skills_revision: data?.current_skills_revision, renewal_of: card.id }
-          : { revision: reference.revision, reason: "rejected" },
+        body: action === "reprepare"
+          ? { acknowledgement_id: card.id }
+          : action === "approve"
+            ? { revision: reference.revision, agent_skills_revision: data?.current_skills_revision, renewal_of: card.id }
+            : { revision: reference.revision, reason: "rejected" },
       });
       if (action === "approve") setNotice("A new confirmation was posted in this conversation.");
-    } catch { setError("The request could not be completed. Reload the current state and try again."); }
+      if (action === "reprepare") {
+        setNotice(result?.card_pending
+          ? "The package was rebuilt, but its review card was not posted. Use Show updated draft to post it."
+          : "The package was rebuilt from the source skill. Review the new confirmation posted in this conversation.");
+      }
+    } catch {
+      setError(action === "reprepare"
+        ? "The package could not be rebuilt. The current state is shown below."
+        : "The request could not be completed. Reload the current state and try again.");
+    }
     finally { await refresh(); }
   }
-  if (data?.state && data.state !== "active") return <p role="status" className="ml-[30px] text-[11px] text-muted-foreground">
-    {data.state === "pinned" ? "Skill published and attached" : data.state === "discarded" ? "Skill draft discarded" : data.state === "invalidated" ? "Skill draft is no longer available" : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available." : "This confirmation no longer matches the draft."}
-  </p>;
+  const messages = <>
+    {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
+    {notice ? <p role="status" className="text-[12px] text-muted-foreground">{notice}</p> : null}
+  </>;
+  const buttons = actions.length > 0 ? <div className="flex justify-end gap-2">
+    {actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Deny</Button> : null}
+    {actions.includes("dismiss_card") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Dismiss confirmation</Button> : null}
+    {actions.includes("discard") ? <Button variant="outline" disabled={deciding} onClick={() => void postAction("reject")}>Discard</Button> : null}
+    {actions.includes("renew") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("approve")}>Request a new confirmation</Button> : null}
+    {actions.includes("publish") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Allow and publish</Button> : null}
+    {actions.includes("retry") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Retry publication</Button> : null}
+    {actions.includes("check") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Check again</Button> : null}
+    {actions.includes("reprepare") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Review updated package</Button> : null}
+    {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
+  </div> : null;
+  if (data?.state && data.state !== "active") {
+    const status = <p role="status" className="ml-[30px] text-[11px] text-muted-foreground">
+      {data.state === "pinned" ? "Skill published and attached" : data.state === "discarded" ? "Skill draft discarded" : data.state === "invalidated" ? "Skill draft is no longer available" : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available." : "This confirmation no longer matches the draft."}
+    </p>;
+    if (!buttons && !error && !notice) return status;
+    // An older card of a rebuilt draft can still raise the new package's card.
+    return <div className="space-y-2">
+      {status}
+      <div className="ml-[30px] space-y-2">
+        {actions.includes("show_updated_draft") ? <p className="text-[12px] text-muted-foreground">A rebuilt package for this draft is waiting for its review card.</p> : null}
+        {messages}
+        {buttons}
+      </div>
+    </div>;
+  }
   return <section aria-label="Review skill draft" className="ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4">
     <p className="text-[13px] font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
     {data ? <p className="text-[12px]">Attach to {data.agent_name}</p> : null}
@@ -89,16 +127,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
     {preview.isError ? <p role="alert" className="text-[12px] text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
     {data?.failure_code ? <p role="alert" className="text-[12px] text-destructive">{publicationFailureText(data.failure_code, data.status)}</p> : null}
-    {error ? <p role="alert" className="text-[12px] text-destructive">{error}</p> : null}
-    {notice ? <p role="status" className="text-[12px] text-muted-foreground">{notice}</p> : null}
-    <div className="flex justify-end gap-2">
-      {actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Deny</Button> : null}
-      {actions.includes("dismiss_card") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Dismiss confirmation</Button> : null}
-      {actions.includes("discard") ? <Button variant="outline" disabled={deciding} onClick={() => void postAction("reject")}>Discard</Button> : null}
-      {actions.includes("renew") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("approve")}>Request a new confirmation</Button> : null}
-      {actions.includes("publish") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Allow and publish</Button> : null}
-      {actions.includes("retry") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Retry publication</Button> : null}
-      {actions.includes("check") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Check again</Button> : null}
-    </div>
+    {messages}
+    {buttons}
   </section>;
 }

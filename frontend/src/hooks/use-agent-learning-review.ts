@@ -17,7 +17,9 @@ export function useAgentLearningReview(id: string, enabled = true) {
   // The server fences a reject on the reviewed revision (and defaults the reason).
   const reject = useMutation({ mutationFn: ({ proposalId, revision }: { proposalId: string; revision: number }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}/reject`, { method: "POST", body: { revision } }), onSuccess: invalidate });
   const approve = useMutation({ mutationFn: async ({ proposalId, acknowledgementId }: { proposalId: string; acknowledgementId?: string }) => learningApprovalSchema.parse(await assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}/approve`, { method: "POST", body: acknowledgementId ? { acknowledgement_id: acknowledgementId } : {} })), onSuccess: invalidate });
+  // Learned drafts rebuild from the panel; authored drafts from their card.
+  const reprepare = useMutation({ mutationFn: ({ proposalId }: { proposalId: string }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}/reprepare`, { method: "POST", body: {} }), onSuccess: invalidate });
   const edit = useMutation({ mutationFn: ({ proposalId, draft }: { proposalId: string; draft: unknown }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}`, { method: "PUT", body: { draft } }), onSuccess: invalidate });
   const configure = useMutation({ mutationFn: (body: { enabled: boolean; threshold: number }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning`, { method: "PUT", body }), onSuccess: () => { void status.refetch(); invalidate(); } });
-  return { ...query, status, run, reject, approve, edit, configure };
+  return { ...query, status, run, reject, approve, reprepare, edit, configure };
 }
