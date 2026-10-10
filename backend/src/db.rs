@@ -131,6 +131,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 }
 
 async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"publication.started":1,"status":1})
+                .build(),
+        )
+        .await?;
     db.collection::<Document>("assistant_upload_limits")
         .create_index(
             IndexModel::builder()

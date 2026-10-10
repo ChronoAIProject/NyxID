@@ -12,6 +12,8 @@ pub const RUNS_COLLECTION_NAME: &str = "assistant_agent_learning_runs";
 pub const PROPOSALS_COLLECTION_NAME: &str = "assistant_agent_learning_proposals";
 pub const REJECTIONS_COLLECTION_NAME: &str = "assistant_agent_learning_rejections";
 pub const ROOTS_COLLECTION_NAME: &str = "assistant_agent_learning_skill_roots";
+pub const PUBLICATION_TARGETS_COLLECTION_NAME: &str = "assistant_learning_publication_targets";
+pub const MIGRATIONS_COLLECTION_NAME: &str = "assistant_learning_migrations";
 
 pub const DEFAULT_THRESHOLD: i64 = 15;
 #[allow(dead_code)]
@@ -230,7 +232,7 @@ pub struct AssistantAgentLearningSkillRoot {
 
 /// Metadata only; the reviewed archive is deterministically regenerated from
 /// the encrypted draft. A started write is never issued a second time.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct LearningPublication {
     pub operation_id: String,
     pub name: String,
@@ -245,4 +247,47 @@ pub struct LearningPublication {
     pub lease_id: Option<String>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub attempt: i64,
+    #[serde(default)]
+    pub last_stage: Option<String>,
+    #[serde(default)]
+    pub last_registry_status: Option<i32>,
+    #[serde(default)]
+    pub uncertain_dispatch: bool,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub verified_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub target_kind: Option<String>,
+    #[serde(default)]
+    pub target_skill_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub interface_encrypted: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for LearningPublication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LearningPublication")
+            .field("started", &self.started)
+            .field("attempt", &self.attempt)
+            .field("uncertain_dispatch", &self.uncertain_dispatch)
+            .field("verified", &self.verified_at.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LearningPublicationTarget {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub agent_id: String,
+    pub owner_id: String,
+    pub proposal_id: String,
+    pub operation_id: String,
+    pub package_sha256: String,
+    pub state: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
 }

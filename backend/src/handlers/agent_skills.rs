@@ -4,7 +4,7 @@ use crate::{
     errors::{AppError, AppResult},
     mw::auth::AuthUser,
     services::{
-        agent_skill_service as skills,
+        agent_skill_service::{self as skills, OrnnCode, OrnnLocalRefusal, OrnnOutcome},
         assistant_acknowledgement_service::{self as acks, ChatAuthority},
         assistant_team_service as team,
     },
@@ -43,6 +43,29 @@ struct OrnnFetch<'a> {
 #[async_trait::async_trait]
 impl skills::OrnnReader for Reader<'_> {
     async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
+        self.classified_request(http::Method::GET, path, Vec::new())
+            .await
+            .into_app_result()
+    }
+
+    async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
+        self.classified_request(method, path, body)
+            .await
+            .into_app_result()
+    }
+
+    async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
+        self.classified_request(method, path, body).await
+    }
+}
+
+impl Reader<'_> {
+    async fn classified_request(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> OrnnOutcome {
         // A proxy request is a substantial state machine. Poll it as its own
         // task so nested native MCP dispatch does not accumulate its debug
         // stack frames. Cancellation/timeout must also cancel that task.
@@ -53,33 +76,7 @@ impl skills::OrnnReader for Reader<'_> {
         let scopes = self.scopes.cloned().unwrap_or_default();
         let chat = self.chat.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            Box::pin(fetch_ornn(OrnnFetch {
-                state: &state,
-                person: &person,
-                path: &path,
-                thread_key,
-                scopes,
-                chat,
-                method: http::Method::GET,
-                body: Body::empty(),
-            }))
-            .await
-        }));
-        tokio::time::timeout(std::time::Duration::from_secs(30), task)
-            .await
-            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
-            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
-    }
-
-    async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
-        let state = self.state.clone();
-        let person = self.person.to_owned();
-        let path = path.to_owned();
-        let thread_key = self.thread_key.map(str::to_owned);
-        let scopes = self.scopes.cloned().unwrap_or_default();
-        let chat = self.chat.clone();
-        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            Box::pin(fetch_ornn(OrnnFetch {
+            Box::pin(fetch_ornn_classified(OrnnFetch {
                 state: &state,
                 person: &person,
                 path: &path,
@@ -91,14 +88,14 @@ impl skills::OrnnReader for Reader<'_> {
             }))
             .await
         }));
-        tokio::time::timeout(std::time::Duration::from_secs(30), task)
-            .await
-            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
-            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
+        match tokio::time::timeout(std::time::Duration::from_secs(30), task).await {
+            Ok(Ok(outcome)) => outcome,
+            _ => OrnnOutcome::Uncertain,
+        }
     }
 }
 
-async fn fetch_ornn(request: OrnnFetch<'_>) -> AppResult<Vec<u8>> {
+async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     let OrnnFetch {
         state,
         person,
@@ -111,22 +108,25 @@ async fn fetch_ornn(request: OrnnFetch<'_>) -> AppResult<Vec<u8>> {
     } = request;
     let publication = method != http::Method::GET;
     if !ornn_operation_allowed(&method, path, publication) {
-        return Err(AppError::Forbidden(
-            "This Ornn operation is not available to agent learning".into(),
-        ));
+        return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
     }
     // Fixed catalog selection; no caller-supplied destination, method or headers.
-    let service = state
+    let service = match state
         .db
         .collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,
         )
         .find_one(mongodb::bson::doc! {"slug":"ornn-api","is_active":true})
-        .await?
-        .ok_or_else(|| {
-            AppError::Forbidden("Ornn is unavailable; connect your Ornn access and retry".into())
-        })?;
-    let mut auth = super::assistant_team::owner_auth(person)?;
+        .await
+    {
+        Ok(Some(service)) => service,
+        Ok(None) => return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable),
+        Err(error) => return OrnnOutcome::LocalError(error.into()),
+    };
+    let mut auth = match super::assistant_team::owner_auth(person) {
+        Ok(auth) => auth,
+        Err(error) => return OrnnOutcome::LocalError(error),
+    };
     if let Some(key) = thread_key {
         // Native reads are agent requests, never browser-session bypasses of
         // approval policy. The key also binds live scope/guest/automation checks.
@@ -139,11 +139,13 @@ async fn fetch_ornn(request: OrnnFetch<'_>) -> AppResult<Vec<u8>> {
     auth.assistant_operation_scopes = scopes;
     auth.assistant_turn_fence = chat.as_ref().map(|chat| chat.turn_fence());
     auth.assistant_chat = chat;
-    let mut request = Request::builder()
+    let Ok(mut request) = Request::builder()
         .method(method)
         .uri(format!("/api/v1/proxy/{}{path}", service.id))
         .body(body)
-        .map_err(|_| AppError::ValidationError("Invalid skill path".into()))?;
+    else {
+        return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::InvalidPath);
+    };
     if publication {
         request.headers_mut().insert(
             http::header::CONTENT_TYPE,
@@ -158,7 +160,7 @@ async fn fetch_ornn(request: OrnnFetch<'_>) -> AppResult<Vec<u8>> {
         request.extensions_mut().insert(OrnnSkillPublication);
     }
     let mut slug = String::new();
-    let response = Box::pin(super::proxy::proxy_request_inner(
+    let response = match Box::pin(super::proxy::proxy_request_inner(
         state,
         &auth,
         &service.id,
@@ -167,25 +169,33 @@ async fn fetch_ornn(request: OrnnFetch<'_>) -> AppResult<Vec<u8>> {
         &mut slug,
     ))
     .await
-    .map_err(|error| match error {
-        AppError::ApiKeyScopeForbidden(_) => error,
-        _ => AppError::Forbidden(
-            "Skill unavailable through your Ornn access; check the connection and retry".into(),
-        ),
-    })?;
+    {
+        Ok(response) => response,
+        Err(AppError::ApiKeyScopeForbidden(message)) => {
+            return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ScopeForbidden(message));
+        }
+        Err(_) => return OrnnOutcome::ProxyError,
+    };
     if !response.status().is_success() {
-        return Err(AppError::Forbidden(
-            "Skill unavailable or not visible through your Ornn access".into(),
-        ));
-    }
-    to_bytes(response.into_body(), skills::MAX_ARCHIVE)
+        let status = response.status().as_u16();
+        // The status is complete once headers arrive. The problem body is
+        // bounded in size and time; a slow or oversized body yields `Unknown`.
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            to_bytes(response.into_body(), 16 * 1024),
+        )
         .await
-        .map(|b| b.to_vec())
-        .map_err(|_| {
-            AppError::ValidationError(
-                "Ornn response exceeded the skill size limit or was interrupted".into(),
-            )
-        })
+        .ok()
+        .and_then(Result::ok)
+        .map_or(OrnnCode::Unknown, |bytes| {
+            OrnnCode::from_problem_body(&bytes)
+        });
+        return OrnnOutcome::Response { status, code };
+    }
+    match to_bytes(response.into_body(), skills::MAX_ARCHIVE).await {
+        Ok(bytes) => OrnnOutcome::Ok(bytes.to_vec()),
+        Err(_) => OrnnOutcome::Interrupted,
+    }
 }
 
 /// The learning publisher is deliberately narrower than the general Ornn
@@ -337,9 +347,16 @@ pub(crate) async fn dispatch(
     }
     if name == "draft_agent_skill" {
         let input = crate::services::assistant_skill_authoring::parse_input(args)?;
+        let reader = Reader {
+            state,
+            person: &chat.user_id,
+            thread_key: Some(&chat.api_key_id),
+            scopes: None,
+            chat: Some(std::sync::Arc::new(chat.clone())),
+        };
         return Ok((
             Box::pin(crate::services::assistant_skill_authoring::create(
-                state, chat, input,
+                state, chat, input, &reader,
             ))
             .await?,
             true,
@@ -649,6 +666,21 @@ mod tests {
             .unwrap();
         collection.update_one(doc!{"_id":&service.id},doc!{"$set":{"identity_propagation_mode":"jwt","auth_method":"bearer","service_category":"internal","credential_encrypted":mongodb::bson::Binary{subtype:mongodb::bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
         assert!(skills::search(&reader, "private", 1).await.is_err());
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::GET,
+                    "/api/v1/skill-search?scope=private&mode=keyword&pageSize=1&page=1&q=private",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::ProxyError
+        ));
+        assert!(matches!(
+            reader.get("/api/v1/skill-search?scope=private&mode=keyword&pageSize=1&page=1&q=private").await,
+            Err(AppError::Forbidden(message))
+                if message == "Skill unavailable through your Ornn access; check the connection and retry"
+        ));
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
         // Missing principal must never become an anonymous Ornn request.
         collection
@@ -671,6 +703,19 @@ mod tests {
             .await
             .is_err()
         );
+        // Owner identity errors keep their own status, as before classification.
+        assert!(matches!(
+            Reader {
+                state: &f.state,
+                person: "not-a-person-id",
+                thread_key: None,
+                scopes: None,
+                chat: None,
+            }
+            .get("/api/v1/skill-search")
+            .await,
+            Err(AppError::NotFound(message)) if message == "Conversation not found"
+        ));
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
         // Ornn visibility refusal is preserved without returning upstream bodies.
         upstream.reset().await;
@@ -683,6 +728,79 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::GET,
+                    "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b?version=1.0",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::Response { status: 404, .. }
+        ));
+        let not_visible = |result: AppResult<Vec<u8>>| {
+            matches!(result, Err(AppError::Forbidden(message))
+                if message == "Skill unavailable or not visible through your Ornn access")
+        };
+        let version = "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b?version=1.0";
+        assert!(not_visible(reader.get(version).await));
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::DELETE,
+                    "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed)
+        ));
+        assert!(matches!(
+            reader
+                .request(
+                    http::Method::DELETE,
+                    "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b",
+                    vec![]
+                )
+                .await,
+            Err(AppError::Forbidden(message))
+                if message == "This Ornn operation is not available to agent learning"
+        ));
+        // Every non-2xx keeps the visibility refusal, including server errors
+        // and oversized problem bodies; publication still sees the status.
+        for response in [
+            ResponseTemplate::new(500),
+            ResponseTemplate::new(400).set_body_string("private detail".repeat(2000)),
+        ] {
+            upstream.reset().await;
+            Mock::given(path("/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b"))
+                .respond_with(response)
+                .mount(&upstream)
+                .await;
+            assert!(matches!(
+                reader.classified(http::Method::GET, version, vec![]).await,
+                OrnnOutcome::Response {
+                    status: 400 | 500,
+                    code: OrnnCode::Unknown
+                }
+            ));
+            assert!(not_visible(reader.get(version).await));
+        }
+        upstream.reset().await;
+        Mock::given(path("/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![b'a'; skills::MAX_ARCHIVE + 1]),
+            )
+            .mount(&upstream)
+            .await;
+        assert!(matches!(
+            reader.classified(http::Method::GET, version, vec![]).await,
+            OrnnOutcome::Interrupted
+        ));
+        assert!(matches!(
+            reader.get(version).await,
+            Err(AppError::ValidationError(message))
+                if message == "Ornn response exceeded the skill size limit or was interrupted"
+        ));
         // Native reads retain runtime approvals; browser preview remains an
         // explicit human read. No upstream bytes flow before the owner decides.
         upstream.reset().await;
@@ -762,6 +880,72 @@ mod tests {
         assert_eq!(pending.get_str("requester_type").unwrap(), "api_key");
         assert_eq!(upstream.received_requests().await.unwrap().len(), before);
         drop(task);
+        let mut live_chat = f.chat.clone();
+        live_chat.turn_id = Some(uuid::Uuid::new_v4().to_string());
+        let state = f.state.clone();
+        let owner = f.owner.clone();
+        let key = f.chat.api_key_id.clone();
+        let live = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            skills::search(
+                &Reader {
+                    state: &state,
+                    person: &owner,
+                    thread_key: Some(&key),
+                    scopes: None,
+                    chat: Some(std::sync::Arc::new(live_chat)),
+                },
+                "snapshot",
+                1,
+            )
+            .await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let count = f
+                    .state
+                    .db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::approval_request::COLLECTION_NAME,
+                    )
+                    .count_documents(
+                        doc! {"user_id": &f.owner, "service_id": &service.id, "status": "pending"},
+                    )
+                    .await
+                    .unwrap();
+                if count >= 2 {
+                    break;
+                }
+                assert!(
+                    !live.is_finished(),
+                    "Live agent read stopped waiting for approval"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("live agent approval request");
+        assert!(!live.is_finished());
+        drop(live);
+        assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+        collection
+            .delete_one(doc! {"_id":&service.id})
+            .await
+            .unwrap();
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::GET,
+                    "/api/v1/skill-search?scope=private&mode=keyword&pageSize=1&page=1&q=private",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable)
+        ));
+        assert!(matches!(
+            reader.get("/api/v1/skill-search").await,
+            Err(AppError::Forbidden(message))
+                if message == "Ornn is unavailable; connect your Ornn access and retry"
+        ));
         f.state.db.drop().await.unwrap();
     }
 }

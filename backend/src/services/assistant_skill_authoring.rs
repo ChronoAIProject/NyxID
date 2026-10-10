@@ -8,8 +8,13 @@ use super::{
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    models::assistant_agent_learning::{
-        AssistantAgentLearningProposal, PROPOSALS_COLLECTION_NAME, ProposalSource,
+    models::{
+        assistant_acknowledgement::{
+            AssistantAcknowledgement, COLLECTION_NAME as ACKNOWLEDGEMENTS_COLLECTION_NAME,
+        },
+        assistant_agent_learning::{
+            AssistantAgentLearningProposal, PROPOSALS_COLLECTION_NAME, ProposalSource,
+        },
     },
 };
 use chrono::Utc;
@@ -44,6 +49,63 @@ pub async fn require_author(db: &Database, chat: &ChatAuthority) -> AppResult<()
         ));
     }
     Ok(())
+}
+
+/// The live chat that raised an authored card: its key is active, still bound
+/// to the card's conversation, and that chat may author skills. Shared by the
+/// card decision and its renewal.
+pub async fn card_authority(
+    db: &Database,
+    actor: &str,
+    card: &AssistantAcknowledgement,
+) -> AppResult<ChatAuthority> {
+    let live = db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(
+            doc! {"_id":&card.api_key_id,"user_id":actor,"is_active":true,
+            "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
+        )
+        .await?
+        .is_some();
+    let chat = if live {
+        acks::for_key(db, actor, Some(&card.api_key_id))
+            .await?
+            .filter(|chat| chat.conversation_id == card.conversation_id)
+    } else {
+        None
+    }
+    .ok_or_else(|| AppError::Forbidden("Skill review key is no longer current".into()))?;
+    require_author(db, &chat).await?;
+    Ok(chat)
+}
+
+/// The authored card being renewed and its live chat, so the new card lands
+/// in the same conversation.
+pub async fn renewal_source(
+    db: &Database,
+    actor: &str,
+    agent_id: &str,
+    proposal_id: &str,
+    original_id: &str,
+    revision: Option<i64>,
+) -> AppResult<(AssistantAcknowledgement, ChatAuthority)> {
+    let original = db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+        .find_one(doc! {"_id":original_id,"user_id":actor,"tool_name":review::TOOL})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Skill review not found".into()))?;
+    let reference = original
+        .authored_skill
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("Skill review not found".into()))?;
+    if reference.agent_id != agent_id
+        || reference.proposal_id != proposal_id
+        || revision.is_some_and(|v| v != reference.revision)
+    {
+        return Err(AppError::Conflict("Skill review changed".into()));
+    }
+    let chat = card_authority(db, actor, &original).await?;
+    Ok((original, chat))
 }
 
 #[derive(Deserialize)]
@@ -98,7 +160,12 @@ pub(crate) fn parse_input(value: &Value) -> AppResult<DraftInput> {
     serde_json::from_value(value.clone()).map_err(|_| invalid("invalid_shape", "draft"))
 }
 
-pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -> AppResult<Value> {
+pub async fn create(
+    state: &AppState,
+    chat: &ChatAuthority,
+    input: DraftInput,
+    reader: &impl super::agent_skill_service::OrnnReader,
+) -> AppResult<Value> {
     require_author(&state.db, chat).await?;
     let agent = team::maintained_agent(&state.db, &chat.user_id, &input.agent).await?;
     if agent.destroyed_at.is_some() {
@@ -169,6 +236,7 @@ pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -
     let collection = state
         .db
         .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
+    let mut inserted = false;
     if collection.find_one(doc! {"_id":&id}).await?.is_none() {
         if collection
             .count_documents(doc! {"agent_id":&agent.id,"status":"pending"})
@@ -201,7 +269,7 @@ pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -
             created_at: now,
             updated_at: now,
         };
-        state
+        inserted = state
             .db
             .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
             .update_one(
@@ -209,17 +277,42 @@ pub async fn create(state: &AppState, chat: &ChatAuthority, input: DraftInput) -
                 doc! {"$setOnInsert": bson::to_document(&row).map_err(|_| AppError::Internal("Skill proposal encoding failed".into()))?},
             )
             .upsert(true)
-            .await?;
+            .await?
+            .upserted_id
+            .is_some();
     }
-    let binding = review::approval_binding(
+    let binding = review::approval_binding_typed(
         state,
         &chat.user_id,
         &agent.id,
         &id,
         0,
         agent.skills_revision,
+        reader,
     )
-    .await?;
+    .await;
+    let binding = match binding {
+        Ok(binding) => binding,
+        Err(failure) => {
+            if inserted {
+                collection
+                    .delete_one(doc! {"_id":&id,"status":"pending","revision":0,"publication":bson::Bson::Null})
+                    .await?;
+            }
+            if body.base_skill.is_some()
+                && matches!(
+                    failure.code,
+                    Some(
+                        review::PublicationFailureCode::OrnnUnavailable
+                            | review::PublicationFailureCode::NyxidRefused
+                    )
+                )
+            {
+                return Err(AppError::Conflict("source_skill_unavailable: NyxID could not read the source skill from Ornn. Approve any pending Ornn request, then draft again.".into()));
+            }
+            return Err(failure.error);
+        }
+    };
     let card = acks::request(&state.db, chat, acks::Request {
         kind: "action", service: None, tool: Some(review::TOOL), arguments: Some(&binding),
         summary: "Review the complete skill draft, publish it privately to Ornn and attach its exact version to this agent.", platform: false,

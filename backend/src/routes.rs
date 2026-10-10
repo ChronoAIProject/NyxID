@@ -1041,6 +1041,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_team::put_profile_routes),
         )
         .route(
+            "/assistant/learning/publications/{proposal_id}/release-target",
+            post(handlers::assistant_agent_learning::admin_release_target),
+        )
+        .route(
             "/usage/analytics",
             get(handlers::admin_usage::get_analytics),
         )

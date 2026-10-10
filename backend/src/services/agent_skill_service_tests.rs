@@ -4,6 +4,107 @@ use crate::services::{
     assistant_team_service as team,
 };
 use std::{io::Write, sync::Mutex};
+
+#[test]
+fn problem_body_reads_only_the_root_code_and_never_detail() {
+    assert_eq!(
+        OrnnCode::from_problem_body(
+            br#"{"code":"BREAKING_CHANGE_WITHOUT_MAJOR_BUMP","detail":"private skill text"}"#
+        ),
+        OrnnCode::BreakingChangeWithoutMajorBump
+    );
+    assert_eq!(
+        OrnnCode::from_problem_body(br#"{"error":{"code":"forbidden"},"detail":"private"}"#),
+        OrnnCode::Unknown
+    );
+    assert_eq!(
+        OrnnCode::from_problem_body(br#"{"code":"unexpected","detail":"private"}"#),
+        OrnnCode::Unknown
+    );
+    assert_eq!(OrnnCode::from_problem_body(b"not json"), OrnnCode::Unknown);
+}
+
+/// Non-publication readers keep the pre-classification contract exactly:
+/// each row is the error the unclassified fetch returned for that case.
+#[test]
+fn classified_outcomes_keep_native_read_error_contract() {
+    type Expect = Box<dyn Fn(&AppError) -> bool>;
+    fn forbidden(message: &'static str) -> Expect {
+        Box::new(move |error| matches!(error, AppError::Forbidden(m) if m == message))
+    }
+    fn validation(message: &'static str) -> Expect {
+        Box::new(move |error| matches!(error, AppError::ValidationError(m) if m == message))
+    }
+    const NOT_VISIBLE: &str = "Skill unavailable or not visible through your Ornn access";
+    let cases: Vec<(OrnnOutcome, Expect)> = vec![
+        (
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed),
+            forbidden("This Ornn operation is not available to agent learning"),
+        ),
+        (
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::InvalidPath),
+            validation("Invalid skill path"),
+        ),
+        (
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable),
+            forbidden("Ornn is unavailable; connect your Ornn access and retry"),
+        ),
+        (
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ScopeForbidden("scope detail".into())),
+            Box::new(|e| matches!(e, AppError::ApiKeyScopeForbidden(m) if m == "scope detail")),
+        ),
+        (
+            OrnnOutcome::LocalError(AppError::NotFound("Conversation not found".into())),
+            Box::new(|e| matches!(e, AppError::NotFound(m) if m == "Conversation not found")),
+        ),
+        (
+            OrnnOutcome::ProxyError,
+            forbidden("Skill unavailable through your Ornn access; check the connection and retry"),
+        ),
+        (
+            OrnnOutcome::Response {
+                status: 404,
+                code: OrnnCode::SkillNotFound,
+            },
+            forbidden(NOT_VISIBLE),
+        ),
+        (
+            OrnnOutcome::Response {
+                status: 403,
+                code: OrnnCode::Forbidden,
+            },
+            forbidden(NOT_VISIBLE),
+        ),
+        (
+            OrnnOutcome::Response {
+                status: 409,
+                code: OrnnCode::SkillVersionExists,
+            },
+            forbidden(NOT_VISIBLE),
+        ),
+        (
+            OrnnOutcome::Response {
+                status: 503,
+                code: OrnnCode::Unknown,
+            },
+            forbidden(NOT_VISIBLE),
+        ),
+        (
+            OrnnOutcome::Interrupted,
+            validation("Ornn response exceeded the skill size limit or was interrupted"),
+        ),
+        (
+            OrnnOutcome::Uncertain,
+            Box::new(|e| matches!(e, AppError::ServicePoolInfrastructureUnavailable)),
+        ),
+    ];
+    for (index, (outcome, expected)) in cases.into_iter().enumerate() {
+        let error = outcome.into_app_result().unwrap_err();
+        assert!(expected(&error), "case {index}: {error:?}");
+    }
+    assert_eq!(OrnnOutcome::Ok(vec![1]).into_app_result().unwrap(), vec![1]);
+}
+
 const ID: &str = "128393f3-d528-4ce2-b197-f1b13cb8fd5b";
 fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));

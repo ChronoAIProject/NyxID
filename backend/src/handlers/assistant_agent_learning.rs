@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -27,12 +27,21 @@ pub struct DecisionBody {
     revision: Option<i64>,
     #[serde(default)]
     agent_skills_revision: Option<i64>,
+    #[serde(default)]
+    renewal_of: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditBody {
     draft: Value,
+}
+
+/// Other query parameters are ignored, as before the card parameter existed.
+#[derive(Deserialize)]
+pub struct PreviewQuery {
+    #[serde(default)]
+    acknowledgement_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -172,7 +181,11 @@ pub async fn approve(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let chat = chat(&state, &owner).await?;
+    if body.renewal_of.is_some() && body.acknowledgement_id.is_some() {
+        return Err(AppError::Conflict(
+            "renewal_of cannot be combined with acknowledgement_id".into(),
+        ));
+    }
     let proposal_row = state
         .db
         .collection::<crate::models::assistant_agent_learning::AssistantAgentLearningProposal>(
@@ -181,10 +194,50 @@ pub async fn approve(
         .find_one(mongodb::bson::doc! {"_id": &proposal_id, "agent_id": &agent_id})
         .await?
         .ok_or_else(|| AppError::NotFound("Learning proposal not found".into()))?;
+    // Authored proposals are confirmed only on their conversation card; this
+    // route may only renew that card, so it never raises a card elsewhere.
+    // Other callers fall through to the binding's ownership refusal.
+    if proposal_row.owner_id == owner
+        && proposal_row.source == crate::models::assistant_agent_learning::ProposalSource::Authored
+        && body.renewal_of.is_none()
+    {
+        return Err(AppError::Conflict(
+            "Confirm this authored skill from its conversation card".into(),
+        ));
+    }
+    let renewal = match body.renewal_of.as_deref() {
+        Some(original_id) => Some(
+            crate::services::assistant_skill_authoring::renewal_source(
+                &state.db,
+                &owner,
+                &agent_id,
+                &proposal_id,
+                original_id,
+                body.revision,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let chat = match &renewal {
+        Some((_, original_chat)) => original_chat.clone(),
+        None => chat(&state, &owner).await?,
+    };
     let expected_revision = body.revision.unwrap_or(proposal_row.revision);
-    let expected_skills_revision = body
-        .agent_skills_revision
-        .unwrap_or(proposal_row.agent_skills_revision);
+    let expected_skills_revision = if body.renewal_of.is_some() {
+        body.agent_skills_revision
+            .ok_or_else(|| AppError::Conflict("Skill review changed".into()))?
+    } else {
+        body.agent_skills_revision
+            .unwrap_or(proposal_row.agent_skills_revision)
+    };
+    let reader = super::agent_skills::Reader {
+        state: &state,
+        person: &owner,
+        thread_key: Some(&chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(chat.clone())),
+    };
     let args = review::approval_binding(
         &state,
         &owner,
@@ -192,27 +245,30 @@ pub async fn approve(
         &proposal_id,
         expected_revision,
         expected_skills_revision,
+        &reader,
     )
     .await?;
+    if let Some((original, _)) = &renewal {
+        review::require_renewal_of(original, &args)?;
+    }
     if args["agent_id"].as_str() != Some(&agent_id) {
         return Err(AppError::NotFound("Learning proposal not found".into()));
     }
     if let Some(id) = body.acknowledgement_id.as_deref() {
-        let _ = id;
+        review::confirm_learned_card(
+            &state,
+            &chat,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            id,
+            &args,
+        )
+        .await?;
     } else {
         let card = acks::request(&state.db, &chat, acks::Request { kind: "action", service: None, tool: Some("nyxid__approve_agent_learning"), arguments: Some(&args), summary: "Publish this reviewed private Ornn skill and attach its exact pinned version to the agent.", platform: false }).await?;
         return Ok(Json(
             json!({"status":"confirmation_required", "acknowledgement":acks::refusal(&card)}),
         ));
     }
-    let chat_key = chat.api_key_id.clone();
-    let reader = super::agent_skills::Reader {
-        state: &state,
-        person: &owner,
-        thread_key: Some(&chat_key),
-        scopes: None,
-        chat: Some(std::sync::Arc::new(chat.clone())),
-    };
     Ok(Json(
         review::approve(
             &state,
@@ -245,13 +301,22 @@ pub async fn authored_preview(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((agent, id)): Path<(String, String)>,
+    Query(query): Query<PreviewQuery>,
 ) -> AppResult<Json<Value>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     engine::require_enabled(&state.db, &actor).await?;
-    Ok(Json(
-        review::authored_preview(&state, &actor, &agent, &id).await?,
-    ))
+    Ok(Json(match query.acknowledgement_id.as_deref() {
+        Some(card) => review::authored_preview_for_card(&state, &actor, &agent, &id, card).await?,
+        None => review::authored_preview(&state, &actor, &agent, &id).await?,
+    }))
+}
+
+/// Withheld decisions use one message; the card shows the reason.
+fn withheld() -> AppError {
+    AppError::Conflict(
+        "This confirmation cannot publish right now; see the card for the reason".into(),
+    )
 }
 
 pub(crate) async fn decide_authored(
@@ -262,21 +327,32 @@ pub(crate) async fn decide_authored(
 ) -> AppResult<crate::models::assistant_acknowledgement::AssistantAcknowledgement> {
     super::login_client_context::require_first_party_human(auth)?;
     let actor = auth.user_id.to_string();
-    if state.db.collection::<mongodb::bson::Document>(crate::models::api_key::COLLECTION_NAME)
-        .find_one(mongodb::bson::doc! {"_id":&card.api_key_id,"user_id":&actor,"is_active":true,
-            "$or":[{"expires_at":mongodb::bson::Bson::Null},{"expires_at":{"$gt":mongodb::bson::DateTime::now()}}]})
-        .await?.is_none() {
-        return Err(AppError::Forbidden("Skill review key is no longer current".into()));
-    }
     let reference = card
         .authored_skill
         .clone()
         .ok_or_else(|| AppError::NotFound("Skill review not found".into()))?;
-    let chat = acks::for_key(&state.db, &actor, Some(&card.api_key_id))
-        .await?
-        .filter(|chat| chat.conversation_id == card.conversation_id)
-        .ok_or_else(|| AppError::Forbidden("Skill review key is no longer current".into()))?;
-    crate::services::assistant_skill_authoring::require_author(&state.db, &chat).await?;
+    let chat = crate::services::assistant_skill_authoring::card_authority(&state.db, &actor, &card)
+        .await?;
+    let actions = review::authored_actions(state, &actor, &card).await?;
+    if card.status == "denied" || (allow && actions.state == "pinned" && card.status == "used") {
+        return Ok(card);
+    }
+    let deny_proposal = actions.contains(review::AuthoredAction::Deny);
+    let permitted = if allow {
+        [
+            review::AuthoredAction::Publish,
+            review::AuthoredAction::Retry,
+            review::AuthoredAction::Check,
+        ]
+        .into_iter()
+        .any(|action| actions.contains(action))
+    } else {
+        deny_proposal || actions.contains(review::AuthoredAction::DismissCard)
+    };
+    if !permitted {
+        review::audit_withheld_decision(&state.db, &actor, &card, &actions, allow).await;
+        return Err(withheld());
+    }
     if card.status == "pending" {
         card = acks::decide(&state.db, &actor, &card.conversation_id, &card.id, allow).await?;
         acks::audit_decision(
@@ -286,58 +362,115 @@ pub(crate) async fn decide_authored(
         )
         .await;
     }
-    if !allow && card.status == "denied" {
-        review::reject(
+    if !allow {
+        if card.status == "denied" && deny_proposal {
+            match review::reject(
+                state,
+                &actor,
+                &reference.agent_id,
+                &reference.proposal_id,
+                reference.revision,
+                "rejected",
+            )
+            .await
+            {
+                Ok(()) | Err(AppError::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        return Ok(card);
+    }
+    if !matches!(card.status.as_str(), "allowed" | "used") {
+        review::audit_withheld_decision(&state.db, &actor, &card, &actions, allow).await;
+        return Err(withheld());
+    }
+    // This is the reviewed human publication, not a new agent tool effect.
+    // Its consumed card and live chat key fence authority; Ornn uses the
+    // approving person's normal signed identity without a second card.
+    let reader = super::agent_skills::Reader {
+        state,
+        person: &actor,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    let attempt = review::publication_attempt(state, &actor, &reference).await?;
+    let mut binding_failure_code = None;
+    let decision: AppResult<()> = async {
+        let binding = review::approval_binding_typed(
             state,
             &actor,
             &reference.agent_id,
             &reference.proposal_id,
             reference.revision,
-            "rejected",
+            reference.skills_revision,
+            &reader,
         )
+        .await
+        .map_err(|failure| {
+            binding_failure_code = failure.code;
+            failure.error
+        })?;
+        Box::pin(review::approve(
+            state,
+            &chat,
+            &reference.agent_id,
+            &reference.proposal_id,
+            &card.id,
+            &binding,
+            &reader,
+        ))
         .await?;
-        return Ok(card);
+        Ok(())
     }
-    if !allow || !matches!(card.status.as_str(), "allowed" | "used") {
-        return Err(AppError::Conflict(
-            "Skill approval is no longer pending".into(),
-        ));
+    .await;
+    if let Err(error) = decision {
+        let code = if card.expires_at <= chrono::Utc::now() {
+            review::PublicationFailureCode::ApprovalExpired
+        } else if let Some(code) = binding_failure_code {
+            code
+        } else if review::target_busy_for(state, &actor, &reference)
+            .await
+            .unwrap_or(false)
+        {
+            review::PublicationFailureCode::TargetBusy
+        } else {
+            review::PublicationFailureCode::NyxidRefused
+        };
+        let _ =
+            review::record_pre_claim_failure(state, &actor, &reference, &card, attempt, code).await;
+        return Err(error);
     }
-    let preview =
-        review::authored_preview(state, &actor, &reference.agent_id, &reference.proposal_id)
-            .await?;
-    if preview["status"] == "pinned" {
-        return Ok(card);
-    }
-    let binding = review::approval_binding(
-        state,
-        &actor,
-        &reference.agent_id,
-        &reference.proposal_id,
-        reference.revision,
-        reference.skills_revision,
-    )
-    .await?;
-    let reader = super::agent_skills::Reader {
-        state,
-        person: &actor,
-        // This is the reviewed human publication, not a new agent tool effect.
-        // Its consumed card and live chat key fence authority; Ornn uses the
-        // approving person's normal signed identity without a second card.
-        thread_key: None,
-        scopes: None,
-        chat: None,
-    };
-    Box::pin(review::approve(
-        state,
-        &chat,
-        &reference.agent_id,
-        &reference.proposal_id,
-        &card.id,
-        &binding,
-        &reader,
-    ))
-    .await?;
     card.status = "used".into();
     Ok(card)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseTargetBody {
+    operation_id: String,
+    evidence_ref: String,
+}
+
+/// Admin-only, audited operator recovery for a target held by an uncertain
+/// publication. See "Operator release of an uncertain target" in
+/// docs/AGENT_LEARNING.md for the evidence required first.
+pub async fn admin_release_target(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(proposal_id): Path<String>,
+    Json(body): Json<ReleaseTargetBody>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    Ok(Json(
+        review::operator_release_target(
+            &state,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            &proposal_id,
+            &body.operation_id,
+            &body.evidence_ref,
+        )
+        .await?,
+    ))
 }

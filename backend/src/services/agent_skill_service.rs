@@ -22,6 +22,129 @@ pub const MAX_ARCHIVE: usize = 4 * 1024 * 1024;
 const MAX_EXPANDED: usize = 8 * 1024 * 1024;
 const MAX_FILES: usize = 256;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrnnCode {
+    AuthMissing,
+    Forbidden,
+    SkillNotFound,
+    SkillVersionNotFound,
+    PayloadTooLarge,
+    InvalidZip,
+    TooManyFiles,
+    UncompressedTooLarge,
+    ValidationFailed,
+    BreakingChangeWithoutMajorBump,
+    VersionNotIncremented,
+    SkillVersionExists,
+    NoUpdate,
+    InvalidBody,
+    SkillDependencyNotFound,
+    DependencyCycle,
+    DependencyConflict,
+    ReservedName,
+    SkillNameExists,
+    Unknown,
+}
+
+impl OrnnCode {
+    pub fn parse(code: &str) -> Self {
+        match code {
+            "auth_missing" => Self::AuthMissing,
+            "forbidden" => Self::Forbidden,
+            "skill_not_found" => Self::SkillNotFound,
+            "skill_version_not_found" => Self::SkillVersionNotFound,
+            "payload_too_large" => Self::PayloadTooLarge,
+            "invalid_zip" => Self::InvalidZip,
+            "too_many_files" => Self::TooManyFiles,
+            "uncompressed_too_large" => Self::UncompressedTooLarge,
+            "validation_failed" => Self::ValidationFailed,
+            "BREAKING_CHANGE_WITHOUT_MAJOR_BUMP" => Self::BreakingChangeWithoutMajorBump,
+            "VERSION_NOT_INCREMENTED" => Self::VersionNotIncremented,
+            "SKILL_VERSION_EXISTS" => Self::SkillVersionExists,
+            "no_update" => Self::NoUpdate,
+            "invalid_body" => Self::InvalidBody,
+            "skill_dependency_not_found" => Self::SkillDependencyNotFound,
+            "dependency_cycle" => Self::DependencyCycle,
+            "dependency_conflict" => Self::DependencyConflict,
+            "reserved_name" => Self::ReservedName,
+            "skill_name_exists" => Self::SkillNameExists,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Ornn problem bodies (RFC 7807) carry the stable code at the root. No
+    /// other field (`detail`, `title`, nested errors) is read or retained.
+    pub fn from_problem_body(bytes: &[u8]) -> Self {
+        serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|value| value.get("code").and_then(Value::as_str).map(Self::parse))
+            .unwrap_or(Self::Unknown)
+    }
+}
+
+/// Registry-adapter classification of one Ornn request. Publication uses the
+/// distinctions; ordinary skill reads collapse them with `into_app_result`.
+pub enum OrnnOutcome {
+    Ok(Vec<u8>),
+    /// Refused by NyxID before the proxy was called.
+    LocalRefusal(OrnnLocalRefusal),
+    /// NyxID failed before the proxy was called (lookup or identity error).
+    LocalError(AppError),
+    /// A complete non-2xx response. `code` is `Unknown` when the problem body
+    /// was absent, unreadable or oversized.
+    Response {
+        status: u16,
+        code: OrnnCode,
+    },
+    /// The proxy returned an error; the request may already have been sent.
+    ProxyError,
+    /// A 2xx response whose body exceeded the limit or was interrupted.
+    Interrupted,
+    /// Timed out or the request task failed.
+    Uncertain,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrnnLocalRefusal {
+    OperationNotAllowed,
+    InvalidPath,
+    ServiceUnavailable,
+    ScopeForbidden(String),
+}
+
+impl OrnnOutcome {
+    /// The non-publication contract: every error keeps the status and message
+    /// that skill reads, catalog/preview and runtime package reads always had.
+    pub fn into_app_result(self) -> AppResult<Vec<u8>> {
+        match self {
+            Self::Ok(bytes) => Ok(bytes),
+            Self::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed) => Err(AppError::Forbidden(
+                "This Ornn operation is not available to agent learning".into(),
+            )),
+            Self::LocalRefusal(OrnnLocalRefusal::InvalidPath) => {
+                Err(AppError::ValidationError("Invalid skill path".into()))
+            }
+            Self::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable) => Err(AppError::Forbidden(
+                "Ornn is unavailable; connect your Ornn access and retry".into(),
+            )),
+            Self::LocalRefusal(OrnnLocalRefusal::ScopeForbidden(message)) => {
+                Err(AppError::ApiKeyScopeForbidden(message))
+            }
+            Self::LocalError(error) => Err(error),
+            Self::Response { .. } => Err(AppError::Forbidden(
+                "Skill unavailable or not visible through your Ornn access".into(),
+            )),
+            Self::ProxyError => Err(AppError::Forbidden(
+                "Skill unavailable through your Ornn access; check the connection and retry".into(),
+            )),
+            Self::Interrupted => Err(AppError::ValidationError(
+                "Ornn response exceeded the skill size limit or was interrupted".into(),
+            )),
+            Self::Uncertain => Err(AppError::ServicePoolInfrastructureUnavailable),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait OrnnReader: Sync {
     /// Must use the acting person's live identity, never a shared master credential.
@@ -38,6 +161,18 @@ pub trait OrnnReader: Sync {
         Err(AppError::Forbidden(
             "Ornn publication is unavailable".into(),
         ))
+    }
+
+    async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
+        let result = if method == http::Method::GET {
+            self.get(path).await
+        } else {
+            self.request(method, path, body).await
+        };
+        match result {
+            Ok(bytes) => OrnnOutcome::Ok(bytes),
+            Err(_) => OrnnOutcome::Uncertain,
+        }
     }
 }
 
@@ -176,48 +311,85 @@ pub async fn versions(reader: &impl OrnnReader, id: &str, page: u32) -> AppResul
 }
 
 pub async fn preview(reader: &impl OrnnReader, id: &str, version: &str) -> AppResult<Preview> {
-    literal(id, version)?;
-    let meta = data(reader, &format!("/api/v1/skills/{id}?version={version}")).await?;
-    if field(&meta, "guid")? != id || field(&meta, "version")? != version {
-        return Err(invalid("Ornn returned a different skill or version"));
+    preview_checked(reader, id, version)
+        .await
+        .map_err(PreviewFailure::into_error)
+}
+
+/// Why a pinned-version preview failed. `Mismatch`: Ornn served content other
+/// than the requested pin (identity, dependency limits, hash or package).
+/// `Read`: the read did not complete or the reply was malformed. Both carry the
+/// error ordinary previews have always returned.
+pub enum PreviewFailure {
+    Mismatch(AppError),
+    Read(AppError),
+}
+
+impl PreviewFailure {
+    pub fn into_error(self) -> AppError {
+        match self {
+            Self::Mismatch(error) | Self::Read(error) => error,
+        }
+    }
+}
+
+pub async fn preview_checked(
+    reader: &impl OrnnReader,
+    id: &str,
+    version: &str,
+) -> Result<Preview, PreviewFailure> {
+    use PreviewFailure::{Mismatch, Read};
+    literal(id, version).map_err(Mismatch)?;
+    let meta = data(reader, &format!("/api/v1/skills/{id}?version={version}"))
+        .await
+        .map_err(Read)?;
+    if field(&meta, "guid").map_err(Read)? != id
+        || field(&meta, "version").map_err(Read)? != version
+    {
+        return Err(Mismatch(invalid(
+            "Ornn returned a different skill or version",
+        )));
     }
     let closure = data(
         reader,
         &format!("/api/v1/skills/{id}/closure?version={version}"),
     )
-    .await?;
+    .await
+    .map_err(Read)?;
     let deps = closure["items"]
         .as_array()
-        .ok_or_else(|| invalid("Invalid Ornn dependency closure"))?;
+        .ok_or_else(|| Read(invalid("Invalid Ornn dependency closure")))?;
     if deps.len() > 16 {
-        return Err(invalid("Skill exceeds 16 pinned dependencies"));
+        return Err(Mismatch(invalid("Skill exceeds 16 pinned dependencies")));
     }
     let mut dependencies = Vec::new();
     for d in deps {
         dependencies.push(SkillPin {
             source: "ornn".into(),
-            skill_id: field(d, "guid")?.into(),
-            name: field(d, "name")?.into(),
-            version: field(d, "version")?.into(),
-            sha256: field(d, "skillHash")?.into(),
+            skill_id: field(d, "guid").map_err(Read)?.into(),
+            name: field(d, "name").map_err(Read)?.into(),
+            version: field(d, "version").map_err(Read)?.into(),
+            sha256: field(d, "skillHash").map_err(Read)?.into(),
         });
     }
     let reference = SkillReference {
         source: "ornn".into(),
         skill_id: id.into(),
-        name: field(&meta, "name")?.into(),
+        name: field(&meta, "name").map_err(Read)?.into(),
         version: version.into(),
-        sha256: field(&meta, "skillHash")?.into(),
+        sha256: field(&meta, "skillHash").map_err(Read)?.into(),
         dependencies,
     };
     validate(&Selection {
         expected_revision: 0,
         skills: vec![reference.clone()],
-    })?;
-    let bytes = download(reader, id, version, &reference.sha256).await?;
-    package(&bytes)?;
+    })
+    .map_err(Mismatch)?;
+    let bytes = download_checked(reader, id, version, &reference.sha256).await?;
+    package(&bytes).map_err(Mismatch)?;
     for d in &reference.dependencies {
-        package(&download(reader, &d.skill_id, &d.version, &d.sha256).await?)?;
+        package(&download_checked(reader, &d.skill_id, &d.version, &d.sha256).await?)
+            .map_err(Mismatch)?;
     }
     Ok(Preview {
         reference,
@@ -232,14 +404,28 @@ async fn download(
     version: &str,
     hash: &str,
 ) -> AppResult<Vec<u8>> {
+    download_checked(reader, id, version, hash)
+        .await
+        .map_err(PreviewFailure::into_error)
+}
+
+async fn download_checked(
+    reader: &impl OrnnReader,
+    id: &str,
+    version: &str,
+    hash: &str,
+) -> Result<Vec<u8>, PreviewFailure> {
     let bytes = reader
         .get(&format!("/api/v1/skills/{id}/versions/{version}/download"))
-        .await?;
+        .await
+        .map_err(PreviewFailure::Read)?;
     if bytes.len() > MAX_ARCHIVE {
-        return Err(invalid("Skill archive exceeds 4 MiB"));
+        return Err(PreviewFailure::Read(invalid("Skill archive exceeds 4 MiB")));
     }
     if hex::encode(Sha256::digest(&bytes)) != hash {
-        return Err(invalid("Skill SHA-256 mismatch; content refused"));
+        return Err(PreviewFailure::Mismatch(invalid(
+            "Skill SHA-256 mismatch; content refused",
+        )));
     }
     Ok(bytes)
 }

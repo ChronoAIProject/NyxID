@@ -54,6 +54,7 @@ fn proposal(started: bool) -> AssistantAgentLearningProposal {
             skills_revision: 0,
             lease_id: Some("lease".into()),
             lease_expires_at: Some(now),
+            ..Default::default()
         }),
         failure_code: None,
         evidence: Vec::new(),
@@ -65,9 +66,196 @@ fn proposal(started: bool) -> AssistantAgentLearningProposal {
 }
 
 #[test]
-fn durable_failure_status_uses_started_boundary() {
-    assert_eq!(failure_status(&proposal(false)), "published_unpinned");
-    assert_eq!(failure_status(&proposal(true)), "publication_failed");
+fn durable_failure_status_requires_verified_checkpoint() {
+    let mut row = proposal(true);
+    assert_eq!(failure_status(&row), "publication_failed");
+    row.publication.as_mut().unwrap().verified_at = Some(Utc::now());
+    assert_eq!(failure_status(&row), "published_unpinned");
+}
+
+#[test]
+fn release_predicate_requires_no_dispatch_checkpoint_or_live_lease() {
+    let mut p = proposal(false).publication.unwrap();
+    p.lease_expires_at = None;
+    assert!(non_effective(&p, Utc::now()));
+    p.started = true;
+    assert!(!non_effective(&p, Utc::now()));
+    p.started = false;
+    p.uncertain_dispatch = true;
+    assert!(!non_effective(&p, Utc::now()));
+    p.uncertain_dispatch = false;
+    p.verified_at = Some(Utc::now());
+    assert!(!non_effective(&p, Utc::now()));
+    p.verified_at = None;
+    p.lease_expires_at = Some(Utc::now() + Duration::seconds(30));
+    assert!(!non_effective(&p, Utc::now()));
+}
+
+#[tokio::test]
+async fn stale_base_changed_binding_cannot_overwrite_new_attempt_or_refusal() {
+    let fixture = orchestrator_fixture("learning_stale_base_binding").await;
+    let mut observed = proposal(false);
+    observed.owner_id = fixture.owner.clone();
+    observed.publication.as_mut().unwrap().lease_expires_at = None;
+    let proposals = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
+    proposals.insert_one(&observed).await.unwrap();
+    let raw = fixture
+        .state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+
+    raw.update_one(doc! {"_id":&observed.id}, doc! {"$set":{
+        "publication.attempt":1_i64,"status":"publishing",
+        "publication.lease_expires_at":bson::DateTime::from_chrono(Utc::now() + Duration::minutes(1))
+    }}).await.unwrap();
+    record_base_changed_if_current(&fixture.state.db, &observed)
+        .await
+        .unwrap();
+    let live = proposals
+        .find_one(doc! {"_id":&observed.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.status, "publishing");
+    assert_eq!(live.publication.unwrap().attempt, 1);
+    assert_eq!(live.failure_code, None);
+
+    raw.update_one(
+        doc! {"_id":&observed.id},
+        doc! {"$set":{
+            "status":"published_unpinned","publication.lease_expires_at":bson::Bson::Null,
+            "failure_code":"verify_failed"
+        }},
+    )
+    .await
+    .unwrap();
+    record_base_changed_if_current(&fixture.state.db, &observed)
+        .await
+        .unwrap();
+    let live = proposals
+        .find_one(doc! {"_id":&observed.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.status, "published_unpinned");
+    assert_eq!(live.failure_code.as_deref(), Some("verify_failed"));
+
+    raw.update_one(
+        doc! {"_id":&observed.id},
+        doc! {"$set":{
+            "status":"publication_failed","publication.attempt":0_i64,
+            "failure_code":"ornn_validation_failed","publication.last_stage":"format_validate"
+        }},
+    )
+    .await
+    .unwrap();
+    record_base_changed_if_current(&fixture.state.db, &observed)
+        .await
+        .unwrap();
+    let live = proposals
+        .find_one(doc! {"_id":&observed.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.failure_code.as_deref(), Some("ornn_validation_failed"));
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn definitive_refusal_releases_target_for_revised_draft() {
+    let fixture = orchestrator_fixture("learning_refusal_releases_target").await;
+    let mut row = proposal(true);
+    row.status = "publishing".into();
+    row.owner_id = fixture.owner.clone();
+    let target_skill_id = Uuid::new_v4().to_string();
+    let p = row.publication.as_mut().unwrap();
+    p.target_kind = Some("update".into());
+    p.target_skill_id = Some(target_skill_id.clone());
+    p.version = "1.1".into();
+    p.lease_expires_at = Some(Utc::now() + Duration::seconds(60));
+    let p = p.clone();
+    let target = target_id(&p).unwrap();
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let targets = fixture
+        .state
+        .db
+        .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME);
+    let now = Utc::now();
+    targets
+        .insert_one(LearningPublicationTarget {
+            id: target.clone(),
+            agent_id: row.agent_id.clone(),
+            owner_id: row.owner_id.clone(),
+            proposal_id: row.id.clone(),
+            operation_id: p.operation_id.clone(),
+            package_sha256: p.sha256.clone(),
+            state: "uncertain".into(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    defer(
+        &fixture.state,
+        &fixture.owner,
+        &row,
+        &p,
+        DeferredFailure {
+            code: publication::FailureCode::OrnnInterfaceChangeRequiresMajor,
+            stage: PublicationStage::Publish,
+            status: Some(409),
+            definitive: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        targets
+            .find_one(doc! {"_id":&target})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stored = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!stored.publication.unwrap().started);
+    targets
+        .insert_one(LearningPublicationTarget {
+            id: target.clone(),
+            agent_id: row.agent_id.clone(),
+            owner_id: row.owner_id.clone(),
+            proposal_id: Uuid::new_v4().to_string(),
+            operation_id: Uuid::new_v4().to_string(),
+            package_sha256: "b".repeat(64),
+            state: "reserved".into(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let holder = targets
+        .find_one(doc! {"_id":&target})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(holder.operation_id, p.operation_id);
+    assert_ne!(holder.package_sha256, p.sha256);
+    fixture.state.db.drop().await.unwrap();
 }
 
 #[test]
@@ -105,6 +293,404 @@ fn approval_binding_changes_after_edit_or_skill_revision() {
     edited.revision += 1;
     assert_ne!(original, publication::binding(&edited, publication, 4));
     assert_ne!(original, publication::binding(&row, publication, 5));
+}
+
+#[tokio::test]
+async fn migration_withholds_marker_for_unrecoverable_started_operation() {
+    let fixture = orchestrator_fixture("learning_migration_unrecoverable").await;
+    let row = proposal(true);
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    migrate_publication_targets(&fixture.state, false)
+        .await
+        .unwrap();
+    assert!(publication_ready(&fixture.state.db).await.is_err());
+    assert!(
+        fixture
+            .state
+            .db
+            .collection::<bson::Document>(MIGRATIONS_COLLECTION_NAME)
+            .find_one(doc! {"_id":MIGRATION_ID})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn migration_reserves_started_update_even_if_invalidated_and_is_idempotent() {
+    let fixture = orchestrator_fixture("learning_migration_started_update").await;
+    let mut row = proposal(true);
+    let target = Uuid::new_v4().to_string();
+    row.status = "invalidated".into();
+    let p = row.publication.as_mut().unwrap();
+    p.target_kind = Some("update".into());
+    p.target_skill_id = Some(target.clone());
+    p.version = "1.1".into();
+    let operation_id = p.operation_id.clone();
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    migrate_publication_targets(&fixture.state, false)
+        .await
+        .unwrap();
+    migrate_publication_targets(&fixture.state, false)
+        .await
+        .unwrap();
+    publication_ready(&fixture.state.db).await.unwrap();
+    let barrier = fixture
+        .state
+        .db
+        .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+        .find_one(doc! {"_id":format!("{target}:1.1")})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(barrier.operation_id, operation_id);
+    assert_eq!(barrier.state, "uncertain");
+    let durable = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(durable.publication.unwrap().uncertain_dispatch);
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn migration_uses_original_encrypted_base_after_current_pin_changes() {
+    let fixture = orchestrator_fixture("learning_migration_original_base").await;
+    let original_id = Uuid::new_v4().to_string();
+    let replacement_id = Uuid::new_v4().to_string();
+    let body = json!({"schema_version":1,"kind":"improve","name":"original","description":"safe guidance",
+        "skill_md":"# Guidance","files":[],"base_skill":{"source":"ornn","skill_id":original_id,
+        "name":"original","version":"1.0","sha256":"a".repeat(64)},"rationale":"","safety_notes":""});
+    let mut row = proposal(true);
+    row.publication.as_mut().unwrap().version = "1.1".into();
+    row.body_encrypted = fixture
+        .state
+        .encryption_keys
+        .encrypt(&serde_json::to_vec(&body).unwrap())
+        .await
+        .unwrap();
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&fixture.chat.agent_id},
+            doc! {"$set":{"skills":[{"source":"ornn","skill_id":&replacement_id,"name":"replacement",
+            "version":"2.0","sha256":"b".repeat(64),"dependencies":[]} ]}},
+        )
+        .await
+        .unwrap();
+    migrate_publication_targets(&fixture.state, false)
+        .await
+        .unwrap();
+    publication_ready(&fixture.state.db).await.unwrap();
+    let barrier = fixture
+        .state
+        .db
+        .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+        .find_one(doc! {"_id":format!("{original_id}:1.1")})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(barrier.operation_id, row.publication.unwrap().operation_id);
+    assert!(
+        fixture
+            .state
+            .db
+            .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+            .find_one(doc! {"_id":format!("{replacement_id}:1.1")})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn migration_withholds_marker_when_operation_bound_targets_disagree() {
+    let fixture = orchestrator_fixture("learning_migration_target_disagreement").await;
+    let mut row = proposal(true);
+    let p = row.publication.as_mut().unwrap();
+    p.target_kind = Some("update".into());
+    p.target_skill_id = Some(Uuid::new_v4().to_string());
+    p.skill_id = Some(Uuid::new_v4().to_string());
+    let barrier_id = format!("{}:{}", p.target_skill_id.as_deref().unwrap(), p.version);
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    migrate_publication_targets(&fixture.state, false)
+        .await
+        .unwrap();
+    assert!(publication_ready(&fixture.state.db).await.is_err());
+    assert!(
+        fixture
+            .state
+            .db
+            .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+            .find_one(doc! {"_id":barrier_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_stale_holder() {
+    let fixture = orchestrator_fixture("learning_refusal_fence").await;
+    let mut row = proposal(true);
+    row.status = "publishing".into();
+    let p = row.publication.as_mut().unwrap();
+    p.attempt = 1;
+    p.lease_expires_at = Some(Utc::now() + Duration::minutes(1));
+    let first = p.clone();
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    defer(
+        &fixture.state,
+        &fixture.owner,
+        &row,
+        &first,
+        DeferredFailure {
+            code: publication::FailureCode::OrnnWriteForbidden,
+            stage: PublicationStage::Publish,
+            status: Some(403),
+            definitive: true,
+        },
+    )
+    .await
+    .unwrap();
+    let collection = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
+    let stored = collection
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!stored.publication.as_ref().unwrap().started);
+    assert_eq!(stored.failure_code.as_deref(), Some("ornn_write_forbidden"));
+    collection.update_one(doc! {"_id":&row.id}, doc! {"$set":{"status":"publishing","publication.started":true,"publication.uncertain_dispatch":true,"publication.attempt":2_i64,"publication.lease_expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(1))}}).await.unwrap();
+    assert!(
+        defer(
+            &fixture.state,
+            &fixture.owner,
+            &row,
+            &first,
+            DeferredFailure {
+                code: publication::FailureCode::OrnnValidationFailed,
+                stage: PublicationStage::Publish,
+                status: Some(400),
+                definitive: true
+            }
+        )
+        .await
+        .is_err()
+    );
+    let second = collection
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.failure_code.as_deref(), Some("ornn_write_forbidden"));
+    let current = second.publication.as_ref().unwrap().clone();
+    defer(
+        &fixture.state,
+        &fixture.owner,
+        &row,
+        &current,
+        DeferredFailure {
+            code: publication::FailureCode::OrnnWriteForbidden,
+            stage: PublicationStage::Publish,
+            status: Some(403),
+            definitive: true,
+        },
+    )
+    .await
+    .unwrap();
+    let after = collection
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after.publication.as_ref().unwrap().started);
+    assert!(after.publication.as_ref().unwrap().uncertain_dispatch);
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn started_boundary_and_target_state_commit_together_before_egress() {
+    let fixture = orchestrator_fixture("learning_started_boundary").await;
+    let mut row = proposal(false);
+    row.status = "publishing".into();
+    let target_skill = Uuid::new_v4().to_string();
+    let p = row.publication.as_mut().unwrap();
+    p.attempt = 1;
+    p.lease_expires_at = Some(Utc::now() + Duration::minutes(1));
+    p.target_kind = Some("update".into());
+    p.target_skill_id = Some(target_skill.clone());
+    let p = p.clone();
+    let now = Utc::now();
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .db
+        .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+        .insert_one(LearningPublicationTarget {
+            id: format!("{target_skill}:{}", p.version),
+            agent_id: row.agent_id.clone(),
+            owner_id: row.owner_id.clone(),
+            proposal_id: row.id.clone(),
+            operation_id: p.operation_id.clone(),
+            package_sha256: p.sha256.clone(),
+            state: "reserved".into(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    assert!(!p.started);
+    mark_started(&fixture.state, &row, &p).await.unwrap();
+    let durable = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(durable.publication.as_ref().unwrap().started);
+    assert!(!non_effective(
+        durable.publication.as_ref().unwrap(),
+        Utc::now()
+    ));
+    let target = fixture
+        .state
+        .db
+        .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+        .find_one(doc! {"_id":format!("{target_skill}:{}", p.version)})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(target.state, "uncertain");
+    defer(
+        &fixture.state,
+        &fixture.owner,
+        &row,
+        &p,
+        DeferredFailure {
+            code: publication::FailureCode::OrnnWriteForbidden,
+            stage: PublicationStage::Publish,
+            status: Some(403),
+            definitive: true,
+        },
+    )
+    .await
+    .unwrap();
+    let durable = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(non_effective(
+        durable.publication.as_ref().unwrap(),
+        Utc::now()
+    ));
+    let target = fixture
+        .state
+        .db
+        .collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME)
+        .find_one(doc! {"_id":format!("{target_skill}:{}", p.version)})
+        .await
+        .unwrap();
+    assert!(target.is_none());
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_evidence_never_deletes_an_effective_operation_body() {
+    let fixture = orchestrator_fixture("learning_effective_body_retained").await;
+    let mut agent = fixture
+        .state
+        .db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&fixture.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    agent.destroyed_at = Some(Utc::now());
+    let mut row = proposal(true);
+    row.source = ProposalSource::Authored;
+    row.agent_id = agent.id.clone();
+    row.owner_id = fixture.owner.clone();
+    row.body_encrypted = vec![1, 2, 3];
+    row.body_bytes = 3;
+    fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    assert!(
+        require_current(&fixture.state.db, &agent, &row)
+            .await
+            .is_err()
+    );
+    let stored = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.body_encrypted, vec![1, 2, 3]);
+    assert_eq!(stored.status, "pending");
+    fixture.state.db.drop().await.unwrap();
 }
 
 #[test]
@@ -242,6 +828,9 @@ async fn org_review_fixture(
         .insert_one(row)
         .await
         .unwrap();
+    migrate_publication_targets(&fixture.state, false)
+        .await
+        .unwrap();
     (fixture, agent, proposal_id, member)
 }
 
@@ -249,9 +838,17 @@ async fn org_review_fixture(
 async fn approval_binding_and_approve_refuse_wrong_access() {
     let (fixture, agent, proposal_id, member) =
         org_review_fixture("learning_review_access_refusals").await;
-    let binding = approval_binding(&fixture.state, &member, &agent.id, &proposal_id, 0, 0)
-        .await
-        .unwrap_err();
+    let binding = approval_binding(
+        &fixture.state,
+        &member,
+        &agent.id,
+        &proposal_id,
+        0,
+        0,
+        &UnavailableReader,
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(binding, AppError::Conflict(message) if message == "owner_binding_unavailable")
     );
@@ -322,6 +919,7 @@ async fn approval_binding_and_approve_refuse_wrong_access() {
         &other_id,
         0,
         0,
+        &UnavailableReader,
     )
     .await
     .unwrap_err();
@@ -515,6 +1113,36 @@ impl OrnnReader for WireReader {
             .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
             .to_vec())
     }
+
+    async fn classified(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> super::super::agent_skill_service::OrnnOutcome {
+        use super::super::agent_skill_service::{OrnnCode, OrnnOutcome};
+        let response = self
+            .client
+            .request(method, format!("{}{}", self.base, path))
+            .body(body)
+            .send()
+            .await;
+        let Ok(response) = response else {
+            return OrnnOutcome::Uncertain;
+        };
+        let status = response.status().as_u16();
+        let Ok(bytes) = response.bytes().await else {
+            return OrnnOutcome::Uncertain;
+        };
+        if (200..300).contains(&status) {
+            return OrnnOutcome::Ok(bytes.to_vec());
+        }
+        let code = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v["code"].as_str().map(OrnnCode::parse))
+            .unwrap_or(OrnnCode::Unknown);
+        OrnnOutcome::Response { status, code }
+    }
 }
 
 fn archive() -> Vec<u8> {
@@ -555,10 +1183,12 @@ async fn wiremock_publish_failure_is_ambiguous_and_reconcile_accepts_one_match()
         skills_revision: 0,
         lease_id: None,
         lease_expires_at: None,
+        ..Default::default()
     };
-    assert!(
-        matches!(publication::publish(&reader, None, bytes.clone()).await, Err(AppError::Conflict(message)) if message.contains("ambiguous"))
-    );
+    assert!(matches!(
+        publication::publish_classified(&reader, None, bytes.clone()).await,
+        publication::PublishOutcome::Uncertain { .. }
+    ));
     server.reset().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/skills"))
@@ -573,9 +1203,10 @@ async fn wiremock_publish_failure_is_ambiguous_and_reconcile_accepts_one_match()
         )
         .mount(&server)
         .await;
-    assert!(
-        matches!(publication::reconcile(&reader, "owner", &publication, None).await, Err(AppError::Conflict(message)) if message.contains("ambiguous"))
-    );
+    assert!(matches!(
+        publication::reconcile(&reader, "owner", &publication, None).await,
+        Err(publication::PublicationError::Ambiguous(_))
+    ));
     let second_id = Uuid::new_v4().to_string();
     server.reset().await;
     Mock::given(method("GET")).and(path("/api/v1/skill-search")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[{"guid":id,"name":"skill-operation"},{"guid":second_id,"name":"skill-operation"}],"totalPages":1}}))).mount(&server).await;
@@ -594,9 +1225,10 @@ async fn wiremock_publish_failure_is_ambiguous_and_reconcile_accepts_one_match()
             .mount(&server)
             .await;
     }
-    assert!(
-        matches!(publication::reconcile(&reader, "owner", &publication, None).await, Err(AppError::Conflict(message)) if message.contains("ambiguous"))
-    );
+    assert!(matches!(
+        publication::reconcile(&reader, "owner", &publication, None).await,
+        Err(publication::PublicationError::Ambiguous(_))
+    ));
     server.reset().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/skills"))
@@ -636,8 +1268,108 @@ async fn wiremock_publish_failure_is_ambiguous_and_reconcile_accepts_one_match()
 }
 
 #[tokio::test]
-async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resumes() {
-    let fixture = orchestrator_fixture("learning_review_approval_resume").await;
+async fn version_exists_reconciles_exact_zip_and_refuses_mismatch_without_another_put() {
+    let server = MockServer::start().await;
+    let id = Uuid::new_v4().to_string();
+    let bytes = archive();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let base = SkillPin {
+        source: "ornn".into(),
+        skill_id: id.clone(),
+        name: "same-name".into(),
+        version: "1.0".into(),
+        sha256: "b".repeat(64),
+    };
+    let publication = LearningPublication {
+        operation_id: Uuid::new_v4().to_string(),
+        name: "same-name".into(),
+        version: "1.1".into(),
+        sha256: hash.clone(),
+        target_kind: Some("update".into()),
+        target_skill_id: Some(id.clone()),
+        started: true,
+        ..Default::default()
+    };
+    let reader = WireReader {
+        base: server.uri(),
+        client: reqwest::Client::new(),
+    };
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/skills/{id}")))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({"code":"SKILL_VERSION_EXISTS"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        publication::publish_classified(&reader, Some(&base), bytes.clone()).await,
+        publication::PublishOutcome::VersionConflict { status: 409 }
+    ));
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{
+            "guid":id,"name":"same-name","version":"1.1","skillHash":hash,"isPrivate":true,
+            "createdBy":"owner","sharedWithUsers":[],"sharedWithOrgs":[],"grants":[]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/closure")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/versions/1.1/download")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        publication::reconcile(&reader, "owner", &publication, Some(&base))
+            .await
+            .unwrap(),
+        id
+    );
+    server.verify().await;
+    server.reset().await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/skills/{id}")))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET")).and(path(format!("/api/v1/skills/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{
+            "guid":id,"name":"same-name","version":"1.1","skillHash":"c".repeat(64),
+            "isPrivate":true,"createdBy":"owner","sharedWithUsers":[],"sharedWithOrgs":[],"grants":[]}})))
+        .mount(&server).await;
+    assert!(matches!(
+        publication::reconcile(&reader, "owner", &publication, Some(&base)).await,
+        Err(publication::PublicationError::Integrity)
+    ));
+    server.verify().await;
+}
+
+struct StartedLearned {
+    fixture: crate::services::assistant_authority_tests::Fixture,
+    agent: AssistantAgent,
+    id: String,
+    generated: learning::GeneratedProposal,
+    binding: Value,
+    card: String,
+    publication: LearningPublication,
+}
+
+struct SeededLearned {
+    fixture: crate::services::assistant_authority_tests::Fixture,
+    agent: AssistantAgent,
+    id: String,
+    generated: learning::GeneratedProposal,
+}
+
+/// A pending learned create proposal with current evidence, in the NyxBot
+/// conversation of an orchestrator fixture, after the startup migration.
+async fn seed_learned_proposal(name: &str) -> SeededLearned {
+    let fixture = orchestrator_fixture(name).await;
     feature_flag_service::set_platform_override(
         &fixture.state.db,
         learning::FLAG_KEY,
@@ -813,6 +1545,26 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
             .await
             .unwrap()
     );
+    migrate_publication_targets(&fixture.state, false)
+        .await
+        .unwrap();
+    SeededLearned {
+        fixture,
+        agent,
+        id,
+        generated,
+    }
+}
+
+/// A learned create whose approved attempt dispatched with an unknown outcome.
+async fn started_learned_publication(name: &str) -> StartedLearned {
+    let SeededLearned {
+        fixture,
+        agent,
+        id,
+        generated,
+    } = seed_learned_proposal(name).await;
+    let now = Utc::now();
     let binding = approval_binding(
         &fixture.state,
         &fixture.owner,
@@ -820,6 +1572,7 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
         &id,
         0,
         agent.skills_revision,
+        &UnavailableReader,
     )
     .await
     .unwrap();
@@ -972,6 +1725,28 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
     );
 
     let publication = stored.publication.clone().unwrap();
+    StartedLearned {
+        fixture,
+        agent,
+        id,
+        generated,
+        binding,
+        card,
+        publication,
+    }
+}
+
+#[tokio::test]
+async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resumes() {
+    let StartedLearned {
+        fixture,
+        agent,
+        id,
+        generated,
+        binding,
+        card,
+        publication,
+    } = started_learned_publication("learning_review_approval_resume").await;
     fixture
         .state
         .db
@@ -983,11 +1758,12 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
         .await
         .unwrap();
     let skill_id = Uuid::new_v4().to_string();
-    let bytes = publication::package(
+    let bytes = publication::package_with_snapshot(
         &generated,
         &publication.operation_id,
         &publication.name,
         &publication.version,
+        None,
     )
     .unwrap();
     assert_eq!(publication::hash(&bytes), publication.sha256);
@@ -1053,6 +1829,177 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
         final_row.publication.unwrap().skill_id.as_deref(),
         Some(skill_id.as_str())
     );
+    server.verify().await;
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_learned_evidence_checks_a_dispatched_version_but_never_attaches_it() {
+    let StartedLearned {
+        fixture,
+        agent,
+        id,
+        generated,
+        binding,
+        card,
+        publication,
+    } = started_learned_publication("learning_stale_evidence_check_only").await;
+    // Consent is withdrawn after the request may have reached Ornn.
+    fixture
+        .state
+        .db
+        .collection::<bson::Document>(CONFIG_COLLECTION_NAME)
+        .update_one(doc! {"_id":&agent.id}, doc! {"$set":{"enabled":false}})
+        .await
+        .unwrap();
+    let listed = list(&fixture.state, &fixture.owner, &agent.id, true)
+        .await
+        .unwrap();
+    let item = listed.iter().find(|item| item.id == id).unwrap();
+    assert!(!item.evidence_available);
+    assert!(item.draft.is_some());
+    fixture
+        .state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"status": "publishing", "publication.lease_expires_at": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1))}},
+        )
+        .await
+        .unwrap();
+    let skill_id = Uuid::new_v4().to_string();
+    let bytes = publication::package_with_snapshot(
+        &generated,
+        &publication.operation_id,
+        &publication.name,
+        &publication.version,
+        None,
+    )
+    .unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skills"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/skill-search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data":{"items":[{"guid":skill_id,"name":publication.name}],"totalPages":1}}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":skill_id,"name":publication.name,"version":publication.version,"skillHash":publication.sha256,"description":"safe guidance","isPrivate":true,"createdBy":fixture.owner,"sharedWithUsers":[],"sharedWithOrgs":[],"grants":[]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill_id}/closure")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/v1/skills/{skill_id}/versions/{}/download",
+            publication.version
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(&server)
+        .await;
+    let reader = WireReader {
+        base: server.uri(),
+        client: reqwest::Client::new(),
+    };
+    let error = approve(
+        &fixture.state,
+        &fixture.chat,
+        &agent.id,
+        &id,
+        &card,
+        &binding,
+        &reader,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(message)
+        if message == "Learning evidence or consent is no longer available; the verified version was not attached"));
+    let stored = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, "published_unpinned");
+    assert_eq!(stored.failure_code.as_deref(), Some("evidence_unavailable"));
+    assert!(!stored.body_encrypted.is_empty());
+    let p = stored.publication.as_ref().unwrap();
+    assert!(p.verified_at.is_some());
+    assert_eq!(p.skill_id.as_deref(), Some(skill_id.as_str()));
+    assert_eq!(p.last_stage.as_deref(), Some("pin"));
+    assert!(p.lease_expires_at.is_none());
+    let unchanged = fixture
+        .state
+        .db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&agent.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.skills_revision, agent.skills_revision);
+    assert!(unchanged.skills.iter().all(|pin| pin.skill_id != skill_id));
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .collection::<bson::Document>(ROOTS_COLLECTION_NAME)
+            .count_documents(doc! {"proposal_id":&id})
+            .await
+            .unwrap(),
+        0
+    );
+    let listed = list(&fixture.state, &fixture.owner, &agent.id, false)
+        .await
+        .unwrap();
+    let item = listed.iter().find(|item| item.id == id).unwrap();
+    assert_eq!(item.status, "published_unpinned");
+    assert_eq!(item.failure_code.as_deref(), Some("evidence_unavailable"));
+    assert!(!item.evidence_available);
+    // Settled: neither a new confirmation nor the approving card can check again.
+    let settled = |error: AppError| {
+        matches!(error, AppError::Conflict(message)
+            if message == "NyxID verified this version but did not attach it; it stays private in Ornn")
+    };
+    assert!(settled(
+        approval_binding(
+            &fixture.state,
+            &fixture.owner,
+            &agent.id,
+            &id,
+            0,
+            agent.skills_revision,
+            &UnavailableReader,
+        )
+        .await
+        .unwrap_err()
+    ));
+    assert!(settled(
+        approve(
+            &fixture.state,
+            &fixture.chat,
+            &agent.id,
+            &id,
+            &card,
+            &binding,
+            &reader
+        )
+        .await
+        .unwrap_err()
+    ));
     server.verify().await;
     fixture.state.db.drop().await.unwrap();
 }
@@ -1162,11 +2109,269 @@ impl OrnnReader for TestReader {
 async fn authored_org_skill_refuses_personal_fallback() {
     let (f, agent, _, _) = org_review_fixture("authored_org_refusal").await;
     let input = serde_json::from_value(json!({"agent":agent.id,"name":"team-review","description":"Review team work","skill_md":"# Review"})).unwrap();
-    let error = crate::services::assistant_skill_authoring::create(&f.state, &f.chat, input)
-        .await
-        .unwrap_err();
+    let error = crate::services::assistant_skill_authoring::create(
+        &f.state,
+        &f.chat,
+        input,
+        &UnavailableReader,
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(error, AppError::Conflict(message) if message.contains("owner_binding_unavailable") && message.contains("maintainer"))
     );
     f.state.db.drop().await.unwrap();
+}
+
+async fn http_approve(
+    fixture: &crate::services::assistant_authority_tests::Fixture,
+    agent: &str,
+    id: &str,
+    body: Value,
+) -> AppResult<Value> {
+    crate::handlers::assistant_agent_learning::approve(
+        axum::extract::State(fixture.state.clone()),
+        crate::test_utils::test_auth_user(&fixture.owner),
+        axum::extract::Path((agent.to_owned(), id.to_owned())),
+        axum::Json(serde_json::from_value(body).unwrap()),
+    )
+    .await
+    .map(|axum::Json(value)| value)
+}
+
+#[tokio::test]
+async fn http_approve_decides_audits_and_publishes_only_the_learning_card() {
+    let SeededLearned {
+        fixture,
+        agent,
+        id,
+        generated,
+    } = seed_learned_proposal("learning_http_approve_card").await;
+    let server = MockServer::start().await;
+    let mut service = crate::test_utils::test_auto_connected_catalog_service();
+    service.slug = "ornn-api".into();
+    service.base_url = server.uri();
+    service.identity_propagation_mode = "jwt".into();
+    fixture
+        .state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .unwrap();
+    let requested = http_approve(&fixture, &agent.id, &id, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(requested["status"], "confirmation_required");
+    let card_id = requested["acknowledgement"]["acknowledgement_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let cards = fixture.state.db.collection::<AssistantAcknowledgement>(
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    );
+    let card = cards
+        .find_one(doc! {"_id":&card_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(card.status, "pending");
+    // Other pending cards the owner holds in the same conversation, even with
+    // this exact binding digest, are never decided through this route.
+    let mut service_card = card.clone();
+    service_card.id = Uuid::new_v4().to_string();
+    service_card.kind = "service".into();
+    service_card.tool_name = None;
+    service_card.arguments_digest = None;
+    service_card.service_id = Some(service.id.clone());
+    let mut authored_card = card.clone();
+    authored_card.id = Uuid::new_v4().to_string();
+    authored_card.authored_skill = Some(
+        crate::models::assistant_acknowledgement::AuthoredSkillReview {
+            agent_id: agent.id.clone(),
+            proposal_id: id.clone(),
+            revision: 0,
+            skills_revision: agent.skills_revision,
+        },
+    );
+    cards.insert_one(&service_card).await.unwrap();
+    cards.insert_one(&authored_card).await.unwrap();
+    for other in [&service_card, &authored_card] {
+        assert!(matches!(
+            http_approve(&fixture, &agent.id, &id, json!({"acknowledgement_id":other.id})).await,
+            Err(AppError::Conflict(message))
+                if message == "Learning approval card is missing, expired, used or stale"
+        ));
+        let unchanged = cards
+            .find_one(doc! {"_id":&other.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.status, "pending");
+        assert!(unchanged.decided_at.is_none());
+    }
+    let audits = fixture
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let decided = doc! {"event_type":"assistant_acknowledgement_decided"};
+    assert_eq!(audits.count_documents(decided.clone()).await.unwrap(), 0);
+    let pending = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    let p = pending.publication.clone().unwrap();
+    assert!(!p.started && p.approved_by.is_none());
+    let skill_id = Uuid::new_v4().to_string();
+    let bytes =
+        publication::package_with_snapshot(&generated, &p.operation_id, &p.name, &p.version, None)
+            .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skills"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":skill_id}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":skill_id,"name":p.name,"version":p.version,"skillHash":p.sha256,"description":"safe guidance","isPrivate":true,"createdBy":fixture.owner,"sharedWithUsers":[],"sharedWithOrgs":[],"grants":[]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill_id}/closure")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/v1/skills/{skill_id}/versions/{}/download",
+            p.version
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(&server)
+        .await;
+    let published = http_approve(
+        &fixture,
+        &agent.id,
+        &id,
+        json!({"acknowledgement_id":card_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(published["status"], "pinned");
+    assert_eq!(published["skill_id"], skill_id.as_str());
+    assert_eq!(
+        cards
+            .find_one(doc! {"_id":&card_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "used"
+    );
+    let audit = audits.find_one(decided.clone()).await.unwrap().unwrap();
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("decision").unwrap(), "allow");
+    assert_eq!(data.get_str("tool_name").unwrap(), TOOL);
+    assert_eq!(audits.count_documents(decided).await.unwrap(), 1);
+    for other in [&service_card, &authored_card] {
+        assert_eq!(
+            cards
+                .find_one(doc! {"_id":&other.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+    }
+    server.verify().await;
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn migration_retries_undecryptable_drafts_without_reporting_them_unresolved() {
+    let fixture = orchestrator_fixture("learning_migration_decrypt_retry").await;
+    let mut row = proposal(true);
+    row.body_encrypted = vec![9; 64];
+    let proposals = fixture
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
+    proposals.insert_one(&row).await.unwrap();
+    let unresolved = doc! {"event_type":"assistant_learning_migration_unresolved"};
+    let audits = fixture
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    assert_eq!(
+        migrate_publication_targets(&fixture.state, false)
+            .await
+            .unwrap(),
+        MigrationOutcome::Retry
+    );
+    assert!(publication_ready(&fixture.state.db).await.is_err());
+    assert_eq!(audits.count_documents(unresolved.clone()).await.unwrap(), 0);
+    // The bounded reporting pass also tells operators, and still retries.
+    assert_eq!(
+        migrate_publication_targets(&fixture.state, true)
+            .await
+            .unwrap(),
+        MigrationOutcome::Retry
+    );
+    let reported = audits.find_one(unresolved.clone()).await.unwrap().unwrap();
+    let data = reported.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("reason").unwrap(), "undecryptable");
+    assert_eq!(data.get_str("proposal_id").unwrap(), row.id);
+    assert_eq!(audits.count_documents(unresolved.clone()).await.unwrap(), 1);
+    // A draft that decrypts but does not decode needs an operator instead.
+    let encrypted = fixture
+        .state
+        .encryption_keys
+        .encrypt(b"not a draft")
+        .await
+        .unwrap();
+    fixture
+        .state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        migrate_publication_targets(&fixture.state, false)
+            .await
+            .unwrap(),
+        MigrationOutcome::Unresolved
+    );
+    assert!(publication_ready(&fixture.state.db).await.is_err());
+    assert_eq!(
+        audits
+            .count_documents(
+                doc! {"event_type":"assistant_learning_migration_unresolved",
+                "event_data.reason":"unclassified"}
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    fixture.state.db.drop().await.unwrap();
 }
