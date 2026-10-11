@@ -639,6 +639,8 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("POST", "turns".into()),
         ("GET", "models".into()),
     ];
+    assert!(routes.iter().any(|(_, path)| path.ends_with("/context")));
+    assert!(routes.iter().any(|(_, path)| path.ends_with("/context/reset")));
     use base64::Engine;
     let forbidden_tokens: Vec<_> = ["sa", "delegated", "relay"]
         .into_iter()
