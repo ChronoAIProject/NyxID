@@ -109,6 +109,10 @@ pub struct BillingServiceResponse {
     pub name: String,
     pub has_billing: bool,
     pub effective_source: &'static str,
+    pub effective_metric: String,
+    pub allowance_metrics: Vec<String>,
+    pub sync_status: Option<String>,
+    pub sync_error: Option<String>,
 }
 
 pub async fn get_overview(
@@ -141,6 +145,24 @@ pub async fn get_overview(
                     name: s.name,
                     has_billing: true,
                     effective_source: source,
+                    effective_metric:
+                        crate::services::billing::metric_resolution::effective_platform_metric(&s)
+                            .to_string(),
+                    allowance_metrics:
+                        crate::services::billing::metric_resolution::allowance_metrics(&s)
+                            .into_iter()
+                            .map(|m| m.to_string())
+                            .collect(),
+                    sync_status: s
+                        .billing
+                        .as_ref()
+                        .and_then(|b| b.byok_pricing.as_ref().or(b.platform_key_pricing.as_ref()))
+                        .map(|p| format!("{:?}", p.sync_status).to_lowercase()),
+                    sync_error: s
+                        .billing
+                        .as_ref()
+                        .and_then(|b| b.byok_pricing.as_ref().or(b.platform_key_pricing.as_ref()))
+                        .and_then(|p| p.sync_error.clone()),
                 }
             })
             .collect(),

@@ -80,21 +80,32 @@ pub struct EffectiveBillingConfig {
 /// deployment fallback. `None` is explicitly represented as free.
 pub fn effective_config(
     service: Option<&ServiceBilling>,
-    global: Option<&BillingSettings>,
+    _global: Option<&BillingSettings>,
     env_lane: Option<&str>,
     env_overdraft: Option<i64>,
 ) -> EffectiveBillingConfig {
-    let service_lane = service
-        .and_then(|b| b.platform_pricing.as_ref())
-        .map(|_| "platform".to_string());
+    let service_lane = service.and_then(|b| {
+        let lane = b
+            .byok_pricing
+            .as_ref()
+            .or(b.platform_key_pricing.as_ref())
+            .or(b.platform_pricing.as_ref())?;
+        (lane.sync_status == crate::models::service_billing::PricingSyncStatus::Synced).then(|| {
+            if b.byok_pricing.is_some() {
+                "byok"
+            } else if b.platform_key_pricing.is_some() {
+                "platform_key"
+            } else {
+                "legacy"
+            }
+            .to_string()
+        })
+    });
     let (lane, lane_source) = match service_lane {
         Some(v) => (Some(v), BillingConfigSource::Service),
-        None => match global.and_then(|g| g.default_lane.clone()) {
-            Some(v) => (Some(v), BillingConfigSource::Global),
-            None => match env_lane {
-                Some(v) => (Some(v.to_string()), BillingConfigSource::Env),
-                None => (None, BillingConfigSource::Free),
-            },
+        None => match env_lane {
+            Some(v) => (Some(v.to_string()), BillingConfigSource::Env),
+            None => (None, BillingConfigSource::Free),
         },
     };
     let (overdraft_cap_credits, overdraft_source) = match global
