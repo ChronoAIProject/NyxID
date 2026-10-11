@@ -702,11 +702,55 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     if let Some(error) = bot["error"].as_str() {
                         eprintln!("Error: {error}");
                     }
+                    if let Some(diagnostics) = bot["diagnostics"].as_object() {
+                        for field in [
+                            "last_inbound_at",
+                            "last_inbound_source",
+                            "last_outbound_at",
+                            "last_webhook_at",
+                            "consecutive_errors",
+                            "failure_reason",
+                        ] {
+                            if let Some(value) = diagnostics.get(field) {
+                                eprintln!(
+                                    "{field}: {}",
+                                    value
+                                        .as_str()
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| value.to_string())
+                                );
+                            }
+                        }
+                    }
                     eprintln!("Active:         {active}");
                     eprintln!("Conversations:  {conversations}");
                     eprintln!("Created:        {created}");
                     eprintln!("Updated:        {updated}");
                     print_permission_block(&bot);
+                }
+            }
+            Ok(())
+        }
+
+        ChannelBotCommands::Health { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let health: Value = api.get(&format!("/channel-bots/{id}/health")).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&health)?),
+                OutputFormat::Table => {
+                    for field in [
+                        "mode",
+                        "status",
+                        "recommended_action",
+                        "recommended_action_text",
+                        "error",
+                    ] {
+                        eprintln!("{field}: {}", health[field].as_str().unwrap_or("-"));
+                    }
+                    eprintln!(
+                        "poll_error_count: {}",
+                        health["poll_error_count"].as_u64().unwrap_or(0)
+                    );
                 }
             }
             Ok(())
@@ -1176,6 +1220,22 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    #[test]
+    fn health_subcommand_parses_for_cli_output() {
+        use clap::Parser;
+        let parsed = crate::cli::Cli::try_parse_from([
+            "nyxid",
+            "channel-bot",
+            "health",
+            "00000000-0000-4000-8000-000000000001",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            crate::cli::Commands::ChannelBot { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn connect_link_cancel_uses_bot_route_and_validates_uuid() {

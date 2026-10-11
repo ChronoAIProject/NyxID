@@ -324,6 +324,7 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
+        diagnostics: Default::default(),
         x_events: None,
         last_verification: None,
         ownership_version: 0,
@@ -2141,6 +2142,7 @@ mod tests {
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

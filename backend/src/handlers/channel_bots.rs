@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -281,6 +282,118 @@ pub struct VerifyBotResponse {
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelBotHealthResponse {
+    pub diagnostics: crate::models::channel_bot::ChannelBotDiagnostics,
+    pub mode: &'static str,
+    pub status: String,
+    pub webhook_registered: bool,
+    pub poll_error_count: u32,
+    pub last_polled_at: Option<String>,
+    pub next_poll_at: Option<String>,
+    pub error: Option<String>,
+    pub recommended_action: &'static str,
+    pub recommended_action_text: &'static str,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AdminChannelBotQuery {
+    pub platform: Option<String>,
+    pub status: Option<String>,
+}
+
+pub async fn admin_list(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AdminChannelBotQuery>,
+) -> AppResult<Json<Vec<ChannelBotHealthResponse>>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    let mut filter = mongodb::bson::doc! {};
+    if let Some(platform) = query.platform {
+        filter.insert(
+            "platform",
+            if platform == "x" {
+                "twitter"
+            } else {
+                &platform
+            },
+        );
+    }
+    if let Some(status) = query.status {
+        filter.insert("status", status);
+    }
+    let bots: Vec<crate::models::channel_bot::ChannelBot> = state
+        .db
+        .collection(crate::models::channel_bot::COLLECTION_NAME)
+        .find(filter)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(Json(
+        bots.iter()
+            .map(|bot| health_for(bot, state.config.billing_enabled))
+            .collect(),
+    ))
+}
+
+pub async fn admin_health(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
+    Ok(Json(health_for(&bot, state.config.billing_enabled)))
+}
+
+pub(crate) fn health_for(
+    bot: &crate::models::channel_bot::ChannelBot,
+    billing_enabled: bool,
+) -> ChannelBotHealthResponse {
+    let mode = if bot.webhook_registered {
+        "webhook"
+    } else if bot.platform == "twitter" || bot.platform == "x" {
+        "poll"
+    } else {
+        "webhook"
+    };
+    let (action, text) = if bot.status == "failed" && billing_enabled && !bot.webhook_registered {
+        (
+            "enable_billing",
+            "Enable billing, then verify the X subscription.",
+        )
+    } else if bot.status == "failed" || bot.error.is_some() {
+        (
+            "reconnect",
+            "Reconnect the X account, or verify credentials and resubscribe.",
+        )
+    } else if mode == "webhook" && !bot.webhook_registered {
+        (
+            "resubscribe",
+            "Register the X Activity webhook subscription.",
+        )
+    } else if bot.poll_backoff_until.is_some() {
+        (
+            "wait_rate_limit",
+            "X rate limiting is active; wait until the backoff expires.",
+        )
+    } else {
+        ("verify", "Verify the live X subscription and credentials.")
+    };
+    ChannelBotHealthResponse {
+        diagnostics: bot.diagnostics.clone(),
+        mode,
+        status: bot.status.clone(),
+        webhook_registered: bot.webhook_registered,
+        poll_error_count: bot.poll_error_count,
+        last_polled_at: bot.last_polled_at.map(|v| v.to_rfc3339()),
+        next_poll_at: bot.poll_backoff_until.map(|v| v.to_rfc3339()),
+        error: bot.error.clone(),
+        recommended_action: action,
+        recommended_action_text: text,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1169,6 +1282,45 @@ pub async fn verify_bot(
     .await
 }
 
+/// GET /api/v1/channel-bots/{id}/health
+pub async fn health(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let (_owner, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
+    Ok(Json(health_for(&bot, state.config.billing_enabled)))
+}
+
+/// POST /api/v1/channel-bots/{id}/resubscribe
+pub async fn resubscribe(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let (_owner, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    if bot.platform != "twitter" && bot.platform != "x" {
+        return Err(AppError::ValidationError(
+            "resubscribe is supported only for X bots".into(),
+        ));
+    }
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    crate::services::channel_connection_webhook_service::configure(
+        &state.db,
+        &state.billing,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter.as_ref(),
+        &bot,
+        &state.config.base_url,
+    )
+    .await?;
+    let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&updated, state.config.billing_enabled)))
+}
+
 pub(crate) async fn verify_bot_with_adapter(
     state: &AppState,
     bot: crate::models::channel_bot::ChannelBot,
@@ -1605,6 +1757,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -1639,6 +1792,19 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn health_recommends_recovery_from_failed_poll() {
+        let mut bot = make_lark_bot(false);
+        bot.platform = "twitter".into();
+        bot.status = "failed".into();
+        bot.error = Some("poll failed".into());
+        bot.diagnostics.consecutive_errors = 5;
+        let health = health_for(&bot, false);
+        assert_eq!(health.mode, "poll");
+        assert_eq!(health.recommended_action, "reconnect");
+        assert_eq!(health.diagnostics.consecutive_errors, 5);
     }
 
     #[test]
@@ -1681,6 +1847,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

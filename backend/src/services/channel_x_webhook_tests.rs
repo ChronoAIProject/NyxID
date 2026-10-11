@@ -1097,3 +1097,20 @@ async fn x_event_settings_require_consent_and_recover_partial_public_setup() {
     assert!(recovered.error.is_none());
     assert_eq!(recovered.x_events, Some(vec![Dm, Mentions, Replies]));
 }
+
+#[test]
+fn live_subscription_state_contract_distinguishes_registered_and_missing() {
+    let registered = crate::models::channel_bot::ChannelBotSubscriptionState {
+        registered: true,
+        checked_at: chrono::Utc::now(),
+        last_error: None,
+    };
+    let missing = crate::models::channel_bot::ChannelBotSubscriptionState {
+        registered: false,
+        checked_at: chrono::Utc::now(),
+        last_error: Some("subscription_missing".into()),
+    };
+    assert!(registered.registered);
+    assert!(!missing.registered);
+    assert_eq!(missing.last_error.as_deref(), Some("subscription_missing"));
+}

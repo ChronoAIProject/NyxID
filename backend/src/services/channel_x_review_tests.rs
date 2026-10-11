@@ -125,6 +125,23 @@ async fn reconnect_relays_dms_received_while_failed_once() {
         .await
         .unwrap();
     assert_eq!(failed.status, "failed");
+    channel_credentials::fail_bot(&state.db, &failed, "Reconnect the account")
+        .await
+        .unwrap();
+    let failure_count = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .count_documents(doc! {"event_type": "channel_bot_failed", "event_data.bot_id": &bot.id})
+        .await
+        .unwrap();
+    assert_eq!(failure_count, 1);
+    let notices = state
+        .db
+        .collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .count_documents(doc! {"user_id": &owner, "channel_bot_failure_notice.bot_id": &bot.id})
+        .await
+        .unwrap();
+    assert_eq!(notices, 1);
     identity(&server, "10").await;
     Mock::given(method("GET"))
         .and(path("/2/dm_events"))

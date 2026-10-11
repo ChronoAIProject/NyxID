@@ -190,7 +190,7 @@ pub async fn fail_bot(db: &mongodb::Database, bot: &ChannelBot, cause: &str) -> 
     }
     let result = db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
         .update_one(filter,
-            doc! { "$set": { "status": "failed", "error": cause, "updated_at": bson::DateTime::now() } }).await?;
+            doc! { "$set": { "status": "failed", "error": cause, "failure_reason": cause, "diagnostics.failure_reason": cause, "updated_at": bson::DateTime::now() } }).await?;
     if result.modified_count > 0 {
         audit_failure(db, bot, cause).await?;
     }
@@ -204,7 +204,14 @@ pub(crate) async fn audit_failure(
 ) -> AppResult<()> {
     super::audit_service::log_system_event(db.clone(), "channel_bot_failed", Some(serde_json::json!({
         "bot_id": bot.id, "owner_user_id": bot.user_id, "platform": bot.platform, "cause": cause,
+        "recommended_action": if cause.contains("credit") { "enable_billing" } else { "reconnect" },
     }))).await?;
+    // Metadata-only owner notification: the notification service owns the
+    // channel row, and the transition filter above makes this idempotent.
+    let channel = super::notification_service::get_or_create_channel(db, &bot.user_id).await?;
+    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(doc! {"_id": &channel.id}, doc! {"$set": {"channel_bot_failure_notice": {"bot_id": &bot.id, "reason": cause, "recommended_action": if cause.contains("credit") { "enable_billing" } else { "reconnect" }, "at": bson::DateTime::now()}}})
+        .await?;
     Ok(())
 }
 

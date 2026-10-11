@@ -57,6 +57,7 @@ export interface ChannelBotListResponse {
 }
 
 export interface ChannelBotDetail extends ChannelBotItem {
+  readonly diagnostics?: ChannelBotDiagnostics;
   readonly x_events?: readonly XChannelEvent[];
   readonly last_verification?: BotVerification | null;
   readonly webhook_ingestion?: boolean;
@@ -84,6 +85,31 @@ export interface ChannelBotDetail extends ChannelBotItem {
   /** Lark/Feishu only: scope keys encoded in `permission_setup_url`,
    *  echoed back so the UI can render the list under the link. */
   readonly permission_setup_scopes?: readonly string[] | null;
+}
+
+export interface ChannelBotDiagnostics {
+  readonly last_inbound_at?: string | null;
+  readonly last_inbound_source?: string | null;
+  readonly last_outbound_at?: string | null;
+  readonly last_outbound_error?: { readonly code: string; readonly at: string } | null;
+  readonly last_webhook_at?: string | null;
+  readonly last_webhook_error?: { readonly code: string; readonly at: string } | null;
+  readonly subscription_state?: { readonly registered: boolean; readonly checked_at: string; readonly last_error?: string | null } | null;
+  readonly consecutive_errors?: number;
+  readonly failure_reason?: string | null;
+}
+
+export interface ChannelBotHealth {
+  readonly diagnostics: ChannelBotDiagnostics;
+  readonly mode: string;
+  readonly status: string;
+  readonly webhook_registered: boolean;
+  readonly poll_error_count: number;
+  readonly last_polled_at?: string | null;
+  readonly next_poll_at?: string | null;
+  readonly error?: string | null;
+  readonly recommended_action: string;
+  readonly recommended_action_text: string;
 }
 
 export interface BotVerification {

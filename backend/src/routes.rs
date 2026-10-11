@@ -923,6 +923,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = Router::new()
+        .route("/channel-bots", get(handlers::channel_bots::admin_list))
+        .route(
+            "/channel-bots/{id}/health",
+            get(handlers::channel_bots::admin_health),
+        )
         .route(
             "/ownership/{kind}",
             get(handlers::admin_ownership::list_resources),
@@ -1691,7 +1696,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::channel_bots::update_bot)
                 .delete(handlers::channel_bots::delete_bot),
         )
-        .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
+        .route("/{id}/verify", post(handlers::channel_bots::verify_bot))
+        .route("/{id}/health", get(handlers::channel_bots::health))
+        .route(
+            "/{id}/resubscribe",
+            post(handlers::channel_bots::resubscribe),
+        );
 
     let channel_conversation_routes = Router::new()
         .route(
