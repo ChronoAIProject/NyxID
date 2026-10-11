@@ -179,7 +179,7 @@ pub struct AdminQuery {
 }
 #[derive(Serialize)]
 pub struct AdminResponse {
-    pub counts: Vec<serde_json::Value>,
+    pub counts: Vec<feedback_service::AdminCount>,
     pub recent: Vec<AdminFeedbackRow>,
     pub next_cursor: Option<String>,
 }
@@ -222,10 +222,7 @@ pub async fn admin(
     }
     let mut aggregate_filter = filter.clone();
     aggregate_filter.remove("$or");
-    let pipeline = vec![doc! {"$match": aggregate_filter}, doc! {"$group": {"_id": {"day": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}}, "vote": "$vote"}, "count": {"$sum": 1}}}];
-    let mut counts = Vec::new();
-    let mut agg = state.db.collection::<bson::Document>(COLLECTION_NAME).aggregate(pipeline).await?;
-    while let Some(row) = agg.try_next().await? { counts.push(row); }
+    let counts = feedback_service::admin_counts(&state.db, aggregate_filter).await?;
     let rows = state
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
