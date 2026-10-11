@@ -415,6 +415,45 @@ async fn context_checkpoint_matches_turn_source_and_reset_reason_is_visible() {
 }
 
 #[tokio::test]
+async fn context_checkpoint_pending_includes_running_activity() {
+    let db = connect_transaction_test_database("nyxa_checkpoint_pending").await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = engine::begin_turn(
+        &db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: None,
+            agent_id: None,
+            text: "work".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    activity_started(&db, OWNER, &row.id, "mcp.long_call")
+        .await
+        .unwrap();
+    let checkpoint = engine::checkpoint_summary(&db, OWNER, &row.id)
+        .await
+        .unwrap();
+    assert!(
+        checkpoint
+            .pending_actions
+            .iter()
+            .any(|action| action.contains("mcp.long_call"))
+    );
+}
+
+#[tokio::test]
 async fn stream_failure_persists_stream_diagnostic_stage() {
     let (state, _calls, server) =
         setup_options(None, Duration::ZERO, vec!["stream_failure"], false).await;
