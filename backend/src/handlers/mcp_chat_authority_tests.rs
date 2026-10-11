@@ -3663,5 +3663,18 @@ async fn s9_specialist_guest_disabled_pin_denial() {
     )
     .await;
     assert_eq!(guest_refusal["error"], "owner_only");
+    let owner = authenticate_id(&f, &f.nyxbot_thread).await;
+    let owner_result = result(
+        call(
+            &f,
+            &owner,
+            "nyxid__set_agent_skills",
+            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[]}}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(owner_result["revision"], 1);
     f.state.db.drop().await.unwrap();
 }
