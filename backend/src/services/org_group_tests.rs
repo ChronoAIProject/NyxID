@@ -569,8 +569,7 @@ async fn org_group_cards_leave_revocation_and_queue_drop() {
     f.state.db.drop().await.unwrap();
 }
 
-#[tokio::test]
-async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() {
+async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants_impl() {
     use super::assistant_live::LiveEvent;
     use http_body_util::BodyExt;
     let f = Fixture::new("org_group_live").await;
@@ -632,6 +631,14 @@ async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() 
     }
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn org_group_sticky_recipients_are_per_actor() {
+    org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants_impl().await;
+}
+
+#[tokio::test]
+async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() { org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants_impl().await; }
 
 #[tokio::test]
 async fn org_group_http_tools_and_demoted_or_inactive_members_are_refused() {

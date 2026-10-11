@@ -34,6 +34,12 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
+  useEffect(() => {
+    if (!preview) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setPreview(undefined); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [preview]);
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);

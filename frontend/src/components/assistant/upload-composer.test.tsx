@@ -63,6 +63,16 @@ describe("Assistant uploads composer", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("closes the image preview with Escape", async () => {
+    vi.mocked(uploadFile).mockResolvedValue({ ...item, label: "photo.png", content_type: "image/png" });
+    render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+    choose(new File(["png"], "photo.png", { type: "image/png" }));
+    await screen.findByText("Ready");
+    fireEvent.click(screen.getByRole("button", { name: "Preview photo.png" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("does not restore attachments after an admitted stream failure", async () => {
     const error = Object.assign(new Error("stream ended"), { admitted: true });
     const onSend = vi.fn().mockRejectedValue(error);

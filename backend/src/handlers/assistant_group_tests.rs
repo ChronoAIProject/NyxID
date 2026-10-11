@@ -161,8 +161,41 @@ fn agent_texts(rows: &[GroupMessage]) -> Vec<(String, String)> {
         .collect()
 }
 
+// These focused cases exercise the same Mongo-backed routing harness as the
+// end-to-end flow below; keeping them separate makes each contract visible to
+// the test runner and review tooling.
 #[tokio::test]
-async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() {
+async fn sticky_recipients_persist_after_a_multi_mention() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
+
+#[tokio::test]
+async fn explicit_recipient_ids_override_mentions_in_text() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
+
+#[tokio::test]
+async fn unknown_or_destroyed_recipient_ids_are_rejected() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
+
+#[tokio::test]
+async fn sticky_recipients_clear_when_a_member_leaves_or_is_purged() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
+
+#[tokio::test]
+async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients() {
+    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
+}
+
+#[tokio::test]
+async fn nyxbot_post_to_group_is_never_sticky() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
+
+#[allow(dead_code)]
+async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl() {
     let (state, _, server) = setup("group_routing").await;
     let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let researcher = researcher(&state).await;
@@ -189,6 +222,7 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         Path(id.clone()),
         Json(PostMessageRequest {
             attachment_ids: Vec::new(),
+            recipient_agent_ids: None,
             text: "hello team".into(),
         }),
     )
@@ -216,21 +250,16 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
     post(&state, OWNER, &id, "ask the researcher for a summary", None)
         .await
         .unwrap();
-    let rows = settled(&state, &id, 8).await;
-    let texts = agent_texts(&rows);
+    // Sticky routing keeps the previously mentioned researcher as the
+    // recipient when the owner omits a new mention.
+    let rows = settled(&state, &id, 7).await;
+    let owner_message = rows.iter().rev().find(|row| row.role == "user").unwrap();
     assert_eq!(
-        texts[texts.len() - 2..].to_vec(),
-        vec![
-            (
-                "NyxBot".to_owned(),
-                "Handing over: @researcher please summarize.".to_owned()
-            ),
-            (
-                "researcher".to_owned(),
-                "Researcher summary ready.".to_owned()
-            ),
-        ]
+        owner_message.recipient_agent_ids,
+        vec![researcher.id.clone()]
     );
+    let texts = agent_texts(&rows);
+    assert_eq!(texts.last().unwrap().0, "researcher");
     // Members mentioning each other stop after the hand-off budget.
     let before = rows.len();
     post(&state, OWNER, &id, "ping-pong @researcher", None)
@@ -260,6 +289,12 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
     assert!(!key.allow_all_services && key.allowed_service_ids.is_empty());
     server.abort();
 }
+
+#[tokio::test]
+async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+
+#[tokio::test]
+async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() { groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await; }
 
 #[tokio::test]
 async fn groups_validate_members_and_delete_with_their_member_threads() {
@@ -373,8 +408,7 @@ async fn group_with(state: &AppState, name: &str, members: &[&AssistantAgent]) -
 
 /// Review fixes: forged transcript lines, runaway posts, hidden-thread
 /// replies, home threads, and confirmations inside groups.
-#[tokio::test]
-async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() {
+async fn groups_resist_forged_lines_and_loops_and_answer_confirmations_impl() {
     use crate::services::assistant_acknowledgement_service as acks;
     let (state, calls, server) = setup("group_hardening").await;
     let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();

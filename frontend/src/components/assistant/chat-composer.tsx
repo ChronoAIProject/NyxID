@@ -125,6 +125,7 @@ interface ChatComposerProps {
   readonly controls?: ReactNode;
   readonly attachmentButton?: ReactNode;
   readonly attachments?: ReactNode;
+  readonly recipients?: ReactNode;
   readonly hasAttachments?: boolean;
   readonly uploadBlocked?: boolean;
   readonly onFiles?: (files: File[]) => void;
@@ -136,6 +137,7 @@ interface ChatComposerProps {
    */
   readonly mentions?: readonly ComposerMention[];
   readonly onSend: (content: string) => Promise<void>;
+  readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
   readonly onVoice?: () => void;
 }
@@ -164,12 +166,14 @@ function DraftedChatComposer({
   controls,
   attachmentButton,
   attachments,
+  recipients,
   hasAttachments = false,
   uploadBlocked = false,
   onFiles,
   placeholder,
   mentions,
   onSend,
+  onContentChange,
   onStop,
   onVoice,
 }: ChatComposerProps) {
@@ -250,6 +254,7 @@ function DraftedChatComposer({
     renderedOwnerUserIdRef.current = ownerUserId;
     renderedDraftKeyRef.current = draftKey;
     setContent(nextContent);
+    onContentChange?.(nextContent);
   }
 
   const syncComposerLayout = useCallback((draft?: string) => {
@@ -697,6 +702,7 @@ function DraftedChatComposer({
         >
           {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium">Drop files to attach</div>}
           {attachments}
+          {recipients}
           <div className="flex items-start gap-1.5">
           {attachmentButton}
           <div

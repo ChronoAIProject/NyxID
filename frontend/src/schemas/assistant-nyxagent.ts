@@ -667,6 +667,7 @@ export const assistantGroupSchema = z.object({
   members: z.array(assistantGroupMemberSchema),
   /** Answers user messages that mention no one: NyxBot when it is a member. */
   lead_agent_id: z.string(),
+  default_recipient_ids: z.array(z.string()).optional(),
   working_agent_ids: z.array(z.string()).default([]),
   message_count: z.number().int().nonnegative().default(0),
   last_message_at: z.string().nullable().default(null),
@@ -690,6 +691,7 @@ export const assistantGroupMessageSchema = z.object({
     .nullable()
     .default(null),
   text: z.string(),
+  recipient_agent_ids: z.array(z.string()).optional(),
   created_at: z.string(),
 });
 export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;

@@ -80,4 +80,8 @@ describe("mentionedNames and mentionSegments", () => {
       { text: " and @nobody", mention: false },
     ]);
   });
+
+  it("keeps recipient names stable across repeated mentions", () => {
+    expect(mentionedNames("@researcher @NyxBot @researcher", names)).toEqual(["researcher", "NyxBot"]);
+  });
 });

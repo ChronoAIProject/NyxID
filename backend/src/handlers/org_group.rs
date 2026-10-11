@@ -39,8 +39,19 @@ pub(crate) async fn post(
     .await?;
     let mut addressed = personal::mentions(text, &agents);
     if addressed.is_empty() {
+        addressed = access
+            .group
+            .last_recipient_ids_by_actor
+            .get(&access.actor)
+            .cloned()
+            .unwrap_or_default();
+        addressed.retain(|id| agents.iter().any(|agent| &agent.id == id));
+    }
+    if addressed.is_empty() {
         addressed.push(access.group.lead_agent_id.clone());
     }
+    state.db.collection::<AssistantGroup>(crate::models::assistant_group::COLLECTION_NAME)
+        .update_one(mongodb::bson::doc! {"_id": &access.group.id}, mongodb::bson::doc! {"$set": {format!("last_recipient_ids_by_actor.{}", access.actor): &addressed}}).await?;
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
         id: id.clone(),

@@ -49,6 +49,7 @@ pub struct GroupResponse {
     name: String,
     members: Vec<GroupMemberResponse>,
     lead_agent_id: String,
+    default_recipient_ids: Vec<String>,
     working_agent_ids: Vec<String>,
     message_count: i64,
     last_message_at: Option<DateTime<Utc>>,
@@ -74,6 +75,7 @@ pub struct GroupMessageResponse {
     role: String,
     agent: Option<GroupAgentRef>,
     text: String,
+    recipient_agent_ids: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -99,6 +101,7 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         role: row.role,
         agent,
         text: row.text,
+        recipient_agent_ids: row.recipient_agent_ids,
         created_at: row.created_at,
     }
 }
@@ -124,7 +127,12 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
             .collect(),
         id: group.id,
         name: group.name,
-        lead_agent_id: group.lead_agent_id,
+        lead_agent_id: group.lead_agent_id.clone(),
+        default_recipient_ids: if group.last_recipient_ids.is_empty() {
+            vec![group.lead_agent_id.clone()]
+        } else {
+            group.last_recipient_ids.clone()
+        },
         working_agent_ids: working,
         message_count: group.message_count,
         last_message_at: group.last_message_at,
@@ -444,7 +452,7 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    post_with_uploads(state, owner, group_id, text, author, &[]).await
+    post_with_uploads(state, owner, group_id, text, author, &[], None).await
 }
 
 async fn post_with_uploads(
@@ -454,6 +462,7 @@ async fn post_with_uploads(
     text: &str,
     author: Option<&AssistantAgent>,
     ids: &[String],
+    explicit_recipients: Option<&[String]>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
     let text = text.trim();
     if (text.is_empty() && ids.is_empty()) || text.chars().count() > MAX_MESSAGE_CHARS {
@@ -484,7 +493,35 @@ async fn post_with_uploads(
         None => confirm_in_group(state, owner, &group, text).await?,
         Some(_) => None,
     };
-    let mut addressed = groups::mentions(text, &live);
+    let mut addressed = if let Some(ids) = explicit_recipients {
+        if ids.is_empty()
+            || ids
+                .iter()
+                .any(|id| !live.iter().any(|member| member.id == *id))
+        {
+            return Err(AppError::ValidationError(
+                "Unknown or empty recipient list".into(),
+            ));
+        }
+        ids.to_vec()
+    } else {
+        let mentioned = groups::mentions(text, &live);
+        if !mentioned.is_empty() {
+            mentioned
+        } else {
+            let sticky = group
+                .last_recipient_ids
+                .iter()
+                .filter(|id| live.iter().any(|member| &member.id == *id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if sticky.is_empty() {
+                Vec::new()
+            } else {
+                sticky
+            }
+        }
+    };
     if let Some(member) = confirmed {
         addressed.retain(|id| id != &member);
         addressed.insert(0, member);
@@ -495,7 +532,17 @@ async fn post_with_uploads(
     {
         addressed.push(group.lead_agent_id.clone());
     }
-    let message = Box::pin(groups::append_with_uploads(
+    if author.is_none() {
+        state
+            .db
+            .collection::<AssistantGroup>(crate::models::assistant_group::COLLECTION_NAME)
+            .update_one(
+                mongodb::bson::doc! {"_id": group_id, "user_id": owner},
+                mongodb::bson::doc! {"$set": {"last_recipient_ids": &addressed}},
+            )
+            .await?;
+    }
+    let mut message = Box::pin(groups::append_with_uploads(
         &state.db,
         owner,
         group_id,
@@ -505,6 +552,15 @@ async fn post_with_uploads(
         ids,
     ))
     .await?;
+    message.recipient_agent_ids = addressed.clone();
+    state
+        .db
+        .collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
+        .update_one(
+            mongodb::bson::doc! {"_id": &message.id},
+            mongodb::bson::doc! {"$set": {"recipient_agent_ids": &addressed}},
+        )
+        .await?;
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.
@@ -964,6 +1020,8 @@ pub struct PostMessageRequest {
     #[serde(default)]
     attachment_ids: Vec<String>,
     text: String,
+    #[serde(default)]
+    recipient_agent_ids: Option<Vec<String>>,
 }
 
 pub async fn post_message(
@@ -977,8 +1035,16 @@ pub async fn post_message(
     if !body.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
     }
-    let (message, addressed) =
-        post_with_uploads(&state, &owner, &id, &body.text, None, &body.attachment_ids).await?;
+    let (message, addressed) = post_with_uploads(
+        &state,
+        &owner,
+        &id,
+        &body.text,
+        None,
+        &body.attachment_ids,
+        body.recipient_agent_ids.as_deref(),
+    )
+    .await?;
     let agents = team::agents(&state.db, &message.user_id, true).await?;
     Ok((
         StatusCode::ACCEPTED,
