@@ -2271,10 +2271,10 @@ async fn finish_turn_inner(
                     error_code: error.as_ref().map(|e| e.code.into()),
                     upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.clone()),
                     error_detail: error.as_ref().map(|error| crate::models::assistant_message::AssistantErrorDetail {
-                        stage: error.stage.clone(),
+                        stage: error.stage.into(),
                         http_status: error.http_status,
-                        upstream_request_id: error.upstream_request_id.clone(),
-                        response_id: error.response_id.clone().or_else(|| result.response_id.clone()),
+                        upstream_request_id: error.upstream_request_id.as_ref().map(|v| v.to_string()),
+                        response_id: error.response_id.as_ref().map(|v| v.to_string()).or_else(|| result.response_id.clone()),
                         continuations: current.active_turn.as_ref().map_or(0, |t| t.continuations),
                         turn_id: turn_id.clone(),
                         occurred_at: now,
@@ -2858,11 +2858,11 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     let mut recap = Vec::new();
     let originating_goal = history.iter().find(|message| message.role == "user");
     let mut selected: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
-    if let Some(goal) = originating_goal {
-        if !selected.iter().any(|message| message.id == goal.id) {
-            selected.pop();
-            selected.push(goal);
-        }
+    if let Some(goal) = originating_goal
+        && !selected.iter().any(|message| message.id == goal.id)
+    {
+        selected.pop();
+        selected.push(goal);
     }
     for message in selected {
         let prefix = format!(
@@ -2977,10 +2977,10 @@ pub struct TurnError {
     pub upstream_code: Option<String>,
     pub code: &'static str,
     pub message: &'static str,
-    pub stage: String,
+    pub stage: &'static str,
     pub http_status: Option<u16>,
-    pub upstream_request_id: Option<String>,
-    pub response_id: Option<String>,
+    pub upstream_request_id: Option<Box<str>>,
+    pub response_id: Option<Box<str>>,
 }
 impl TurnError {
     pub fn preserves_session(&self) -> bool {
@@ -3079,7 +3079,7 @@ impl TurnError {
             code,
             message,
             upstream_code,
-            stage: "stream".into(),
+            stage: "stream",
             http_status: None,
             upstream_request_id: None,
             response_id: None,

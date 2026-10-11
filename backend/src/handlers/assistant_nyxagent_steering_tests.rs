@@ -481,7 +481,11 @@ async fn assistant_steer_excluded_from_anchors_and_only_labelled_in_recap() {
             .instructions(&history, false)
             .contains("NEW GUIDANCE")
     );
-    assert!(!prepared.input("", "Next request").contains("NEW GUIDANCE"));
+    assert!(
+        !prepared
+            .input_with_memory("", "Next request", true)
+            .contains("NEW GUIDANCE")
+    );
     assert!(
         prepared
             .instructions(&history, true)

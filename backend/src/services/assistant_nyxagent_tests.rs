@@ -341,7 +341,7 @@ fn failure_matrix_covers_envelope_less_5xx_and_first_byte_timeout_codes() {
 
 #[test]
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
-    let mut rows = vec![
+    let rows = vec![
         AssistantMessage {
             steering: None,
             voice: None,
@@ -385,7 +385,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
     ];
-    let recap = bounded_recap(&mut rows);
+    let recap = bounded_recap(&rows);
     assert!(recap.contains("ORIGINATING GOAL"));
     assert!(recap.contains("HEAD"));
     assert!(recap.contains("TAIL"));
@@ -457,7 +457,7 @@ fn reset_context_rejects_a_live_turn_to_prevent_fence_race() {
 
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
-    let mut row = AssistantMessage {
+    let row = AssistantMessage {
         steering: None,
         voice: None,
         execution_pending: false,
@@ -487,7 +487,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
         origin: None,
         via: None,
     };
-    let recap = bounded_recap(&mut [row]);
+    let recap = bounded_recap(&[row]);
     assert!(recap.len() <= 16384);
     assert!(recap.contains("tool-0"));
 }
@@ -500,7 +500,7 @@ fn continuation_memory_is_not_repeated_into_the_stable_session_prompt() {
 #[test]
 fn turn_error_diagnostics_carry_stage_and_upstream_correlation_fields() {
     let mut error = TurnError::new("assistant_unavailable");
-    error.stage = "upstream_response".into();
+    error.stage = "upstream_response";
     error.http_status = Some(503);
     error.upstream_request_id = Some("req-123".into());
     error.response_id = Some("resp-123".into());
@@ -512,7 +512,7 @@ fn turn_error_diagnostics_carry_stage_and_upstream_correlation_fields() {
 
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
-    let mut row = AssistantMessage {
+    let row = AssistantMessage {
         steering: None,
         voice: None,
         execution_pending: false,
@@ -548,7 +548,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         origin: None,
         via: None,
     };
-    let recap = bounded_recap(std::slice::from_mut(&mut row));
+    let recap = bounded_recap(std::slice::from_ref(&row));
     assert!(recap.contains("Previous context (after reset)"));
     assert!(recap.contains("tool.check=completed"));
     assert!(recap.contains("result.txt"));
@@ -557,7 +557,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
-    let mut row = AssistantMessage {
+    let row = AssistantMessage {
         steering: None,
         voice: None,
         execution_pending: false,
@@ -593,7 +593,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         origin: None,
         via: None,
     };
-    let recap = bounded_recap_for_audience(std::slice::from_mut(&mut row), true);
+    let recap = bounded_recap_for_audience(std::slice::from_ref(&row), true);
     assert!(recap.contains("Visible channel reply"));
     assert!(!recap.contains("owner.secret_tool"));
     assert!(!recap.contains("private.txt"));
@@ -602,7 +602,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
-    let mut row = AssistantMessage {
+    let row = AssistantMessage {
         steering: None,
         voice: None,
         execution_pending: false,
@@ -630,7 +630,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         origin: None,
         via: None,
     };
-    let recap = bounded_recap(std::slice::from_mut(&mut row));
+    let recap = bounded_recap(std::slice::from_ref(&row));
     assert!(recap.contains("mail.send=completed"));
     assert!(recap.contains("activity-42") || recap.contains("mail.send"));
 }
@@ -2046,7 +2046,7 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
             );
             assert!(
                 prepared
-                    .input("Current preferences", "continue")
+                    .input_with_memory("Current preferences", "continue", true)
                     .contains("Current preferences")
             );
             continue;
