@@ -70,6 +70,9 @@ export function uploadFile(
         const body: unknown = JSON.parse(xhr.responseText);
         if (xhr.status < 200 || xhr.status >= 300) {
           const error = body as { message?: unknown };
+          if (typeof error.message === "string" && /malformed or unsupported attachment/i.test(error.message)) {
+            throw new Error(UNSUPPORTED_FORMAT_MESSAGE);
+          }
           throw new Error(
             typeof error.message === "string"
               ? error.message

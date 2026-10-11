@@ -85,9 +85,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         progress: 0,
         controller: new AbortController(),
       };
-      const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/markdown", "text/csv", "application/json"];
-      const extensionAllowed = /\.(png|jpe?g|gif|webp|pdf|docx|txt|md|markdown|csv|json)$/i.test(file.name);
-      if (!allowed.includes(file.type) && !/^text\//.test(file.type) && !extensionAllowed) {
+      if (["image/svg+xml", "video/mp4", "audio/mpeg"].includes(file.type)) {
         entry.error = UNSUPPORTED_FORMAT_MESSAGE;
         pending.current.set(entry.key, entry);
         refresh();
