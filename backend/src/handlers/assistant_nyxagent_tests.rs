@@ -192,6 +192,7 @@ async fn setup_options(
                     {
                         return (
                             StatusCode::from_u16(status).unwrap(),
+                            [("x-request-id", "req-5xx")],
                             Json(json!({"error": {
                                 "code": code,
                                 "message": "SECRET upstream failure detail",
@@ -323,6 +324,10 @@ async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
     let failed = messages.last().expect("failed reply");
     assert_eq!(failed.error_code.as_deref(), Some("assistant_unavailable"));
     assert_eq!(failed.upstream_error_code, None);
+    let detail = failed.error_detail.as_ref().expect("diagnostic detail");
+    assert_eq!(detail.http_status, Some(503));
+    assert_eq!(detail.upstream_request_id.as_deref(), Some("req-5xx"));
+    assert_eq!(detail.stage, "upstream_response");
     server.abort();
 }
 

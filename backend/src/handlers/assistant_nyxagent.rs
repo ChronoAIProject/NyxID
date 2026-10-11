@@ -2106,6 +2106,7 @@ async fn execute_turn(
                     } else {
                         code
                     });
+                    error.stage = "upstream_response";
                     error.http_status = Some(status);
                     error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
                     return Err(error);
