@@ -63,7 +63,18 @@ pub async fn put_config(
             ));
         }
     }
-    state.db.collection::<PlatformSettings>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$set": {"billing": mongodb::bson::to_bson(&input.billing)?}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}}).upsert(true).await?;
+    let billing = mongodb::bson::to_bson(&input.billing).map_err(|error| {
+        crate::errors::AppError::Internal(format!("serialize billing settings: {error}"))
+    })?;
+    state
+        .db
+        .collection::<PlatformSettings>(SETTINGS)
+        .update_one(
+            doc! {"_id": PLATFORM_SETTINGS_ID},
+            doc! {"$set": {"billing": billing}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}},
+        )
+        .upsert(true)
+        .await?;
     get_config(State(state), auth).await
 }
 
@@ -83,7 +94,7 @@ pub async fn get_rates(
     auth: AuthUser,
 ) -> AppResult<Json<Vec<BillingRateResponse>>> {
     require_admin(&state, &auth).await?;
-    let ttl = chrono::Duration::seconds(state.config.billing_rate_cache_ttl_secs);
+    let ttl = chrono::Duration::seconds(state.config.billing_rate_cache_ttl_secs as i64);
     let rows = state
         .db
         .collection::<BillingRateCache>(RATES)
