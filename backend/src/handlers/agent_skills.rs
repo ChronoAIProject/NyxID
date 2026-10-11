@@ -705,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn specialist_learning_mutation_is_denied() {
         let f = orchestrator_fixture("specialist_learning_mutation").await;
-        let err = super::dispatch(&f.state, &authority(crate::models::assistant_conversation::AgentRole::Specialist, false), "learning_run_now", &json!({})).await.unwrap_err();
+        let err = super::dispatch(&f.state, &authority(crate::models::assistant_conversation::AgentRole::Subagent, false), "learning_run_now", &json!({})).await.unwrap_err();
         assert!(err.to_string().contains("managed"));
         f.state.db.drop().await.unwrap();
     }
