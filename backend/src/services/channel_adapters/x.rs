@@ -226,6 +226,11 @@ fn response_error(status: StatusCode, backoff: Option<Duration>) -> AppError {
     AppError::ChannelPlatformError(format!("X: {cause} (HTTP {})", status.as_u16()))
 }
 
+#[cfg(test)]
+fn classify_forbidden(scopes_granted: bool) -> &'static str {
+    if scopes_granted { "X app access or paid tier denied" } else { "X OAuth scopes missing; reconnect and grant scopes" }
+}
+
 async fn send(request: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
     request
         .timeout(Duration::from_secs(20))
@@ -1036,6 +1041,8 @@ mod tests {
                 .to_string()
                 .contains("5xx")
         );
+        assert!(classify_forbidden(false).contains("scopes"));
+        assert!(classify_forbidden(true).contains("tier"));
     }
     use super::*;
     use wiremock::{

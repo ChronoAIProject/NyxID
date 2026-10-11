@@ -1221,6 +1221,15 @@ mod tests {
 
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
 
+    #[test]
+    fn health_subcommand_parses_for_cli_output() {
+        use clap::Parser;
+        let parsed = crate::cli::Cli::try_parse_from([
+            "nyxid", "channel-bot", "health", "00000000-0000-4000-8000-000000000001",
+        ]).unwrap();
+        assert!(matches!(parsed.command, crate::cli::Commands::ChannelBot { .. }));
+    }
+
     #[tokio::test]
     async fn connect_link_cancel_uses_bot_route_and_validates_uuid() {
         use clap::Parser;
