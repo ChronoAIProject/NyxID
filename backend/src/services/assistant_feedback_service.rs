@@ -33,11 +33,3 @@ pub async fn group_message(db: &Database, group_id: &str, message_id: &str) -> m
         .find_one(doc! {"_id": message_id, "group_id": group_id})
         .await
 }
-
-pub async fn feedback_for_messages(db: &Database, user_id: &str, message_ids: &[String]) -> mongodb::error::Result<Vec<AssistantMessageFeedback>> {
-    db.collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find(doc! {"user_id": user_id, "message_id": {"$in": message_ids}})
-        .await?.try_collect().await
-}
-
-use futures::TryStreamExt;

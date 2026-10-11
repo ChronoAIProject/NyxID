@@ -254,11 +254,17 @@ mod tests {
     fn validate_accepts_votes_and_bounds_comments() {
         let input = FeedbackInput {
             vote: "up".into(),
-            comment: Some(format!("  {}  ", "x".repeat(1_200))),
+            comment: Some(format!("  {}  ", "x".repeat(1_000))),
         };
         let comment = validate(&input).unwrap().unwrap();
         assert_eq!(comment.len(), 1_000);
         assert!(comment.chars().all(|c| c == 'x'));
+    }
+
+    #[test]
+    fn validate_rejects_comments_over_bound() {
+        let error = validate(&FeedbackInput { vote: "up".into(), comment: Some("x".repeat(1_001)) }).unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(code) if code == "feedback_comment_too_long"));
     }
 
     #[test]
