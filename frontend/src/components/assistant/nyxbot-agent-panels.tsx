@@ -83,6 +83,7 @@ export function ThreadHeader({
         <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">{name}</h2>
         {handle ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
+        <Badge variant="outline" aria-label="Access mode">NyxMode</Badge>
         {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
         {onOpenDetails ? (
           <Button

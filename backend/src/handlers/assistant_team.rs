@@ -2360,6 +2360,8 @@ pub struct UpdateAgentRequest {
     persona: Option<String>,
     #[serde(default)]
     access_mode_override: Option<Option<crate::models::assistant_settings::AccessMode>>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 pub async fn update_agent(
@@ -2385,6 +2387,13 @@ pub async fn update_agent(
     if body.access_mode_override.is_some() {
         state.db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
             .update_one(mongodb::bson::doc! {"_id": &agent.id, "user_id": &owner}, mongodb::bson::doc! {"$set": {"access_mode_override": mongodb::bson::to_bson(&body.access_mode_override).map_err(|_| AppError::Internal("access mode serialization failed".into()))?}}).await?;
+    }
+    if let Some(model) = body.model.as_deref() {
+        if !crate::services::assistant_nyxagent::valid_model(model) {
+            return Err(AppError::ValidationError("model_unavailable: choose another model".into()));
+        }
+        state.db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc! {"_id": &agent.id, "user_id": &owner}, mongodb::bson::doc! {"$set": {"model": model}}).await?;
     }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
