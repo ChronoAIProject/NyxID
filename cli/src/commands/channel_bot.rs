@@ -1225,9 +1225,16 @@ mod tests {
     fn health_subcommand_parses_for_cli_output() {
         use clap::Parser;
         let parsed = crate::cli::Cli::try_parse_from([
-            "nyxid", "channel-bot", "health", "00000000-0000-4000-8000-000000000001",
-        ]).unwrap();
-        assert!(matches!(parsed.command, crate::cli::Commands::ChannelBot { .. }));
+            "nyxid",
+            "channel-bot",
+            "health",
+            "00000000-0000-4000-8000-000000000001",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            crate::cli::Commands::ChannelBot { .. }
+        ));
     }
 
     #[tokio::test]

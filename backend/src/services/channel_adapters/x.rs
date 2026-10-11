@@ -228,7 +228,11 @@ fn response_error(status: StatusCode, backoff: Option<Duration>) -> AppError {
 
 #[cfg(test)]
 fn classify_forbidden(scopes_granted: bool) -> &'static str {
-    if scopes_granted { "X app access or paid tier denied" } else { "X OAuth scopes missing; reconnect and grant scopes" }
+    if scopes_granted {
+        "X app access or paid tier denied"
+    } else {
+        "X OAuth scopes missing; reconnect and grant scopes"
+    }
 }
 
 async fn send(request: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
