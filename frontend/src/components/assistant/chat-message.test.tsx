@@ -77,6 +77,18 @@ describe("canonical chat presentation", () => {
       screen.queryByRole("button", { name: "Helpful" }),
     ).not.toBeInTheDocument();
   });
+  it("keeps feedback controls visibly pressed and blocks duplicate pending clicks", () => {
+    render(
+      <ChatMessageBubble
+        message={{ ...BASE, feedback: { vote: "up" } }}
+        conversationId="conversation-1"
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
   afterEach(() => vi.useRealTimers());
 
   it("opens the optional feedback comment popover without submitting", () => {
