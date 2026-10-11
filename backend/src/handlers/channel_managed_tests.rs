@@ -1555,7 +1555,17 @@ async fn admin_channel_bot_list_filters_platform_and_status_and_requires_admin()
     .await
     .unwrap();
     assert_eq!(listed.0.len(), 1);
-    let non_admin = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let non_admin_id = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &non_admin_id,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let non_admin = crate::test_utils::test_auth_user(&non_admin_id);
     let error = super::channel_bots::admin_list(
         State(state),
         non_admin,
@@ -1579,7 +1589,17 @@ async fn admin_health_requires_admin() {
         .await
         .unwrap();
     assert_eq!(ok.0.mode, "webhook");
-    let other = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let other_id = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &other_id,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let other = crate::test_utils::test_auth_user(&other_id);
     let err = super::channel_bots::admin_health(State(state), other, Path(bot_id.into()))
         .await
         .unwrap_err();

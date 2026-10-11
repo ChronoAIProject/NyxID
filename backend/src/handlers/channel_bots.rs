@@ -369,7 +369,13 @@ pub(crate) fn health_for(
             "reconnect",
             "Reconnect the X account, or verify credentials and resubscribe.",
         )
-    } else if mode == "webhook" && !bot.webhook_registered {
+    } else if bot
+        .diagnostics
+        .subscription_state
+        .as_ref()
+        .is_some_and(|state| !state.registered)
+        || (mode == "webhook" && !bot.webhook_registered)
+    {
         (
             "resubscribe",
             "Register the X Activity webhook subscription.",
