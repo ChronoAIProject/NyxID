@@ -2610,11 +2610,22 @@ pub async fn activity_started(
     conversation_id: &str,
     label: &str,
 ) -> AppResult<Option<String>> {
+    activity_started_with_digest(db, user_id, conversation_id, label, None).await
+}
+
+pub async fn activity_started_with_digest(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    label: &str,
+    digest: Option<&str>,
+) -> AppResult<Option<String>> {
     let id = Uuid::new_v4().to_string();
     let label: String = label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect();
     let entry = doc! {
         "id": &id,
         "label": label,
+        "digest": digest,
         "status": "running",
         "started_at": bson::DateTime::now(),
         "ended_at": bson::Bson::Null,
@@ -2971,8 +2982,13 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     }
 }
 
-pub fn retry_duplicate_action(completed: &[crate::models::assistant_conversation::TurnActivity], label: &str) -> bool {
-    completed.iter().any(|activity| activity.status == "completed" && activity.label == label)
+pub fn retry_duplicate_action(
+    completed: &[crate::models::assistant_conversation::TurnActivity],
+    label: &str,
+) -> bool {
+    completed
+        .iter()
+        .any(|activity| activity.status == "completed" && activity.label == label)
 }
 pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instructions: &str) -> Value {
     let mut body = json!({

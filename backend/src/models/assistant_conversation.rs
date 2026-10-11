@@ -88,6 +88,8 @@ pub struct TurnActivity {
     pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub digest: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

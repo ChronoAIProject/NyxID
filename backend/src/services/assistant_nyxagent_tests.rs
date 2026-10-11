@@ -19,13 +19,20 @@ fn retry_duplicate_action_is_refused_after_completed_activity() {
     let activity = crate::models::assistant_conversation::TurnActivity {
         machine: None,
         id: "activity-1".into(),
+        digest: None,
         label: "mcp.mail.send".into(),
         status: "completed".into(),
         started_at: Utc::now(),
         ended_at: Some(Utc::now()),
     };
-    assert!(retry_duplicate_action(std::slice::from_ref(&activity), "mcp.mail.send"));
-    assert!(!retry_duplicate_action(std::slice::from_ref(&activity), "mcp.calendar.list"));
+    assert!(retry_duplicate_action(
+        std::slice::from_ref(&activity),
+        "mcp.mail.send"
+    ));
+    assert!(!retry_duplicate_action(
+        std::slice::from_ref(&activity),
+        "mcp.calendar.list"
+    ));
 }
 fn terminal(kind: &str, seq: u64, text: &str) -> Value {
     let sid = "1234567890abcdef1234567890abcdef";
@@ -411,6 +418,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
             .map(|i| crate::models::assistant_conversation::TurnActivity {
                 machine: None,
                 id: i.to_string(),
+                digest: None,
                 label: format!("tool-{i}"),
                 status: "completed".into(),
                 started_at: Utc::now(),
@@ -447,6 +455,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         activities: vec![crate::models::assistant_conversation::TurnActivity {
             machine: None,
             id: "a".into(),
+            digest: None,
             label: "tool.check".into(),
             status: "completed".into(),
             started_at: Utc::now(),
@@ -492,6 +501,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         activities: vec![crate::models::assistant_conversation::TurnActivity {
             machine: None,
             id: "owner-action".into(),
+            digest: None,
             label: "owner.secret_tool".into(),
             status: "completed".into(),
             started_at: Utc::now(),
@@ -537,6 +547,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         activities: vec![crate::models::assistant_conversation::TurnActivity {
             machine: None,
             id: "activity-42".into(),
+            digest: None,
             label: "mail.send".into(),
             status: "completed".into(),
             started_at: Utc::now(),

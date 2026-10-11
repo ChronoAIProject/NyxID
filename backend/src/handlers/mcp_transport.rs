@@ -23,6 +23,7 @@ use crate::services::{
     proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use sha2::{Digest, Sha256};
 
 use super::services_helpers::fetch_service;
 
@@ -1694,6 +1695,20 @@ fn chat_activity_label(params: &serde_json::Value) -> String {
     name.to_owned()
 }
 
+fn chat_activity_digest(params: &serde_json::Value) -> String {
+    let name = params
+        .get("name")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let canonical = serde_json::to_vec(&serde_json::json!({"name": name, "arguments": arguments}))
+        .unwrap_or_default();
+    format!("{:x}", Sha256::digest(canonical))
+}
+
 /// Chat-key tool calls are recorded on the live turn as metadata-only activity
 /// so the browser can show what the assistant is doing before its reply streams.
 async fn handle_tools_call(
@@ -1748,11 +1763,12 @@ async fn handle_tools_call(
     };
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
-            match crate::services::assistant_nyxagent::activity_started(
+            match crate::services::assistant_nyxagent::activity_started_with_digest(
                 &state.db,
                 &chat.user_id,
                 &chat.conversation_id,
                 &chat_activity_label(params),
+                Some(&chat_activity_digest(params)),
             )
             .await
             {

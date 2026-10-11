@@ -2336,7 +2336,7 @@ fn sanitize_upstream_request_id(value: &str) -> Option<String> {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)))
-        .then(|| value.to_owned())
+    .then(|| value.to_owned())
 }
 
 #[cfg(test)]
