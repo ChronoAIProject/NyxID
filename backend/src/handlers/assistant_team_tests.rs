@@ -1598,7 +1598,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
 // path. Captured prompts contain a private marker: never print request bodies.
 fn refresh_start(id: Option<&str>, agent_id: Option<&str>, text: &str) -> TurnStart {
     TurnStart::from(&engine::TurnRequest {
-            retry_of: None,
+        retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: agent_id.map(str::to_owned),
         conversation_id: id.map(str::to_owned),

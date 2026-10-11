@@ -846,7 +846,7 @@ async fn machine_access_org_contexts_partition_people_and_recheck_membership() {
             &f.state.db,
             actor,
             &engine::TurnRequest {
-            retry_of: None,
+                retry_of: None,
                 conversation_id: Some(row.id.clone()),
                 text: "Inspect workspace".into(),
                 attachment_ids: vec![],

@@ -671,8 +671,8 @@ mod integration_tests {
         (state, user, row.id)
     }
     fn request(id: &str, attachments: Vec<String>) -> engine::TurnRequest {
-            retry_of: None,
         engine::TurnRequest {
+            retry_of: None,
             conversation_id: Some(id.into()),
             attachment_ids: attachments,
             text: "Read my files".into(),
@@ -997,7 +997,7 @@ mod integration_tests {
             db,
             &user,
             &engine::TurnRequest {
-            retry_of: None,
+                retry_of: None,
                 conversation_id: None,
                 ..request(&id, vec![])
             },

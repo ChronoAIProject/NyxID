@@ -72,8 +72,8 @@ fn preferences() -> VoicePreferences {
     }
 }
 fn turn(id: Option<&str>, text: &str) -> engine::TurnRequest {
-            retry_of: None,
     engine::TurnRequest {
+        retry_of: None,
         attachment_ids: vec![],
         conversation_id: id.map(str::to_string),
         agent_id: None,
