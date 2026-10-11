@@ -1585,3 +1585,24 @@ async fn admin_health_requires_admin() {
         .unwrap_err();
     assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
 }
+
+#[tokio::test]
+async fn resubscribe_requires_owner_write_and_reconfigures_subscription() {
+    let (state, auth, _server) = fixture().await;
+    let bot_id = "resubscribe-health";
+    let owner = auth.user_id.to_string();
+    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+        "_id": bot_id, "user_id": &owner, "platform": "twitter", "label": "x", "credential_source": "connection", "connection_id": "missing", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+    }).unwrap()).await.unwrap();
+    let other = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let err = super::channel_bots::resubscribe(State(state.clone()), other, Path(bot_id.into()))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::errors::AppError::ChannelBotNotFound(_)
+    ));
+    let owner_result =
+        super::channel_bots::resubscribe(State(state), auth, Path(bot_id.into())).await;
+    assert!(owner_result.is_err());
+}
