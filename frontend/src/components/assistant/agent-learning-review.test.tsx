@@ -120,6 +120,25 @@ describe("AgentLearningReview", () => {
     expect(mocks.consent).toHaveBeenCalledWith(true);
   });
 
+  it("renders validation diagnostics at their field and line", () => {
+    mocks.feature.mockReturnValue(true);
+    const error = Object.assign(new Error("validation failed"), {
+      diagnostics: [{ rule: "frontmatter.required", field: "name", line: 3, remediation: "Set a name" }],
+    });
+    mocks.review.mockReturnValue({
+      data: { proposals: [] },
+      status: { data: { enabled: true } },
+      edit: { error, isPending: false },
+      configure: { mutate: mocks.configure, isPending: false },
+      approve: { mutateAsync: mocks.approve, isPending: false },
+      reject: { mutateAsync: mocks.reject, isPending: false },
+      run: { mutate: mocks.run, isPending: false },
+      consent: { mutate: mocks.consent, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText(/name:3 \(frontmatter.required\): Set a name/)).toBeInTheDocument();
+  });
+
   it("keeps authored proposals visible without the invalid approval button", () => {
     mocks.feature.mockReturnValue(true);
     mocks.review.mockReturnValue({
