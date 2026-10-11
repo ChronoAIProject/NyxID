@@ -613,7 +613,9 @@ mod route_tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, crate::errors::AppError::NotFound(message) if message == "Agent not found"));
+        assert!(
+            matches!(err, crate::errors::AppError::NotFound(message) if message == "Agent not found")
+        );
         f.state.db.drop().await.unwrap();
     }
 
