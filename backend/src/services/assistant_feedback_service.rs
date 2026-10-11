@@ -1,6 +1,7 @@
 use crate::models::{assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME}, assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGE_COLLECTION}, assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME}};
 use mongodb::{bson::doc, Database};
 
+/// Single-row lookup keeps eligibility bounded for long-lived conversations.
 pub async fn conversation_message(db: &Database, user_id: &str, conversation_id: &str, message_id: &str) -> mongodb::error::Result<Option<AssistantMessage>> {
     db.collection::<AssistantMessage>(MESSAGE_COLLECTION)
         .find_one(doc! {"_id": message_id, "conversation_id": conversation_id, "user_id": user_id})
