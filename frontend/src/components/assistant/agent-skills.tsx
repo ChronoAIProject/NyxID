@@ -26,6 +26,7 @@ function AttachedSkill({
   disabled,
   remove,
   review,
+  toggle,
 }: {
   readonly skill: AgentSkill;
   readonly description?: string;
@@ -154,7 +155,7 @@ export function AgentSkills({
           size={current.data.metadata[skill.skill_id]?.size_bytes}
           disabled={disabled}
           review={() => choose(skill.skill_id, skill.name)}
-          toggle={(enabled) => save({ ...skill, disabled: !enabled })}
+          toggle={(enabled) => save(current.data!.skills.map((item) => item.skill_id === skill.skill_id ? { ...item, disabled: !enabled } : item))}
           remove={() =>
             save(
               current.data.skills.filter((s) => s.skill_id !== skill.skill_id),
