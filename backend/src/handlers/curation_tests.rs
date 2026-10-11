@@ -409,6 +409,15 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
             .0
             .is_success()
     );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let audits = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .count_documents(doc! {"event_type": "assistant_feedback_withdrawn"})
+        .await
+        .unwrap();
+    assert_eq!(audits, 1);
 }
 
 #[tokio::test]
