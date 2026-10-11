@@ -891,6 +891,61 @@ async fn feedback_conversation_delete_purges_existing_rows() {
     );
 }
 
+#[tokio::test]
+async fn feedback_rejects_message_from_another_owned_conversation() {
+    let f = fixture("feedback-cross-conversation", false).await;
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "scoped-reply".into(),
+            conversation_id: "actual-conversation".into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let actual = "/api/v1/assistant/nyxagent/conversations/actual-conversation/messages/scoped-reply/feedback";
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            actual,
+            &f.human_token,
+            Some(json!({"vote":"up"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let wrong = "/api/v1/assistant/nyxagent/conversations/other-owned-conversation/messages/scoped-reply/feedback";
+    for method in ["PUT", "DELETE"] {
+        let input = (method == "PUT").then(|| json!({"vote":"up"}));
+        let (status, body) = request(&f.state, method, wrong, &f.human_token, input).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"].as_str(), Some("message not found"));
+    }
+    assert_eq!(
+        request(&f.state, "DELETE", actual, &f.human_token, None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
