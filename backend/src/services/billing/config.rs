@@ -73,4 +73,20 @@ mod tests {
         let free = effective_config(None, None, None, None);
         assert_eq!(free.lane_source, BillingConfigSource::Free);
     }
+
+    #[test]
+    fn service_override_wins_over_global_and_env() {
+        let service = ServiceBilling {
+            platform_pricing: Some(
+                crate::models::service_billing::ServicePlatformPricing::default(),
+            ),
+            ..Default::default()
+        };
+        let global = BillingSettings {
+            default_lane: Some("byok".into()),
+            default_overdraft_cap_credits: Some(3),
+        };
+        let effective = effective_config(Some(&service), Some(&global), Some("legacy"), Some(5));
+        assert_eq!(effective.lane_source, BillingConfigSource::Service);
+    }
 }

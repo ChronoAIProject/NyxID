@@ -1075,6 +1075,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_billing::resync_service),
         )
         .route(
+            "/billing/services/{id}",
+            put(handlers::services::update_service),
+        )
+        .route(
             "/credits/grants",
             get(handlers::billing_credits::admin_list_grants)
                 .post(handlers::billing_credits::issue_grant),
