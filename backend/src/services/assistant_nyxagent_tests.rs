@@ -307,6 +307,21 @@ fn failure_diagnostics_normalize_unknown_upstream_codes() {
 }
 
 #[test]
+fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
+    assert_eq!(
+        TurnError::new("first_byte_timeout").code,
+        "first_byte_timeout"
+    );
+    assert_eq!(TurnError::new("idle_timeout").code, "idle_timeout");
+    assert_eq!(TurnError::new("invalid_stream").code, "invalid_stream");
+    assert_eq!(TurnError::new("upstream_503").code, "assistant_unavailable");
+    assert_eq!(
+        TurnError::new("settlement_deadline").code,
+        "assistant_unavailable"
+    );
+}
+
+#[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let mut row = AssistantMessage {
         steering: None,
