@@ -618,6 +618,16 @@ impl AccountTools<'_> {
         }
         let settings = super::assistant_settings_service::get(self.db, &chat.user_id).await?;
         if !chat.guest
+            && matches!(
+                acks::classify_owner_action(tool_name, None),
+                acks::OwnerActionClass::Sensitive | acks::OwnerActionClass::Destructive
+            )
+        {
+            // Resolve ownership/eligibility before raising a card, preserving
+            // not-found-shaped refusals and assistant-key restrictions.
+            let _ = self.action_summary(&chat.user_id, name, args).await?;
+        }
+        if !chat.guest
             && acks::owner_confirmation_required(
                 settings.access_mode,
                 acks::classify_owner_action(tool_name, None),
@@ -813,6 +823,12 @@ impl AccountTools<'_> {
                     self.org_prefix(user, &route.user_id).await?,
                     short(&route.platform_conversation_id)
                 )
+            }
+            "set_service_enabled" => {
+                let service =
+                    user_service_service::get_user_service(self.db, user, text(args, "service_id"))
+                        .await?;
+                format!("Update connected service '{}'", short(&service.slug))
             }
             "delete_service" => {
                 let service =
