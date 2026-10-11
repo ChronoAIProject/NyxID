@@ -1633,7 +1633,7 @@ pub async fn begin_turn_with_voice(
                         error_detail: None,
                         created_at: now,
                         activities: lost.activities.into_iter().map(|mut activity| {
-                            if activity.status == "running" { activity.status = "error"; activity.ended_at = Some(now); }
+                            if activity.status.as_str() == "running" { activity.status = "error".into(); activity.ended_at = Some(now); }
                             activity
                         }).collect(),
                         attachments: lost.attachments,
@@ -2239,7 +2239,7 @@ async fn finish_turn_inner(
                     .into(),
                     error_code: error.as_ref().map(|e| e.code.into()),
                     upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.clone()),
-                    error_detail: error.as_ref().map(|e| crate::models::assistant_message::AssistantErrorDetail {
+                    error_detail: error.as_ref().map(|_| crate::models::assistant_message::AssistantErrorDetail {
                         stage: "stream".into(),
                         http_status: None,
                         upstream_request_id: None,
