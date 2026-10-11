@@ -41,6 +41,12 @@ pub struct EditBody {
     draft: Value,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateBody {
+    draft: Value,
+}
+
 /// Other query parameters are ignored, as before the card parameter existed.
 #[derive(Deserialize)]
 pub struct PreviewQuery {
@@ -166,6 +172,19 @@ pub async fn edit(
     )
     .await?;
     Ok(Json(json!({"status": "updated"})))
+}
+
+pub async fn validate(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((_agent_id, _proposal_id)): Path<(String, String)>,
+    Json(body): Json<ValidateBody>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let text = serde_json::to_string(&body.draft)?;
+    let generated = crate::services::assistant_skill_authoring::validation::decode(&text)?;
+    let bytes = crate::services::assistant_skill_authoring::validation::validate(&generated)?;
+    Ok(Json(json!({"valid": true, "bytes": bytes.len()})))
 }
 
 pub async fn approve(

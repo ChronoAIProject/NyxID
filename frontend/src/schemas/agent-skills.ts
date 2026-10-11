@@ -8,6 +8,7 @@ const pinSchema = z.object({
 });
 export const agentSkillSchema = pinSchema.extend({
   dependencies: pinSchema.array().default([]),
+  disabled: z.boolean().default(false),
 });
 export type AgentSkill = z.infer<typeof agentSkillSchema>;
 export const agentSkillsSchema = z.object({

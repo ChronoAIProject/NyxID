@@ -141,6 +141,7 @@ impl Registry {
             version: "1.0".into(),
             sha256: hex::encode(Sha256::digest(&self.bytes)),
             dependencies: vec![],
+            disabled: false,
         }
     }
 }

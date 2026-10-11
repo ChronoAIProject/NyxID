@@ -7285,6 +7285,7 @@ mod tests {
                 version: "1.0".into(),
                 sha256: "a".repeat(64),
                 dependencies: vec![],
+                disabled: false,
             },
         ]);
         service.skills_revision = Some(3);
@@ -7325,6 +7326,7 @@ mod tests {
                 version: "1.0".into(),
                 sha256: "b".repeat(64),
                 dependencies: vec![],
+                disabled: false,
             },
         ]);
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)

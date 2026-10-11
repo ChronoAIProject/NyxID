@@ -1637,6 +1637,7 @@ async fn org_agent_skills_removal_acl_and_mandatory_add_card() {
         version: "1.0".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     let selection = super::agent_skill_service::Selection {
         expected_revision: 0,
@@ -2030,6 +2031,7 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         version: "1.0".into(),
         sha256: hex::encode(Sha256::digest(&bytes)),
         dependencies: vec![],
+        disabled: false,
     };
     Mock::given(method("GET")).and(path(format!("/api/v1/skills/{id}"))).and(query_param("version","1.0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":id,"name":pin.name,"version":"1.0","description":"Team guidance","skillHash":pin.sha256}}))).mount(&upstream).await;

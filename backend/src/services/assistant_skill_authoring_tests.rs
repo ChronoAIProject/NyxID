@@ -102,6 +102,7 @@ async fn pending_source_read_times_out_without_leaving_a_draft_or_card() {
         version: "1.0".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db

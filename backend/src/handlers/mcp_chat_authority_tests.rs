@@ -3006,6 +3006,7 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         version: "1.0".into(),
         sha256: hex::encode(Sha256::digest(&bytes)),
         dependencies: vec![],
+        disabled: false,
     };
     Mock::given(method("GET")).and(path(format!("/api/v1/skills/{id}"))).and(query_param("version","1.0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":id,"name":pin.name,"version":"1.0","description":"Bounded guidance","skillHash":pin.sha256}}))).mount(&upstream).await;

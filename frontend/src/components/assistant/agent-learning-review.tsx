@@ -27,6 +27,8 @@ export function AgentLearningReview({
   const review = useAgentLearningReview(agentId, enabled);
   const [open, setOpen] = useState<string>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [draftNames, setDraftNames] = useState<Record<string, string>>({});
+  const [draftDescriptions, setDraftDescriptions] = useState<Record<string, string>>({});
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
@@ -63,6 +65,16 @@ export function AgentLearningReview({
         <p role="alert" className="text-12 text-warning">
           Publishing is unavailable for this organization: owner binding is required.
         </p>
+      ) : null}
+      {review.status.data?.org_owned && !readOnly ? (
+        <label className="flex items-center gap-2 text-12">
+          <Switch
+            checked={review.status.data.opted_in ?? false}
+            disabled={review.consent.isPending}
+            onCheckedChange={(checked) => review.consent.mutate(checked)}
+          />
+          I consent to learning proposals for this organization
+        </label>
       ) : null}
 
       {!readOnly ? (
@@ -179,6 +191,24 @@ export function AgentLearningReview({
                     }))
                   }
                 />
+                <Input
+                  aria-label="Skill name"
+                  value={draftNames[proposal.id] ?? draft.name}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftNames((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
+                <Textarea
+                  aria-label="Skill description"
+                  value={draftDescriptions[proposal.id] ?? draft.description}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftDescriptions((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
+                {draft.files.map((file, index) => (
+                  <div key={`${proposal.id}-${index}`} className="space-y-1 rounded border border-border/50 p-2">
+                    <Input aria-label={`File ${index + 1} path`} value={file.path} readOnly={readOnly} />
+                    <Textarea aria-label={`File ${index + 1} content`} value={file.content} readOnly={readOnly} />
+                  </div>
+                ))}
                 <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2 text-11">
                   {draft.safety_notes}
                 </pre>
@@ -195,6 +225,8 @@ export function AgentLearningReview({
                         revision: proposal.revision,
                         draft: {
                           ...draft,
+                          name: draftNames[proposal.id] ?? draft.name,
+                          description: draftDescriptions[proposal.id] ?? draft.description,
                           skill_md: drafts[proposal.id],
                         },
                       })

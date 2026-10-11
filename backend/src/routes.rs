@@ -2156,6 +2156,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
         )
         .route(
+            "/nyxagent/agents/{id}/skills/history",
+            get(handlers::agent_skills::history),
+        )
+        .route(
+            "/nyxagent/agents/{id}/skills/{skill_id}/preview",
+            get(handlers::agent_skills::preview_attached),
+        )
+        .route(
             "/nyxagent/agents/{id}/learning",
             get(handlers::assistant_agent_learning::status)
                 .put(handlers::assistant_agent_learning::configure),
@@ -2180,6 +2188,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
             get(handlers::assistant_agent_learning::authored_preview)
                 .put(handlers::assistant_agent_learning::edit),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/validate",
+            post(handlers::assistant_agent_learning::validate),
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",

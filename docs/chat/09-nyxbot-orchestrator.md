@@ -1082,3 +1082,7 @@ bounded best-effort call to the declared cancel operation under live authority.
 Conversation deletion removes its watches after attempting cancellation. A late
 poll cannot recreate a deleted watch or overwrite cancellation. Services without
 a trusted contract and legacy event behavior remain unchanged.
+
+### Skill editing and controls
+
+Attached Ornn skill pins are versioned, bounded guidance. Owners can enable or disable each pin without removing it; disabled pins are omitted from prompt metadata and `skill_read`. Learning proposal edits carry a top-level revision fence (legacy nested fences are accepted during migration), and the learning status response includes maintenance, consent, threshold, and publication-blocking state. Preview and history endpoints expose bounded metadata only.

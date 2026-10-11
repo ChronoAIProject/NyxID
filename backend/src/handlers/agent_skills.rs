@@ -17,6 +17,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{self, Request},
 };
+use futures_util::TryStreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -362,6 +363,48 @@ pub async fn set(
             true,
         ))
         .await?,
+    ))
+}
+
+pub async fn preview_attached(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, skill_id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
+    let agent = team::agent(&state.db, &owner, &id).await?;
+    let pin = agent
+        .skills
+        .iter()
+        .find(|s| s.skill_id == skill_id)
+        .ok_or_else(|| AppError::NotFound("Attached skill not found".into()))?;
+    let reader = Reader {
+        state: &state,
+        person: &owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    let preview = skills::preview(&reader, &pin.skill_id, &pin.version).await?;
+    Ok(Json(
+        json!({"reference": pin, "description": preview.description, "size_bytes": preview.size_bytes, "disabled": pin.disabled}),
+    ))
+}
+
+pub async fn history(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
+    let _ = team::agent(&state.db, &owner, &id).await?;
+    let rows: Vec<crate::models::audit_log::AuditLog> = state.db.collection(crate::models::audit_log::COLLECTION_NAME)
+        .find(mongodb::bson::doc! {"user_id": &owner, "event_type": "assistant_skills_updated", "event_data.agent_id": &id})
+        .sort(mongodb::bson::doc! {"created_at": -1}).limit(50).await?.try_collect().await?;
+    Ok(Json(
+        json!({"items": rows.into_iter().map(|r| json!({"id": r.id, "created_at": r.created_at, "event_data": r.event_data})).collect::<Vec<_>>() }),
     ))
 }
 fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
