@@ -145,7 +145,7 @@ mod access_mode_tests {
 
     #[test]
     fn mode_class_matrix() {
-        let cases = [(Read, false), (Change, true), (Sensitive, true), (Destructive, true)];
+        let cases = [(OwnerActionClass::Read, false), (OwnerActionClass::Change, true), (OwnerActionClass::Sensitive, true), (OwnerActionClass::Destructive, true)];
         for mode in [Autopilot, Nyxmode, AskEveryTime] {
             for (class, expected) in cases {
                 let want = match mode { Autopilot => false, Nyxmode => matches!(class, Sensitive|Destructive), AskEveryTime => expected };

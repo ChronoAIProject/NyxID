@@ -172,6 +172,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         operation_scope_revisions: Default::default(),
         created_by: "user".into(),
         model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
+        access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
         display_name: None,
@@ -974,6 +975,7 @@ pub async fn create_specialist_for(
         operation_scope_revisions: Default::default(),
         created_by: request.created_by.into(),
         model,
+        access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
         display_name: style_value(

@@ -271,6 +271,7 @@ describe("NyxBot team, settings and channel schemas", () => {
   it("validates settings form values against the server limits", () => {
     const schema = nyxAgentSettingsFormSchema(limits);
     const valid = {
+      access_mode: "nyxmode" as const,
       confirm_destructive: true,
       max_live_subagents: 0,
       max_concurrent_subagent_turns: 1,
