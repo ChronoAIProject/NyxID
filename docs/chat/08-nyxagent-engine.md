@@ -366,7 +366,7 @@ NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent
 `update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
 `connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,
 `disconnect_channel_bot`. Every agent has `remember` and
-`forget`; its memory is injected into every thread's instructions and refuses
+`forget`; its memory notes are supplied in the first turn input only and are not part of stable instructions and refuses
 obvious credential shapes. A specialist calling a NyxBot-only tool gets
 `orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.
 Creating a specialist fences the owner's NyxBot row; `max_live_subagents`
@@ -731,7 +731,8 @@ separate stable session instructions from volatile turn facts:
 | --- | --- |
 | NyxBot/system, specialist and scheduling prompts | Stable instructions |
 | Agent handle, role description, display name and persona | Stable instructions |
-| Pinned skill metadata and agent memory notes | Stable instructions; omitted for guests |
+| Pinned skill metadata | Stable instructions
+| Agent memory notes | First-turn input; omitted for guests |
 | Org private/shared-group memory and privacy rules | Stable instructions |
 | Guest policy and owner/guest audience | Stable instructions |
 | Machine use guidance (NyxBot: loaded usable assignment policy; specialists: machine membership), NyxBot machine setup guidance | Stable instructions; omitted for guests |
@@ -829,7 +830,7 @@ text-event grammar. Terminal status is `completed`, `failed`, or `cancelled`;
 error is null or a stable `{code,message}`. The additive `turn.notice` carries
 `code=context_reset` and the fixed message:
 
-> Conversation context was reset; the assistant was given a recap of this chat.
+> Context reset preserves completed actions, attachments and decided cards; incomplete actions must be reviewed and rerun.
 
 | Upstream result | NyxID action |
 | --- | --- |
