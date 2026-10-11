@@ -43,6 +43,7 @@ pub(super) struct Fixture {
 
 #[tokio::test]
 async fn feedback_concurrent_first_puts_share_one_row() {
+    // The unique index and barrier make concurrent first writes deterministic; repeat attempts are covered by the shared fixture index.
     let f = fixture("feedback-r3", false).await;
     let conversation_id = "nyxa-feedback-r3";
     let message_id = "reply-feedback-r3";
