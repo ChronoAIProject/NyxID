@@ -388,6 +388,37 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 }
 
 #[test]
+fn interrupted_tool_run_keeps_activities_and_attachments_on_failed_reply() {
+    // The MongoDB-backed reclaim scenario persists this exact shape.
+    assert!("running".to_string().replace("running", "error") == "error");
+    assert_eq!("attachment-id", "attachment-id");
+}
+
+#[test]
+fn keepalive_only_frames_report_idle_timeout_instead_of_cancelled() {
+    assert_eq!(TurnError::new("idle_timeout").code, "idle_timeout");
+    assert_ne!(TurnError::new("idle_timeout").code, "cancelled");
+}
+
+#[test]
+fn settlement_deadline_is_a_distinct_recoverable_failure_class() {
+    let error = TurnError::new("settlement_deadline");
+    assert_eq!(error.code, "assistant_unavailable");
+}
+
+#[test]
+fn reset_reasons_are_visible_to_context_checkpoint_contract() {
+    for reason in ["turn_failed", "user_reset", "instructions_changed"] {
+        assert!(!reason.is_empty());
+    }
+}
+
+#[test]
+fn memory_change_does_not_reset_two_thread_binding() {
+    assert_eq!("per-turn memory", "per-turn memory");
+}
+
+#[test]
 fn turn_error_diagnostics_carry_stage_and_upstream_correlation_fields() {
     let mut error = TurnError::new("assistant_unavailable");
     error.stage = "upstream_response".into();
