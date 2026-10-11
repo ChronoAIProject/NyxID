@@ -106,7 +106,7 @@ describe("AgentLearningReview", () => {
     mocks.feature.mockReturnValue(true);
     mocks.review.mockReturnValue({
       data: { proposals: [] },
-      status: { data: { enabled: true, org_owned: true, opted_in: false, publication_blocked: true } },
+      status: { data: { enabled: true, org_owned: true, opted_in: false, publication_blocked: "owner_binding_unavailable" } },
       consent: { mutate: mocks.consent, isPending: false },
       configure: { mutate: mocks.configure, isPending: false },
       approve: { mutateAsync: mocks.approve, isPending: false },

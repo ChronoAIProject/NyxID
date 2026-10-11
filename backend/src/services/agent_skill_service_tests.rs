@@ -668,7 +668,8 @@ async fn disabled_pins_are_inaccessible_to_skill_read() {
         .await
         .unwrap();
     agent.skills = vec![reader.reference()];
+    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_ok());
     agent.skills[0].disabled = true;
-    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_err());
+    assert!(matches!(read(&reader, &agent, ID, None, "/", 0).await, Err(AppError::Forbidden(_))));
     f.state.db.drop().await.unwrap();
 }
