@@ -1951,7 +1951,7 @@ async fn dispatch_tools_call(
         && let Some(chat) = auth
             .chat
             .as_ref()
-            .filter(|chat| chat.confirmation_policy.is_some())
+            .filter(|chat| !chat.guest)
     {
         match crate::services::assistant_acknowledgement_service::webhook_action_gate(
             &state.db,
