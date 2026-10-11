@@ -1316,6 +1316,66 @@ pub async fn checkpoint_for_turn(
     context_checkpoint(db, user_id, id).await
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CheckpointSummary {
+    pub conversation: AssistantConversation,
+    pub messages: Vec<AssistantMessage>,
+    pub goal: Option<String>,
+    pub completed_actions: Vec<String>,
+    pub pending_actions: Vec<String>,
+    pub failed_actions: Vec<String>,
+    pub last_successful_turn: Option<String>,
+    pub binding_state: String,
+}
+
+pub async fn checkpoint_summary(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<CheckpointSummary> {
+    let (conversation, messages) = checkpoint_for_turn(db, user_id, id).await?;
+    let mut activities = messages
+        .iter()
+        .flat_map(|message| message.activities.iter().cloned())
+        .collect::<Vec<_>>();
+    if let Some(active) = conversation.active_turn.as_ref() {
+        activities.extend(active.activities.iter().cloned());
+    }
+    Ok(CheckpointSummary {
+        goal: messages
+            .iter()
+            .find(|message| message.role == "user")
+            .map(|message| message.text.clone()),
+        completed_actions: activities
+            .iter()
+            .filter(|a| a.status == "completed")
+            .map(|a| format!("{}=completed", a.label))
+            .collect(),
+        pending_actions: activities
+            .iter()
+            .filter(|a| a.status == "running")
+            .map(|a| format!("{}=running", a.label))
+            .collect(),
+        failed_actions: activities
+            .iter()
+            .filter(|a| a.status == "error")
+            .map(|a| format!("{}=error", a.label))
+            .collect(),
+        last_successful_turn: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant" && message.status == "completed")
+            .map(|message| message.turn_id.clone()),
+        binding_state: if conversation.nyxagent_session_id.is_some() {
+            "bound".into()
+        } else {
+            "reset".into()
+        },
+        conversation,
+        messages,
+    })
+}
+
 /// Fence and first message commit together, before any upstream work.
 /// Legacy Ask-mode orchestrators upgrade to Full access here, inside the same
 /// transaction that claims the turn, so no startup sweep races a live turn.

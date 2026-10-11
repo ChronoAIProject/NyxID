@@ -652,45 +652,16 @@ pub async fn context(
 ) -> AppResult<Json<ContextResponse>> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let (row, messages) = engine::checkpoint_for_turn(&state.db, &user_id, &id).await?;
-    let goal = messages
-        .iter()
-        .find(|m| m.role == "user")
-        .map(|m| m.text.clone());
-    let actions = messages
-        .iter()
-        .flat_map(|m| m.activities.iter())
-        .map(|a| format!("{}={}", a.label, a.status))
-        .collect::<Vec<_>>();
+    let checkpoint = engine::checkpoint_summary(&state.db, &user_id, &id).await?;
     Ok(Json(ContextResponse {
-        conversation_id: row.id,
-        goal,
-        completed_actions: actions
-            .iter()
-            .filter(|a| a.ends_with("=completed"))
-            .cloned()
-            .collect(),
-        pending_actions: actions
-            .iter()
-            .filter(|a| a.ends_with("=running"))
-            .cloned()
-            .collect(),
-        failed_actions: actions
-            .iter()
-            .filter(|a| a.ends_with("=error"))
-            .cloned()
-            .collect(),
-        last_successful_turn: messages
-            .iter()
-            .rev()
-            .find(|m| m.role == "assistant" && m.status == "completed")
-            .map(|m| m.turn_id.clone()),
-        reset_reason: row.context_reset_reason,
-        binding_state: if row.nyxagent_session_id.is_some() {
-            "bound".into()
-        } else {
-            "reset".into()
-        },
+        conversation_id: checkpoint.conversation.id,
+        goal: checkpoint.goal,
+        completed_actions: checkpoint.completed_actions,
+        pending_actions: checkpoint.pending_actions,
+        failed_actions: checkpoint.failed_actions,
+        last_successful_turn: checkpoint.last_successful_turn,
+        reset_reason: checkpoint.conversation.context_reset_reason,
+        binding_state: checkpoint.binding_state,
     }))
 }
 
