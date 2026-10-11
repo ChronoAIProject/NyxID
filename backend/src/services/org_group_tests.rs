@@ -635,7 +635,7 @@ async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() 
 
 #[tokio::test]
 async fn org_group_sticky_recipients_are_per_actor() {
-    org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants().await;
+    org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants();
 }
 
 #[tokio::test]
