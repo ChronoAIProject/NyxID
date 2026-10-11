@@ -14,7 +14,7 @@ use axum::{
 use mongodb::bson::doc;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
@@ -461,7 +461,7 @@ async fn uncertain_error_is_generic_persisted_and_never_retried() {
 }
 
 #[tokio::test]
-async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
+async fn execution_routes_are_human_only_flag_gated_and_owner_scoped() {
     use crate::services::feature_flag_service::{self, FlagTarget};
     use tower::ServiceExt;
     let db = connect_transaction_test_database("nyxa_gates").await;
@@ -506,6 +506,7 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
             format!("conversations/{id}/acknowledgements/missing"),
         ),
         ("POST", "turns".into()),
+        ("POST", "turns/idempotent".into()),
         ("GET", "models".into()),
     ];
     use base64::Engine;
@@ -558,6 +559,37 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
             assert_eq!(response.status(), status, "{method} {path}");
         }
     }
+    let admission_key = Uuid::new_v4().to_string();
+    for (auth, status) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some("nyx_invalid"), StatusCode::FORBIDDEN),
+        (Some(token.as_str()), StatusCode::NO_CONTENT),
+    ]
+    .into_iter()
+    .chain(
+        forbidden_tokens
+            .iter()
+            .map(|token| (Some(token.as_str()), StatusCode::FORBIDDEN)),
+    ) {
+        let mut request = Request::builder().method("POST").uri(format!(
+            "/api/v1/assistant/nyxagent/turn-admissions/{admission_key}/resolve"
+        ));
+        if let Some(auth) = auth {
+            request = request.header("authorization", format!("Bearer {auth}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "POST turn-admissions resolve");
+    }
+    let absence =
+        crate::services::assistant_turn_admission_service::get(&db, OWNER, &admission_key)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(absence.not_admitted);
     assert_eq!(
         db.collection::<mongodb::bson::Document>(
             crate::models::assistant_agent_credential::COLLECTION_NAME
@@ -2097,6 +2129,548 @@ async fn attachment_expiring_after_admission_is_announced_in_input() {
             .as_str()
             .unwrap()
             .contains("Attachments expired per retention policy")
+    );
+    server.abort();
+}
+
+fn idempotent_turn_request(key: &str, text: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/assistant/nyxagent/turns/idempotent")
+        .header("idempotency-key", key)
+        .body(Body::from(json!({"text": text}).to_string()))
+        .unwrap();
+    request.extensions_mut().insert(BillingRoutePolicy::Metered(
+        crate::services::billing::BillingIngress::Proxy,
+    ));
+    request
+}
+
+fn admission(
+    key: &str,
+    request: &engine::TurnRequest,
+) -> crate::services::assistant_turn_admission_service::AdmissionRequest {
+    crate::services::assistant_turn_admission_service::AdmissionRequest {
+        client_request_id: key.to_owned(),
+        payload_fingerprint: crate::services::assistant_turn_admission_service::payload_fingerprint(
+            request,
+        ),
+        test_hook: None,
+    }
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_route_requires_idempotency_key() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    assert!(matches!(
+        idempotent_turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("Idempotency-Key is required")
+    ));
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_exact_post_replay_is_sse_and_runs_once() {
+    let (state, calls, server) = setup(None, Duration::from_millis(100)).await;
+    let key = Uuid::new_v4().to_string();
+    drop(
+        idempotent_turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            idempotent_turn_request(&key, "hello"),
+        )
+        .await
+        .unwrap(),
+    );
+    let saved = crate::services::assistant_turn_admission_service::get(&state.db, OWNER, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!saved.not_admitted);
+    let replay = idempotent_turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        idempotent_turn_request(&key, "hello"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert!(
+        replay
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
+    let body = axum::body::to_bytes(replay.into_body(), 4096)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: turn.status") || body.contains("event:turn.status"));
+    assert!(body.contains(&saved.conversation_id));
+    assert!(body.contains(&saved.turn_id));
+    let row = settled(&state).await;
+    assert_eq!(row.id, saved.conversation_id);
+    assert_eq!(calls.lock().await.len(), 1);
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_turn_admission::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_conflicting_replay_fails_closed() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let key = Uuid::new_v4().to_string();
+    let request = engine::parse_turn(br#"{"text":"first"}"#).unwrap();
+    let first = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(first, engine::BeginTurnOutcome::Started(_)));
+    let changed = engine::parse_turn(br#"{"text":"different"}"#).unwrap();
+    assert!(matches!(
+        engine::begin_turn_idempotent(
+            &state.db,
+            OWNER,
+            &changed,
+            &state.encryption_keys,
+            admission(&key, &changed),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_negative_fence_blocks_a_late_post() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let key = Uuid::new_v4().to_string();
+    let response = resolve_turn_admission(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(key.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let saved = crate::services::assistant_turn_admission_service::get(&state.db, OWNER, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.not_admitted);
+
+    let request = engine::parse_turn(br#"{"text":"too late"}"#).unwrap();
+    assert!(matches!(
+        engine::begin_turn_idempotent(
+            &state.db,
+            OWNER,
+            &request,
+            &state.encryption_keys,
+            admission(&key, &request),
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_and_negative_fence_have_one_durable_winner() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let key = Uuid::new_v4().to_string();
+    let request = engine::parse_turn(br#"{"text":"race"}"#).unwrap();
+    let begin = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    );
+    let recover = crate::services::assistant_turn_admission_service::get_or_fence_absent(
+        &state.db, OWNER, &key,
+    );
+    let (begin, recover) = tokio::join!(begin, recover);
+
+    let expected_turns = match recover.unwrap() {
+        crate::services::assistant_turn_admission_service::RecoveryLookup::Admitted(saved) => {
+            let engine::BeginTurnOutcome::Started(row) = begin.unwrap() else {
+                panic!("a positive recovery winner must be the started turn");
+            };
+            assert!(!saved.not_admitted);
+            assert_eq!(saved.conversation_id, row.id);
+            1
+        }
+        crate::services::assistant_turn_admission_service::RecoveryLookup::ExplicitlyAbsent => {
+            assert!(matches!(begin, Err(AppError::Conflict(_))));
+            0
+        }
+    };
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        expected_turns
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER, "role": "user"})
+            .await
+            .unwrap(),
+        expected_turns
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_negative_fence_rolls_back_after_transaction_read_missing() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let key = Uuid::new_v4().to_string();
+    let request = engine::parse_turn(br#"{"text":"forced race"}"#).unwrap();
+    let after_missing = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let mut request_admission = admission(&key, &request);
+    request_admission.test_hook = Some(
+        crate::services::assistant_turn_admission_service::AdmissionTestHook {
+            after_missing: after_missing.clone(),
+            resume: resume.clone(),
+            armed: Arc::new(AtomicBool::new(true)),
+        },
+    );
+
+    let begin = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        request_admission,
+    );
+    let fence = async {
+        after_missing.notified().await;
+        let result = crate::services::assistant_turn_admission_service::get_or_fence_absent(
+            &state.db, OWNER, &key,
+        )
+        .await;
+        resume.notify_one();
+        result
+    };
+    let (begin, fence) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(begin, fence)
+    })
+    .await
+    .expect("forced admission race must not deadlock");
+
+    assert!(matches!(
+        fence.unwrap(),
+        crate::services::assistant_turn_admission_service::RecoveryLookup::ExplicitlyAbsent
+    ));
+    assert!(matches!(begin, Err(AppError::Conflict(_))));
+    let saved = crate::services::assistant_turn_admission_service::get(&state.db, OWNER, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.not_admitted);
+    for collection in [
+        crate::models::assistant_conversation::COLLECTION_NAME,
+        crate::models::assistant_message::COLLECTION_NAME,
+        crate::models::assistant_agent_credential::COLLECTION_NAME,
+        crate::models::api_key::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            state
+                .db
+                .collection::<mongodb::bson::Document>(collection)
+                .count_documents(doc! {"user_id": OWNER})
+                .await
+                .unwrap(),
+            0,
+            "{collection} must roll back when the negative fence wins"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_is_owner_scoped() {
+    const OTHER: &str = "12345678-1234-4123-8123-123456789013";
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(OTHER, UserType::Person))
+        .await
+        .unwrap();
+    let key = Uuid::new_v4().to_string();
+    let request = engine::parse_turn(br#"{"text":"same"}"#).unwrap();
+    let owner = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(owner, engine::BeginTurnOutcome::Started(_)));
+    assert!(
+        crate::services::assistant_turn_admission_service::get(&state.db, OTHER, &key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let other = engine::begin_turn_idempotent(
+        &state.db,
+        OTHER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(other, engine::BeginTurnOutcome::Started(_)));
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_concurrent_replay_creates_one_turn() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let key = Uuid::new_v4().to_string();
+    let request = engine::parse_turn(br#"{"text":"concurrent"}"#).unwrap();
+    let left = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    );
+    let right = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    );
+    let (left, right) = tokio::join!(left, right);
+    let mut started = 0;
+    let mut replayed = 0;
+    let mut started_receipt = None;
+    let mut replayed_receipt = None;
+    for outcome in [left.unwrap(), right.unwrap()] {
+        match outcome {
+            engine::BeginTurnOutcome::Started(row) => {
+                started += 1;
+                started_receipt = Some((row.id, row.active_turn.as_ref().unwrap().turn_id.clone()));
+            }
+            engine::BeginTurnOutcome::Replay(row) => {
+                replayed += 1;
+                replayed_receipt = Some((row.conversation_id, row.turn_id));
+            }
+        }
+    }
+    assert_eq!((started, replayed), (1, 1));
+    assert_eq!(started_receipt, replayed_receipt);
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"user_id": OWNER, "role": "user"})
+            .await
+            .unwrap(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_survives_post_commit_credential_failure() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let key = Uuid::new_v4().to_string();
+    let request = engine::parse_turn(br#"{"text":"committed"}"#).unwrap();
+    let outcome = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    )
+    .await
+    .unwrap();
+    let engine::BeginTurnOutcome::Started(row) = outcome else {
+        panic!("first request must start");
+    };
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_agent_credential::COLLECTION_NAME,
+        )
+        .delete_many(doc! {"user_id": OWNER, "conversation_id": &row.id})
+        .await
+        .unwrap();
+    assert!(
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id,)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let saved = crate::services::assistant_turn_admission_service::get(&state.db, OWNER, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!saved.not_admitted);
+    assert_eq!(saved.conversation_id, row.id);
+    assert_eq!(saved.turn_id, row.active_turn.as_ref().unwrap().turn_id);
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_turn_admission_delete_keeps_fail_closed_tombstone() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let key = Uuid::new_v4().to_string();
+    let request = engine::parse_turn(br#"{"text":"delete later"}"#).unwrap();
+    let outcome = engine::begin_turn_idempotent(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+        admission(&key, &request),
+    )
+    .await
+    .unwrap();
+    let engine::BeginTurnOutcome::Started(row) = outcome else {
+        panic!("first request must start");
+    };
+    engine::delete(&state.db, OWNER, &row.id).await.unwrap();
+    let saved = crate::services::assistant_turn_admission_service::get(&state.db, OWNER, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.conversation_deleted);
+    assert!(saved.conversation_deleted_at.is_some());
+    let public = resolve_turn_admission(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(key.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(public.status(), StatusCode::OK);
+    let public: Value = serde_json::from_slice(
+        &axum::body::to_bytes(public.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(public["clientRequestId"], key);
+    assert_eq!(public["conversationId"], row.id);
+    assert_eq!(public["active"], false);
+    assert_eq!(public["conversationDeleted"], true);
+    assert!(public.get("payloadFingerprint").is_none());
+    assert!(matches!(
+        engine::begin_turn_idempotent(
+            &state.db,
+            OWNER,
+            &request,
+            &state.encryption_keys,
+            admission(&key, &request),
+        )
+        .await
+        .unwrap(),
+        engine::BeginTurnOutcome::Replay(_)
+    ));
+    crate::services::admin_user_service::delete_current_user_cascade(&state.db, OWNER)
+        .await
+        .unwrap();
+    assert!(
+        crate::services::assistant_turn_admission_service::get(&state.db, OWNER, &key)
+            .await
+            .unwrap()
+            .is_none()
     );
     server.abort();
 }

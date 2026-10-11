@@ -789,6 +789,16 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             doc! {"user_id": 1, "updated_at": -1, "_id": -1},
             false,
         ),
+        (
+            crate::models::assistant_turn_admission::COLLECTION_NAME,
+            doc! {"user_id": 1, "client_request_id": 1},
+            true,
+        ),
+        (
+            crate::models::assistant_turn_admission::COLLECTION_NAME,
+            doc! {"user_id": 1, "conversation_id": 1},
+            false,
+        ),
         (MESSAGES, doc! {"conversation_id": 1, "seq": 1}, true),
         // Late channel delivery reads one exact settled turn, including in
         // long-lived home threads; never scan the whole transcript per sweep.
@@ -1283,7 +1293,34 @@ pub async fn begin_turn(
     start: impl Into<TurnStart>,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
 ) -> AppResult<AssistantConversation> {
-    Box::pin(begin_turn_with_voice(db, user_id, start, keys, None)).await
+    match Box::pin(begin_turn_inner(db, user_id, start, keys, None, None)).await? {
+        BeginTurnOutcome::Started(row) => Ok(row),
+        BeginTurnOutcome::Replay(_) => unreachable!("non-idempotent turns cannot replay"),
+    }
+}
+
+#[derive(Clone)]
+pub enum BeginTurnOutcome {
+    Started(AssistantConversation),
+    Replay(crate::models::assistant_turn_admission::AssistantTurnAdmission),
+}
+
+pub async fn begin_turn_idempotent(
+    db: &Database,
+    user_id: &str,
+    start: impl Into<TurnStart>,
+    keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    admission: super::assistant_turn_admission_service::AdmissionRequest,
+) -> AppResult<BeginTurnOutcome> {
+    Box::pin(begin_turn_inner(
+        db,
+        user_id,
+        start,
+        keys,
+        None,
+        Some(admission),
+    ))
+    .await
 }
 
 pub async fn begin_turn_with_voice(
@@ -1293,6 +1330,29 @@ pub async fn begin_turn_with_voice(
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     voice_request_id: Option<&str>,
 ) -> AppResult<AssistantConversation> {
+    match Box::pin(begin_turn_inner(
+        db,
+        user_id,
+        start,
+        keys,
+        voice_request_id,
+        None,
+    ))
+    .await?
+    {
+        BeginTurnOutcome::Started(row) => Ok(row),
+        BeginTurnOutcome::Replay(_) => unreachable!("voice turns cannot replay here"),
+    }
+}
+
+async fn begin_turn_inner(
+    db: &Database,
+    user_id: &str,
+    start: impl Into<TurnStart>,
+    keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    voice_request_id: Option<&str>,
+    admission: Option<super::assistant_turn_admission_service::AdmissionRequest>,
+) -> AppResult<BeginTurnOutcome> {
     let voice_request_id = voice_request_id.map(str::to_owned);
     let start: TurnStart = start.into();
     let id = start
@@ -1337,9 +1397,10 @@ pub async fn begin_turn_with_voice(
     let keys = keys.clone();
     let replaced = start.conversation_id.is_some();
     let start = start.clone();
+    let replay_admission = admission.clone();
     let audit_db = db.clone();
     let audit_user = user_id.clone();
-    let (row, credential) = session
+    let transaction = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db;
@@ -1348,6 +1409,29 @@ pub async fn begin_turn_with_voice(
             // MongoDB's retry driver stores and polls this callback through
             // several frames. Keep the turn/message/upload transaction on the heap.
             let operation: AppResult<_> = Box::pin(async {
+                if let Some(request) = admission.as_ref() {
+                    if let Some(saved) =
+                        super::assistant_turn_admission_service::get_in_session(
+                            db,
+                            user_id,
+                            &request.client_request_id,
+                            session,
+                        )
+                        .await?
+                    {
+                        return Ok((
+                            BeginTurnOutcome::Replay(
+                                super::assistant_turn_admission_service::verify(
+                                    saved,
+                                    &request.payload_fingerprint,
+                                )?,
+                            ),
+                            None,
+                        ));
+                    }
+                    #[cfg(test)]
+                    super::assistant_turn_admission_service::pause_after_missing(request).await;
+                }
                 let now = Utc::now();
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let mut row = if start.conversation_id.is_some() {
@@ -1826,22 +1910,59 @@ pub async fn begin_turn_with_voice(
                         .session(&mut *session)
                         .await?;
                 }
-                Ok((row, credential))
+                if let Some(request) = admission.as_ref() {
+                    super::assistant_turn_admission_service::insert_in_session(
+                        db,
+                        user_id,
+                        request,
+                        &row.id,
+                        turn_id,
+                        session,
+                    )
+                    .await?;
+                }
+                Ok((BeginTurnOutcome::Started(row), Some(credential)))
             })
             .await;
             transactions::transaction_result(operation)
         })
-        .await
-        .map_err(transactions::map_transaction_error)?;
-    super::assistant_agent_credential_service::audit_provision(
-        &audit_db,
-        &audit_user,
-        &row.id,
-        &credential,
-        replaced,
-    )
-    .await;
-    Ok(row)
+        .await;
+    let (outcome, credential) = match transaction {
+        Ok(result) => result,
+        Err(error)
+            if replay_admission.is_some()
+                && super::assistant_turn_admission_service::is_duplicate_key(&error) =>
+        {
+            let request = replay_admission.as_ref().expect("checked above");
+            if let Some(saved) = super::assistant_turn_admission_service::get(
+                &audit_db,
+                &audit_user,
+                &request.client_request_id,
+            )
+            .await?
+            {
+                return Ok(BeginTurnOutcome::Replay(
+                    super::assistant_turn_admission_service::verify(
+                        saved,
+                        &request.payload_fingerprint,
+                    )?,
+                ));
+            }
+            return Err(transactions::map_transaction_error(error));
+        }
+        Err(error) => return Err(transactions::map_transaction_error(error)),
+    };
+    if let BeginTurnOutcome::Started(row) = &outcome {
+        super::assistant_agent_credential_service::audit_provision(
+            &audit_db,
+            &audit_user,
+            &row.id,
+            &credential.expect("new turns provision a credential"),
+            replaced,
+        )
+        .await;
+    }
+    Ok(outcome)
 }
 
 /// The input NyxAgent receives for a claimed turn: the message text, or the
@@ -2764,6 +2885,21 @@ pub async fn delete(
                             .session(&mut *session)
                             .await?;
                     }
+                    // Keep the owner/key receipt after transcript deletion. A
+                    // recovering client must never interpret an already-run
+                    // service action as "not admitted" and execute it again.
+                    db.collection::<bson::Document>(
+                        crate::models::assistant_turn_admission::COLLECTION_NAME,
+                    )
+                    .update_many(
+                        doc! {"conversation_id": id, "user_id": user_id},
+                        doc! {"$set": {
+                            "conversation_deleted": true,
+                            "conversation_deleted_at": bson::DateTime::now(),
+                        }},
+                    )
+                    .session(&mut *session)
+                    .await?;
                     collection
                         .delete_one(doc! {"_id": id, "user_id": user_id})
                         .session(&mut *session)

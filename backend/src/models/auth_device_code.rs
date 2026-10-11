@@ -70,6 +70,8 @@ pub struct AuthDeviceCode {
     #[serde(default)]
     pub login_approval_id: Option<String>,
     pub device_code_hmac: String,
+    #[serde(default)]
+    pub recovery_secret_hmac: Option<String>,
     pub user_code_hmac: String,
     #[serde(default)]
     pub user_code_reservation_hmac: Option<String>,
@@ -178,6 +180,13 @@ impl fmt::Debug for AuthDeviceCode {
                 "device_code_hmac",
                 &RedactedLen(self.device_code_hmac.len()),
             )
+            .field(
+                "recovery_secret_hmac",
+                &self
+                    .recovery_secret_hmac
+                    .as_ref()
+                    .map(|hash| RedactedLen(hash.len())),
+            )
             .field("user_code_hmac", &RedactedLen(self.user_code_hmac.len()))
             .field("status", &self.status)
             .field("poll_interval_secs", &self.poll_interval_secs)
@@ -257,6 +266,7 @@ mod tests {
             supports_grant_choice: false,
             id: uuid::Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),
+            recovery_secret_hmac: Some("9876cdef".repeat(8)),
             user_code_hmac: "def456aa".repeat(8),
             requested_profile: None,
             user_code_reservation_hmac: None,
@@ -323,6 +333,7 @@ mod tests {
 
         assert_eq!(row.id, restored.id);
         assert_eq!(row.device_code_hmac, restored.device_code_hmac);
+        assert_eq!(row.recovery_secret_hmac, restored.recovery_secret_hmac);
         assert_eq!(row.user_code_hmac, restored.user_code_hmac);
         assert_eq!(row.status, restored.status);
         assert_eq!(row.poll_interval_secs, restored.poll_interval_secs);
@@ -428,12 +439,14 @@ mod tests {
         let row = make_auth_device_code();
         let mut doc = bson::to_document(&row).expect("serialize");
         doc.remove("login_approval_id");
+        doc.remove("recovery_secret_hmac");
         doc.remove("client_ip");
         doc.remove("denied_by_user_id");
 
         let restored: AuthDeviceCode = bson::from_document(doc).expect("deserialize legacy row");
 
         assert!(restored.login_approval_id.is_none());
+        assert!(restored.recovery_secret_hmac.is_none());
         assert!(restored.client_ip.is_none());
         assert!(restored.denied_by_user_id.is_none());
     }

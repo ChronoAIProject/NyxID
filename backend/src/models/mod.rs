@@ -123,6 +123,7 @@ pub mod assistant_group;
 pub mod assistant_message;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
+pub mod assistant_turn_admission;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;

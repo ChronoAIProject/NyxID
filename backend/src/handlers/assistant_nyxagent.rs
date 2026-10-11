@@ -4,7 +4,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Path, Query, State},
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     response::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
@@ -1074,14 +1074,55 @@ pub async fn turns(
     auth: AuthUser,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    turns_inner(state, auth, request, false).await
+}
+
+/// Admission-protocol route for clients that require crash-safe replay.
+/// Legacy replicas do not mount this path, so they cannot execute a request
+/// without participating in the positive/negative receipt protocol.
+pub async fn idempotent_turns(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    turns_inner(state, auth, request, true).await
+}
+
+async fn turns_inner(
+    state: AppState,
+    auth: AuthUser,
+    request: Request<Body>,
+    require_admission: bool,
+) -> AppResult<Response> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     let (parts, body) = request.into_parts();
     let bytes =
         super::body_limit::read_body(body, engine::MAX_REQUEST_BYTES, "Assistant turn").await?;
     let input = engine::parse_turn(&bytes)?;
+    let admission = idempotency_key(&parts.headers)?.map(|client_request_id| {
+        crate::services::assistant_turn_admission_service::AdmissionRequest {
+            client_request_id,
+            payload_fingerprint:
+                crate::services::assistant_turn_admission_service::payload_fingerprint(&input),
+            #[cfg(test)]
+            test_hook: None,
+        }
+    });
+    if require_admission && admission.is_none() {
+        return Err(AppError::BadRequest(
+            "Idempotency-Key is required on the idempotent assistant turn route".into(),
+        ));
+    }
     if !input.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
+    }
+    if let Some(request) = admission.as_ref()
+        && let crate::services::assistant_turn_admission_service::ReplayLookup::Exact(saved) =
+            crate::services::assistant_turn_admission_service::lookup(&state.db, &user_id, request)
+                .await?
+    {
+        return Ok(replay_receipt(saved));
     }
     // Ownership is checked before provisioning or touching a credential.
     let org_access = if let Some(id) = &input.conversation_id {
@@ -1103,8 +1144,85 @@ pub async fn turns(
             .await,
         );
     }
-    let (_, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
-    Ok(subscribe_events(receiver))
+    if let Some(admission) = admission {
+        match start_turn_idempotent(&state, auth, &start, policy, permit, admission).await? {
+            StartTurnOutcome::Started(receiver) => Ok(subscribe_events(receiver)),
+            StartTurnOutcome::Replay(saved) => Ok(replay_receipt(saved)),
+        }
+    } else {
+        let (_, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
+        Ok(subscribe_events(receiver))
+    }
+}
+
+fn idempotency_key(headers: &HeaderMap) -> AppResult<Option<String>> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(AppError::BadRequest(
+            "Idempotency-Key must be sent exactly once".into(),
+        ));
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| AppError::BadRequest("Idempotency-Key must be a UUID v4".into()))?;
+    crate::services::assistant_turn_admission_service::parse_client_request_id(value).map(Some)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnAdmissionResponse {
+    client_request_id: String,
+    conversation_id: String,
+    turn_id: String,
+    active: bool,
+    conversation_deleted: bool,
+}
+
+pub async fn resolve_turn_admission(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(client_request_id): Path<String>,
+) -> AppResult<Response> {
+    let user_id = auth.user_id.to_string();
+    let client_request_id =
+        crate::services::assistant_turn_admission_service::parse_client_request_id(
+            &client_request_id,
+        )?;
+    let row = match crate::services::assistant_turn_admission_service::get_or_fence_absent(
+        &state.db,
+        &user_id,
+        &client_request_id,
+    )
+    .await?
+    {
+        crate::services::assistant_turn_admission_service::RecoveryLookup::Admitted(row) => row,
+        crate::services::assistant_turn_admission_service::RecoveryLookup::ExplicitlyAbsent => {
+            // The matching submission path is absent on legacy replicas, so
+            // only this authenticated 204 plus its fence proves non-admission.
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+    };
+    let active = if row.conversation_deleted {
+        false
+    } else {
+        match engine::get(&state.db, &user_id, &row.conversation_id).await {
+            Ok(conversation) => engine::live_turn(&conversation, Utc::now())
+                .is_some_and(|turn| turn.turn_id == row.turn_id),
+            Err(AppError::NotFound(_)) => false,
+            Err(error) => return Err(error),
+        }
+    };
+    Ok(Json(TurnAdmissionResponse {
+        client_request_id: row.client_request_id,
+        conversation_id: row.conversation_id,
+        turn_id: row.turn_id,
+        active,
+        conversation_deleted: row.conversation_deleted,
+    })
+    .into_response())
 }
 
 /// The billing classification of a server-started turn: the same metered
@@ -1129,6 +1247,37 @@ pub(crate) async fn start_turn(
     .await
 }
 
+pub(crate) enum StartTurnOutcome {
+    Started(broadcast::Receiver<Value>),
+    Replay(crate::models::assistant_turn_admission::AssistantTurnAdmission),
+}
+
+pub(crate) async fn start_turn_idempotent(
+    state: &AppState,
+    auth: AuthUser,
+    start: &engine::TurnStart,
+    policy: Option<BillingRoutePolicy>,
+    permit: DirectChatPermit,
+    admission: crate::services::assistant_turn_admission_service::AdmissionRequest,
+) -> AppResult<StartTurnOutcome> {
+    let user_id = auth.user_id.to_string();
+    match Box::pin(engine::begin_turn_idempotent(
+        &state.db,
+        &user_id,
+        start,
+        &state.encryption_keys,
+        admission,
+    ))
+    .await?
+    {
+        engine::BeginTurnOutcome::Started(row) => {
+            let (_, receiver) = start_claimed_turn(state, auth, start, policy, permit, row).await?;
+            Ok(StartTurnOutcome::Started(receiver))
+        }
+        engine::BeginTurnOutcome::Replay(saved) => Ok(StartTurnOutcome::Replay(saved)),
+    }
+}
+
 pub(crate) async fn start_turn_with_voice(
     state: &AppState,
     auth: AuthUser,
@@ -1138,7 +1287,7 @@ pub(crate) async fn start_turn_with_voice(
     voice_request_id: Option<&str>,
 ) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
     let user_id = auth.user_id.to_string();
-    let mut row = if voice_request_id.is_some() {
+    let row = if voice_request_id.is_some() {
         Box::pin(engine::begin_turn_with_voice(
             &state.db,
             &user_id,
@@ -1156,6 +1305,18 @@ pub(crate) async fn start_turn_with_voice(
         ))
         .await?
     };
+    start_claimed_turn(state, auth, start, policy, permit, row).await
+}
+
+async fn start_claimed_turn(
+    state: &AppState,
+    auth: AuthUser,
+    start: &engine::TurnStart,
+    policy: Option<BillingRoutePolicy>,
+    permit: DirectChatPermit,
+    mut row: AssistantConversation,
+) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
+    let user_id = auth.user_id.to_string();
     if let Some(watch) = crate::services::async_service_operation::bound(&state.db, &row).await? {
         crate::services::async_service_operation::apply_delivery(&mut row, &watch);
     }
@@ -1185,6 +1346,25 @@ pub(crate) async fn start_turn_with_voice(
         },
     ));
     Ok((row, receiver))
+}
+
+fn replay_receipt(
+    row: crate::models::assistant_turn_admission::AssistantTurnAdmission,
+) -> Response {
+    let event = json!({
+        "event": "turn.status",
+        "cursor": 1,
+        "conversation_id": row.conversation_id,
+        "turn_id": row.turn_id,
+        "status": "running",
+    });
+    sse_response(futures::stream::once(async move {
+        Ok::<_, Infallible>(
+            Event::default()
+                .event("turn.status")
+                .data(event.to_string()),
+        )
+    }))
 }
 
 fn subscribe_events(mut receiver: broadcast::Receiver<Value>) -> Response {

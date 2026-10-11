@@ -1,0 +1,341 @@
+.mascot {
+  --mascot-size: 168px;
+  --mascot-look-x: 0;
+  --mascot-look-y: 0;
+  width: var(--mascot-size);
+  height: var(--mascot-size);
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+.mascot svg {
+  display: block;
+  overflow: visible;
+}
+
+.mascot__float {
+  transform-origin: 110px 170px;
+  animation: mascot-breathe 3.8s ease-in-out infinite;
+}
+
+.mascot__ground {
+  fill: rgba(16, 17, 20, 0.18);
+  transform-origin: center;
+  animation: mascot-shadow 3.8s ease-in-out infinite;
+}
+
+.mascot__wing,
+.mascot__tail,
+.mascot__ears {
+  transform-box: fill-box;
+}
+
+.mascot__face,
+.mascot__ears,
+.mascot__mouth,
+.mascot__gaze {
+  transform: translate(
+    calc(var(--mascot-look-x) * 1.6px),
+    calc(var(--mascot-look-y) * 1.2px)
+  );
+  transition: transform 90ms linear;
+}
+
+.mascot__gaze {
+  transform: translate(
+    calc(var(--mascot-look-x) * 4px),
+    calc(var(--mascot-look-y) * 3px)
+  );
+}
+
+.mascot__wing--left {
+  transform-origin: right center;
+}
+
+.mascot__wing--right {
+  transform-origin: left center;
+}
+
+.mascot__tail {
+  transform-origin: 150px 166px;
+  animation: mascot-tail 4.4s ease-in-out infinite;
+}
+
+.mascot__wing-mark,
+.mascot__eyes--closed path,
+.mascot__mouth,
+.mascot__hungry-mark path {
+  fill: none;
+  stroke: #202126;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mascot__wing-mark {
+  stroke: rgba(244, 238, 229, 0.16);
+  stroke-width: 2;
+}
+
+.mascot__eyes--closed,
+.mascot__eyes--thinking,
+.mascot__mouth--hungry,
+.mascot__mouth--thinking,
+.mascot__mouth--happy,
+.mascot__hungry-mark,
+.mascot__thinking-mark,
+.mascot__happy-mark {
+  display: none;
+}
+
+.mascot--hungry .mascot__mouth--idle,
+.mascot--thinking .mascot__mouth--idle,
+.mascot--happy .mascot__mouth--idle,
+.mascot--happy .mascot__eyes--open,
+.mascot--thinking .mascot__eyes--open,
+.mascot--running .mascot__mouth--idle,
+.mascot--running .mascot__eyes--open,
+.mascot--failed .mascot__mouth--idle {
+  display: none;
+}
+
+.mascot--hungry .mascot__mouth--hungry,
+.mascot--hungry .mascot__hungry-mark,
+.mascot--thinking .mascot__mouth--thinking,
+.mascot--thinking .mascot__eyes--thinking,
+.mascot--thinking .mascot__thinking-mark,
+.mascot--happy .mascot__mouth--happy,
+.mascot--happy .mascot__eyes--closed,
+.mascot--happy .mascot__happy-mark,
+.mascot--review .mascot__happy-mark,
+.mascot--running .mascot__mouth--thinking,
+.mascot--running .mascot__eyes--thinking,
+.mascot--running .mascot__thinking-mark,
+.mascot--failed .mascot__mouth--thinking {
+  display: block;
+}
+
+.mascot--hungry .mascot__wing--left {
+  animation: mascot-wing-left 1.1s ease-in-out infinite;
+}
+
+.mascot--hungry .mascot__wing--right {
+  animation: mascot-wing-right 1.1s ease-in-out infinite;
+}
+
+.mascot--thinking .mascot__thinking-mark {
+  transform-origin: 171px 75px;
+  animation: mascot-thought 2.4s ease-in-out infinite;
+}
+
+.mascot--thinking .mascot__eyes--thinking {
+  animation: mascot-look 2.4s ease-in-out infinite;
+}
+
+.mascot--happy .mascot__float {
+  animation: mascot-happy 1.15s ease-in-out infinite;
+}
+
+.mascot--happy .mascot__tail {
+  animation-duration: 0.75s;
+}
+
+.mascot--waving .mascot__wing--right {
+  animation: mascot-wave 0.72s ease-in-out infinite;
+}
+
+.mascot--jumping .mascot__float,
+.mascot--review .mascot__float {
+  animation: mascot-jump 0.72s ease-out infinite;
+}
+
+.mascot--running-left .mascot__float {
+  animation: mascot-run-left 0.34s ease-in-out infinite alternate;
+}
+
+.mascot--running-right .mascot__float {
+  animation: mascot-run-right 0.34s ease-in-out infinite alternate;
+}
+
+.mascot--running-left .mascot__tail,
+.mascot--running-right .mascot__tail {
+  animation-duration: 0.3s;
+}
+
+.mascot--waiting .mascot__eyes--open {
+  animation: mascot-waiting 1.8s ease-in-out infinite;
+}
+
+.mascot--running .mascot__thinking-mark {
+  transform-origin: 171px 75px;
+  animation: mascot-thought 1.1s linear infinite;
+}
+
+.mascot--failed .mascot__float {
+  animation: mascot-failed 0.48s ease-in-out 2;
+}
+
+@keyframes mascot-breathe {
+  0%,
+  100% {
+    transform: translateY(1px) scaleY(1);
+  }
+  50% {
+    transform: translateY(-4px) scaleY(1.012);
+  }
+}
+
+@keyframes mascot-shadow {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: scaleX(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scaleX(0.9);
+  }
+}
+
+@keyframes mascot-tail {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(8deg);
+  }
+}
+
+@keyframes mascot-wing-left {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-6deg);
+  }
+}
+
+@keyframes mascot-wing-right {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(6deg);
+  }
+}
+
+@keyframes mascot-thought {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: translateY(2px) rotate(0deg) scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px) rotate(16deg) scale(1.06);
+  }
+}
+
+@keyframes mascot-look {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(1px, -2px);
+  }
+}
+
+@keyframes mascot-happy {
+  0%,
+  100% {
+    transform: translateY(1px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(-1deg);
+  }
+}
+
+@keyframes mascot-wave {
+  0%,
+  100% {
+    transform: rotate(2deg);
+  }
+  50% {
+    transform: rotate(18deg);
+  }
+}
+
+@keyframes mascot-jump {
+  0%,
+  100% {
+    transform: translateY(1px);
+  }
+  45% {
+    transform: translateY(-11px) scaleY(1.02);
+  }
+}
+
+@keyframes mascot-run-left {
+  from {
+    transform: translate(-3px, 0) rotate(-3deg);
+  }
+  to {
+    transform: translate(3px, -5px) rotate(1deg);
+  }
+}
+
+@keyframes mascot-run-right {
+  from {
+    transform: translate(-3px, -5px) rotate(-1deg);
+  }
+  to {
+    transform: translate(3px, 0) rotate(3deg);
+  }
+}
+
+@keyframes mascot-waiting {
+  0%,
+  35%,
+  100% {
+    transform: translateX(0);
+  }
+  55%,
+  75% {
+    transform: translateX(3px);
+  }
+}
+
+@keyframes mascot-failed {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  30% {
+    transform: translateX(-5px) rotate(-2deg);
+  }
+  70% {
+    transform: translateX(5px) rotate(2deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mascot *,
+  .mascot__float,
+  .mascot__ground,
+  .mascot__tail,
+  .mascot__face,
+  .mascot__ears,
+  .mascot__mouth,
+  .mascot__gaze,
+  .mascot__thinking-mark,
+  .mascot__eyes--thinking {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -2546,6 +2546,7 @@ mod tests {
         }
         for path in [
             "/api/v1/assistant/nyxagent/voice/options",
+            "/api/v1/assistant/nyxagent/turn-admissions/00000000-0000-4000-8000-000000000000/resolve",
             "/api/v1/assistant/nyxagent/conversations/id/voice-requests/rid",
             "/api/v1/assistant/nyxagent/conversations/id/voice-sessions/sid/stream",
         ] {

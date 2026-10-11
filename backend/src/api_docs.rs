@@ -92,6 +92,7 @@
         // Auth Device Login
         crate::handlers::auth_device::request_auth_device,
         crate::handlers::auth_device::request_auth_device_v2,
+        crate::handlers::auth_device::cancel_auth_device,
         crate::handlers::auth_device::poll_auth_device_v2,
         crate::handlers::auth_device::poll_auth_device_web_v2,
         crate::handlers::auth_device::auth_device_options,
@@ -240,6 +241,7 @@
             crate::handlers::auth_device::AuthDeviceRequestBody,
             crate::handlers::auth_device::AuthDeviceRequestResponse,
             crate::handlers::auth_device::AuthDevicePollBody,
+            crate::handlers::auth_device::AuthDeviceCancelBody,
             crate::handlers::auth_device::AuthDevicePollResponse,
             crate::handlers::auth_device::AuthDevicePreviewBody,
             crate::handlers::auth_device::AuthDevicePreviewResponse,
@@ -463,6 +465,7 @@ mod tests {
             ("/api/v1/auth/device/v2/request", "post", false),
             ("/api/v1/auth/device/v2/poll", "post", false),
             ("/api/v1/auth/device/v2/poll-web", "post", false),
+            ("/api/v1/auth/device/cancel", "post", false),
             ("/api/v1/auth/device/options", "post", true),
             ("/api/v1/auth/device/approve-agent-key", "post", true),
             ("/api/v1/auth/login-code", "post", true),

@@ -705,6 +705,113 @@ mod tests {
     }
 
     #[test]
+    fn lark_approval_instance_detail_is_user_scoped_and_read_only() {
+        for slug in ["api-lark", "api-feishu"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let detail = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_instance_detail")
+                .unwrap();
+            assert_eq!(detail.method, "GET");
+            assert_eq!(detail.path, "/approval/v4/instances/detail");
+            assert_eq!(
+                detail.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            assert!(!detail.destructive);
+            assert_eq!(detail.changes_existing, None);
+
+            let parameters = detail.parameters.as_ref().unwrap().as_array().unwrap();
+            assert_eq!(parameters.len(), 3);
+            for (name, required) in [
+                ("instance_code", true),
+                ("locale", false),
+                ("user_id_type", false),
+            ] {
+                let parameter = parameters
+                    .iter()
+                    .find(|parameter| parameter["name"] == name)
+                    .unwrap();
+                assert_eq!(parameter["in"], "query");
+                assert_eq!(parameter["required"], required);
+            }
+
+            let operation = &spec["paths"]["/approval/v4/instances/detail"]["get"];
+            assert!(
+                operation["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("approval:instance:read")
+            );
+            assert_eq!(operation["x-aevatar-tool"]["readOnly"], true);
+            assert_eq!(operation["x-aevatar-tool"]["destructive"], false);
+            assert_eq!(operation["x-aevatar-tool"]["requiresApproval"], false);
+        }
+
+        for slug in ["api-lark-bot", "api-feishu-bot"] {
+            let spec = spec_for_slug(slug).unwrap();
+            assert!(spec["paths"].get("/approval/v4/instances/detail").is_none());
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            assert!(
+                endpoints
+                    .iter()
+                    .all(|endpoint| endpoint.name != "approval_instance_detail")
+            );
+        }
+    }
+
+    #[test]
+    fn lark_approval_approve_uses_user_route_and_mutation_marks() {
+        for slug in ["api-lark", "api-feishu"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let approve = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_task_approve")
+                .unwrap();
+            assert_eq!(approve.method, "POST");
+            assert_eq!(approve.path, "/approval/v4/tasks/pass");
+            assert_eq!(
+                approve.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Write)
+            );
+            assert!(approve.destructive);
+            assert_eq!(approve.changes_existing, Some(true));
+            assert!(approve.request_body_required);
+            assert_eq!(
+                approve.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let schema = approve.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["instance_code", "task_id"])
+            );
+            assert_eq!(schema["additionalProperties"], false);
+            assert_eq!(schema["properties"].as_object().unwrap().len(), 2);
+
+            let operation = &spec["paths"]["/approval/v4/tasks/pass"]["post"];
+            assert_eq!(operation["x-aevatar-tool"]["requiresApproval"], true);
+            assert_eq!(
+                operation_marks(slug, "POST", &approve.path, "renamed").changes_existing,
+                Some(true)
+            );
+            assert!(operation_marks(slug, "POST", &approve.path, "renamed").destructive);
+            assert!(spec["paths"].get("/approval/v4/tasks/refuse").is_none());
+        }
+
+        for slug in ["api-lark-bot", "api-feishu-bot"] {
+            let spec = spec_for_slug(slug).unwrap();
+            assert!(
+                spec["paths"]
+                    .get("/open-apis/approval/v4/tasks/pass")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
         for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");
