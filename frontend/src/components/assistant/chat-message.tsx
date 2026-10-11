@@ -165,6 +165,8 @@ export function ChatMessageBubble({
       ? sanitizeAssistantMessageContent(message.content)
       : message.content;
   const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
+  const [commentOpen, setCommentOpen] = useState(false);
+  const [comment, setComment] = useState(message.feedback?.comment ?? "");
   const feedback = useAssistantFeedback("conversation", conversationId ?? "", message.id);
   const setFeedback = async (next: "up" | "down") => {
     const previous = vote; const selected = previous === next ? undefined : next; setVote(selected);
@@ -268,6 +270,13 @@ export function ChatMessageBubble({
           <div className="mt-2 flex items-center gap-1" aria-label="Reply feedback">
             <button type="button" aria-label="Helpful" aria-pressed={vote === "up"} onClick={() => void setFeedback("up")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "up" && "text-success") }><ThumbsUp className="h-3.5 w-3.5" /></button>
             <button type="button" aria-label="Not helpful" aria-pressed={vote === "down"} onClick={() => void setFeedback("down")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "down" && "text-destructive") }><ThumbsDown className="h-3.5 w-3.5" /></button>
+            <button type="button" aria-label="Add feedback comment" onClick={() => setCommentOpen((open) => !open)} className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay">Comment</button>
+          </div>
+        ) : null}
+        {commentOpen && !streaming ? (
+          <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
+            <textarea aria-label="Optional feedback comment" value={comment} maxLength={1000} onChange={(event) => setComment(event.target.value)} className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none" placeholder="Optional comment" />
+            <button type="button" className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10" onClick={() => { if (conversationId && vote) void feedback.mutateAsync({ vote, comment }); setCommentOpen(false); }}>Send</button>
           </div>
         ) : null}
       </div>
