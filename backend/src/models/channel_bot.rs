@@ -247,6 +247,21 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_capture_webhook_drop_reasons() {
+        let diagnostics = ChannelBotDiagnostics {
+            last_webhook_error: Some(ChannelBotError {
+                code: "unregistered".into(),
+                at: Utc::now(),
+            }),
+            failure_reason: Some("signature".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(json["last_webhook_error"]["code"], "unregistered");
+        assert_eq!(json["failure_reason"], "signature");
+    }
+
+    #[test]
     fn polling_fields_are_bson_datetimes_and_legacy_rows_keep_defaults() {
         let mut bot = make_channel_bot();
         let now = bson::DateTime::now().to_chrono();
