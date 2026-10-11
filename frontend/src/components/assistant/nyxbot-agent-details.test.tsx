@@ -169,7 +169,7 @@ it("forgets a memory note", async () => {
 it("replaces a specialist's grants with a dirty-gated save", async () => {
   const { user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  expect(within(sheet).getByText("Only NyxBot can request or grant access for this agent.")).toBeVisible();
+  expect(within(sheet).getByText(/Only NyxBot can request or grant access for this agent/)).toBeVisible();
   const grants = await within(sheet).findByRole("form", { name: "Grants" });
   const save = within(grants).getByRole("button", { name: "Save grants" });
   expect(save).toBeDisabled();
