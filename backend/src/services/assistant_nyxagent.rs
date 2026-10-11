@@ -1658,7 +1658,10 @@ pub async fn begin_turn_with_voice(
                         status: "failed".into(),
                         error_code: Some("turn_lost".into()),
                         upstream_error_code: None,
-                        error_detail: None,
+                        error_detail: Some(crate::models::assistant_message::AssistantErrorDetail {
+                            stage: "lease_expiry".into(), http_status: None, upstream_request_id: None,
+                            response_id: None, continuations: lost.continuations, turn_id: lost.turn_id.clone(), occurred_at: now,
+                        }),
                         created_at: now,
                         activities: lost.activities.into_iter().map(|mut activity| {
                             if activity.status.as_str() == "running" { activity.status = "error".into(); activity.ended_at = Some(now); }
