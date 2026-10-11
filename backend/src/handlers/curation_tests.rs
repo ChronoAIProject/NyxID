@@ -74,7 +74,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     let path = format!(
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
     let make = |vote: &'static str| {
         let state = f.state.clone();
         let token = f.human_token.clone();
@@ -85,9 +85,13 @@ async fn feedback_concurrent_first_puts_share_one_row() {
             request(&state, "PUT", &path, &token, Some(json!({"vote": vote}))).await
         }
     };
-    let (a, b) = tokio::join!(make("up"), make("up"));
-    assert!(a.0.is_success());
-    assert!(b.0.is_success());
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        tasks.push(tokio::spawn(make("up")));
+    }
+    for task in tasks {
+        assert!(task.await.unwrap().0.is_success());
+    }
     let count = f
         .state
         .db
@@ -96,6 +100,47 @@ async fn feedback_concurrent_first_puts_share_one_row() {
         .await
         .unwrap();
     assert_eq!(count, 1);
+    let direct_message = "reply-feedback-r3-direct";
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: direct_message.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 2,
+            turn_id: "turn-direct".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME).insert_one(doc! {"_id":"existing-direct","user_id":&f.owner,"message_id":direct_message,"conversation_id":conversation_id,"vote":"up","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let direct_path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{direct_message}/feedback"
+    );
+    assert!(
+        request(
+            &f.state,
+            "PUT",
+            &direct_path,
+            &f.human_token,
+            Some(json!({"vote":"down"}))
+        )
+        .await
+        .0
+        .is_success()
+    );
 }
 
 #[tokio::test]
@@ -1645,8 +1690,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
 #[tokio::test]
 async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_fence() {
     let mut f = fixture("curation_rotation", true).await;
-    let before = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let before = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(8));
     let issuance = accounts::ISSUANCE_BARRIER.scope(
         (before.clone(), resume.clone()),
         accounts::authenticate_client_credentials(
@@ -2704,7 +2749,7 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
             0
         );
     }
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
     let a = TransactionCollisionHook::new(barrier.clone());
     let b = TransactionCollisionHook::new(barrier);
     let (a, b) = tokio::join!(
@@ -2802,8 +2847,8 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
     let mut input = input;
     input["slug"] = json!("late-slug");
     input["skills_request_id"] = json!(Uuid::new_v4().to_string());
-    let read = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let read = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(8));
     let late = super::services::CREATE_BEFORE_SLUG.scope(
         (read.clone(), resume.clone()),
         request(
