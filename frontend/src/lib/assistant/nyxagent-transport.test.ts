@@ -1156,17 +1156,3 @@ describe("steering transport", () => {
     await sending;
   });
 });
-
-it("maps cancelled replies to an error state so feedback stays ineligible", () => {
-  const message = {
-    id: "cancelled",
-    role: "assistant",
-    text: "stopped",
-    status: "failed",
-    error_code: "cancelled",
-    created_at: new Date().toISOString(),
-    activities: [],
-    attachments: [],
-  } as never;
-  expect((message as { error_code: string }).error_code).toBe("cancelled");
-});
