@@ -113,8 +113,16 @@ impl Prepared {
     }
 
     pub fn input(&self, notes: &str, text: &str) -> String {
+        self.input_with_memory(notes, text, true)
+    }
+
+    pub fn input_with_memory(&self, notes: &str, text: &str, include_memory: bool) -> String {
         let text = self.redact(text);
-        let notes = format!("{}{}", self.memory, notes);
+        let notes = if include_memory {
+            format!("{}{}", self.memory, notes)
+        } else {
+            notes.to_owned()
+        };
         if notes.is_empty() {
             return text;
         }
@@ -239,6 +247,22 @@ mod tests {
         assert!(input.contains("new memory note"));
         assert_eq!(context.binding.fingerprint, fingerprint);
         assert!(!context.instructions(&[], false).contains("new memory note"));
+    }
+
+    #[test]
+    fn continuation_input_does_not_repeat_memory_note() {
+        let mut context = prepared();
+        context.memory = "[memory] private preference\n".into();
+        assert!(
+            context
+                .input_with_memory("first", "question", true)
+                .contains("private preference")
+        );
+        assert!(
+            !context
+                .input_with_memory("continuation", "question", false)
+                .contains("private preference")
+        );
     }
 
     #[test]

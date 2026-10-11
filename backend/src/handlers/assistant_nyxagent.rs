@@ -1978,7 +1978,7 @@ async fn execute_turn(
                 "POST",
                 "v1/responses",
                 Some({
-                    let input = context.input(
+                    let input = context.input_with_memory(
                         if continuations.count == 0 || binding.is_none() {
                             // Recovery into a fresh session must restore the
                             // turn facts that its discarded session had seen.
@@ -1990,6 +1990,7 @@ async fn execute_turn(
                             &listing
                         },
                         input,
+                        continuations.count == 0 || binding.is_none(),
                     );
                     let mut body =
                         engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
