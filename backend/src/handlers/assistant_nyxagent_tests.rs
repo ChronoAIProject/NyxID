@@ -58,7 +58,7 @@ fn failed_message_response_serializes_error_detail_as_rfc3339() {
     assert_eq!(json["error_detail"]["http_status"], 504);
     assert_eq!(
         json["error_detail"]["occurred_at"],
-        occurred_at.to_rfc3339()
+        occurred_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
     );
 }
 
