@@ -636,6 +636,12 @@ async fn disabled_pins_are_omitted_from_prompt_instructions() {
     )
     .await
     .unwrap();
+    let mut toggled = reader.reference();
+    toggled.disabled = true;
+    let toggled_selection = Selection { expected_revision: 1, skills: vec![toggled] };
+    set(&f.state.db, &reader, &f.owner, &f.chat.agent_id, &toggled_selection, true)
+        .await
+        .expect("disabling an existing pin must not require a re-preview");
     let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
         .await
         .unwrap();

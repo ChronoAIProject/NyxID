@@ -583,8 +583,20 @@ fn page(content: &str, id: &str, version: &str, path: &str, offset: usize) -> Ap
     }
 }
 
+fn same_pin_ignoring_disabled(a: &SkillReference, b: &SkillReference) -> bool {
+    a.source == b.source
+        && a.skill_id == b.skill_id
+        && a.name == b.name
+        && a.version == b.version
+        && a.sha256 == b.sha256
+        && a.dependencies == b.dependencies
+}
+
 pub fn needs_confirmation(agent: &AssistantAgent, selection: &Selection) -> bool {
-    selection.skills.iter().any(|s| !agent.skills.contains(s))
+    selection
+        .skills
+        .iter()
+        .any(|s| !agent.skills.iter().any(|current| same_pin_ignoring_disabled(current, s)))
 }
 
 pub async fn set(
@@ -612,7 +624,7 @@ pub async fn set(
     }
     let mut metadata = BTreeMap::new();
     for r in &selection.skills {
-        if agent.skills.contains(r) {
+        if let Some(existing) = agent.skills.iter().find(|current| same_pin_ignoring_disabled(current, r)) {
             metadata.insert(
                 r.skill_id.clone(),
                 agent
