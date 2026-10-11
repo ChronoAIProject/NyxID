@@ -380,8 +380,9 @@ export function AgentLearningReview({
               {card && proposal.source !== "authored" && !checkOnly ? (
               <p className="text-11 text-warning">
                 This is a two-step approval: first request the owner confirmation
-                card, then confirm that exact card to publish and attach the
-                pinned version. The card expires if the draft or agent changes.
+                card, then confirm that exact card. Confirming this exact card
+                will publish the private skill and attach its pinned version.
+                The card expires if the draft or agent changes.
               </p>
             ) : null}
           </article>
