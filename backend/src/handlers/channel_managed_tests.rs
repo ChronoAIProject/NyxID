@@ -1606,3 +1606,32 @@ async fn resubscribe_requires_owner_write_and_reconfigures_subscription() {
         super::channel_bots::resubscribe(State(state), auth, Path(bot_id.into())).await;
     assert!(owner_result.is_err());
 }
+
+#[test]
+fn verify_reports_live_subscription_state_and_recommended_action() {
+    let mut bot: ChannelBot = bson::from_document(doc! {"_id": "verify-state", "user_id": "u", "platform": "twitter", "label": "x", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": true, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() }).unwrap();
+    bot.diagnostics.subscription_state =
+        Some(crate::models::channel_bot::ChannelBotSubscriptionState {
+            registered: true,
+            checked_at: chrono::Utc::now(),
+            last_error: None,
+        });
+    let registered = super::channel_bots::health_for(&bot, false);
+    assert!(
+        registered
+            .diagnostics
+            .subscription_state
+            .as_ref()
+            .unwrap()
+            .registered
+    );
+    bot.webhook_registered = false;
+    bot.diagnostics.subscription_state =
+        Some(crate::models::channel_bot::ChannelBotSubscriptionState {
+            registered: false,
+            checked_at: chrono::Utc::now(),
+            last_error: Some("missing".into()),
+        });
+    let missing = super::channel_bots::health_for(&bot, false);
+    assert_eq!(missing.recommended_action, "resubscribe");
+}
