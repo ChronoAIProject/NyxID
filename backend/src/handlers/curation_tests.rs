@@ -850,6 +850,47 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     );
 }
 
+#[tokio::test]
+async fn feedback_conversation_delete_purges_existing_rows() {
+    let f = fixture("feedback-conversation-purge", false).await;
+    let id = "feedback-purge-conversation";
+    f.state
+        .db
+        .collection::<Document>("assistant_conversations")
+        .insert_one(doc! {
+            "_id": id, "user_id": &f.owner, "title":"Purge", "model":"test",
+            "credential_api_key_id":"unused", "message_count":0,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+        })
+        .await
+        .unwrap();
+    f.state.db.collection::<Document>(FEEDBACK).insert_one(doc! {
+        "_id":"conversation-feedback", "user_id": &f.owner, "conversation_id":id,
+        "message_id":"reply", "vote":"up", "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+    }).await.unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(FEEDBACK)
+            .count_documents(doc! {"conversation_id":id})
+            .await
+            .unwrap(),
+        1
+    );
+    crate::services::assistant_nyxagent::delete(&f.state.db, &f.owner, id)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(FEEDBACK)
+            .count_documents(doc! {"conversation_id":id})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
