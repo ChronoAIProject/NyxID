@@ -198,6 +198,11 @@ async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
     assert!(status.is_success(), "{status} {body}");
     assert_eq!(body["recent"].as_array().unwrap().len(), 100);
     let cursor = body["next_cursor"].as_str().unwrap();
+    let mut cursor_parts = cursor.splitn(2, '|');
+    let encoded_time = cursor_parts.next().unwrap();
+    let encoded_id = cursor_parts.next().unwrap();
+    assert!(encoded_time.ends_with('Z'));
+    assert!(!encoded_id.is_empty());
     let (status, next) = request(
         &f.state,
         "GET",
