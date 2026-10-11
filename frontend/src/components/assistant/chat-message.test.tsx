@@ -23,6 +23,14 @@ describe("canonical chat presentation", () => {
     rerender(<ChatMessageBubble message={BASE} />);
     expect(screen.queryByRole("group", { name: "Reply feedback" })).not.toBeInTheDocument();
   });
+
+  it("shows feedback controls for a completed NyxAgent reply only when enabled", () => {
+    const { rerender } = render(<ChatMessageBubble message={BASE} conversationId="nyxa-1" feedbackEnabled />);
+    expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Not helpful" })).toBeVisible();
+    rerender(<ChatMessageBubble message={BASE} conversationId="aevatar-1" feedbackEnabled={false} />);
+    expect(screen.queryByRole("button", { name: "Helpful" })).not.toBeInTheDocument();
+  });
   afterEach(() => vi.useRealTimers());
 
   it("opens the optional feedback comment popover without submitting", () => {
