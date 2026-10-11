@@ -38,6 +38,8 @@ pub struct Update {
     pub max_concurrent_subagent_turns: Option<i32>,
     pub max_group_handoffs: Option<i32>,
     pub max_group_handoffs_per_hour: Option<i32>,
+    pub specialist_access_requests:
+        Option<crate::models::assistant_settings::SpecialistAccessRequests>,
 }
 
 pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<AssistantSettings> {
@@ -165,6 +167,14 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
     if let Some(value) = update.max_group_handoffs_per_hour {
         set.insert("max_group_handoffs_per_hour", value);
         defaults.remove("max_group_handoffs_per_hour");
+    }
+    if let Some(value) = update.specialist_access_requests {
+        set.insert(
+            "specialist_access_requests",
+            bson::to_bson(&value)
+                .map_err(|_| AppError::Internal("Settings serialization failed".into()))?,
+        );
+        defaults.remove("specialist_access_requests");
     }
     db.collection::<AssistantSettings>(COLLECTION_NAME)
         .find_one_and_update(

@@ -737,6 +737,7 @@ pub async fn create_group(
     auth: AuthUser,
     Json(body): Json<CreateGroupRequest>,
 ) -> AppResult<(StatusCode, Json<GroupResponse>)> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     if let Some(org) = body.org.as_deref() {
@@ -779,6 +780,7 @@ pub async fn get_group(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<GroupResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
@@ -843,6 +845,7 @@ pub async fn delete_group(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;

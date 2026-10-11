@@ -136,6 +136,27 @@ impl ChatAuthority {
         self.role == AgentRole::Orchestrator
     }
 
+    /// Only the owner's NyxBot may widen access or create an access request.
+    /// Keeping this predicate here makes every acknowledgement-producing path
+    /// share the same authority decision.
+    pub fn access_request_allowed(&self) -> bool {
+        self.is_orchestrator() && !self.guest
+    }
+
+    /// Compatibility policy used by owner-controlled settings. Strict mode
+    /// denies specialist requests; routed mode permits the existing
+    /// orchestrator-card path while never granting specialist authority.
+    pub fn access_request_allowed_with_mode(
+        &self,
+        mode: crate::models::assistant_settings::SpecialistAccessRequests,
+    ) -> bool {
+        self.access_request_allowed()
+            || (matches!(
+                mode,
+                crate::models::assistant_settings::SpecialistAccessRequests::RoutedToNyxbot
+            ) && !self.guest)
+    }
+
     pub fn turn_fence(&self) -> AssistantTurnFence {
         AssistantTurnFence {
             conversation_id: self.conversation_id.clone(),
@@ -188,6 +209,94 @@ pub fn guest_refusal() -> Value {
         anything that needs their approval, or more than the owner lets guests do with a \
         service. Help with your services otherwise, and say that only the bot's owner can \
         ask for that."})
+}
+
+pub fn access_request_denied() -> Value {
+    json!({
+        "error": "access_request_denied",
+        "instructions": "Only NyxBot can request or grant access. Report the need to NyxBot in your reply."
+    })
+}
+
+/// Record a metadata-only denial. Callers use this before returning the stable
+/// refusal so denied attempts remain visible without storing arguments or
+/// credentials.
+pub async fn audit_access_request_denied(
+    db: &Database,
+    chat: &ChatAuthority,
+    target: Option<&str>,
+    scope: &str,
+) {
+    let sample = format!("{}:{}:{}", chat.agent_id, chat.conversation_id, scope);
+    if !crate::telemetry::should_sample_event("assistant_access_request_denied", &sample, 100) {
+        return;
+    }
+    let _ = audit_service::log_actor_event(
+        db.clone(),
+        &audit_service::AuditActor {
+            user_id: chat.user_id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: Some(chat.api_key_id.clone()),
+            api_key_name: None,
+        },
+        "assistant_access_request_denied",
+        Some(
+            json!({"requester_agent": chat.agent_id, "thread": chat.conversation_id,
+            "key": chat.api_key_id, "target": target, "scope": scope,
+            "decision": "denied"}),
+        ),
+    )
+    .await;
+    if let Ok(agents) = super::assistant_team_service::agents(db, &chat.user_id, false).await
+        && let Some(home) = agents
+            .into_iter()
+            .find(|a| a.is_nyxbot())
+            .and_then(|a| a.home_conversation_id)
+    {
+            let conversations = db
+                .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                );
+            if let Ok(Some(row)) = conversations
+                .find_one_and_update(
+                    doc! {"_id": &home, "user_id": &chat.user_id},
+                    doc! {"$inc": {"message_count": 1}},
+                )
+                .await
+            {
+                let message = crate::models::assistant_message::AssistantMessage {
+                    steering: None,
+                    voice: None,
+                    execution_pending: false,
+                    id: Uuid::new_v4().to_string(),
+                    conversation_id: home,
+                    user_id: chat.user_id.clone(),
+                    seq: row.message_count + 1,
+                    turn_id: format!("access-denied-{}", Uuid::new_v4()),
+                    role: "notice".into(),
+                    text: format!(
+                        "specialist_access_denied: {} needs {} for {}",
+                        chat.agent_name,
+                        scope,
+                        target.unwrap_or("account")
+                    ),
+                    status: "completed".into(),
+                    error_code: Some("specialist_access_denied".into()),
+                    created_at: Utc::now(),
+                    activities: Vec::new(),
+                    attachments: Vec::new(),
+                    origin: None,
+                    via: None,
+                };
+                let _ = db
+                    .collection::<crate::models::assistant_message::AssistantMessage>(
+                        crate::models::assistant_message::COLLECTION_NAME,
+                    )
+                    .insert_one(message)
+                    .await;
+            }
+    }
 }
 
 /// An org permission request may use the person's NyxBot only while that
@@ -332,6 +441,91 @@ pub fn arguments_digest(arguments: &Value) -> String {
         map.remove("acknowledgement_id");
     }
     hex::encode(Sha256::digest(canonical(&value).to_string().as_bytes()))
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod access_authority_tests {
+    use super::*;
+    use crate::models::assistant_conversation::AgentRole;
+
+    fn chat(role: AgentRole, guest: bool) -> ChatAuthority {
+        ChatAuthority {
+            org_agent_access: None,
+            turn_id: None,
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "thread".into(),
+            user_id: "user".into(),
+            api_key_id: "key".into(),
+            role,
+            agent_id: "agent".into(),
+            agent_name: "specialist".into(),
+            guest,
+            confirmation_policy: None,
+        }
+    }
+
+    #[test]
+    fn specialist_access_matrix_denies_all_requesting_turn_kinds() {
+        let gates = [
+            "service",
+            "account",
+            "operations",
+            "skills",
+            "machine",
+            "connect",
+            "channel",
+        ];
+        let turns = [
+            ("owner", false),
+            ("guest", true),
+            ("event", false),
+            ("channel", true),
+        ];
+        for tool in crate::services::assistant_team_tools::TOOL_NAMES
+            .iter()
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES.iter())
+        {
+            for gate in gates {
+                for (turn, guest) in turns {
+                    let authority = chat(AgentRole::Subagent, guest);
+                    assert!(!authority.access_request_allowed(), "{tool}/{gate}/{turn}");
+                }
+            }
+        }
+        assert!(chat(AgentRole::Orchestrator, false).access_request_allowed());
+        assert!(!chat(AgentRole::Orchestrator, true).access_request_allowed());
+        assert_eq!(access_request_denied()["error"], "access_request_denied");
+    }
+
+    #[test]
+    fn routed_mode_is_explicitly_distinct_from_strict_default() {
+        use crate::models::assistant_settings::SpecialistAccessRequests;
+        assert_eq!(
+            SpecialistAccessRequests::default(),
+            SpecialistAccessRequests::Denied
+        );
+        assert_ne!(
+            SpecialistAccessRequests::Denied,
+            SpecialistAccessRequests::RoutedToNyxbot
+        );
+        assert!(
+            chat(AgentRole::Subagent, false)
+                .access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot)
+        );
+        assert!(
+            !chat(AgentRole::Subagent, false)
+                .access_request_allowed_with_mode(SpecialistAccessRequests::Denied)
+        );
+        let mut org_specialist = chat(AgentRole::Subagent, false);
+        org_specialist.user_id = "org-owner".into();
+        org_specialist.agent_id = "org-specialist".into();
+        assert!(!org_specialist.access_request_allowed());
+        assert!(chat(AgentRole::Orchestrator, false).access_request_allowed());
+    }
 }
 
 async fn fence(
@@ -615,6 +809,15 @@ async fn request_tracked_with_machine_context(
     request: Request<'_>,
     machine_context: Option<crate::models::machine_access::HumanContextAction>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
+    let request_mode = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| s.specialist_access_requests)
+        .unwrap_or_default();
+    if request.kind != "action" && !chat.access_request_allowed_with_mode(request_mode) {
+        return Err(AppError::Forbidden(
+            "access_request_denied: only NyxBot can request or grant access; report the need to NyxBot in your reply".into(),
+        ));
+    }
     if request.kind == "operations" {
         Box::pin(
             super::agent_operation_scope_service::require_configuration_enabled(db, &chat.user_id),
@@ -982,6 +1185,14 @@ pub async fn service_gate(
     if chat.guest {
         return Ok(Some((guest_refusal(), None)));
     }
+    let routed = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
+        .unwrap_or(false);
+    if !routed {
+        audit_access_request_denied(db, chat, Some(id), "service").await;
+        return Ok(Some((access_request_denied(), None)));
+    }
     access = super::org_agent_service::key_access_with_snapshot(
         db,
         &chat.user_id,
@@ -1024,6 +1235,14 @@ pub async fn account_gate(
 ) -> AppResult<Option<(Value, Option<AssistantAcknowledgement>)>> {
     if chat.is_orchestrator() {
         return Ok(None);
+    }
+    let routed = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
+        .unwrap_or(false);
+    if !routed {
+        audit_access_request_denied(db, chat, None, "account").await;
+        return Ok(Some((access_request_denied(), None)));
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
     if key

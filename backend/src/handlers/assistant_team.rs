@@ -2366,6 +2366,7 @@ pub async fn update_agent(
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::update_agent(
@@ -2408,6 +2409,7 @@ pub async fn set_agent_grants(
     Path(id): Path<String>,
     Json(body): Json<GrantsRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let current = team::maintained_agent(&state.db, &owner, &id).await?;
@@ -2454,6 +2456,7 @@ pub async fn destroy_agent_route(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
@@ -2474,6 +2477,7 @@ pub async fn delete_agent(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     team::purge(&state.db, &owner, &id).await?;
@@ -2493,6 +2497,7 @@ pub async fn set_memory(
     Path(id): Path<String>,
     Json(body): Json<MemoryRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     engine::require_enabled(&state.db, &actor).await?;
     let note = team::remember(
@@ -2511,6 +2516,7 @@ pub async fn delete_memory(
     auth: AuthUser,
     Path((id, note_id)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     team::agent(&state.db, &owner, &id).await?;
@@ -2540,6 +2546,7 @@ pub struct SettingsResponse {
     max_group_handoffs_per_hour: i32,
     max_group_handoffs_limit: i32,
     max_group_handoffs_per_hour_limit: i32,
+    specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -2562,6 +2569,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_group_handoffs_limit: crate::models::assistant_settings::MAX_GROUP_HANDOFFS_LIMIT,
             max_group_handoffs_per_hour_limit:
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
+            specialist_access_requests: row.specialist_access_requests,
         }
     }
 }
@@ -2593,6 +2601,8 @@ pub struct SettingsRequest {
     max_group_handoffs: Option<i32>,
     #[serde(default)]
     max_group_handoffs_per_hour: Option<i32>,
+    #[serde(default)]
+    specialist_access_requests: Option<crate::models::assistant_settings::SpecialistAccessRequests>,
 }
 
 pub async fn update_settings(
@@ -2622,6 +2632,7 @@ pub async fn update_settings(
             max_concurrent_subagent_turns: body.max_concurrent_subagent_turns,
             max_group_handoffs: body.max_group_handoffs,
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
+            specialist_access_requests: body.specialist_access_requests,
         },
     )
     .await?;
@@ -2693,6 +2704,7 @@ pub async fn put_profile_routes(
     auth: AuthUser,
     Json(body): Json<ProfileRoutesRequest>,
 ) -> AppResult<Json<ProfileRoutesResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     crate::handlers::admin_helpers::require_admin(&state, &auth).await?;
     let admin = auth.user_id.to_string();
     let row = crate::services::assistant_profile_routing::set(
@@ -2810,6 +2822,7 @@ pub async fn set_agent_operations(
     Path((id, service_id)): Path<(String, String)>,
     Json(body): Json<crate::models::agent_operation_scope::OperationSelection>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = Box::pin(crate::services::agent_operation_scope_service::set(

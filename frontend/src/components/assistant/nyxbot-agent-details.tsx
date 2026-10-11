@@ -181,10 +181,13 @@ export function AgentDetailsSheet({
                 agent={agent}
               />
               {agent.kind === "specialist" ? (
-                <GrantsForm
-                  key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
-                  agent={agent}
-                />
+                <>
+                  <Section title="Access authority" description="Only NyxBot can request or grant access for this agent." />
+                  <GrantsForm
+                    key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
+                    agent={agent}
+                  />
+                </>
               ) : (
                 <Section title="Access" description="NyxBot runs with full access to your connected services and account. Machine capabilities are assigned separately. Destructive actions follow your confirmation setting.">
                   <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
@@ -411,7 +414,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
   return (
     <Section
       title="Grants"
-      description="Saving replaces the current grants. Anything else, the agent asks NyxBot for."
+      description="Only NyxBot can request or grant access for this agent. Saving replaces the current grants. Anything else, the agent asks NyxBot for."
     >
       <Form {...form}>
         <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">

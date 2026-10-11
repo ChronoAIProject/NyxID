@@ -1082,3 +1082,7 @@ bounded best-effort call to the declared cancel operation under live authority.
 Conversation deletion removes its watches after attempting cancellation. A late
 poll cannot recreate a deleted watch or overwrite cancellation. Services without
 a trusted contract and legacy event behavior remain unchanged.
+
+### Specialist access boundary
+
+Specialist threads are sandboxed. Only the owner's NyxBot may request or grant access; specialists report missing access to NyxBot. Card and hosted connection-link creation from specialist chat keys is refused with `access_request_denied`.

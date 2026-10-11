@@ -274,6 +274,7 @@ export const nyxAgentSettingsSchema = z.object({
     .int()
     .nonnegative()
     .default(600),
+  specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]).default("denied"),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
@@ -290,6 +291,7 @@ export type NyxAgentSettingsUpdate = Partial<
     | "max_concurrent_subagent_turns"
     | "max_group_handoffs"
     | "max_group_handoffs_per_hour"
+    | "specialist_access_requests"
   >
 >;
 
@@ -313,6 +315,7 @@ export function nyxAgentSettingsFormSchema(limits: {
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),
     max_group_handoffs: whole(0, limits.max_group_handoffs_limit),
     max_group_handoffs_per_hour: whole(0, limits.max_group_handoffs_per_hour_limit),
+    specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]).default("denied"),
   });
 }
 export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFormSchema>>;

@@ -186,7 +186,21 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
     )
     .await
     .unwrap();
-    chat_fixture(state, owner, row, orchestrator.id).await
+    let fixture = chat_fixture(state, owner, row, orchestrator.id).await;
+    // Legacy specialist-flow fixtures explicitly opt into routed compatibility;
+    // production defaults remain denied.
+    fixture
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &fixture.owner},
+            doc! {"$set": {"specialist_access_requests": "routed_to_nyxbot", "updated_at": bson::DateTime::now()}},
+        )
+        .upsert(true)
+        .await
+        .unwrap();
+    fixture
 }
 
 fn orchestrator_chat() -> acks::ChatAuthority {

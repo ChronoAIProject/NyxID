@@ -3632,6 +3632,23 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
+    if let Some(chat) = auth.chat.as_ref()
+        && !chat.access_request_allowed()
+    {
+        crate::services::assistant_acknowledgement_service::audit_access_request_denied(
+            &state.db,
+            chat,
+            arguments.get("service_id").and_then(|v| v.as_str()),
+            "connect_service",
+        )
+        .await;
+        return tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::access_request_denied()
+                .to_string(),
+            true,
+        );
+    }
     if auth.chat.is_some() && arguments.get("credential").is_some() {
         return tool_result(
             request_id,

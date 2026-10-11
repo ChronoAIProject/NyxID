@@ -137,3 +137,34 @@ pub(super) fn capture_client_context(
         client_device_memory: body.client_device_memory,
     })
 }
+
+
+#[cfg(test)]
+mod management_route_tests {
+    use super::require_first_party_human;
+
+    #[test]
+    fn specialist_conversation_credentials_are_rejected_for_every_management_route() {
+        let routes = [
+            "PUT /agents/{id}/grants",
+            "PATCH /agents/{id}",
+            "PUT /agents/{id}/skills",
+            "PUT /assistant/settings",
+            "POST /channel-bots",
+            "PUT /channel-bots/{id}",
+            "DELETE /channel-bots/{id}",
+            "POST /groups",
+            "PUT /groups/{id}",
+            "DELETE /groups/{id}",
+            "POST /agents/{id}/destroy",
+            "DELETE /agents/{id}/memory/{note}",
+        ];
+        for route in routes {
+            let mut auth =
+                crate::test_utils::test_auth_user("00000000-0000-0000-0000-000000000001");
+            auth.api_key_id = Some("specialist-conversation-key".into());
+            assert!(require_first_party_human(&auth).is_err(), "{route}");
+        }
+    }
+}
+

@@ -1,5 +1,6 @@
 import { AutomationPreferences } from "./automation-preferences";
 import { useState } from "react";
+import type { Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -76,13 +77,14 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
     max_concurrent_subagent_turns: settings.max_concurrent_subagent_turns,
     max_group_handoffs: settings.max_group_handoffs,
     max_group_handoffs_per_hour: settings.max_group_handoffs_per_hour,
+    specialist_access_requests: settings.specialist_access_requests ?? "denied",
   };
 }
 
 function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
   const update = useUpdateNyxBotSettings();
   const form = useAppForm<NyxAgentSettingsForm>({
-    resolver: zodResolver(nyxAgentSettingsFormSchema(settings)),
+    resolver: zodResolver(nyxAgentSettingsFormSchema(settings)) as Resolver<NyxAgentSettingsForm>,
     defaultValues: formValues(settings),
   });
   const [error, setError] = useState<string>();
@@ -112,6 +114,9 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
         : {}),
       ...(dirty.max_group_handoffs_per_hour
         ? { max_group_handoffs_per_hour: values.max_group_handoffs_per_hour }
+        : {}),
+      ...(dirty.specialist_access_requests
+        ? { specialist_access_requests: values.specialist_access_requests }
         : {}),
     };
     try {
@@ -238,6 +243,9 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             )}
           />
         ))}
+        <FormField control={form.control} name="specialist_access_requests" render={({ field }) => (
+          <FormItem className="rounded-lg border border-border p-4"><FormLabel>Specialist access requests</FormLabel><FormDescription>Only NyxBot can request or grant access for a specialist.</FormDescription><FormControl><select className="mt-2 h-10 rounded-md border bg-background px-3" {...field}><option value="denied">Deny requests</option><option value="routed_to_nyxbot">Route to NyxBot</option></select></FormControl></FormItem>
+        )} />
         <p className="text-11 text-muted-foreground">
           Every specialist turn and group hand-off is billed to your credits
           like any other NyxBot turn, so higher limits can spend credits faster.
