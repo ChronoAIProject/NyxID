@@ -1083,14 +1083,10 @@ Conversation deletion removes its watches after attempting cancellation. A late
 poll cannot recreate a deleted watch or overwrite cancellation. Services without
 a trusted contract and legacy event behavior remain unchanged.
 
-### Skill editing and controls
-
-Attached Ornn skill pins are versioned, bounded guidance. Owners can enable or disable each pin without removing it; disabled pins are omitted from prompt metadata and `skill_read`. Learning proposal edits carry a top-level revision fence (legacy nested fences are accepted during migration), and the learning status response includes maintenance, consent, threshold, and publication-blocking state. Preview and history endpoints expose bounded metadata only.
-
 ### Editable skills and attached pins
 
 When rolling out pin disablement, upgrade all NyxID replicas before writing disabled pins so older replicas never deserialize rows containing the additive field.
 
-NyxBot skill proposals are editable before publication. The review editor preserves the revision fence and supports name, description, markdown, rationale, optional base skill, and bounded file edits. Validation diagnostics identify the exact field and source line with a remediation hint. Publishing is a two-step owner confirmation: requesting a card does not publish; confirming the exact card publishes and attaches the pinned version.
+NyxBot skill proposals are editable before publication. The review editor preserves the revision fence and supports name, description, markdown, rationale, optional base skill, and bounded file edits. Publishing is a two-step owner confirmation: requesting a card does not publish; confirming the exact card publishes and attaches the pinned version.
 
-Organization members can change learning consent through the learning consent action. Status reports publication blocks, owner binding, thresholds, and the current consent state. Attached skill pins can be enabled or disabled independently; disabled pins are omitted from skill reads and prompt injection while remaining in history. Preview, validation, and bounded history endpoints are owner-scoped. The Skills panel uses the live Ornn catalog and agent skill selection APIs for pin management.
+Organization members can change learning consent through the learning consent action. Status reports publication blocks, owner binding, thresholds, and the current consent state. Attached skill pins can be enabled or disabled independently; disabled pins are omitted from skill reads and prompt injection while remaining in history. Preview and bounded history are owner-scoped; validation is a dry-run authoring check. The Skills panel uses the live Ornn catalog and agent skill selection APIs for pin management.
