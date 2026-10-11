@@ -1670,7 +1670,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::channel_bots::update_bot)
                 .delete(handlers::channel_bots::delete_bot),
         )
-        .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
+        .route("/{id}/verify", post(handlers::channel_bots::verify_bot))
+        .route("/{id}/health", get(handlers::channel_bots::health))
+        .route(
+            "/{id}/resubscribe",
+            post(handlers::channel_bots::resubscribe),
+        );
 
     let channel_conversation_routes = Router::new()
         .route(

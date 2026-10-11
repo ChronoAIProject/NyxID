@@ -5421,6 +5421,13 @@ pub enum ChannelBotCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Show actionable health and recovery state
+    Health {
+        /// Bot ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Delete a bot
     Delete {
         /// Bot ID

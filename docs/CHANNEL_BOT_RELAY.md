@@ -1883,3 +1883,18 @@ Only one setup attempt can hold a link's renewable claim. Bot insertion and its 
 Existing bot creation entry points pass no link claim, and existing frontend callers use their original endpoints outside the hosted context. Existing service callbacks retain their HTTP client, signature contract, timestamp behavior, and `developer_webhook` rate bucket. Bot callbacks opt into public-address validation, DNS pinning, redirects disabled, and the separate `developer_channel_webhook` bucket. Their sweep runs in a separate task while sharing the [configured sweep interval](ENV.md#hosted-connect-links).
 
 Regression coverage lives beside the new service and handlers, in [`telegram_new_tests.rs`](../backend/src/services/telegram_new_tests.rs), and in the [hosted page tests](../frontend/src/pages/channel-connect-link.test.tsx). Existing `connect_link_service`, `connect_links`, `developer_webhook_service`, and CLI `commands::connect` tests cover the shared compatibility boundary.
+
+### X troubleshooting and recovery
+
+Use `GET /api/v1/channel-bots/{id}/health` (or `nyxid channel-bot health <id>`) before reconnecting. The response is metadata-only and gives a stable `recommended_action`.
+
+| Symptom | Cause | Diagnostic fields | Action |
+| --- | --- | --- | --- |
+| No inbound events in webhook mode | Subscription missing or callback rejected | `webhook_registered`, `status`, `error` | Choose **Resubscribe** (or `POST .../{id}/resubscribe`), then Verify. |
+| Bot failed after repeated polls | Legacy polling errors reached the threshold | `poll_error_count`, `last_polled_at`, `error` | Fix the credential/provider issue and Reconnect. |
+| Requests delayed | X rate limit | `poll_backoff_until`, `recommended_action=wait_rate_limit` | Wait for the backoff; do not replay messages automatically. |
+| 401 or revoked consent | OAuth token expired/revoked | `status`, `error` | Reconnect and grant the required X scopes. |
+| 403 scope or paid-tier error | Missing scope or app access/credits | `error` | Re-consent with the requested scopes; if access is paid, restore the X app tier/credits. |
+| 402 / exhausted NyxID credits | Billing admission suspended the subscription | `status`, `error`, `recommended_action=enable_billing` | Restore billing credits, then Verify. |
+
+Staging verification requires live X OAuth credentials and consent, a reachable HTTPS Activity webhook with CRC/signature verification, `/2/webhooks` and subscription API access, the NyxID `nyxbot:gateway-x` allowlist entry, and an X app tier with sufficient credits. The staging operator should connect an account, verify the subscription, send a DM and an opted-in mention/reply, confirm one inbound callback and outbound reply, exercise a forced 401/403/429 response, then use Health, Resubscribe, and Reconnect to recover. Production credentials are intentionally never used in local tests.

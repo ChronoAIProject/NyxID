@@ -712,6 +712,30 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             Ok(())
         }
 
+        ChannelBotCommands::Health { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let health: Value = api.get(&format!("/channel-bots/{id}/health")).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&health)?),
+                OutputFormat::Table => {
+                    for field in [
+                        "mode",
+                        "status",
+                        "recommended_action",
+                        "recommended_action_text",
+                        "error",
+                    ] {
+                        eprintln!("{field}: {}", health[field].as_str().unwrap_or("-"));
+                    }
+                    eprintln!(
+                        "poll_error_count: {}",
+                        health["poll_error_count"].as_u64().unwrap_or(0)
+                    );
+                }
+            }
+            Ok(())
+        }
+
         ChannelBotCommands::Repair { id, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let setup: Value = api

@@ -284,6 +284,66 @@ pub struct VerifyBotResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ChannelBotHealthResponse {
+    pub mode: &'static str,
+    pub status: String,
+    pub webhook_registered: bool,
+    pub poll_error_count: u32,
+    pub last_polled_at: Option<String>,
+    pub next_poll_at: Option<String>,
+    pub error: Option<String>,
+    pub recommended_action: &'static str,
+    pub recommended_action_text: &'static str,
+}
+
+fn health_for(
+    bot: &crate::models::channel_bot::ChannelBot,
+    billing_enabled: bool,
+) -> ChannelBotHealthResponse {
+    let mode = if bot.webhook_registered {
+        "webhook"
+    } else if bot.platform == "twitter" || bot.platform == "x" {
+        "poll"
+    } else {
+        "webhook"
+    };
+    let (action, text) = if bot.status == "failed" && billing_enabled && !bot.webhook_registered {
+        (
+            "enable_billing",
+            "Enable billing, then verify the X subscription.",
+        )
+    } else if bot.status == "failed" || bot.error.is_some() {
+        (
+            "reconnect",
+            "Reconnect the X account, or verify credentials and resubscribe.",
+        )
+    } else if mode == "webhook" && !bot.webhook_registered {
+        (
+            "resubscribe",
+            "Register the X Activity webhook subscription.",
+        )
+    } else if bot.poll_backoff_until.is_some() {
+        (
+            "wait_rate_limit",
+            "X rate limiting is active; wait until the backoff expires.",
+        )
+    } else {
+        ("verify", "Verify the live X subscription and credentials.")
+    };
+    ChannelBotHealthResponse {
+        mode,
+        status: bot.status.clone(),
+        webhook_registered: bot.webhook_registered,
+        poll_error_count: bot.poll_error_count,
+        last_polled_at: bot.last_polled_at.map(|v| v.to_rfc3339()),
+        next_poll_at: bot.poll_backoff_until.map(|v| v.to_rfc3339()),
+        error: bot.error.clone(),
+        recommended_action: action,
+        recommended_action_text: text,
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct BotVerificationResponse {
     pub id: String,
     pub status: &'static str,
@@ -1167,6 +1227,45 @@ pub async fn verify_bot(
         auth_user.api_key_id.as_deref(),
     )
     .await
+}
+
+/// GET /api/v1/channel-bots/{id}/health
+pub async fn health(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let (_owner, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
+    Ok(Json(health_for(&bot, state.config.billing_enabled)))
+}
+
+/// POST /api/v1/channel-bots/{id}/resubscribe
+pub async fn resubscribe(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let (_owner, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    if bot.platform != "twitter" && bot.platform != "x" {
+        return Err(AppError::ValidationError(
+            "resubscribe is supported only for X bots".into(),
+        ));
+    }
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    crate::services::channel_connection_webhook_service::configure(
+        &state.db,
+        &state.billing,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter.as_ref(),
+        &bot,
+        &state.config.base_url,
+    )
+    .await?;
+    let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&updated, state.config.billing_enabled)))
 }
 
 pub(crate) async fn verify_bot_with_adapter(
