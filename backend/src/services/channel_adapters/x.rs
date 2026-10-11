@@ -1009,6 +1009,34 @@ impl PlatformAdapter for XAdapter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn response_error_classifies_recovery_actions() {
+        assert!(
+            response_error(StatusCode::UNAUTHORIZED, None)
+                .to_string()
+                .contains("reconnect")
+        );
+        assert!(
+            response_error(StatusCode::FORBIDDEN, None)
+                .to_string()
+                .contains("scopes")
+        );
+        assert!(
+            response_error(StatusCode::PAYMENT_REQUIRED, None)
+                .to_string()
+                .contains("credits")
+        );
+        assert!(
+            response_error(StatusCode::TOO_MANY_REQUESTS, Some(Duration::from_secs(7)))
+                .to_string()
+                .contains("7s")
+        );
+        assert!(
+            response_error(StatusCode::BAD_GATEWAY, None)
+                .to_string()
+                .contains("5xx")
+        );
+    }
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

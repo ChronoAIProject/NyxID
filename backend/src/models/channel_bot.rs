@@ -240,7 +240,10 @@ mod tests {
         assert!(bot.diagnostics.last_inbound_at.is_none());
         document.insert("diagnostics", bson::doc! {"last_inbound_source": "webhook"});
         let bot: ChannelBot = bson::from_document(document).unwrap();
-        assert_eq!(bot.diagnostics.last_inbound_source.as_deref(), Some("webhook"));
+        assert_eq!(
+            bot.diagnostics.last_inbound_source.as_deref(),
+            Some("webhook")
+        );
     }
 
     #[test]
