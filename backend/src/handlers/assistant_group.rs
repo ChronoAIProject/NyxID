@@ -444,7 +444,7 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    post_with_uploads(state, owner, group_id, text, author, &[]).await
+    post_with_uploads(state, owner, group_id, text, author, &[], None).await
 }
 
 async fn post_with_uploads(
@@ -454,6 +454,7 @@ async fn post_with_uploads(
     text: &str,
     author: Option<&AssistantAgent>,
     ids: &[String],
+    explicit_recipients: Option<&[String]>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
     let text = text.trim();
     if (text.is_empty() && ids.is_empty()) || text.chars().count() > MAX_MESSAGE_CHARS {
@@ -484,7 +485,20 @@ async fn post_with_uploads(
         None => confirm_in_group(state, owner, &group, text).await?,
         Some(_) => None,
     };
-    let mut addressed = groups::mentions(text, &live);
+    let mut addressed = if let Some(ids) = explicit_recipients {
+        if ids.is_empty()
+            || ids
+                .iter()
+                .any(|id| !live.iter().any(|member| member.id == *id))
+        {
+            return Err(AppError::ValidationError(
+                "Unknown or empty recipient list".into(),
+            ));
+        }
+        ids.to_vec()
+    } else {
+        groups::mentions(text, &live)
+    };
     if let Some(member) = confirmed {
         addressed.retain(|id| id != &member);
         addressed.insert(0, member);
@@ -961,6 +975,8 @@ pub struct PostMessageRequest {
     #[serde(default)]
     attachment_ids: Vec<String>,
     text: String,
+    #[serde(default)]
+    recipient_agent_ids: Option<Vec<String>>,
 }
 
 pub async fn post_message(
@@ -974,8 +990,16 @@ pub async fn post_message(
     if !body.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
     }
-    let (message, addressed) =
-        post_with_uploads(&state, &owner, &id, &body.text, None, &body.attachment_ids).await?;
+    let (message, addressed) = post_with_uploads(
+        &state,
+        &owner,
+        &id,
+        &body.text,
+        None,
+        &body.attachment_ids,
+        body.recipient_agent_ids.as_deref(),
+    )
+    .await?;
     let agents = team::agents(&state.db, &message.user_id, true).await?;
     Ok((
         StatusCode::ACCEPTED,
