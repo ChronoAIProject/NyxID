@@ -1761,6 +1761,25 @@ async fn handle_tools_call(
     } else {
         None
     };
+    if let Some(chat) = &auth.chat
+        && let Some(params) = request.params.as_ref()
+        && crate::services::assistant_nyxagent::retry_duplicate_digest(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            &chat_activity_digest(params),
+        )
+        .await
+        .unwrap_or(false)
+    {
+        return rpc_success(
+            request.id.clone(),
+            serde_json::json!({
+                "content": [{"type": "text", "text": "retry_duplicate_action"}],
+                "isError": true,
+            }),
+        );
+    }
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
             match crate::services::assistant_nyxagent::activity_started_with_digest(

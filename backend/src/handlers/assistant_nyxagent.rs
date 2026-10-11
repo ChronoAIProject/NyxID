@@ -1219,6 +1219,9 @@ pub async fn turns(
         );
     }
     let (_, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
+    if let (Some(conversation_id), Some(retry_of)) = (&input.conversation_id, &input.retry_of) {
+        engine::mark_retry_of(&state.db, &user_id, conversation_id, retry_of).await?;
+    }
     Ok(subscribe_events(receiver))
 }
 

@@ -2648,6 +2648,44 @@ pub async fn activity_started_with_digest(
     Ok((result.matched_count == 1).then_some(id))
 }
 
+pub async fn mark_retry_of(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    retry_of: &str,
+) -> AppResult<()> {
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": conversation_id, "user_id": user_id, "active_turn.turn_id": {"$exists": true}},
+            doc! {"$set": {"active_turn.retry_of": retry_of}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn retry_duplicate_digest(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    digest: &str,
+) -> AppResult<bool> {
+    let Some(row) = db.collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": conversation_id, "user_id": user_id, "active_turn.retry_of": {"$exists": true}})
+        .await? else { return Ok(false); };
+    let Some(retry_of) = row.active_turn.and_then(|turn| turn.retry_of) else {
+        return Ok(false);
+    };
+    let messages = messages(db, user_id, conversation_id, 100, None).await?;
+    Ok(messages
+        .iter()
+        .find(|message| message.turn_id == retry_of)
+        .is_some_and(|message| {
+            message.activities.iter().any(|activity| {
+                activity.status == "completed" && activity.digest.as_deref() == Some(digest)
+            })
+        }))
+}
+
 /// Settle a recorded tool call. A missing entry (turn settled or evicted) is a no-op.
 pub async fn activity_finished(
     db: &Database,
