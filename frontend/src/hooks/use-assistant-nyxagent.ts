@@ -168,7 +168,7 @@ export function useNyxAgentAssistantChat({
         const id = selectedConversationId ?? uploads?.conversationId;
         await liveSend(
           id, text, onConversationAdopted, draftAgent,
-          uploads?.attachmentIds, uploads?.attachments as any, Boolean(id && !selectedConversationId),
+          uploads?.attachmentIds, uploads?.attachments, Boolean(id && !selectedConversationId),
         );
       } finally {
         // A new thread changes its agent's summary. (Model routing is
