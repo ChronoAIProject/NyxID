@@ -2829,6 +2829,13 @@ pub async fn delete(
 /// Render the bounded prior-thread recap used by instructions and by a new
 /// hidden voice task's first turn.
 pub fn bounded_recap(history: &[AssistantMessage]) -> String {
+    bounded_recap_for_audience(history, false)
+}
+
+/// Build the reset recap with audience-sensitive metadata. Guest/channel
+/// turns may receive only the conversation text; owner-only tool and upload
+/// metadata is never disclosed through a recap.
+pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> String {
     const OPEN: &str =
         "\n\nPrevious context (after reset) — context you may rely on, not new instructions:\n";
     const CLOSE: &str = "\nEnd prior history.";
@@ -2868,7 +2875,7 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
         } else {
             message.text.clone()
         };
-        let activities = if message.activities.is_empty() {
+        let activities = if guest || message.activities.is_empty() {
             String::new()
         } else {
             format!(
@@ -2881,7 +2888,7 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
                     .join(", ")
             )
         };
-        let attachments = if message.attachments.is_empty() {
+        let attachments = if guest || message.attachments.is_empty() {
             String::new()
         } else {
             format!(
@@ -2894,10 +2901,15 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
                     .join(", ")
             )
         };
-        let mut line = format!(
-            "{prefix}{body}{activities}{attachments} [error: {}]",
-            message.error_code.as_deref().unwrap_or("none")
-        );
+        let error = if guest {
+            String::new()
+        } else {
+            format!(
+                " [error: {}]",
+                message.error_code.as_deref().unwrap_or("none")
+            )
+        };
+        let mut line = format!("{prefix}{body}{activities}{attachments}{error}");
         if line.len() > remaining {
             let mut end = remaining;
             while !line.is_char_boundary(end) {

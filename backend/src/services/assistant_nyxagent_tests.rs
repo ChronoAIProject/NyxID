@@ -366,6 +366,51 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     assert!(recap.contains("partial, failed"));
 }
 
+#[test]
+fn guest_recap_omits_owner_tool_metadata() {
+    let mut row = AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "guest-recap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "Visible channel reply".into(),
+        status: "completed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "owner-action".into(),
+            label: "owner.secret_tool".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            image_input: None,
+            origin: "tool".into(),
+            pages: None,
+            id: "owner-attachment".into(),
+            content_type: "text/plain".into(),
+            size: 1,
+            label: "private.txt".into(),
+        }],
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap_for_audience(std::slice::from_mut(&mut row), true);
+    assert!(recap.contains("Visible channel reply"));
+    assert!(!recap.contains("owner.secret_tool"));
+    assert!(!recap.contains("private.txt"));
+    assert!(!recap.contains("turn_lost"));
+}
+
 #[tokio::test]
 async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes() {
     let db = connect_transaction_test_database("nyxa_persist").await;

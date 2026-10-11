@@ -104,7 +104,10 @@ impl Prepared {
         }
         if recap {
             // Recap text is untrusted and cannot introduce the current marker.
-            prompt.push_str(&self.redact(&engine::bounded_recap(history)));
+            prompt.push_str(&self.redact(&engine::bounded_recap_for_audience(
+                history,
+                self.binding.guest,
+            )));
         }
         prompt
     }
