@@ -1310,6 +1310,22 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
 }
 
 #[tokio::test]
+async fn b4_duplicate_action_fence_end_to_end_keeps_tool_counter_at_one() {
+    let db = connect_transaction_test_database("nyxa_retry_fence").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS).insert_one(test_user(&user, UserType::Person)).await.unwrap();
+    let state = test_app_state(db.clone());
+    let row = begin_turn(&db, &user, &request(None, "send mail"), &state.encryption_keys).await.unwrap();
+    let digest = "digest-mail-1";
+    let activity = activity_started_with_digest(&db, &user, &row.id, "mcp.mail.send", Some(digest)).await.unwrap().unwrap();
+    activity_finished(&db, &user, &row.id, &activity, true).await.unwrap();
+    mark_retry_of(&db, &user, &row.id, &row.active_turn.as_ref().unwrap().turn_id).await.unwrap();
+    assert!(retry_duplicate_digest(&db, &user, &row.id, digest).await.unwrap());
+    assert!(!retry_duplicate_digest(&db, &user, &row.id, "digest-mail-2").await.unwrap());
+}
+
+#[tokio::test]
 async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat() {
     use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
     let db = connect_transaction_test_database("nyxa_images").await;
