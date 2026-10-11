@@ -144,12 +144,10 @@ pub async fn put_config(
             "default overdraft cap must be non-negative".into(),
         ));
     }
-    crate::services::billing::config::save_settings(&state.db, input.billing.clone()).await?;
-    crate::services::audit_service::log_actor_event(
-        state.db.clone(),
+    crate::services::billing::config::save_settings_and_audit(
+        &state.db,
+        input.billing.clone(),
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
-        "billing_config_updated",
-        Some(serde_json::json!({"billing": input.billing})),
     )
     .await?;
     get_config(State(state), auth).await

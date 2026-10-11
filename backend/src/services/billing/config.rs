@@ -32,6 +32,27 @@ pub async fn save_settings(
         .await?;
     Ok(())
 }
+
+pub async fn save_settings_and_audit(
+    db: &mongodb::Database,
+    billing: Option<BillingSettings>,
+    actor: &crate::services::audit_service::AuditActor,
+) -> AppResult<()> {
+    let key = crate::services::audit_service::audit_chain_hmac_key()
+        .ok_or_else(|| crate::errors::AppError::Internal("audit chain key unavailable".into()))?;
+    let value = mongodb::bson::to_bson(&billing).map_err(|e| {
+        crate::errors::AppError::Internal(format!("serialize billing settings: {e}"))
+    })?;
+    let mut session = db.client().start_session().await?;
+    let db_clone = db.clone();
+    let actor = actor.clone();
+    session.start_transaction().and_run(|session| async move {
+        db_clone.collection::<PlatformSettings>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$set": {"billing": value}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}}).upsert(true).session(session).await?;
+        crate::services::audit_service::log_actor_event_in_session(&db_clone, session, key, &actor, "billing_config_updated", serde_json::json!({"billing": billing})).await.map_err(|e| mongodb::error::Error::custom(e.to_string()))?;
+        Ok(())
+    }).await.map_err(|e| crate::errors::AppError::Internal(format!("billing config transaction: {e}")))?;
+    Ok(())
+}
 pub async fn load_rates(db: &mongodb::Database) -> AppResult<Vec<BillingRateCache>> {
     Ok(db
         .collection::<BillingRateCache>(RATES)
