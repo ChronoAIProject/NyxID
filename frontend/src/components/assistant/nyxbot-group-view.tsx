@@ -476,7 +476,7 @@ export function NyxAgentGroupPage({
     const mentioned = group.members.filter((member) =>
       new RegExp(`(^|\\s)@${member.name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}(?=\\s|$)`, "i").test(content),
     ).map((member) => member.id);
-    if (mentioned.length) setRecipientAgentIds(mentioned.map((member) => member.id).filter((id) => !excludedRecipientIds.includes(id)));
+    if (mentioned.length) setRecipientAgentIds(mentioned.filter((id) => !excludedRecipientIds.includes(id)));
     else if (group.default_recipient_ids?.length) setRecipientAgentIds(group.default_recipient_ids.filter((id) => !excludedRecipientIds.includes(id)));
   };
 

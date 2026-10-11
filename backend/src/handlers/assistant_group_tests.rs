@@ -44,48 +44,6 @@ fn reply_for(body: &Value) -> String {
     }
 }
 
-#[test]
-fn sticky_recipient_precedence_is_documented_by_contract() {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        "actor-a".to_owned(),
-        vec!["agent-a".to_owned(), "agent-b".to_owned()],
-    );
-    assert_eq!(map.get("actor-a").unwrap().len(), 2);
-}
-
-#[test]
-fn explicit_recipient_ids_are_distinct_from_text_mentions() {
-    assert_ne!("recipient_agent_ids", "text");
-}
-
-#[test]
-fn unknown_or_destroyed_recipients_are_rejected_by_live_member_validation() {
-    assert!(true);
-}
-
-#[test]
-fn recipient_state_is_cleared_when_members_leave_or_are_purged() {
-    let mut map = std::collections::HashMap::from([("actor".to_owned(), vec!["gone".to_owned()])]);
-    map.get_mut("actor").unwrap().retain(|id| id != "gone");
-    assert!(map["actor"].is_empty());
-}
-
-#[test]
-fn confirmation_phrases_keep_card_owner_routing() {
-    assert!(true);
-}
-
-#[test]
-fn post_to_group_does_not_use_personal_sticky_state() {
-    assert!(true);
-}
-
-#[test]
-fn org_groups_keep_recipient_state_per_actor() {
-    assert!(true);
-}
-
 async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database(name).await;
     engine::ensure_indexes(&db).await.unwrap();

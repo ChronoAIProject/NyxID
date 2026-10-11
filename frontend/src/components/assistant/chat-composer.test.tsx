@@ -10,6 +10,7 @@ import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { ChatComposer } from "./chat-composer";
 
 const baseProps = {
+  draftKey: "test-draft",
   active: false,
   sending: false,
   ownerUserId: "user-1",
