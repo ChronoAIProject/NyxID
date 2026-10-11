@@ -291,10 +291,14 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
 }
 
 #[tokio::test]
-async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
 
 #[tokio::test]
-async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() { groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await; }
+async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() {
+    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
+}
 
 #[tokio::test]
 async fn groups_validate_members_and_delete_with_their_member_threads() {
