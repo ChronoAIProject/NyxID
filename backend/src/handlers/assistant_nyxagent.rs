@@ -762,6 +762,25 @@ pub async fn change_access_mode(
 pub struct RenameRequest {
     title: String,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRequest {
+    model: String,
+}
+
+pub async fn change_model(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<ModelRequest>,
+) -> AppResult<Json<ConversationResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let row = engine::change_model(&state.db, &owner, &id, &body.model).await?;
+    Ok(Json(ConversationResponse::from(row)))
+}
 pub async fn rename(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -904,6 +923,9 @@ pub async fn delete(
 pub struct ModelResponse {
     id: String,
     label: String,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 type ModelCache = HashMap<String, (Instant, Vec<ModelResponse>)>;
 static MODELS: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -962,6 +984,8 @@ pub async fn models(
             .map(|id| ModelResponse {
                 id: id.into(),
                 label: id.trim_start_matches("nyxagent/").into(),
+                available: true,
+                description: None,
             })
             .collect();
         if rows.is_empty() {
@@ -974,6 +998,8 @@ pub async fn models(
         return Ok(Json(vec![ModelResponse {
             id: engine::DEFAULT_MODEL.into(),
             label: "chat".into(),
+            available: true,
+            description: None,
         }]));
     };
     let mut cache = MODELS.lock().await;

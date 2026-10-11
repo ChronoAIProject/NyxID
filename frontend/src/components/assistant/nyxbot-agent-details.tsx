@@ -233,6 +233,8 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
       display_name: agent.display_name ?? "",
       description: agent.description,
       persona: agent.persona ?? "",
+      model: agent.model ?? "",
+      access_mode_override: agent.access_mode_override ?? null,
     },
   });
   const [error, setError] = useState<string>();
@@ -248,6 +250,8 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
         ...(dirty.display_name ? { display_name: values.display_name } : {}),
         ...(dirty.description ? { description: values.description } : {}),
         ...(dirty.persona ? { persona: values.persona } : {}),
+        ...(dirty.model ? { model: values.model } : {}),
+        ...(dirty.access_mode_override ? { access_mode_override: values.access_mode_override } : {}),
       });
       form.reset(values);
     } catch (cause) {
@@ -305,6 +309,16 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
+          {nyxbot ? (
+            <>
+              <FormField control={form.control} name="model" render={({ field }) => (
+                <FormItem><FormLabel>Default model</FormLabel><FormControl><Input disabled={readOnly} placeholder="provider/model" {...field} /></FormControl><FormDescription className="text-11">Unavailable models are rejected by the server.</FormDescription><FormMessage /></FormItem>
+              )} />
+              <FormField control={form.control} name="access_mode_override" render={({ field }) => (
+                <FormItem><FormLabel>Access mode override</FormLabel><FormControl><select disabled={readOnly} className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={field.value ?? ""} onChange={(e) => field.onChange(e.target.value || null)}><option value="">Inherit workspace</option><option value="autopilot">Autopilot</option><option value="nyxmode">NyxMode</option><option value="ask_every_time">Ask Every Time</option></select></FormControl><FormMessage /></FormItem>
+              )} />
+            </>
+          ) : null}
           <FormField
             control={form.control}
             name="description"

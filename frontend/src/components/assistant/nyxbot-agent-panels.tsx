@@ -63,6 +63,8 @@ export function ThreadHeader({
   destroyed,
   channelPlatform,
   onOpenDetails,
+  model,
+  onModelChange,
 }: {
   /** The agent's display name (or handle). */
   readonly name: string;
@@ -75,6 +77,8 @@ export function ThreadHeader({
   /** Set when the thread answers one of the user's channel bots. */
   readonly channelPlatform?: string | null;
   readonly onOpenDetails?: () => void;
+  readonly model?: string;
+  readonly onModelChange?: (model: string) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -84,6 +88,7 @@ export function ThreadHeader({
         {handle ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
         {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
+        {onModelChange ? <select aria-label="Model" className="h-8 rounded-md border bg-background px-2 text-xs" value={model ?? ""} onChange={(e) => onModelChange(e.target.value)}><option value="">Default model</option></select> : null}
         {onOpenDetails ? (
           <Button
             size="sm"

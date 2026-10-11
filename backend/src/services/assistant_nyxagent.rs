@@ -1906,6 +1906,27 @@ pub async fn clear_binding(
     Ok(())
 }
 
+pub async fn change_model(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    model: &str,
+) -> AppResult<AssistantConversation> {
+    if !valid_model(model) {
+        return Err(AppError::ValidationError(
+            "model_unavailable: choose another model in the selector".into(),
+        ));
+    }
+    let current = get(db, user_id, id).await?;
+    if current.active_turn.is_some() {
+        return Err(AppError::AssistantTurnActive);
+    }
+    db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
+        doc! {"_id": id, "user_id": user_id, "active_turn": bson::Bson::Null},
+        doc! {"$set": {"model": model, "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::now(), "context_reset_reason": "model_changed"}},
+    ).return_document(ReturnDocument::After).await?.ok_or(AppError::AssistantTurnActive)
+}
+
 pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
     let now = Utc::now();
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);

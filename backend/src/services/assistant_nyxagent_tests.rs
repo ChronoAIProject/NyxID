@@ -1718,3 +1718,11 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
         row.context_reset_at = None;
     }
 }
+
+#[test]
+fn model_validation_and_unavailable_copy_are_stable() {
+    assert!(super::valid_model("nyxagent/chat"));
+    assert!(super::valid_model("nyxagent/reasoning_v2"));
+    assert!(!super::valid_model("openai/gpt-4"));
+    assert!(!super::valid_model("nyxagent/"));
+}

@@ -358,6 +358,8 @@ export const assistantAgentSchema = z.object({
   /** Personality and tone the user asked for; style only, never authority. */
   persona: z.string().nullable().default(null),
   description: z.string().default(""),
+  model: z.string().optional(),
+  access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
@@ -487,12 +489,16 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         display_name: agentDisplayName,
         description: z.string().trim().max(2048, "Keep the notes under 2048 characters"),
         persona: agentPersona,
+        model: z.string().optional(),
+        access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
       })
     : z.object({
         name: agentName,
         display_name: agentDisplayName,
         description: agentDescription,
         persona: agentPersona,
+        model: z.string().optional(),
+        access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
       });
 }
 export type AssistantAgentProfile = {
@@ -500,6 +506,8 @@ export type AssistantAgentProfile = {
   display_name: string;
   description: string;
   persona: string;
+  model?: string;
+  access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
 };
 
 export const assistantAgentGrantsSchema = z.object({
