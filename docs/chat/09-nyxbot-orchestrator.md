@@ -1082,3 +1082,13 @@ bounded best-effort call to the declared cancel operation under live authority.
 Conversation deletion removes its watches after attempting cancellation. A late
 poll cannot recreate a deleted watch or overwrite cancellation. Services without
 a trusted contract and legacy event behavior remain unchanged.
+# Access modes
+
+NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
+`nyxmode` (default) confirms sensitive and destructive actions, `ask_every_time`
+confirms every changing action, and `autopilot` bypasses routine cards. Policy
+floors such as service approvals, machine confirmation, webhook policy and guest
+rules always remain enforced. The legacy `skip_destructive_confirmation` field is
+kept synchronized for one rolling release; rows without `access_mode` migrate
+from its value (`true` means `autopilot`). Specialists may override the owner
+mode with `access_mode_override`.

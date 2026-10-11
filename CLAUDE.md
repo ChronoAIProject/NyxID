@@ -706,3 +706,8 @@ stores live inside its private locked update volume; keep tmpfs flags in both
 rendered commands for 0.41.0 compatibility. Failures expose fixed stage/reason
 codes and guidance only. Production-image verification tests must exercise real
 TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions.
+NyxBot owner settings include an enforced `access_mode` (`nyxmode`, `autopilot`,
+or `ask_every_time`) and optional specialist override. The backend acknowledgement
+service owns classification and approval; clients cannot bypass policy floors.
+NyxAgent model selection is owner-authenticated, validated against live models,
+and changing an existing thread resets its upstream context.
