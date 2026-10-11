@@ -34,6 +34,10 @@ pub struct DecisionBody {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditBody {
+    /// Revision fence. Kept top-level for the public contract; nested legacy
+    /// drafts are still accepted for one release.
+    #[serde(default)]
+    revision: Option<i64>,
     draft: Value,
 }
 
@@ -61,16 +65,9 @@ pub async fn status(
     engine::require_enabled(&state.db, &actor).await?;
     let agent = team::agent(&state.db, &actor, &agent_id).await?;
     crate::services::org_agent_service::require_use(&state.db, &actor, &agent).await?;
-    let config = state
-        .db
-        .collection::<crate::models::assistant_agent_learning::AssistantAgentLearning>(
-            crate::models::assistant_agent_learning::CONFIG_COLLECTION_NAME,
-        )
-        .find_one(mongodb::bson::doc! {"_id": &agent_id})
-        .await?;
-    Ok(Json(
-        json!({"enabled": config.as_ref().is_some_and(|c| c.enabled), "config": config.map(|c| json!({"threshold": c.threshold, "learning_epoch": c.learning_epoch, "config_revision": c.config_revision, "eligible_count": c.eligible_count, "last_run_at": c.last_run_at, "last_success_at": c.last_success_at, "last_error_code": c.last_error_code}))}),
-    ))
+    Ok(Json(serde_json::to_value(
+        review::status(&state.db, &actor, &agent_id).await?,
+    )?))
 }
 
 pub async fn configure(
@@ -156,9 +153,8 @@ pub async fn edit(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let revision = body
-        .draft
-        .get("revision")
-        .and_then(Value::as_i64)
+        .revision
+        .or_else(|| body.draft.get("revision").and_then(Value::as_i64))
         .unwrap_or(0);
     review::edit(
         &state,

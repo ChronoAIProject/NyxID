@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,11 @@ export function AgentLearningReview({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
 
+  const serverThreshold = review.status.data?.threshold;
+  useEffect(() => {
+    if (serverThreshold !== undefined) setThreshold(serverThreshold);
+  }, [serverThreshold]);
+
   if (!enabled || (readOnly && !review.data)) {
     return null;
   }
@@ -52,6 +57,11 @@ export function AgentLearningReview({
       {review.error ? (
         <p role="alert" className="text-12 text-destructive">
           Automatic learning is unavailable.
+        </p>
+      ) : null}
+      {review.status.data?.publication_blocked ? (
+        <p role="alert" className="text-12 text-warning">
+          Publishing is unavailable for this organization: owner binding is required.
         </p>
       ) : null}
 
@@ -182,9 +192,9 @@ export function AgentLearningReview({
                     onClick={() =>
                       review.edit.mutate({
                         proposalId: proposal.id,
+                        revision: proposal.revision,
                         draft: {
                           ...draft,
-                          revision: proposal.revision,
                           skill_md: drafts[proposal.id],
                         },
                       })

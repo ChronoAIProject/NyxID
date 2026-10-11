@@ -91,19 +91,18 @@ export const learningProposalSchema = z.object({
 });
 export const learningProposalsSchema = z.object({ proposals: learningProposalSchema.array() });
 export const learningStatusSchema = z.object({
+  available: z.boolean().optional(),
+  can_maintain: z.boolean().optional(),
+  org_owned: z.boolean().optional(),
   enabled: z.boolean(),
-  config: z
-    .object({
-      threshold: z.number().optional(),
-      learning_epoch: z.number().optional(),
-      config_revision: z.number().optional(),
-      eligible_count: z.number().optional(),
-      last_run_at: z.string().nullable().optional(),
-      last_success_at: z.string().nullable().optional(),
-      last_error_code: z.string().nullable().optional(),
-    })
-    .nullable()
-    .optional(),
+  threshold: z.number().optional(),
+  learning_epoch: z.number().optional(),
+  config_revision: z.number().optional(),
+  eligible_count: z.number().optional(),
+  last_run_at: z.string().nullable().optional(),
+  last_error_code: z.string().nullable().optional(),
+  opted_in: z.boolean().optional(),
+  publication_blocked: z.string().nullable().optional(),
 });
 export const learningApprovalSchema = z.object({
   status: z.string(),
