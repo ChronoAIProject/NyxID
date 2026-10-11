@@ -2853,7 +2853,15 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     const CLOSE: &str = "\nEnd prior history.";
     let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
     let mut recap = Vec::new();
-    for message in history.iter().rev().take(20) {
+    let originating_goal = history.iter().find(|message| message.role == "user");
+    let mut selected: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
+    if let Some(goal) = originating_goal {
+        if !selected.iter().any(|message| message.id == goal.id) {
+            selected.pop();
+            selected.push(goal);
+        }
+    }
+    for message in selected {
         let prefix = format!(
             "\n{}{}{}: ",
             message.role,
@@ -2890,15 +2898,21 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
         let activities = if guest || message.activities.is_empty() {
             String::new()
         } else {
+            let omitted = message.activities.len().saturating_sub(10);
             format!(
-                " [actions: {}]",
+                " [actions: {}{}]",
                 message
                     .activities
                     .iter()
                     .take(10)
                     .map(|a| format!("{}={}", a.label, a.status))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                if omitted > 0 {
+                    format!(", +{omitted} more")
+                } else {
+                    String::new()
+                }
             )
         };
         let attachments = if guest || message.attachments.is_empty() {
