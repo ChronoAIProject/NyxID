@@ -1754,3 +1754,12 @@ async fn deleting_a_conversation_revokes_children_clears_bindings_and_audits_aft
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn native_account_cards_are_consumed_once_and_audited() {
+    // The shared native inventory exercises every account tool, including the
+    // NyxMode destructive retry and its single success audit with an ack id.
+    native_inventory(false).await;
+    // Its companion explicitly covers Autopilot's card-free execution path.
+    native_inventory(true).await;
+}
