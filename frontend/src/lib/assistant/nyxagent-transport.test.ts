@@ -1074,6 +1074,7 @@ describe("steering transport", () => {
 
   it("merges a steer once during a live stream and preserves its label during a later turn", async () => {
     const page = history();
+    page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "cancelled" };
     const receipt = {
       client_request_id: "guidance",
       outcome: "applied" as const,
@@ -1137,6 +1138,7 @@ describe("steering transport", () => {
     await transport.history(id);
     const session = transport.session(id);
     expect(session.messages.filter((m) => m.steering)).toHaveLength(2);
+    expect(session.messages.find((message) => message.id === page.messages[2]?.id)?.errorCode).toBe("cancelled");
     expect(session.messages.find((m) => m.id === "steer")?.steering).toEqual(
       receipt,
     );

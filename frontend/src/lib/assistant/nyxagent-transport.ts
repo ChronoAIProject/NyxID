@@ -466,6 +466,7 @@ export class NyxAgentTransport {
           id: message.id,
           role: settledMessages.get(message.id)?.role ?? message.role,
           feedback: settledMessages.get(message.id)?.feedback ?? undefined,
+          errorCode: settledMessages.get(message.id)?.error_code,
           steering: settledMessages.get(message.id)?.steering,
           via: settledMessages.get(message.id)?.via,
           turnId: settledMessages.get(message.id)?.turn_id,
