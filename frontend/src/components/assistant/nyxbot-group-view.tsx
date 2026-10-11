@@ -365,8 +365,7 @@ function GroupHeader({
           </Button>
         </div>
         <p className="text-11 text-text-tertiary">
-          {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"} unless you
-          @mention someone. Agents hand work to each other the same way.
+          {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
         </p>
       </div>
     </div>
@@ -625,7 +624,7 @@ export function NyxAgentGroupPage({
               }
             }}
             onContentChange={onComposerContentChange}
-            controls={group ? <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Message recipients">
+            recipients={group ? <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Message recipients">
               {recipientAgentIds.map((id) => {
                 const member = group.members.find((row) => row.id === id);
                 return member ? <Button key={id} type="button" size="sm" variant="secondary" className="rounded-full" aria-label={`Remove recipient ${member.name}`} onClick={() => setRecipientAgentIds((current) => current.filter((value) => value !== id))}>@{member.name} ×</Button> : null;
