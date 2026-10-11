@@ -62,9 +62,9 @@ pub async fn put_config(
         .and_then(|b| b.default_overdraft_cap_credits)
         .is_some_and(|v| v < 0)
     {
-            return Err(crate::errors::AppError::ValidationError(
-                "default overdraft cap must be non-negative".into(),
-            ));
+        return Err(crate::errors::AppError::ValidationError(
+            "default overdraft cap must be non-negative".into(),
+        ));
     }
     let billing = mongodb::bson::to_bson(&input.billing).map_err(|error| {
         crate::errors::AppError::Internal(format!("serialize billing settings: {error}"))
@@ -112,7 +112,6 @@ pub async fn get_rates(
         .await?
         .try_collect::<Vec<_>>()
         .await?;
-    let global = state.db.collection::<PlatformSettings>(SETTINGS).find_one(doc! {"_id": PLATFORM_SETTINGS_ID}).await?.and_then(|s| s.billing);
     Ok(Json(
         rows.into_iter()
             .map(|r| BillingRateResponse {
@@ -149,19 +148,37 @@ pub async fn get_overview(
         .await?
         .try_collect::<Vec<_>>()
         .await?;
+    let global = state
+        .db
+        .collection::<PlatformSettings>(SETTINGS)
+        .find_one(doc! {"_id": PLATFORM_SETTINGS_ID})
+        .await?
+        .and_then(|settings| settings.billing);
     Ok(Json(
         rows.into_iter()
             .filter(|s| s.billing.is_some())
             .map(|s| {
-                let effective = crate::services::billing::config::effective_config(s.billing.as_ref(), global.as_ref(), None, Some(state.config.billing_default_overdraft_cap_credits));
-                let source = match effective.lane_source { crate::services::billing::config::BillingConfigSource::Env => "env", crate::services::billing::config::BillingConfigSource::Global => "global", crate::services::billing::config::BillingConfigSource::Service => "service", crate::services::billing::config::BillingConfigSource::Legacy => "legacy", crate::services::billing::config::BillingConfigSource::Free => "free" };
+                let effective = crate::services::billing::config::effective_config(
+                    s.billing.as_ref(),
+                    global.as_ref(),
+                    None,
+                    Some(state.config.billing_default_overdraft_cap_credits),
+                );
+                let source = match effective.lane_source {
+                    crate::services::billing::config::BillingConfigSource::Env => "env",
+                    crate::services::billing::config::BillingConfigSource::Global => "global",
+                    crate::services::billing::config::BillingConfigSource::Service => "service",
+                    crate::services::billing::config::BillingConfigSource::Legacy => "legacy",
+                    crate::services::billing::config::BillingConfigSource::Free => "free",
+                };
                 BillingServiceResponse {
-                id: s.id,
-                slug: s.slug,
-                name: s.name,
-                has_billing: true,
-                effective_source: source,
-            }}
+                    id: s.id,
+                    slug: s.slug,
+                    name: s.name,
+                    has_billing: true,
+                    effective_source: source,
+                }
+            })
             .collect(),
     ))
 }
