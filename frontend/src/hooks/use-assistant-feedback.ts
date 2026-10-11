@@ -11,5 +11,5 @@ export function useAssistantFeedback(scope: "conversation" | "group", parentId: 
     try { return vote ? await api.put<AssistantFeedback>(path, { vote, comment }) : await api.delete<void>(path); }
     finally { setPending(false); }
   }, [path]);
-  return { mutateAsync, isPending };
+  return { mutateAsync, isPending, cacheKey: [scope, parentId, messageId] as const };
 }
