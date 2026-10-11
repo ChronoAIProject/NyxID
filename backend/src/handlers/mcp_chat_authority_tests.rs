@@ -426,7 +426,16 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
 #[tokio::test]
 async fn chat_mcp_native_account_and_action_refusals_are_tool_results() {
     let f = fixture("chat_mcp_account").await;
-    crate::services::assistant_settings_service::update(&f.state.db, &f.owner, crate::services::assistant_settings_service::Update { access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode), ..Default::default() }).await.unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let auth = authenticate(&f).await;
     let search = result(
         handle_meta_search(

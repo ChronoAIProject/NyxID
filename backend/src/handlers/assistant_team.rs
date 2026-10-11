@@ -1854,13 +1854,18 @@ async fn dispatch_settings(
     Ok(match name {
         "update_settings" => {
             let before = settings::get(&state.db, &chat.user_id).await?;
-            let maximum = args["max_auto_continuations"].as_i64().and_then(|v| i32::try_from(v).ok()).unwrap_or(before.max_auto_continuations);
+            let maximum = args["max_auto_continuations"]
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(before.max_auto_continuations);
             let after = settings::update(
                 &state.db,
                 &chat.user_id,
                 settings::Update {
                     max_auto_continuations: Some(maximum),
-                    access_mode: args["access_mode"].as_str().and_then(|v| serde_json::from_value(serde_json::Value::String(v.into())).ok()),
+                    access_mode: args["access_mode"].as_str().and_then(|v| {
+                        serde_json::from_value(serde_json::Value::String(v.into())).ok()
+                    }),
                     ..Default::default()
                 },
             )

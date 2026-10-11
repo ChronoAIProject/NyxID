@@ -40,7 +40,10 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
         .await
         .unwrap();
     db.collection(crate::models::assistant_settings::COLLECTION_NAME)
-        .insert_one(crate::models::assistant_settings::AssistantSettings { access_mode: crate::models::assistant_settings::AccessMode::Autopilot, ..crate::models::assistant_settings::AssistantSettings::defaults(OWNER) })
+        .insert_one(crate::models::assistant_settings::AssistantSettings {
+            access_mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            ..crate::models::assistant_settings::AssistantSettings::defaults(OWNER)
+        })
         .await
         .unwrap();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));

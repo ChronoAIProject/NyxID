@@ -12,7 +12,6 @@ pub enum AccessMode {
     AskEveryTime,
 }
 
-
 pub const DEFAULT_MAX_LIVE_SUBAGENTS: i32 = 8;
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS: i32 = 3;
 /// Hard ceilings that bound what an owner can configure.
