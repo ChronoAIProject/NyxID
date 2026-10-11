@@ -16,7 +16,12 @@ const action = {
 describe("GroupPendingActions", () => {
   it("renders nothing without pending actions", () => {
     const { container } = render(
-      <GroupPendingActions actions={[]} members={[]} sending={false} onAnswer={vi.fn()} />,
+      <GroupPendingActions
+        actions={[]}
+        members={[]}
+        sending={false}
+        onAnswer={vi.fn()}
+      />,
     );
     expect(container).toBeEmptyDOMElement();
   });
@@ -31,8 +36,12 @@ describe("GroupPendingActions", () => {
         onAnswer={onAnswer}
       />,
     );
-    const card = screen.getByRole("region", { name: "Confirm: Delete agent key 'ci-bot'" });
-    expect(card).toHaveTextContent("Keeper wants to: Delete agent key 'ci-bot'");
+    const card = screen.getByRole("region", {
+      name: "Confirm: Delete agent key 'ci-bot'",
+    });
+    expect(card).toHaveTextContent(
+      "Keeper wants to: Delete agent key 'ci-bot'",
+    );
     await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onAnswer).toHaveBeenLastCalledWith("yes 4821");
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -51,7 +60,11 @@ describe("GroupPendingActions", () => {
       created_at: "2026-09-29T00:00:00Z",
     };
     expect(
-      assistantGroupMessagesSchema.parse({ group, messages: [], before_seq: null }).pending_actions,
+      assistantGroupMessagesSchema.parse({
+        group,
+        messages: [],
+        before_seq: null,
+      }).pending_actions,
     ).toEqual([]);
     expect(() =>
       assistantGroupMessagesSchema.parse({
@@ -66,21 +79,81 @@ describe("GroupPendingActions", () => {
 
 it("shows the triggering person and hides decisions from other participants", () => {
   const metadata = { ...action, confirm_phrase: undefined };
-  render(<GroupPendingActions actions={[{ ...metadata, triggering_person: { id: "b", display_name: "Blair" }, can_decide: false }]}
-    members={[]} sending={false} onAnswer={vi.fn()} onDecide={vi.fn()} />);
+  render(
+    <GroupPendingActions
+      actions={[
+        {
+          ...metadata,
+          triggering_person: { id: "b", display_name: "Blair" },
+          can_decide: false,
+        },
+      ]}
+      members={[]}
+      sending={false}
+      onAnswer={vi.fn()}
+      onDecide={vi.fn()}
+    />,
+  );
   expect(screen.getByText("Awaiting Blair")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Allow" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Deny" }),
+  ).not.toBeInTheDocument();
 });
 
 it("decides an org card by id instead of posting a confirmation phrase", async () => {
   const onDecide = vi.fn().mockResolvedValue(undefined);
   const onAnswer = vi.fn();
-  const card = { ...action, confirm_phrase: undefined, triggering_person: { id: "b", display_name: "Blair" }, can_decide: true };
-  render(<GroupPendingActions actions={[card]} members={[]} sending={false} onAnswer={onAnswer} onDecide={onDecide} />);
+  const card = {
+    ...action,
+    confirm_phrase: undefined,
+    triggering_person: { id: "b", display_name: "Blair" },
+    can_decide: true,
+  };
+  render(
+    <GroupPendingActions
+      actions={[card]}
+      members={[]}
+      sending={false}
+      onAnswer={onAnswer}
+      onDecide={onDecide}
+    />,
+  );
   await userEvent.click(screen.getByRole("button", { name: "Allow" }));
   expect(onDecide).toHaveBeenLastCalledWith(card, "allow");
   await userEvent.click(screen.getByRole("button", { name: "Deny" }));
   expect(onDecide).toHaveBeenLastCalledWith(card, "deny");
   expect(onAnswer).not.toHaveBeenCalled();
+});
+
+import { GroupMessageRow } from "@/components/assistant/nyxbot-group-view";
+
+test("group message composition mirrors pressed feedback controls", () => {
+  render(
+    <GroupMessageRow
+      groupId="g"
+      message={
+        {
+          id: "m",
+          group_id: "g",
+          seq: 1,
+          role: "agent",
+          text: "reply",
+          created_at: new Date().toISOString(),
+          activities: [],
+          attachments: [],
+          feedback: { vote: "up" },
+        } as never
+      }
+      names={[]}
+      onOpenAgent={() => undefined}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  expect(screen.getByRole("button", { name: "Not helpful" })).toBeEnabled();
 });
