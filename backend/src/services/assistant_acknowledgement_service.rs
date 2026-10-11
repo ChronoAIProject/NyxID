@@ -163,6 +163,35 @@ mod access_mode_tests {
         assert_eq!(classify_owner_action("list_services", Some("GET")), OwnerActionClass::Read);
         assert_eq!(classify_owner_action("create_schedule", None), OwnerActionClass::Sensitive);
     }
+
+    #[test]
+    fn full_mode_class_family_matrix() {
+        let families = [
+            ("delete_agent_key", OwnerActionClass::Destructive),
+            ("delete_schedule", OwnerActionClass::Destructive),
+            ("DELETE /v1/items", OwnerActionClass::Destructive),
+            ("nyx__machine_exec", OwnerActionClass::Destructive),
+            ("grant_subagent", OwnerActionClass::Sensitive),
+            ("update_settings", OwnerActionClass::Sensitive),
+            ("nyx__set_agent_model", OwnerActionClass::Sensitive),
+            ("service_operation", OwnerActionClass::Read),
+        ];
+        for mode in [
+            crate::models::assistant_settings::AccessMode::Autopilot,
+            crate::models::assistant_settings::AccessMode::Nyxmode,
+            crate::models::assistant_settings::AccessMode::AskEveryTime,
+        ] {
+            for (_, class) in families {
+                let expected = match mode {
+                    crate::models::assistant_settings::AccessMode::Autopilot => false,
+                    crate::models::assistant_settings::AccessMode::Nyxmode => matches!(class, OwnerActionClass::Sensitive | OwnerActionClass::Destructive),
+                    crate::models::assistant_settings::AccessMode::AskEveryTime => !matches!(class, OwnerActionClass::Read),
+                };
+                assert_eq!(owner_confirmation_required(mode, class, false), expected);
+                assert!(owner_confirmation_required(mode, class, true));
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
