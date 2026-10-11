@@ -414,7 +414,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
   return (
     <Section
       title="Grants"
-      description="Saving replaces the current grants. Anything else, the agent asks NyxBot for."
+      description="Only NyxBot can request or grant access for this agent. Saving replaces the current grants. Anything else, the agent asks NyxBot for."
     >
       <Form {...form}>
         <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
