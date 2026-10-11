@@ -314,7 +314,11 @@ pub async fn admin_list(
     if let Some(platform) = query.platform {
         filter.insert(
             "platform",
-            if platform == "x" { "twitter" } else { &platform },
+            if platform == "x" {
+                "twitter"
+            } else {
+                &platform
+            },
         );
     }
     if let Some(status) = query.status {

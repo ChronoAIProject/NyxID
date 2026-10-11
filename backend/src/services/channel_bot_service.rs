@@ -324,7 +324,7 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
-            diagnostics: Default::default(),
+        diagnostics: Default::default(),
         x_events: None,
         last_verification: None,
         ownership_version: 0,
