@@ -518,7 +518,7 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
     assert!(document.get_datetime("updated_at").is_ok());
     assert!(!format!("{original:?}").contains("secret-for-test"));
     let adapter = resolve_adapter("whatsapp", &state.token_exchange_cache).unwrap();
-    let bot: ChannelBot = bson::from_document(doc! { "_id": "bot", "user_id": auth.user_id.to_string(), "platform": "whatsapp", "label": "test", "credential_source": "platform", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "333", "platform_bot_username": "number", "webhook_registered": false, "webhook_secret_hash": "hash", "status": "pending_webhook", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() }).unwrap();
+    let bot: ChannelBot = bson::from_document::<ChannelBot>(doc! { "_id": "bot", "user_id": auth.user_id.to_string(), "platform": "whatsapp", "label": "test", "credential_source": "platform", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "333", "platform_bot_username": "number", "webhook_registered": false, "webhook_secret_hash": "hash", "status": "pending_webhook", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() }).unwrap();
     assert_eq!(
         build_verify_secrets(&state.db, &state.encryption_keys, adapter.as_ref(), &bot)
             .await
@@ -595,7 +595,7 @@ async fn aurinko_platform_credentials_share_provider_pair_and_keep_signing_secre
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
     let db = crate::test_utils::connect_transaction_test_database("aurinko_credentials").await;
     let (state, auth, _) = fixture_with_db(db).await;
-    let provider: ProviderConfig = bson::from_document(doc! {
+    let provider: ProviderConfig = bson::from_document::<ChannelBot>(doc! {
         "_id": uuid::Uuid::new_v4().to_string(), "slug": "aurinko", "name": "Aurinko",
         "provider_type": "api_key", "is_active": true, "created_by": auth.user_id.to_string(),
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
@@ -786,7 +786,7 @@ async fn aurinko_composite_reads_never_mix_concurrent_rotations() {
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
     let db = crate::test_utils::connect_transaction_test_database("aurinko_rotations").await;
     let (state, auth, _) = fixture_with_db(db).await;
-    let provider: ProviderConfig = bson::from_document(doc! {
+    let provider: ProviderConfig = bson::from_document::<ChannelBot>(doc! {
         "_id": uuid::Uuid::new_v4().to_string(), "slug": "aurinko", "name": "Aurinko",
         "provider_type": "api_key", "is_active": true, "created_by": "seed-author",
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
@@ -1505,7 +1505,7 @@ async fn health_is_owner_only_and_not_found_shaped_for_others() {
     let (state, auth, _server) = fixture().await;
     let bot_id = uuid::Uuid::new_v4().to_string();
     let owner = auth.user_id.to_string();
-    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
         "_id": &bot_id, "user_id": &owner, "platform": "whatsapp", "label": "health",
         "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
         "platform_bot_id": "p", "platform_bot_username": "health", "webhook_registered": true,
@@ -1536,7 +1536,7 @@ async fn admin_channel_bot_list_filters_platform_and_status_and_requires_admin()
         ("x-health", "twitter", "failed"),
         ("other", "telegram", "active"),
     ] {
-        state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+        state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
             "_id": id, "user_id": &owner, "platform": platform, "label": id,
             "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
             "platform_bot_id": "p", "platform_bot_username": id, "webhook_registered": false,
@@ -1571,7 +1571,7 @@ async fn admin_health_requires_admin() {
     let (state, auth, _server) = fixture().await;
     let bot_id = "admin-health";
     let owner = auth.user_id.to_string();
-    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
         "_id": bot_id, "user_id": &owner, "platform": "twitter", "label": "health",
         "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": true, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
     }).unwrap()).await.unwrap();
@@ -1591,7 +1591,7 @@ async fn resubscribe_requires_owner_write_and_reconfigures_subscription() {
     let (state, auth, _server) = fixture().await;
     let bot_id = "resubscribe-health";
     let owner = auth.user_id.to_string();
-    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
         "_id": bot_id, "user_id": &owner, "platform": "twitter", "label": "x", "credential_source": "connection", "connection_id": "missing", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
     }).unwrap()).await.unwrap();
     let other = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
@@ -1609,7 +1609,7 @@ async fn resubscribe_requires_owner_write_and_reconfigures_subscription() {
 
 #[test]
 fn verify_reports_live_subscription_state_and_recommended_action() {
-    let mut bot: ChannelBot = bson::from_document(doc! {"_id": "verify-state", "user_id": "u", "platform": "twitter", "label": "x", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": true, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() }).unwrap();
+    let mut bot: ChannelBot = bson::from_document::<ChannelBot>(doc! {"_id": "verify-state", "user_id": "u", "platform": "twitter", "label": "x", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": true, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() }).unwrap();
     bot.diagnostics.subscription_state =
         Some(crate::models::channel_bot::ChannelBotSubscriptionState {
             registered: true,

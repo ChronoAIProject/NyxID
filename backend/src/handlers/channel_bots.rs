@@ -348,7 +348,7 @@ pub async fn admin_health(
     Ok(Json(health_for(&bot, state.config.billing_enabled)))
 }
 
-fn health_for(
+pub(crate) fn health_for(
     bot: &crate::models::channel_bot::ChannelBot,
     billing_enabled: bool,
 ) -> ChannelBotHealthResponse {
