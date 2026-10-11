@@ -1499,3 +1499,31 @@ async fn platform_dispatcher_routes_two_bots_drops_unknown_and_preserves_dedup()
         .unwrap();
     assert_eq!(byo.status, "pending_webhook");
 }
+
+#[tokio::test]
+async fn health_is_owner_only_and_not_found_shaped_for_others() {
+    let (state, auth, _server) = fixture().await;
+    let bot_id = uuid::Uuid::new_v4().to_string();
+    let owner = auth.user_id.to_string();
+    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+        "_id": &bot_id, "user_id": &owner, "platform": "whatsapp", "label": "health",
+        "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
+        "platform_bot_id": "p", "platform_bot_username": "health", "webhook_registered": true,
+        "webhook_secret_hash": "h", "status": "active", "is_active": true,
+        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+    }).unwrap()).await.unwrap();
+    let response =
+        super::channel_bots::health(State(state.clone()), auth.clone(), Path(bot_id.clone()))
+            .await
+            .unwrap();
+    assert_eq!(response.0.mode, "webhook");
+    assert_eq!(response.0.recommended_action, "verify");
+    let other = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let error = super::channel_bots::health(State(state), other, Path(bot_id))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::errors::AppError::ChannelBotNotFound(_)
+    ));
+}
