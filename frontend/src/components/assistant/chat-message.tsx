@@ -147,9 +147,11 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
 export function ChatMessageBubble({
   message,
   interactiveCards = true,
+  onRetry,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
+  readonly onRetry?: () => void;
 }) {
   const streaming = message.status === "streaming";
   const content =
@@ -203,6 +205,17 @@ export function ChatMessageBubble({
           <MachineToolCard key={tool.id} receipt={tool.machine!} conversationId={tool.conversationId} images={message.images} />
         ))}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {message.status === "error" && message.errorDetail ? (
+          <details className="mt-2 text-11 text-text-tertiary">
+            <summary className="cursor-pointer">Details</summary>
+            <div className="mt-1 space-y-1 rounded border border-hairline p-2 font-mono">
+              <div>stage: {message.errorDetail.stage}</div><div>turn: {message.errorDetail.turnId}</div>
+              {message.errorDetail.upstreamRequestId ? <div>request: {message.errorDetail.upstreamRequestId}</div> : null}
+              <button type="button" className="underline" onClick={() => void navigator.clipboard?.writeText(`${message.errorDetail?.turnId}${message.errorDetail?.upstreamRequestId ? ` / ${message.errorDetail.upstreamRequestId}` : ""}`)}>Copy diagnostic ID</button>
+            </div>
+          </details>
+        ) : null}
+        {message.status === "error" && onRetry ? <button type="button" className="mt-2 text-11 underline" onClick={onRetry}>Retry</button> : null}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
             {message.images.filter((image) => !message.toolCalls?.some((tool) => tool.machine?.screenshot_id === image.id)).map((image) => (

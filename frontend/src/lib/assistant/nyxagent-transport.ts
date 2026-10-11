@@ -74,7 +74,7 @@ function path(id: string): string {
   return `${ROOT}/conversations/${id}`;
 }
 
-function storedError(code: string | null): string {
+export function storedError(code: string | null): string {
   if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
   if (code === "continuation_no_progress") return "Paused because the task repeated without progress. Its context is saved; give it new guidance.";
   if (code === "idle_timeout") return "The assistant stopped responding. Try again.";
@@ -87,7 +87,26 @@ function storedError(code: string | null): string {
   if (code === "session_busy" || code === "capacity_exceeded") {
     return "The assistant is busy. Try again shortly.";
   }
+  if (code === "turn_lost") return "This turn was interrupted; check which actions completed before retrying.";
+  if (code === "assistant_unavailable") return "The assistant is temporarily unavailable. Try again shortly.";
+  if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
+  if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
+  if (code === "output_too_large") return "The assistant reached its response limit.";
+  if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";
+  if (code === "stale_response") return "The assistant context changed. Start a new turn.";
+  if (code === "context_unavailable") return "The assistant context could not be restored. Try a new turn.";
   return "The assistant could not complete this turn.";
+}
+
+export function contextResetCopy(reason: string | null | undefined): string {
+  switch (reason) {
+    case "turn_failed": return "The previous turn failed; completed actions were preserved for review.";
+    case "memory_updated": return "Memory was updated; the next turn will use the new note.";
+    case "instructions_changed": return "Instructions changed; the assistant context was refreshed.";
+    case "stopped": return "The turn was stopped; review pending actions before retrying.";
+    case "user_reset": return "You reset the working context.";
+    default: return "Context was refreshed; review the working context before continuing.";
+  }
 }
 
 function active(row: NyxAgentConversation | undefined): boolean {
@@ -436,6 +455,7 @@ export class NyxAgentTransport {
         turnId: message.turn_id,
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
+        errorDetail: message.error_detail ? { stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id } : undefined,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
         via: message.via,
@@ -757,6 +777,16 @@ export class NyxAgentTransport {
         if (agentId) await this.list(agentId).catch(() => undefined);
       }
     }
+  }
+
+  /** Retry the most recent failed turn. The server recap is authoritative;
+   * completed activities are listed there and must not be replayed. */
+  async retry(id: string, onAdopt: (id: string) => void) {
+    const messages = this.histories.get(id)?.messages ?? [];
+    const failed = [...messages].reverse().find((message) => message.role === "assistant" && message.status === "failed");
+    const user = failed && [...messages].reverse().find((message) => message.role === "user" && message.seq < failed.seq && !message.execution_pending);
+    if (!user) throw new Error("No failed turn is available to retry.");
+    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true });
   }
 }
 

@@ -980,6 +980,8 @@ pub(crate) async fn webhook(
                         text: text.clone(),
                         status: "completed".into(),
                         error_code: None,
+                        upstream_error_code: None,
+                        error_detail: None,
                         created_at: now,
                         activities: vec![],
                         attachments: vec![],

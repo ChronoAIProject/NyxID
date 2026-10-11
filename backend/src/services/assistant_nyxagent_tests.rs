@@ -272,6 +272,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             text: format!("marker{i}:{}", "界".repeat(400)),
             status: "completed".into(),
             error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -287,11 +289,81 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let base = context.instructions(&[], false);
     let prompt = context.instructions(&messages, true);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
-    assert!(prompt.contains("Prior conversation history"));
+    assert!(prompt.contains("Previous context (after reset)"));
     assert!(prompt.contains("marker29"));
     assert!(!prompt.contains("marker0:"));
     assert!(prompt.contains(SCHEDULE_PROMPT));
-    assert!(prompt.len() <= base.len() + 8192);
+    assert!(prompt.len() <= base.len() + 16384);
+}
+
+#[test]
+fn failure_diagnostics_normalize_unknown_upstream_codes() {
+    let error = TurnError::new("provider_rate_limit");
+    assert_eq!(error.code, "assistant_unavailable");
+    assert_eq!(error.upstream_code.as_deref(), Some("provider_rate_limit"));
+    let known = TurnError::new("first_byte_timeout");
+    assert_eq!(known.code, "first_byte_timeout");
+    assert_eq!(known.upstream_code.as_deref(), Some("first_byte_timeout"));
+}
+
+#[test]
+fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
+    assert_eq!(
+        TurnError::new("first_byte_timeout").code,
+        "first_byte_timeout"
+    );
+    assert_eq!(TurnError::new("idle_timeout").code, "idle_timeout");
+    assert_eq!(TurnError::new("invalid_stream").code, "invalid_stream");
+    assert_eq!(TurnError::new("upstream_503").code, "assistant_unavailable");
+    assert_eq!(
+        TurnError::new("settlement_deadline").code,
+        "assistant_unavailable"
+    );
+}
+
+#[test]
+fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
+    let mut row = AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "m".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "head goal details tail".into(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: Some("upstream_x".into()),
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "a".into(),
+            label: "tool.check".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            image_input: None,
+            origin: "tool".into(),
+            pages: None,
+            id: "att".into(),
+            content_type: "text/plain".into(),
+            size: 4,
+            label: "result.txt".into(),
+        }],
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap(std::slice::from_mut(&mut row));
+    assert!(recap.contains("Previous context (after reset)"));
+    assert!(recap.contains("tool.check=completed"));
+    assert!(recap.contains("result.txt"));
+    assert!(recap.contains("partial, failed"));
 }
 
 #[tokio::test]
@@ -577,6 +649,13 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     )
     .await
     .unwrap();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &old.id},
+            doc! {"$set": {"active_turn.activities": [{"id": "act-1", "label": "nyxid__check", "status": "running", "started_at": bson::DateTime::now(), "ended_at": bson::Bson::Null}], "active_turn.attachments": [{"id": "att-1", "content_type": "text/plain", "size": 4i64, "label": "result.txt", "origin": "tool"}]}},
+        )
+        .await
+        .unwrap();
     expire_turn(&db, &old).await;
     let next = begin_turn(
         &db,
@@ -600,6 +679,8 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     assert_eq!(lost.status, "failed");
     assert_eq!(lost.error_code.as_deref(), Some("turn_lost"));
     assert!(lost.text.is_empty());
+    assert_eq!(lost.activities[0].status, "error");
+    assert_eq!(lost.attachments[0].id, "att-1");
     assert_eq!(
         lost.created_at.timestamp_millis(),
         next.context_reset_at.unwrap().timestamp_millis()
@@ -1690,6 +1771,18 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
             _ => unreachable!(),
         }
         let prepared = prepare(&row, &changed);
+        if field == "memory" {
+            assert!(
+                !prepared.reset,
+                "memory changes are per-turn input, not stable instructions"
+            );
+            assert!(
+                prepared
+                    .input("Current preferences", "continue")
+                    .contains("Current preferences")
+            );
+            continue;
+        }
         assert!(
             prepared.reset,
             "stable field {field} must invalidate the binding"

@@ -301,7 +301,7 @@ async fn nyxbot_is_one_persistent_agent_whose_memory_spans_its_threads() {
         agents[0].home_conversation_id.as_deref(),
         Some(first.id.as_str())
     );
-    // Memory saved in one thread reaches every thread's instructions.
+    // Memory saved in one thread reaches every thread's per-turn input.
     let chat = chat_for(&state, &first).await;
     let (value, error) = execute_tool(
         &state,
@@ -320,28 +320,16 @@ async fn nyxbot_is_one_persistent_agent_whose_memory_spans_its_threads() {
     .await;
     assert!(error, "{value}");
     let refreshed = user_turn(&state, Some(&second.id), None, "When should we meet?").await;
-    assert_eq!(
+    assert_ne!(
         refreshed.context_reset_reason.as_deref(),
         Some("instructions_changed")
     );
-    assert!(
-        refreshed
-            .nyxagent_instruction_binding
-            .as_ref()
-            .unwrap()
-            .fingerprint
-            != second
-                .nyxagent_instruction_binding
-                .as_ref()
-                .unwrap()
-                .fingerprint
-    );
     {
         let calls = calls.lock().await;
-        assert!(calls.last().unwrap().body.get("conversation").is_none());
-        let instructions = calls.last().unwrap().body["instructions"].as_str().unwrap();
-        assert!(instructions.contains("The user prefers morning meetings"));
-        assert!(!instructions.contains("nyxid_ag_secretvalue"));
+        assert!(calls.last().unwrap().body.get("conversation").is_some());
+        let input = calls.last().unwrap().body["input"].as_str().unwrap();
+        assert!(input.contains("The user prefers morning meetings"));
+        assert!(!input.contains("nyxid_ag_secretvalue"));
     }
     // Deleting a thread leaves the agent and its memory.
     engine::delete(&state.db, OWNER, &first.id).await.unwrap();
@@ -1853,11 +1841,7 @@ async fn instruction_refresh_legacy_adopts_then_detects_changes_without_grant_ti
     .unwrap();
     let (changed, notices) =
         refresh_turn(&state, refresh_start(Some(&first.id), None, "Again")).await;
-    assert_eq!(notices, 1);
-    assert_eq!(
-        changed.context_reset_reason.as_deref(),
-        Some("instructions_changed")
-    );
+    assert_eq!(notices, 0);
     assert!(
         changed
             .nyxagent_instruction_binding
@@ -1968,7 +1952,7 @@ async fn instruction_refresh_legacy_memory_timestamp_proves_change() {
     let body = &calls.last().unwrap().body;
     assert!(body.get("conversation").is_none());
     assert!(
-        body["instructions"]
+        body["input"]
             .as_str()
             .unwrap()
             .contains("Prefer morning meetings")
@@ -2046,7 +2030,7 @@ async fn instruction_refresh_guest_audiences_and_context_are_isolated_on_every_t
     let body = &calls.last().unwrap().body;
     assert!(body.get("conversation").is_none());
     assert!(
-        body["instructions"]
+        body["input"]
             .as_str()
             .unwrap()
             .contains("PRIVATE owner memory")

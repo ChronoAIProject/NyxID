@@ -210,6 +210,7 @@ pub struct ConversationResponse {
     pending_acknowledgements: u32,
     active_turn: Option<ActiveTurnResponse>,
     context_reset_at: Option<DateTime<Utc>>,
+    context_reset_reason: Option<String>,
     role: crate::models::assistant_conversation::AgentRole,
     /// The agent this thread belongs to; `None` only when it could not be
     /// resolved (legacy rows resolve to the owner's NyxBot).
@@ -295,6 +296,7 @@ impl From<AssistantConversation> for ConversationResponse {
             pending_acknowledgements: 0,
             active_turn,
             context_reset_at: row.context_reset_at,
+            context_reset_reason: row.context_reset_reason,
             role: row.role,
             agent: None,
             pending_events: row.pending_events.len(),
@@ -351,6 +353,8 @@ pub struct MessageResponse {
     text: String,
     status: String,
     error_code: Option<String>,
+    upstream_error_code: Option<String>,
+    error_detail: Option<crate::models::assistant_message::AssistantErrorDetail>,
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
     attachments: Vec<AttachmentResponse>,
@@ -373,6 +377,8 @@ impl From<AssistantMessage> for MessageResponse {
             text: row.text,
             status: row.status,
             error_code: row.error_code,
+            upstream_error_code: row.upstream_error_code,
+            error_detail: row.error_detail,
             created_at: row.created_at,
             activities: row
                 .activities
@@ -600,6 +606,66 @@ pub async fn history(
         messages,
         before_seq,
     }))
+}
+
+#[derive(Serialize)]
+pub struct ContextResponse {
+    pub conversation_id: String,
+    pub goal: Option<String>,
+    pub completed_actions: Vec<String>,
+    pub pending_actions: Vec<String>,
+    pub reset_reason: Option<String>,
+    pub binding_state: String,
+}
+
+pub async fn context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ContextResponse>> {
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    let (row, messages) = engine::history_page(&state.db, &user_id, &id, 100, None).await?;
+    let goal = messages
+        .iter()
+        .find(|m| m.role == "user")
+        .map(|m| m.text.clone());
+    let actions = messages
+        .iter()
+        .flat_map(|m| m.activities.iter())
+        .map(|a| format!("{}={}", a.label, a.status))
+        .collect::<Vec<_>>();
+    Ok(Json(ContextResponse {
+        conversation_id: row.id,
+        goal,
+        completed_actions: actions
+            .iter()
+            .filter(|a| a.ends_with("=completed"))
+            .cloned()
+            .collect(),
+        pending_actions: actions
+            .iter()
+            .filter(|a| a.ends_with("=running"))
+            .cloned()
+            .collect(),
+        reset_reason: row.context_reset_reason,
+        binding_state: if row.nyxagent_session_id.is_some() {
+            "bound".into()
+        } else {
+            "reset".into()
+        },
+    }))
+}
+
+pub async fn reset_context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ContextResponse>> {
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    engine::reset_context(&state.db, &user_id, &id).await?;
+    context(State(state), auth, Path(id)).await
 }
 /// An image a tool returned during one of the owner's turns. Only verified
 /// raster types are ever stored, and they are served inline with nosniff.
@@ -2037,12 +2103,13 @@ async fn execute_turn(
         let mut body = response.into_body().into_data_stream();
         let mut decoder = ResponseStream::default();
         let mut first = true;
+        let mut last_progress = tokio::time::Instant::now();
         let mut emitted_bytes = completed.len();
         loop {
             let timeout = if first {
                 deadline.saturating_duration_since(tokio::time::Instant::now())
             } else {
-                Duration::from_secs(120)
+                Duration::from_secs(120).saturating_sub(last_progress.elapsed())
             };
             let next = tokio::time::timeout(timeout, body.next())
                 .await
@@ -2053,11 +2120,15 @@ async fn execute_turn(
                         "idle_timeout"
                     })
                 })?;
-            first = false;
             let Some(chunk) = next else {
                 break;
             };
             let chunk = chunk.map_err(|_| TurnError::new("invalid_stream"))?;
+            // SSE comments/keepalives do not extend the useful-response deadline.
+            if chunk.windows(5).any(|bytes| bytes == b"data:") {
+                first = false;
+                last_progress = tokio::time::Instant::now();
+            }
             let decoded = decoder.push(&chunk);
             *partial = completed.clone()
                 + &context.redact(
