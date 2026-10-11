@@ -484,12 +484,16 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         display_name: agentDisplayName,
         description: z.string().trim().max(2048, "Keep the notes under 2048 characters"),
         persona: agentPersona,
+        model: z.string().optional(),
+        access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
       })
     : z.object({
         name: agentName,
         display_name: agentDisplayName,
         description: agentDescription,
         persona: agentPersona,
+        model: z.string().optional(),
+        access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
       });
 }
 export type AssistantAgentProfile = {

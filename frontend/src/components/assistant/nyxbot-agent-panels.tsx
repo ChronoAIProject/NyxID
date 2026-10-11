@@ -84,6 +84,7 @@ export function ThreadHeader({
         {handle ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
         {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
+        {onModelChange ? <select aria-label="Model" className="h-8 rounded-md border bg-background px-2 text-xs" value={model ?? ""} onChange={(e) => onModelChange(e.target.value)}><option value="">Default model</option></select> : null}
         {onOpenDetails ? (
           <Button
             size="sm"
