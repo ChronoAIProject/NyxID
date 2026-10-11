@@ -129,7 +129,7 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
         name: group.name,
         lead_agent_id: group.lead_agent_id,
         default_recipient_ids: if group.last_recipient_ids.is_empty() {
-            vec![]
+            vec![group.lead_agent_id.clone()]
         } else {
             group.last_recipient_ids.clone()
         },
