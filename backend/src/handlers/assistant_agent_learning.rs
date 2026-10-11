@@ -172,15 +172,7 @@ pub async fn edit(
         .or_else(|| body.draft.get("revision").and_then(Value::as_i64))
         .unwrap_or(0);
     let draft = normalize_edit_draft(body.revision, body.draft);
-    review::edit(
-        &state,
-        &owner,
-        &agent_id,
-        &proposal_id,
-        revision,
-        &draft,
-    )
-    .await?;
+    review::edit(&state, &owner, &agent_id, &proposal_id, revision, &draft).await?;
     Ok(Json(json!({"status": "updated"})))
 }
 

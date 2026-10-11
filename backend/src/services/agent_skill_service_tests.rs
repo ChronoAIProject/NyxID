@@ -638,10 +638,20 @@ async fn disabled_pins_are_omitted_from_prompt_instructions() {
     .unwrap();
     let mut toggled = reader.reference();
     toggled.disabled = true;
-    let toggled_selection = Selection { expected_revision: 1, skills: vec![toggled] };
-    set(&f.state.db, &reader, &f.owner, &f.chat.agent_id, &toggled_selection, true)
-        .await
-        .expect("disabling an existing pin must not require a re-preview");
+    let toggled_selection = Selection {
+        expected_revision: 1,
+        skills: vec![toggled],
+    };
+    set(
+        &f.state.db,
+        &reader,
+        &f.owner,
+        &f.chat.agent_id,
+        &toggled_selection,
+        true,
+    )
+    .await
+    .expect("disabling an existing pin must not require a re-preview");
     let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
         .await
         .unwrap();
@@ -670,6 +680,9 @@ async fn disabled_pins_are_inaccessible_to_skill_read() {
     agent.skills = vec![reader.reference()];
     assert!(read(&reader, &agent, ID, None, "/", 0).await.is_ok());
     agent.skills[0].disabled = true;
-    assert!(matches!(read(&reader, &agent, ID, None, "/", 0).await, Err(AppError::Forbidden(_))));
+    assert!(matches!(
+        read(&reader, &agent, ID, None, "/", 0).await,
+        Err(AppError::Forbidden(_))
+    ));
     f.state.db.drop().await.unwrap();
 }

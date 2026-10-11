@@ -34,7 +34,15 @@ mod tests {
 
     #[test]
     fn catalog_reference_omits_default_disabled_wire_field() {
-        let reference = SkillReference { source: "ornn".into(), skill_id: "s".into(), name: "n".into(), version: "1.0".into(), sha256: "h".into(), dependencies: vec![], disabled: false };
+        let reference = SkillReference {
+            source: "ornn".into(),
+            skill_id: "s".into(),
+            name: "n".into(),
+            version: "1.0".into(),
+            sha256: "h".into(),
+            dependencies: vec![],
+            disabled: false,
+        };
         let value = serde_json::to_value(reference).unwrap();
         assert!(value.get("disabled").is_none());
     }
