@@ -1,6 +1,7 @@
 use crate::models::{assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME}, assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGE_COLLECTION}, assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME}};
 use mongodb::{bson::doc, Database};
 use serde::Serialize;
+use futures::TryStreamExt;
 
 #[derive(Debug, Serialize)]
 pub struct AdminCount { pub day: String, pub up: i64, pub down: i64 }
@@ -12,9 +13,9 @@ pub async fn admin_counts(db: &Database, filter: mongodb::bson::Document) -> mon
     while let Some(row) = cursor.try_next().await? {
         let Ok(id) = row.get_document("_id") else { continue };
         let Ok(day_value) = id.get_str("day") else { continue };
-        let day = day_value.to_string();
+        let day: String = day_value.to_owned();
         let Ok(vote) = id.get_str("vote") else { continue };
-        let count = row.get_i64("count").unwrap_or(0);
+        let count: i64 = row.get_i64("count").unwrap_or(0);
         let entry = out.entry(day.clone()).or_insert(AdminCount { day, up: 0, down: 0 });
         if vote == "up" { entry.up += count; } else { entry.down += count; }
     }
