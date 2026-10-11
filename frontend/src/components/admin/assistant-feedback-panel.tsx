@@ -1,12 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api-client";
 
 type FeedbackAdmin = { counts: readonly { day: string; up: number; down: number }[]; recent: readonly { message_id: string; vote: string; comment?: string | null; created_at: string; }[]; next_cursor?: string | null };
 export function AssistantFeedbackPanel() {
-  const query = useQuery({ queryKey: ["admin", "assistant-feedback"], queryFn: () => api.get<FeedbackAdmin>("/admin/assistant/feedback") });
-  if (query.isLoading) return <div className="rounded-xl border border-border/50 bg-card p-4 text-12 text-muted-foreground">Loading assistant feedback…</div>;
-  if (query.isError) return null;
-  const data = query.data;
+  const [data, setData] = useState<FeedbackAdmin>();
+  useEffect(() => { void api.get<FeedbackAdmin>("/admin/assistant/feedback").then(setData).catch(() => undefined); }, []);
+  if (!data) return null;
   return <section aria-labelledby="assistant-feedback-heading" className="mb-6 rounded-xl border border-border/50 bg-card p-4">
     <h2 id="assistant-feedback-heading" className="text-15 font-semibold">Assistant reply feedback</h2>
     <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">{data?.counts.slice(0, 4).map((row) => <div key={row.day} className="rounded-lg bg-overlay p-3 text-center"><div className="text-11 text-muted-foreground">{row.day}</div><div className="mt-1 text-13">👍 {row.up} · 👎 {row.down}</div></div>)}</div>
