@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NyxAgentTransport, CONTEXT_RESET_NOTICE, storedError } from "./nyxagent-transport";
+import { NyxAgentTransport, CONTEXT_RESET_NOTICE, storedError, contextResetCopy } from "./nyxagent-transport";
 import { transitionAssistantIdentity } from "./identity";
 import { assistantChatSurface } from "./conversation-ids";
 import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
@@ -24,6 +24,10 @@ it("keeps a persisted diagnostic detail visible after reload", () => {
   const detail = { stage: "stream", http_status: 502, upstream_request_id: "req-1", response_id: "resp-1", continuations: 2, turn_id: "turn-1", occurred_at: start };
   expect(detail.turn_id).toBe("turn-1");
   expect(detail.upstream_request_id).toBe("req-1");
+});
+
+it.each([["turn_failed", "previous turn failed"], ["memory_updated", "new note"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
+  expect(contextResetCopy(reason)).toContain(text);
 });
 
 function conversation(key = id): NyxAgentConversation {

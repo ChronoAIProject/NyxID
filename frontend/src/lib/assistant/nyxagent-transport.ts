@@ -98,6 +98,17 @@ export function storedError(code: string | null): string {
   return "The assistant could not complete this turn.";
 }
 
+export function contextResetCopy(reason: string | null | undefined): string {
+  switch (reason) {
+    case "turn_failed": return "The previous turn failed; completed actions were preserved for review.";
+    case "memory_updated": return "Memory was updated; the next turn will use the new note.";
+    case "instructions_changed": return "Instructions changed; the assistant context was refreshed.";
+    case "stopped": return "The turn was stopped; review pending actions before retrying.";
+    case "user_reset": return "You reset the working context.";
+    default: return "Context was refreshed; review the working context before continuing.";
+  }
+}
+
 function active(row: NyxAgentConversation | undefined): boolean {
   return Boolean(row?.active_turn);
 }
