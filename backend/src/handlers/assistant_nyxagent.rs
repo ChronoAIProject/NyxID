@@ -904,6 +904,9 @@ pub async fn delete(
 pub struct ModelResponse {
     id: String,
     label: String,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 type ModelCache = HashMap<String, (Instant, Vec<ModelResponse>)>;
 static MODELS: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -962,6 +965,8 @@ pub async fn models(
             .map(|id| ModelResponse {
                 id: id.into(),
                 label: id.trim_start_matches("nyxagent/").into(),
+                available: true,
+                description: None,
             })
             .collect();
         if rows.is_empty() {
@@ -974,6 +979,8 @@ pub async fn models(
         return Ok(Json(vec![ModelResponse {
             id: engine::DEFAULT_MODEL.into(),
             label: "chat".into(),
+            available: true,
+            description: None,
         }]));
     };
     let mut cache = MODELS.lock().await;
