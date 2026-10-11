@@ -40,6 +40,37 @@ fn long_tool_call_keepalives_use_no_progress_bound() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn keepalives_for_300_seconds_then_text_complete_before_no_progress_timeout() {
+    tokio::time::advance(std::time::Duration::from_secs(300)).await;
+    assert!(
+        stream_timeout(false, std::time::Duration::ZERO, std::time::Duration::ZERO)
+            > std::time::Duration::ZERO
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn keepalive_only_beyond_no_progress_bound_reports_idle_timeout() {
+    tokio::time::advance(std::time::Duration::from_secs(611)).await;
+    assert_eq!(
+        stream_timeout(
+            false,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(611)
+        ),
+        std::time::Duration::ZERO
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_mcp_activity_resets_semantic_progress_and_does_not_idle() {
+    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    assert!(
+        stream_timeout(false, std::time::Duration::ZERO, std::time::Duration::ZERO)
+            > std::time::Duration::ZERO
+    );
+}
+
 #[test]
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
