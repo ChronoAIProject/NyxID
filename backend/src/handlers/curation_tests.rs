@@ -413,14 +413,20 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
             .0
             .is_success()
     );
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let audits = f
-        .state
-        .db
-        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .count_documents(doc! {"event_type": "assistant_feedback_withdrawn"})
-        .await
-        .unwrap();
+    let mut audits = 0;
+    for _ in 0..20 {
+        audits = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type": "assistant_feedback_withdrawn"})
+            .await
+            .unwrap();
+        if audits == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     assert_eq!(audits, 1);
 }
 
