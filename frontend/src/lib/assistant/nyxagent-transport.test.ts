@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NyxAgentTransport, CONTEXT_RESET_NOTICE } from "./nyxagent-transport";
 import { transitionAssistantIdentity } from "./identity";
 import { assistantChatSurface } from "./conversation-ids";
-import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
+import type {
+  NyxAgentConversation,
+  NyxAgentHistory,
+} from "@/schemas/assistant-nyxagent";
 
 const id = `nyxa-${"1".repeat(32)}`;
 const other = `nyxa-${"2".repeat(32)}`;
@@ -41,7 +44,8 @@ function history(): NyxAgentHistory {
         status: "completed",
         error_code: null,
         created_at: start,
-        activities: [], attachments: [],
+        activities: [],
+        attachments: [],
       },
       {
         id: "a",
@@ -52,7 +56,8 @@ function history(): NyxAgentHistory {
         status: "completed",
         error_code: null,
         created_at: afterReset,
-        activities: [], attachments: [],
+        activities: [],
+        attachments: [],
       },
     ],
     before_seq: null,
@@ -70,7 +75,12 @@ const json = (value: unknown, status = 200) =>
 
 function stream(): Response {
   const events = [
-    { event: "turn.status", conversation_id: id, turn_id: "turn", status: "running" },
+    {
+      event: "turn.status",
+      conversation_id: id,
+      turn_id: "turn",
+      status: "running",
+    },
     { event: "message.started", message_id: "a", role: "assistant" },
     {
       event: "block.started",
@@ -79,7 +89,11 @@ function stream(): Response {
       index: 0,
       block: { type: "text", block_id: "b", text: "" },
     },
-    { event: "turn.notice", code: "context_reset", message: "ignore upstream text" },
+    {
+      event: "turn.notice",
+      code: "context_reset",
+      message: "ignore upstream text",
+    },
     { event: "block.delta", block_id: "b", text: "Answer 界" },
     {
       event: "block.completed",
@@ -87,11 +101,19 @@ function stream(): Response {
       block: { type: "text", block_id: "b", text: "Answer 界" },
     },
     { event: "message.completed", message_id: "a" },
-    { event: "turn.completed", turn_id: "turn", status: "completed", error: null },
+    {
+      event: "turn.completed",
+      turn_id: "turn",
+      status: "completed",
+      error: null,
+    },
   ];
   const bytes = new TextEncoder().encode(
     events
-      .map((event, i) => `data: ${JSON.stringify({ ...event, cursor: i + 1 })}\r\n\r\n`)
+      .map(
+        (event, i) =>
+          `data: ${JSON.stringify({ ...event, cursor: i + 1 })}\r\n\r\n`,
+      )
       .join(""),
   );
   let cursor = 0;
@@ -138,7 +160,9 @@ describe("NyxAgent server-backed transport", () => {
     let sawLiveNotice = false;
     transport.subscribe(() => {
       if (transport.isRunning(id)) {
-        sawLiveNotice ||= transport.session(id).messages.some((m) => m.role === "system");
+        sawLiveNotice ||= transport
+          .session(id)
+          .messages.some((m) => m.role === "system");
       }
     });
     transport.setModel("nyxagent/research");
@@ -146,7 +170,11 @@ describe("NyxAgent server-backed transport", () => {
     expect(adopted).toHaveBeenCalledExactlyOnceWith(id);
     expect(sawLiveNotice).toBe(true);
     const messages = transport.session(id).messages;
-    expect(messages.map((m) => m.role)).toEqual(["user", "system", "assistant"]);
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "system",
+      "assistant",
+    ]);
     expect(messages[1]?.content).toBe(CONTEXT_RESET_NOTICE);
     expect(messages.at(-1)?.content).toBe("Answer 界");
     expect(transport.isRunning(id)).toBe(false);
@@ -154,7 +182,9 @@ describe("NyxAgent server-backed transport", () => {
       text: "Question",
       model: "nyxagent/research",
     });
-    expect(requests.filter((r) => r.endpoint.endsWith("/turns"))).toHaveLength(1);
+    expect(requests.filter((r) => r.endpoint.endsWith("/turns"))).toHaveLength(
+      1,
+    );
   });
 
   it.each([false, true])(
@@ -226,22 +256,26 @@ describe("NyxAgent server-backed transport", () => {
     await transport.history(id);
     await transport.history(id, 2);
     await transport.history(id);
-    expect(transport.getHistory(id)?.messages.map((m) => m.seq)).toEqual([1, 2]);
+    expect(transport.getHistory(id)?.messages.map((m) => m.seq)).toEqual([
+      1, 2,
+    ]);
     expect(transport.getHistory(id)?.before_seq).toBeNull();
   });
 
   it("marks messages the user wrote in a chat app with its platform", async () => {
     globalThis.__nyxidAssistantHttpMock = () => {
       const page = history();
-      page.messages = [{ ...page.messages[0]!, via: "telegram" }, page.messages[1]!];
+      page.messages = [
+        { ...page.messages[0]!, via: "telegram" },
+        page.messages[1]!,
+      ];
       return json(page);
     };
     const transport = new NyxAgentTransport();
     await transport.history(id);
-    expect(transport.session(id).messages.map((message) => message.via ?? null)).toEqual([
-      "telegram",
-      null,
-    ]);
+    expect(
+      transport.session(id).messages.map((message) => message.via ?? null),
+    ).toEqual(["telegram", null]);
   });
 
   it("surfaces stable HTTP errors without treating them as an expired login", async () => {
@@ -255,10 +289,12 @@ describe("NyxAgent server-backed transport", () => {
         409,
       );
     const transport = new NyxAgentTransport();
-    await expect(transport.send(id, "Question", vi.fn())).rejects.toMatchObject({
-      status: 409,
-      message: "A turn is already active",
-    });
+    await expect(transport.send(id, "Question", vi.fn())).rejects.toMatchObject(
+      {
+        status: 409,
+        message: "A turn is already active",
+      },
+    );
     expect(transport.isRunning(id)).toBe(false);
   });
 
@@ -266,18 +302,36 @@ describe("NyxAgent server-backed transport", () => {
     const requests: string[] = [];
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
       requests.push(`${init.method} ${endpoint}`);
-      if (endpoint.endsWith("/stop")) return new Response(null, { status: 204 });
+      if (endpoint.endsWith("/stop"))
+        return new Response(null, { status: 204 });
       const page = history();
       page.messages.pop();
       page.conversation.active_turn = {
         turn_id: "running",
         started_at: start,
         activities: [
-          { id: "t1", label: "nyx__search_tools", status: "completed", started_at: start, ended_at: reset },
-          { id: "t2", label: "github__list_issues", status: "running", started_at: reset, ended_at: null },
+          {
+            id: "t1",
+            label: "nyx__search_tools",
+            status: "completed",
+            started_at: start,
+            ended_at: reset,
+          },
+          {
+            id: "t2",
+            label: "github__list_issues",
+            status: "running",
+            started_at: reset,
+            ended_at: null,
+          },
         ],
         attachments: [
-          { id: "img-1", content_type: "image/jpeg", size: 10, label: "lobby-camera__snapshot" },
+          {
+            id: "img-1",
+            content_type: "image/jpeg",
+            size: 10,
+            label: "lobby-camera__snapshot",
+          },
         ],
       };
       return json(page);
@@ -289,8 +343,20 @@ describe("NyxAgent server-backed transport", () => {
     expect(session.status).toBe("streaming");
     // Tool activity recorded on the live turn is shown on the streaming placeholder.
     expect(session.messages.at(-1)?.toolCalls).toEqual([
-      { id: "t1", name: "nyx__search_tools", status: "done", startedAt: Date.parse(start), finishedAt: Date.parse(reset) },
-      { id: "t2", name: "github__list_issues", status: "running", startedAt: Date.parse(reset), finishedAt: undefined },
+      {
+        id: "t1",
+        name: "nyx__search_tools",
+        status: "done",
+        startedAt: Date.parse(start),
+        finishedAt: Date.parse(reset),
+      },
+      {
+        id: "t2",
+        name: "github__list_issues",
+        status: "running",
+        startedAt: Date.parse(reset),
+        finishedAt: undefined,
+      },
     ]);
     // Images a tool returned during the live turn show on the streaming placeholder.
     expect(session.messages.at(-1)?.images).toEqual([
@@ -303,7 +369,9 @@ describe("NyxAgent server-backed transport", () => {
     ]);
     await transport.stop(id);
     expect(requests).toHaveLength(2);
-    expect(requests[1]).toBe(`POST /assistant/nyxagent/conversations/${id}/stop`);
+    expect(requests[1]).toBe(
+      `POST /assistant/nyxagent/conversations/${id}/stop`,
+    );
   });
 
   it("clears identity caches and rejects late results for the previous owner", async () => {
@@ -324,7 +392,8 @@ describe("NyxAgent server-backed transport", () => {
   it("renames and deletes through HTTP and evicts deleted transcript state", async () => {
     globalThis.__nyxidAssistantHttpMock = ({ init }) => {
       if (init.method === "DELETE") return new Response(null, { status: 204 });
-      if (init.method === "PATCH") return json({ ...conversation(), title: "Renamed" });
+      if (init.method === "PATCH")
+        return json({ ...conversation(), title: "Renamed" });
       return json(history());
     };
     const transport = new NyxAgentTransport();
@@ -345,7 +414,9 @@ describe("NyxAgent server-backed transport", () => {
       }
       return json({ conversations: [], next_cursor: null });
     };
-    await expect(new NyxAgentTransport().send(undefined, "Question", vi.fn())).rejects.toThrow();
+    await expect(
+      new NyxAgentTransport().send(undefined, "Question", vi.fn()),
+    ).rejects.toThrow();
     expect(turns).toBe(1);
   });
 
@@ -366,14 +437,21 @@ describe("NyxAgent server-backed transport", () => {
                 turn_id: "turn",
                 status: "running",
               };
-              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+              controller.enqueue(
+                new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+              );
             },
             cancel: cancelled,
           }),
         );
       }
       const page = history();
-      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+      page.conversation.active_turn = {
+        turn_id: "turn",
+        started_at: start,
+        activities: [],
+        attachments: [],
+      };
       return endpoint.includes(`/conversations/${id}`)
         ? json(page)
         : json({ conversations: [page.conversation], next_cursor: null });
@@ -381,12 +459,16 @@ describe("NyxAgent server-backed transport", () => {
     try {
       const transport = new NyxAgentTransport();
       const pending = transport.send(id, "Question", vi.fn());
-      const rejected = expect(pending).rejects.toThrow("connection was interrupted");
+      const rejected = expect(pending).rejects.toThrow(
+        "connection was interrupted",
+      );
       await vi.advanceTimersByTimeAsync(135_001);
       await rejected;
       expect(cancelled).toHaveBeenCalledOnce();
       expect(transport.isRunning(id)).toBe(true);
-      expect(requests.filter((path) => path.endsWith("/turns"))).toHaveLength(1);
+      expect(requests.filter((path) => path.endsWith("/turns"))).toHaveLength(
+        1,
+      );
       expect(requests.some((path) => path.endsWith("/stop"))).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -419,16 +501,25 @@ describe("NyxAgent server-backed transport", () => {
 
   it("retains the uncertain-outcome warning when restoring a failed transcript", async () => {
     const page = history();
-    page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "outcome_unknown" };
+    page.messages[1] = {
+      ...page.messages[1]!,
+      status: "failed",
+      error_code: "outcome_unknown",
+    };
     globalThis.__nyxidAssistantHttpMock = () => json(page);
     const transport = new NyxAgentTransport();
     await transport.history(id);
-    expect(transport.session(id).messages.at(-1)?.error).toContain("may have taken effect");
+    expect(transport.session(id).messages.at(-1)?.error).toContain(
+      "may have taken effect",
+    );
   });
 
   it("detects repeated index cursors", async () => {
-    globalThis.__nyxidAssistantHttpMock = () => json({ conversations: [], next_cursor: "same" });
-    await expect(new NyxAgentTransport().list()).rejects.toThrow("Invalid assistant pagination");
+    globalThis.__nyxidAssistantHttpMock = () =>
+      json({ conversations: [], next_cursor: "same" });
+    await expect(new NyxAgentTransport().list()).rejects.toThrow(
+      "Invalid assistant pagination",
+    );
   });
 });
 
@@ -525,8 +616,12 @@ it("keeps pending cards at the tail and decided cards beside the turn that reque
     `nyxagent-acknowledgement:${ack.id}`,
     "a",
   ]);
-  expect(transport.getHistory(id)?.conversation.pending_acknowledgements).toBe(0);
-  expect(transport.session(id).messages.filter((m) => m.role === "user")).toHaveLength(1);
+  expect(transport.getHistory(id)?.conversation.pending_acknowledgements).toBe(
+    0,
+  );
+  expect(
+    transport.session(id).messages.filter((m) => m.role === "user"),
+  ).toHaveLength(1);
 });
 
 it("does not adopt another identity's decision response", async () => {
@@ -552,7 +647,10 @@ it("never sends an access mode: every chat runs with Full access", async () => {
       return json({ conversations: [conversation()], next_cursor: null });
     }
     // Older servers still echo the retired field; it is ignored.
-    return json({ ...history(), conversation: { ...conversation(), access_mode: "full" } });
+    return json({
+      ...history(),
+      conversation: { ...conversation(), access_mode: "full" },
+    });
   };
   await transport.send(undefined, "Full draft", vi.fn());
   expect(requests.find((r) => r.method === "POST")?.body).toEqual({
@@ -570,7 +668,12 @@ it("never sends an access mode: every chat runs with Full access", async () => {
 });
 
 describe("NyxBot agents", () => {
-  const NYXBOT = { id: "agent-nyxbot", kind: "nyxbot" as const, name: "NyxBot", destroyed: false };
+  const NYXBOT = {
+    id: "agent-nyxbot",
+    kind: "nyxbot" as const,
+    name: "NyxBot",
+    destroyed: false,
+  };
   const RESEARCHER = {
     id: "agent-researcher",
     kind: "specialist" as const,
@@ -578,7 +681,10 @@ describe("NyxBot agents", () => {
     destroyed: false,
   };
   const sub = `nyxa-${"3".repeat(32)}`;
-  const thread = (key: string, agent: typeof NYXBOT | typeof RESEARCHER): NyxAgentConversation => ({
+  const thread = (
+    key: string,
+    agent: typeof NYXBOT | typeof RESEARCHER,
+  ): NyxAgentConversation => ({
     ...conversation(key),
     agent,
     role: agent.kind === "specialist" ? "subagent" : "orchestrator",
@@ -589,7 +695,11 @@ describe("NyxBot agents", () => {
       ...page,
       conversation: { ...thread(sub, RESEARCHER), title: "researcher" },
       messages: [
-        { ...page.messages[0]!, role: "orchestrator", text: "Find urgent issues" },
+        {
+          ...page.messages[0]!,
+          role: "orchestrator",
+          text: "Find urgent issues",
+        },
         { ...page.messages[1]!, text: "Found three" },
         {
           ...page.messages[0]!,
@@ -620,12 +730,18 @@ describe("NyxBot agents", () => {
       "/assistant/nyxagent/conversations?limit=100&agent_id=agent-nyxbot",
       "/assistant/nyxagent/conversations?limit=100&agent_id=agent-researcher",
     ]);
-    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([id]);
-    expect(transport.getConversations(RESEARCHER.id).map((row) => row.id)).toEqual([sub]);
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([
+      id,
+    ]);
+    expect(
+      transport.getConversations(RESEARCHER.id).map((row) => row.id),
+    ).toEqual([sub]);
     researcherThreads = [];
     await transport.list(RESEARCHER.id);
     expect(transport.getConversations(RESEARCHER.id)).toEqual([]);
-    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([id]);
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([
+      id,
+    ]);
   });
 
   it("keeps orchestrator and event roles while the user talks to a specialist", async () => {
@@ -638,7 +754,10 @@ describe("NyxBot agents", () => {
         return stream();
       }
       if (endpoint.includes("/conversations?")) {
-        return json({ conversations: [thread(sub, RESEARCHER)], next_cursor: null });
+        return json({
+          conversations: [thread(sub, RESEARCHER)],
+          next_cursor: null,
+        });
       }
       return json(specialistHistory());
     };
@@ -650,11 +769,12 @@ describe("NyxBot agents", () => {
     ]);
     const sending = transport.send(sub, "Continue", vi.fn());
     await vi.waitFor(() => expect(transport.isRunning(sub)).toBe(true));
-    expect(transport.session(sub).messages.slice(0, 3).map((m) => m.role)).toEqual([
-      "orchestrator",
-      "assistant",
-      "event",
-    ]);
+    expect(
+      transport
+        .session(sub)
+        .messages.slice(0, 3)
+        .map((m) => m.role),
+    ).toEqual(["orchestrator", "assistant", "event"]);
     release();
     await sending.catch(() => undefined);
   });
@@ -671,16 +791,27 @@ describe("NyxBot agents", () => {
         return stream();
       }
       if (endpoint.includes("/conversations?")) {
-        return json({ conversations: [thread(id, RESEARCHER)], next_cursor: null });
+        return json({
+          conversations: [thread(id, RESEARCHER)],
+          next_cursor: null,
+        });
       }
       return json({ ...history(), conversation: thread(id, RESEARCHER) });
     };
-    const sending = transport.send(undefined, "Hello", vi.fn(), undefined, { agent: RESEARCHER });
+    const sending = transport.send(undefined, "Hello", vi.fn(), undefined, {
+      agent: RESEARCHER,
+    });
     await vi.waitFor(() => expect(bodies).toHaveLength(1));
-    expect(bodies[0]).toEqual({ model: "nyxagent/chat", agent_id: RESEARCHER.id, text: "Hello" });
+    expect(bodies[0]).toEqual({
+      model: "nyxagent/chat",
+      agent_id: RESEARCHER.id,
+      text: "Hello",
+    });
     release();
     await sending;
-    expect(transport.getConversations(RESEARCHER.id).map((row) => row.id)).toEqual([id]);
+    expect(
+      transport.getConversations(RESEARCHER.id).map((row) => row.id),
+    ).toEqual([id]);
   });
 
   it("keeps the agent and pending counts when a rename returns a bare row", async () => {
@@ -691,7 +822,9 @@ describe("NyxBot agents", () => {
       }
       if (endpoint.includes("/conversations?")) {
         return json({
-          conversations: [{ ...thread(id, NYXBOT), pending_acknowledgements: 2 }],
+          conversations: [
+            { ...thread(id, NYXBOT), pending_acknowledgements: 2 },
+          ],
           next_cursor: null,
         });
       }
@@ -717,7 +850,10 @@ describe("NyxBot agents", () => {
         });
       }
       if (endpoint.includes("/conversations?")) {
-        return json({ conversations: [thread(sub, RESEARCHER)], next_cursor: null });
+        return json({
+          conversations: [thread(sub, RESEARCHER)],
+          next_cursor: null,
+        });
       }
       return json(specialistHistory());
     };
@@ -725,10 +861,14 @@ describe("NyxBot agents", () => {
     await transport.list(RESEARCHER.id);
     await transport.history(sub);
     await transport.delete(id);
-    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([other]);
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([
+      other,
+    ]);
     transport.forgetAgent(RESEARCHER.id);
     expect(transport.getConversation(sub)).toBeUndefined();
-    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([other]);
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([
+      other,
+    ]);
   });
 });
 
@@ -738,10 +878,21 @@ it("retains a settled reply's tool activity as done tool calls", async () => {
     page.messages[1] = {
       ...page.messages[1]!,
       activities: [
-        { id: "t1", label: "nyxid__list_agent_keys", status: "error", started_at: start, ended_at: reset },
+        {
+          id: "t1",
+          label: "nyxid__list_agent_keys",
+          status: "error",
+          started_at: start,
+          ended_at: reset,
+        },
       ],
       attachments: [
-        { id: "img-2", content_type: "image/png", size: 4, label: "frigate__latest" },
+        {
+          id: "img-2",
+          content_type: "image/png",
+          size: 4,
+          label: "frigate__latest",
+        },
       ],
     };
     return json(page);
@@ -760,14 +911,25 @@ it("retains a settled reply's tool activity as done tool calls", async () => {
     },
   ]);
   expect(session.messages[1]?.toolCalls).toEqual([
-    { id: "t1", name: "nyxid__list_agent_keys", status: "error", startedAt: Date.parse(start), finishedAt: Date.parse(reset) },
+    {
+      id: "t1",
+      name: "nyxid__list_agent_keys",
+      status: "error",
+      startedAt: Date.parse(start),
+      finishedAt: Date.parse(reset),
+    },
   ]);
 });
 
 it("shows pending proxy approvals raised by the chat key as cards at the tail", async () => {
   globalThis.__nyxidAssistantHttpMock = () => {
     const page = history();
-    page.conversation.active_turn = { turn_id: "running", started_at: start, activities: [], attachments: [] };
+    page.conversation.active_turn = {
+      turn_id: "running",
+      started_at: start,
+      activities: [],
+      attachments: [],
+    };
     page.approvals = [
       {
         id: "req-1",
@@ -789,15 +951,30 @@ it("shows pending proxy approvals raised by the chat key as cards at the tail", 
   expect(card?.id).toBe("nyxagent-approval:req-1");
   expect(card?.role).toBe("system");
   expect(card?.content).toBe("GET /user");
-  expect(transport.getHistory(id)?.approvals[0]?.approval_mode).toBe("per_request");
+  expect(transport.getHistory(id)?.approvals[0]?.approval_mode).toBe(
+    "per_request",
+  );
 });
 
 it("optimistically renames during a turn and rolls back on failure without losing activity", async () => {
   let finish!: (response: Response) => void;
-  const activeRow = { ...conversation(), active_turn: { turn_id: "running", started_at: start, stop_requested: false, continuations: 0, activities: [], attachments: [] } };
-  globalThis.__nyxidAssistantHttpMock = ({ init }) => init.method === "PATCH"
-    ? new Promise<Response>((resolve) => { finish = resolve; })
-    : json({ ...history(), conversation: activeRow });
+  const activeRow = {
+    ...conversation(),
+    active_turn: {
+      turn_id: "running",
+      started_at: start,
+      stop_requested: false,
+      continuations: 0,
+      activities: [],
+      attachments: [],
+    },
+  };
+  globalThis.__nyxidAssistantHttpMock = ({ init }) =>
+    init.method === "PATCH"
+      ? new Promise<Response>((resolve) => {
+          finish = resolve;
+        })
+      : json({ ...history(), conversation: activeRow });
   const transport = new NyxAgentTransport();
   await transport.history(id);
   const pending = transport.rename(id, "My chosen title");
@@ -816,45 +993,121 @@ describe("steering transport", () => {
     const seen: { endpoint: string; body?: BodyInit | null }[] = [];
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
       seen.push({ endpoint, body: init.body });
-      if (endpoint.endsWith("/steer")) return json({ error: "response_mismatch", message: "Refresh turn" }, 409);
+      if (endpoint.endsWith("/steer"))
+        return json(
+          { error: "response_mismatch", message: "Refresh turn" },
+          409,
+        );
       return json(history());
     };
     const transport = new NyxAgentTransport();
-    await expect(transport.steer(id, "Guidance", "turn", "stable-request")).rejects.toThrow("Refresh turn");
-    expect(JSON.parse(String(seen[0]?.body))).toEqual({ text: "Guidance", turn_id: "turn", clientRequestId: "stable-request" });
+    await expect(
+      transport.steer(id, "Guidance", "turn", "stable-request"),
+    ).rejects.toThrow("Refresh turn");
+    expect(JSON.parse(String(seen[0]?.body))).toEqual({
+      text: "Guidance",
+      turn_id: "turn",
+      clientRequestId: "stable-request",
+    });
     expect(seen).toHaveLength(2);
     expect(transport.getHistory(id)?.messages).toHaveLength(2);
   });
 
   it("merges a steer once during a live stream and preserves its label during a later turn", async () => {
     const page = history();
-    const receipt = { client_request_id: "guidance", outcome: "applied" as const, code: null };
-    page.messages.splice(1, 0, { ...page.messages[0]!, id: "steer", seq: 2, text: "Direction", steering: receipt });
+    const receipt = {
+      client_request_id: "guidance",
+      outcome: "applied" as const,
+      code: null,
+    };
+    page.messages.splice(1, 0, {
+      ...page.messages[0]!,
+      id: "steer",
+      seq: 2,
+      text: "Direction",
+      steering: receipt,
+    });
     page.messages[2] = { ...page.messages[2]!, seq: 3 };
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
     globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
-      if (endpoint.endsWith("/turns")) return new Response(new ReadableStream({ start(c) { controller = c; } }), { headers: { "content-type": "text/event-stream" } });
+      if (endpoint.endsWith("/turns"))
+        return new Response(
+          new ReadableStream({
+            start(c) {
+              controller = c;
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
       return json(page);
     };
     const transport = new NyxAgentTransport();
     await transport.history(id);
     const sending = transport.send(id, "Next question", vi.fn());
     await vi.waitFor(() => expect(controller).toBeDefined());
-    const emit = (event: object) => controller!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
-    emit({ cursor: 1, event: "turn.status", conversation_id: id, turn_id: "next", status: "running" });
+    const emit = (event: object) =>
+      controller!.enqueue(
+        new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+      );
+    emit({
+      cursor: 1,
+      event: "turn.status",
+      conversation_id: id,
+      turn_id: "next",
+      status: "running",
+    });
     await vi.waitFor(() => expect(transport.getActiveTurnId(id)).toBe("next"));
-    page.conversation.active_turn = { turn_id: "next", started_at: start, steering_allowed: true, response_id: "resp_next", stop_requested: false, activities: [], attachments: [] };
-    page.messages.push({ ...page.messages[0]!, id: "new-steer", seq: 4, turn_id: "next", text: "New direction", steering: { ...receipt, client_request_id: "new" } });
+    page.conversation.active_turn = {
+      turn_id: "next",
+      started_at: start,
+      steering_allowed: true,
+      response_id: "resp_next",
+      stop_requested: false,
+      activities: [],
+      attachments: [],
+    };
+    page.messages.push({
+      ...page.messages[0]!,
+      id: "new-steer",
+      seq: 4,
+      turn_id: "next",
+      text: "New direction",
+      steering: { ...receipt, client_request_id: "new" },
+    });
     await transport.history(id);
     await transport.history(id);
     const session = transport.session(id);
     expect(session.messages.filter((m) => m.steering)).toHaveLength(2);
-    expect(session.messages.find((m) => m.id === "steer")?.steering).toEqual(receipt);
+    expect(session.messages.find((m) => m.id === "steer")?.steering).toEqual(
+      receipt,
+    );
     expect(session.expectedTurnCount).toBe(2);
-    expect(transport.getConversation(id)?.active_turn?.response_id).toBe("resp_next");
+    expect(transport.getConversation(id)?.active_turn?.response_id).toBe(
+      "resp_next",
+    );
     page.conversation.active_turn = null;
-    emit({ cursor: 2, event: "turn.completed", turn_id: "next", status: "completed", error: null });
+    emit({
+      cursor: 2,
+      event: "turn.completed",
+      turn_id: "next",
+      status: "completed",
+      error: null,
+    });
     controller!.close();
     await sending;
   });
+});
+
+it("maps cancelled replies to an error state so feedback stays ineligible", () => {
+  const message = {
+    id: "cancelled",
+    role: "assistant",
+    text: "stopped",
+    status: "failed",
+    error_code: "cancelled",
+    created_at: new Date().toISOString(),
+    activities: [],
+    attachments: [],
+  } as never;
+  expect(message.error_code).toBe("cancelled");
 });

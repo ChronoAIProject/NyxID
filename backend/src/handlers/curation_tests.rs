@@ -219,6 +219,89 @@ async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn feedback_put_change_withdraw_and_ineligible_reply() {
+    let f = fixture("feedback-b5-behavior", false).await;
+    let conversation_id = "b5-conversation";
+    let message_id = "b5-reply";
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "b5-turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
+    assert!(
+        request(
+            &f.state,
+            "PUT",
+            &path,
+            &f.human_token,
+            Some(json!({"vote":"up","comment":"kept"}))
+        )
+        .await
+        .0
+        .is_success()
+    );
+    assert!(
+        request(
+            &f.state,
+            "PUT",
+            &path,
+            &f.human_token,
+            Some(json!({"vote":"down"}))
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let row = f
+        .state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .find_one(doc! {"message_id": message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.vote, "down");
+    assert_eq!(row.comment.as_deref(), Some("kept"));
+    assert!(
+        request(&f.state, "DELETE", &path, &f.human_token, None)
+            .await
+            .0
+            .is_success()
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantMessageFeedback>(FEEDBACK)
+            .count_documents(doc! {"message_id": message_id})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     catalog_skill_service::ensure_indexes(&db).await.unwrap();

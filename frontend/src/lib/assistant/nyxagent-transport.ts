@@ -427,7 +427,7 @@ export class NyxAgentTransport {
     const live = this.live.get(id ?? "draft");
     const conversation = live?.conversation ?? history?.conversation ?? this.index.get(id ?? "");
     let messages: ChatMessage[] = (history?.messages ?? []).map((message) => {
-      const failed = message.status === "failed" && message.error_code !== "cancelled";
+      const failed = message.status === "failed";
       return {
         id: message.id,
         feedback: message.feedback ?? undefined,
