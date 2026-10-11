@@ -578,7 +578,7 @@ pub async fn admin_release_target(
 
 #[cfg(test)]
 mod tests {
-    use super::EditBody;
+    use super::{EditBody, ValidateBody};
     use serde_json::json;
 
     #[test]
