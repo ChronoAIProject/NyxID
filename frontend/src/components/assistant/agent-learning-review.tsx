@@ -16,6 +16,11 @@ function requestFailure(cause: unknown): string {
     : "The request could not be completed. Check the proposal and try again.";
 }
 
+function diagnostics(cause: unknown): Array<{ rule: string; field: string; line?: number; remediation?: string }> {
+  const value = cause as { diagnostics?: unknown } | null;
+  return Array.isArray(value?.diagnostics) ? value.diagnostics.filter((item): item is { rule: string; field: string; line?: number; remediation?: string } => Boolean(item && typeof item === "object" && "rule" in item && "field" in item)) : [];
+}
+
 export function AgentLearningReview({
   agentId,
   readOnly = false,
@@ -82,9 +87,10 @@ export function AgentLearningReview({
       {[review.run.error, review.configure.error, review.consent?.error, review.edit.error, review.approve.error, review.reject.error]
         .filter(Boolean)
         .map((error, index) => (
-          <p key={index} role="alert" className="text-12 text-destructive">
-            {requestFailure(error)}
-          </p>
+          <div key={index} role="alert" className="text-12 text-destructive">
+            <p>{requestFailure(error)}</p>
+            {diagnostics(error).map((item) => <p key={`${item.rule}-${item.field}-${item.line ?? 0}`}>{item.field}{item.line ? `:${item.line}` : ""} ({item.rule}): {item.remediation ?? "update this field"}</p>)}
+          </div>
         ))}
 
       {!readOnly ? (
@@ -211,7 +217,7 @@ export function AgentLearningReview({
                 <Input
                   aria-label="Base skill"
                   placeholder="Base skill id@version (optional)"
-                  value={draftBases[proposal.id] ?? (draft.base_skill ? `${draft.base_skill.skill_id}@${draft.base_skill.version}` : "")}
+                  value={draftBases[proposal.id] ?? (draft.base_skill && typeof draft.base_skill === "object" && "skill_id" in draft.base_skill && "version" in draft.base_skill ? `${String(draft.base_skill.skill_id)}@${String(draft.base_skill.version)}` : "")}
                   readOnly={readOnly}
                   onChange={(event) => setDraftBases((current) => ({ ...current, [proposal.id]: event.target.value }))}
                 />
@@ -371,11 +377,11 @@ export function AgentLearningReview({
                 </Button>
               ) : null}
             </div>
-            {card && proposal.source !== "authored" && !checkOnly ? (
+              {card && proposal.source !== "authored" && !checkOnly ? (
               <p className="text-11 text-warning">
-                Confirming this exact card will publish the private skill and
-                attach its pinned version. The card expires if the draft or
-                agent changes.
+                This is a two-step approval: first request the owner confirmation
+                card, then confirm that exact card to publish and attach the
+                pinned version. The card expires if the draft or agent changes.
               </p>
             ) : null}
           </article>

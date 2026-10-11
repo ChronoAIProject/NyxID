@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Plus, RefreshCw, Search } from "lucide-react";
+import { ArrowRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -159,40 +159,6 @@ function PluginCard({
           {actionLabel}
           {interactive && <ArrowRight className="h-3 w-3" />}
         </span>
-      </div>
-    </div>
-  );
-}
-
-function AddYourOwnSkillCard() {
-  return (
-    <div
-      className={`flex ${CARD_HEIGHT} flex-col gap-2.5 rounded-xl border border-dashed border-border p-4`}
-    >
-      <div className="flex items-start gap-2.5">
-        <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-          <Plus className="h-3.5 w-3.5" />
-        </div>
-        <div className="min-w-0">
-          <p className="text-13 font-medium text-foreground">
-            Add your own skill
-          </p>
-          <p className="text-10 uppercase tracking-[0.5px] text-text-tertiary">
-            Skill
-          </p>
-        </div>
-      </div>
-      <p className="flex-1 text-12 leading-[17px] text-muted-foreground line-clamp-3">
-        Register a skill from a Git repo or paste a SKILL.md - your assistant
-        loads it on demand in every chat.
-      </p>
-      <div className="flex shrink-0 items-center justify-between gap-2">
-        <span className="font-mono text-10 text-text-tertiary">
-          git url or upload
-        </span>
-        <Button type="button" variant="outline" size="sm" disabled>
-          Add skill
-        </Button>
       </div>
     </div>
   );
