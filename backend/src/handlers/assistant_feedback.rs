@@ -105,12 +105,6 @@ async fn upsert(
     }
     let now = Utc::now();
     let mut filter = doc! {"user_id":&user_id,"message_id":message_id};
-    if let Some(cid) = conversation_id.as_deref() {
-        filter.insert("conversation_id", cid);
-    }
-    if let Some(gid) = group_id.as_deref() {
-        filter.insert("group_id", gid);
-    }
     let existing = state
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
