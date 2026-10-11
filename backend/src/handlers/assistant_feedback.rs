@@ -437,3 +437,12 @@ mod tests {
         assert!(json.get("message_id").is_none());
     }
 }
+
+#[cfg(test)]
+mod input_tests {
+    use super::sanitize_comment;
+    #[test]
+    fn sanitize_comment_strips_controls_and_bidi() {
+        assert_eq!(sanitize_comment("ok\u{0007}\u{202e}text"), "oktext");
+    }
+}
