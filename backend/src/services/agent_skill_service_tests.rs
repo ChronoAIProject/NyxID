@@ -630,3 +630,14 @@ async fn disabled_pins_are_omitted_from_prompt_instructions() {
     assert!(instructions(&agent).is_empty());
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn disabled_pins_are_inaccessible_to_skill_read() {
+    let f = fixture("agent_skill_disabled_read").await;
+    let reader = Registry::new();
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id).await.unwrap();
+    agent.skills = vec![reader.reference()];
+    agent.skills[0].disabled = true;
+    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_err());
+    f.state.db.drop().await.unwrap();
+}
