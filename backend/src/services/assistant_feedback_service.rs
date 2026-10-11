@@ -10,9 +10,10 @@ pub async fn admin_counts(db: &Database, filter: mongodb::bson::Document) -> mon
     let mut cursor = db.collection::<AssistantMessageFeedback>(COLLECTION_NAME).aggregate(pipeline).await?;
     let mut out = std::collections::BTreeMap::<String, AdminCount>::new();
     while let Some(row) = cursor.try_next().await? {
-        let id = row.get_document("_id")?;
-        let day = id.get_str("day")?.to_string();
-        let vote = id.get_str("vote")?;
+        let Ok(id) = row.get_document("_id") else { continue };
+        let Ok(day_value) = id.get_str("day") else { continue };
+        let day = day_value.to_string();
+        let Ok(vote) = id.get_str("vote") else { continue };
         let count = row.get_i64("count").unwrap_or(0);
         let entry = out.entry(day.clone()).or_insert(AdminCount { day, up: 0, down: 0 });
         if vote == "up" { entry.up += count; } else { entry.down += count; }
