@@ -178,8 +178,16 @@ pub struct AdminQuery {
 #[derive(Serialize)]
 pub struct AdminResponse {
     pub counts: Vec<serde_json::Value>,
-    pub recent: Vec<AssistantMessageFeedback>,
+    pub recent: Vec<AdminFeedbackRow>,
     pub next_cursor: Option<String>,
+}
+#[derive(Serialize)]
+pub struct AdminFeedbackRow {
+    pub message_id: String,
+    pub vote: String,
+    pub comment: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 pub async fn admin(
     State(state): State<AppState>,
@@ -203,14 +211,19 @@ pub async fn admin(
             b.insert("$lte", bson::DateTime::from_chrono(t));
         }
     }
-    if let Some(cursor) = q.cursor.as_deref()
-        && let Ok(dt) = DateTime::parse_from_rfc3339(cursor)
-    {
-        filter.insert(
-            "created_at",
-            doc! {"$lt": bson::DateTime::from_chrono(dt.with_timezone(&Utc))},
-        );
+    if let Some(cursor) = q.cursor.as_deref() {
+        let mut parts = cursor.splitn(2, '|');
+        let dt = parts.next().and_then(|v| DateTime::parse_from_rfc3339(v).ok());
+        let id = parts.next().filter(|v| !v.is_empty());
+        let (dt, id) = match (dt, id) { (Some(dt), Some(id)) => (dt.with_timezone(&Utc), id), _ => return Err(AppError::BadRequest("feedback_cursor_invalid".into())) };
+        filter.insert("$or", vec![doc! {"created_at": {"$lt": bson::DateTime::from_chrono(dt)}}, doc! {"created_at": bson::DateTime::from_chrono(dt), "_id": {"$lt": id}}]);
     }
+    let mut aggregate_filter = filter.clone();
+    aggregate_filter.remove("$or");
+    let pipeline = vec![doc! {"$match": aggregate_filter}, doc! {"$group": {"_id": {"day": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}}, "vote": "$vote"}, "count": {"$sum": 1}}}];
+    let mut counts = Vec::new();
+    let mut agg = state.db.collection::<bson::Document>(COLLECTION_NAME).aggregate(pipeline).await?;
+    while let Some(row) = agg.try_next().await? { counts.push(row); }
     let rows = state
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
@@ -220,20 +233,11 @@ pub async fn admin(
         .await?
         .try_collect::<Vec<_>>()
         .await?;
-    let mut buckets = std::collections::BTreeMap::<String, (i64, i64)>::new();
-    for row in &rows {
-        let day = row.created_at.format("%Y-%m-%d").to_string();
-        let e = buckets.entry(day).or_default();
-        if row.vote == "up" { e.0 += 1 } else { e.1 += 1 }
-    }
-    let counts = buckets
-        .into_iter()
-        .map(|(day, (up, down))| serde_json::json!({"day":day,"up":up,"down":down}))
-        .collect();
-    let next_cursor = rows.last().map(|r| r.created_at.to_rfc3339());
+    let recent = rows.iter().map(|r| AdminFeedbackRow { message_id: r.message_id.clone(), vote: r.vote.clone(), comment: r.comment.clone(), created_at: r.created_at.to_rfc3339(), updated_at: r.updated_at.to_rfc3339() }).collect::<Vec<_>>();
+    let next_cursor = (rows.len() == 100).then(|| rows.last().map(|r| format!("{}|{}", r.created_at.to_rfc3339(), r.id))).flatten();
     Ok(Json(AdminResponse {
         counts,
-        recent: rows,
+        recent,
         next_cursor,
     }))
 }
