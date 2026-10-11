@@ -1,6 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useContext, useState } from "react";
 import { api } from "@/lib/api-client";
-import { useQueryClient } from "@tanstack/react-query";
+import { QueryClientContext } from "@tanstack/react-query";
 
 export type AssistantFeedbackVote = "up" | "down";
 export interface AssistantFeedback {
@@ -15,7 +15,7 @@ export function useAssistantFeedback(
 ) {
   const path = `/assistant/nyxagent/${scope === "group" ? "groups" : "conversations"}/${encodeURIComponent(parentId)}/messages/${encodeURIComponent(messageId)}/feedback`;
   const [isPending, setPending] = useState(false);
-  const queryClient = useQueryClient();
+  const queryClient = useContext(QueryClientContext);
   const mutateAsync = useCallback(
     async ({
       vote,
@@ -29,9 +29,10 @@ export function useAssistantFeedback(
         const result = vote
           ? await api.put<AssistantFeedback>(path, { vote, comment })
           : await api.delete<void>(path);
-        await queryClient.invalidateQueries({
-          queryKey: ["assistant", "nyxagent", scope, parentId],
-        });
+        if (queryClient)
+          await queryClient.invalidateQueries({
+            queryKey: ["assistant", "nyxagent", scope, parentId],
+          });
         return result;
       } finally {
         setPending(false);

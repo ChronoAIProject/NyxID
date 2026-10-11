@@ -503,3 +503,19 @@ describe("canonical chat presentation", () => {
     expect(scroller.scrollTop).toBe(1_200);
   });
 });
+
+it("focuses the comment field and closes it with Escape, showing save failures", async () => {
+  render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
+  const textarea = screen.getByRole("textbox", {
+    name: "Optional feedback comment",
+  });
+  expect(textarea).toHaveFocus();
+  fireEvent.keyDown(textarea, { key: "Escape" });
+  expect(
+    screen.queryByRole("textbox", { name: "Optional feedback comment" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
+  fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
