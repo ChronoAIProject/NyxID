@@ -298,6 +298,28 @@ async fn settled(state: &AppState) -> AssistantConversation {
 }
 
 #[tokio::test]
+async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
+    let (state, _calls, server) =
+        setup_options(Some((503, "")), Duration::ZERO, vec![], false).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let failed = messages.last().expect("failed reply");
+    assert_eq!(failed.error_code.as_deref(), Some("assistant_unavailable"));
+    assert_eq!(failed.upstream_error_code, None);
+    server.abort();
+}
+
+#[tokio::test]
 async fn browser_disconnect_does_not_cancel_detached_turn_and_headers_are_server_owned() {
     let (state, calls, server) = setup(None, Duration::from_millis(150)).await;
     let response = turns(
@@ -608,6 +630,8 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("DELETE", format!("conversations/{id}")),
         ("POST", format!("conversations/{id}/stop")),
         ("PATCH", format!("conversations/{id}/access-mode")),
+        ("GET", format!("conversations/{id}/context")),
+        ("POST", format!("conversations/{id}/context/reset")),
         (
             "POST",
             format!("conversations/{id}/acknowledgements/missing"),
