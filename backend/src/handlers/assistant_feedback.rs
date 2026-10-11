@@ -199,17 +199,17 @@ pub async fn admin(
         filter
             .entry("created_at".to_string())
             .or_insert(doc! {}.into());
-        if let Some(b) = filter.get_document_mut("created_at").ok() {
+        if let Ok(b) = filter.get_document_mut("created_at") {
             b.insert("$lte", bson::DateTime::from_chrono(t));
         }
     }
-    if let Some(cursor) = q.cursor.as_deref() {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(cursor) {
-            filter.insert(
-                "created_at",
-                doc! {"$lt": bson::DateTime::from_chrono(dt.with_timezone(&Utc))},
-            );
-        }
+    if let Some(cursor) = q.cursor.as_deref()
+        && let Ok(dt) = DateTime::parse_from_rfc3339(cursor)
+    {
+        filter.insert(
+            "created_at",
+            doc! {"$lt": bson::DateTime::from_chrono(dt.with_timezone(&Utc))},
+        );
     }
     let rows = state
         .db
