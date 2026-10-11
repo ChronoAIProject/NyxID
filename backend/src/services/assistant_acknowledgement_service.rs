@@ -184,8 +184,13 @@ mod access_mode_tests {
             for (_, class) in families {
                 let expected = match mode {
                     crate::models::assistant_settings::AccessMode::Autopilot => false,
-                    crate::models::assistant_settings::AccessMode::Nyxmode => matches!(class, OwnerActionClass::Sensitive | OwnerActionClass::Destructive),
-                    crate::models::assistant_settings::AccessMode::AskEveryTime => !matches!(class, OwnerActionClass::Read),
+                    crate::models::assistant_settings::AccessMode::Nyxmode => matches!(
+                        class,
+                        OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+                    ),
+                    crate::models::assistant_settings::AccessMode::AskEveryTime => {
+                        !matches!(class, OwnerActionClass::Read)
+                    }
                 };
                 assert_eq!(owner_confirmation_required(mode, class, false), expected);
                 assert!(owner_confirmation_required(mode, class, true));
