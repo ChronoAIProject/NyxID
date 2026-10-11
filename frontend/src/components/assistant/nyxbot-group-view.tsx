@@ -45,7 +45,8 @@ import type {
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
 
-export const GROUP_COMPOSER_PLACEHOLDER = "Message the group — @mention an agent";
+export const GROUP_COMPOSER_PLACEHOLDER =
+  "Message the group — @mention an agent";
 
 function WorkingDots() {
   return (
@@ -61,7 +62,13 @@ function WorkingDots() {
   );
 }
 
-function UserText({ text, names }: { readonly text: string; readonly names: readonly string[] }) {
+function UserText({
+  text,
+  names,
+}: {
+  readonly text: string;
+  readonly names: readonly string[];
+}) {
   return (
     <>
       {mentionSegments(text, names).map((segment, index) =>
@@ -89,12 +96,22 @@ export function GroupMessageRow({
   readonly onOpenAgent: (agentId: string) => void;
 }) {
   const feedback = useAssistantFeedback("group", groupId, message.id);
-  const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
+  const [vote, setVote] = useState<"up" | "down" | undefined>(
+    message.feedback?.vote,
+  );
   if (message.role === "notice") {
     return (
       <div className="min-w-0 px-8">
-        <p role="note" aria-label="Group notice" className="text-center text-11 text-text-tertiary">{message.text}</p>
-          {message.activities?.filter((activity) => activity.machine).map((activity) => (
+        <p
+          role="note"
+          aria-label="Group notice"
+          className="text-center text-11 text-text-tertiary"
+        >
+          {message.text}
+        </p>
+        {message.activities
+          ?.filter((activity) => activity.machine)
+          .map((activity) => (
             <MachineToolCard key={activity.id} receipt={activity.machine!} />
           ))}
       </div>
@@ -104,7 +121,11 @@ export function GroupMessageRow({
     return (
       <div className="ml-[30px] flex justify-end">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
-          {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+          {message.author ? (
+            <p className="mb-1 text-11 font-medium text-muted-foreground">
+              {message.author.display_name}
+            </p>
+          ) : null}
           <UserText text={message.text} names={names} />
           {message.attachments?.map((item) => (
             <ToolImage
@@ -123,7 +144,11 @@ export function GroupMessageRow({
       </div>
     );
   }
-  const agent = message.agent ?? { id: "unknown", name: "Agent", kind: "specialist" as const };
+  const agent = message.agent ?? {
+    id: "unknown",
+    name: "Agent",
+    kind: "specialist" as const,
+  };
   const title = agentTitle(agent);
   const handle = agentHandle(agent);
   const time = formatClockTime(message.created_at);
@@ -144,23 +169,52 @@ export function GroupMessageRow({
       <div className="min-w-0">
         <div className="mb-0.5 flex items-baseline gap-2">
           <span className="text-12 font-medium text-foreground">{title}</span>
-          {handle ? <span className="text-11 text-text-tertiary">{handle}</span> : null}
+          {handle ? (
+            <span className="text-11 text-text-tertiary">{handle}</span>
+          ) : null}
           {agent.kind === "nyxbot" ? (
             <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
           {time ? (
-            <time dateTime={message.created_at} className="font-mono text-11 text-text-tertiary">
+            <time
+              dateTime={message.created_at}
+              className="font-mono text-11 text-text-tertiary"
+            >
               {time}
             </time>
           ) : null}
         </div>
         <div className="px-px text-foreground">
-          {message.activities?.filter((activity) => activity.machine).map((activity) => (
-            <MachineToolCard key={activity.id} receipt={activity.machine!} />
-          ))}
+          {message.activities
+            ?.filter((activity) => activity.machine)
+            .map((activity) => (
+              <MachineToolCard key={activity.id} receipt={activity.machine!} />
+            ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
           <div className="mt-2 flex gap-1">
-            {(["up", "down"] as const).map((next) => <button key={next} type="button" disabled={feedback.isPending} aria-label={next === "up" ? "Helpful" : "Not helpful"} aria-pressed={vote === next} onClick={() => { const selected = vote === next ? undefined : next; setVote(selected); void feedback.mutateAsync(selected ? { vote: selected } : {}).catch(() => setVote(vote)); }} className={`rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50 ${vote === next ? "text-nyx-secondary-400" : ""}`}>{next === "up" ? <ThumbsUp className="h-3.5 w-3.5" /> : <ThumbsDown className="h-3.5 w-3.5" />}</button>)}
+            {(["up", "down"] as const).map((next) => (
+              <button
+                key={next}
+                type="button"
+                disabled={feedback.isPending}
+                aria-label={next === "up" ? "Helpful" : "Not helpful"}
+                aria-pressed={vote === next}
+                onClick={() => {
+                  const selected = vote === next ? undefined : next;
+                  setVote(selected);
+                  void feedback
+                    .mutateAsync(selected ? { vote: selected } : {})
+                    .catch(() => setVote(vote));
+                }}
+                className={`rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50 ${vote === next ? "text-nyx-secondary-400" : ""}`}
+              >
+                {next === "up" ? (
+                  <ThumbsUp className="h-3.5 w-3.5" />
+                ) : (
+                  <ThumbsDown className="h-3.5 w-3.5" />
+                )}
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -215,9 +269,11 @@ function GroupTranscript({
 
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget;
-    const distance = element.scrollHeight - element.clientHeight - element.scrollTop;
+    const distance =
+      element.scrollHeight - element.clientHeight - element.scrollTop;
     if (distance <= 48) following.current = true;
-    else if (element.scrollTop < lastScrollTop.current - 1) following.current = false;
+    else if (element.scrollTop < lastScrollTop.current - 1)
+      following.current = false;
     lastScrollTop.current = element.scrollTop;
   }
 
@@ -308,7 +364,11 @@ function MemberButton({
       type="button"
       onClick={onOpen}
       aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
-      title={agentHandle(member) ? `${agentTitle(member)} (${agentHandle(member)!})` : agentTitle(member)}
+      title={
+        agentHandle(member)
+          ? `${agentTitle(member)} (${agentHandle(member)!})`
+          : agentTitle(member)
+      }
       className={cn(
         "relative rounded-full transition-opacity hover:opacity-80",
         member.destroyed && "opacity-50",
@@ -334,7 +394,9 @@ function GroupHeader({
   readonly onOpenAgent: (agentId: string) => void;
   readonly onOpenSettings: () => void;
 }) {
-  const lead = group.members.find((member) => member.id === group.lead_agent_id);
+  const lead = group.members.find(
+    (member) => member.id === group.lead_agent_id,
+  );
   const working = group.working_agent_ids.length;
   return (
     <div className="shrink-0 px-4 pt-3 sm:px-6">
@@ -343,7 +405,11 @@ function GroupHeader({
           <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">
             {group.name}
           </h2>
-          <div aria-label="Members" role="group" className="flex items-center gap-1">
+          <div
+            aria-label="Members"
+            role="group"
+            className="flex items-center gap-1"
+          >
             {group.members.map((member) => (
               <MemberButton
                 key={member.id}
@@ -354,7 +420,10 @@ function GroupHeader({
           </div>
           {working ? (
             <span className="flex items-center gap-1.5 text-11 text-muted-foreground">
-              <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
+              <span
+                aria-hidden="true"
+                className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
+              />
               {working} working
             </span>
           ) : null}
@@ -370,8 +439,11 @@ function GroupHeader({
           </Button>
         </div>
         <p className="text-11 text-text-tertiary">
-          {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"} unless you
-          @mention someone. Agents hand work to each other the same way.
+          {lead
+            ? `Messages go to ${agentTitle(lead)}`
+            : "Messages go to the first agent"}{" "}
+          unless you @mention someone. Agents hand work to each other the same
+          way.
         </p>
       </div>
     </div>
@@ -392,10 +464,17 @@ export function GroupPendingActions({
   onDecide,
 }: {
   readonly actions: readonly AssistantGroupPendingAction[];
-  readonly members: readonly { readonly id: string; readonly name: string; readonly display_name?: string | null }[];
+  readonly members: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly display_name?: string | null;
+  }[];
   readonly sending: boolean;
   readonly onAnswer: (text: string) => Promise<void>;
-  readonly onDecide?: (action: AssistantGroupPendingAction, decision: "allow" | "deny") => Promise<void>;
+  readonly onDecide?: (
+    action: AssistantGroupPendingAction,
+    decision: "allow" | "deny",
+  ) => Promise<void>;
 }) {
   if (!actions.length) return null;
   return (
@@ -406,9 +485,14 @@ export function GroupPendingActions({
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
       />
-      <div className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2" aria-label="Actions waiting for you">
+      <div
+        className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2"
+        aria-label="Actions waiting for you"
+      >
         {actions.map((action) => {
-          const member = members.find((candidate) => candidate.id === action.agent_id);
+          const member = members.find(
+            (candidate) => candidate.id === action.agent_id,
+          );
           const who = member?.display_name ?? member?.name ?? "An agent";
           const code = action.confirm_phrase?.slice(4);
           return (
@@ -419,27 +503,53 @@ export function GroupPendingActions({
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
               <p className="min-w-0 flex-1 text-12 text-foreground">
-                <span className="font-medium">{who}</span> wants to: {action.summary}
+                <span className="font-medium">{who}</span> wants to:{" "}
+                {action.summary}
               </p>
-              {action.triggering_person ? <>
-                <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person.display_name}</span>
-                {action.can_decide ? <>
-                  <Button size="sm" variant="outline" disabled={sending} onClick={() => void onDecide?.(action, "deny")}>Deny</Button>
-                  <Button size="sm" disabled={sending} onClick={() => void onDecide?.(action, "allow")}>Allow</Button>
-                </> : null}
-              </> : action.confirm_phrase ? <>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={sending}
-                onClick={() => void onAnswer(`no ${code}`)}
-              >
-                Cancel
-              </Button>
-              <Button size="sm" disabled={sending} onClick={() => void onAnswer(action.confirm_phrase!)}>
-                Confirm
-              </Button>
-              </> : null}
+              {action.triggering_person ? (
+                <>
+                  <span className="text-11 text-muted-foreground">
+                    Awaiting {action.triggering_person.display_name}
+                  </span>
+                  {action.can_decide ? (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={sending}
+                        onClick={() => void onDecide?.(action, "deny")}
+                      >
+                        Deny
+                      </Button>
+                      <Button
+                        size="sm"
+                        disabled={sending}
+                        onClick={() => void onDecide?.(action, "allow")}
+                      >
+                        Allow
+                      </Button>
+                    </>
+                  ) : null}
+                </>
+              ) : action.confirm_phrase ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={sending}
+                    onClick={() => void onAnswer(`no ${code}`)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={sending}
+                    onClick={() => void onAnswer(action.confirm_phrase!)}
+                  >
+                    Confirm
+                  </Button>
+                </>
+              ) : null}
             </div>
           );
         })}
@@ -466,11 +576,19 @@ export function NyxAgentGroupPage({
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Group payloads name agents by handle; their display names live on the agent list.
-  const group = transcript.data && !transcript.error
-    ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
-    : undefined;
-  const messages = (transcript.error ? [] : transcript.data?.messages ?? []).map((message) =>
-    message.agent ? { ...message, agent: withDisplayName(message.agent, agents.data?.agents) } : message,
+  const group =
+    transcript.data && !transcript.error
+      ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
+      : undefined;
+  const messages = (
+    transcript.error ? [] : (transcript.data?.messages ?? [])
+  ).map((message) =>
+    message.agent
+      ? {
+          ...message,
+          agent: withDisplayName(message.agent, agents.data?.agents),
+        }
+      : message,
   );
 
   useLayoutEffect(() => {
@@ -484,10 +602,12 @@ export function NyxAgentGroupPage({
   }, []);
 
   function goTo(search: { c?: string } = {}) {
-    void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant" as never,
-      search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
-    }));
+    void navigateWithBuildUpdate(() =>
+      navigate({
+        to: "/assistant" as never,
+        search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
+      }),
+    );
   }
 
   const mentions = (group?.members ?? [])
@@ -570,27 +690,45 @@ export function NyxAgentGroupPage({
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <GroupPendingActions
-            actions={transcript.error ? [] : transcript.data?.pending_actions ?? []}
+            actions={
+              transcript.error ? [] : (transcript.data?.pending_actions ?? [])
+            }
             members={group?.members ?? []}
             sending={transcript.post.isPending || deciding}
             onDecide={async (action, decision) => {
               setDeciding(true);
               try {
                 if (action.approval_request_id) {
-                  await decideApproval.mutateAsync({ requestId: action.approval_request_id, approved: decision === "allow" });
+                  await decideApproval.mutateAsync({
+                    requestId: action.approval_request_id,
+                    approved: decision === "allow",
+                  });
                 } else if (action.acknowledgement_id) {
-                  await nyxAgentTransport.decide(action.conversation_id, action.acknowledgement_id, decision);
+                  await nyxAgentTransport.decide(
+                    action.conversation_id,
+                    action.acknowledgement_id,
+                    decision,
+                  );
                 }
                 await transcript.refetch();
-              } catch (error) { toast.error(error instanceof Error ? error.message : "Could not decide this action."); }
-              finally { setDeciding(false); }
+              } catch (error) {
+                toast.error(
+                  error instanceof Error
+                    ? error.message
+                    : "Could not decide this action.",
+                );
+              } finally {
+                setDeciding(false);
+              }
             }}
             onAnswer={async (text) => {
               try {
                 await transcript.post.mutateAsync(text);
               } catch (error) {
                 toast.error(
-                  error instanceof Error ? error.message : "The answer was not delivered.",
+                  error instanceof Error
+                    ? error.message
+                    : "The answer was not delivered.",
                 );
               }
             }}
@@ -601,7 +739,9 @@ export function NyxAgentGroupPage({
             active={false}
             sending={transcript.post.isPending}
             // Read-only once every member is gone (destroyed or removed).
-            disabled={Boolean(transcript.error) || Boolean(group && !mentions.length)}
+            disabled={
+              Boolean(transcript.error) || Boolean(group && !mentions.length)
+            }
             ownerUserId={user?.id ?? null}
             draftKey={`group:${groupId}`}
             placeholder={GROUP_COMPOSER_PLACEHOLDER}
@@ -609,11 +749,15 @@ export function NyxAgentGroupPage({
             onSend={async (text, uploads) => {
               try {
                 await transcript.post.mutateAsync(
-                  uploads ? { text, attachmentIds: uploads.attachmentIds } : text,
+                  uploads
+                    ? { text, attachmentIds: uploads.attachmentIds }
+                    : text,
                 );
               } catch (error) {
                 toast.error(
-                  error instanceof Error ? error.message : "The message was not delivered.",
+                  error instanceof Error
+                    ? error.message
+                    : "The message was not delivered.",
                 );
                 throw error;
               }
