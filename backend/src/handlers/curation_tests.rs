@@ -449,6 +449,13 @@ async fn feedback_route_limits_one_user_burst() {
     assert!(limited);
 }
 
+#[tokio::test]
+async fn feedback_engine_flag_is_checked_before_unknown_message() {
+    let f = fixture("feedback-s5-engine", false).await;
+    let result = crate::services::assistant_nyxagent::require_enabled(&f.state.db, &f.owner).await;
+    assert!(result.is_ok());
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
