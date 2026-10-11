@@ -47,7 +47,10 @@ fn reply_for(body: &Value) -> String {
 #[test]
 fn sticky_recipient_precedence_is_documented_by_contract() {
     let mut map = std::collections::HashMap::new();
-    map.insert("actor-a".to_owned(), vec!["agent-a".to_owned(), "agent-b".to_owned()]);
+    map.insert(
+        "actor-a".to_owned(),
+        vec!["agent-a".to_owned(), "agent-b".to_owned()],
+    );
     assert_eq!(map.get("actor-a").unwrap().len(), 2);
 }
 
