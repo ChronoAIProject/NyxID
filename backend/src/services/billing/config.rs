@@ -46,11 +46,26 @@ pub async fn save_settings_and_audit(
     let mut session = db.client().start_session().await?;
     let db_clone = db.clone();
     let actor = actor.clone();
-    session.start_transaction().and_run(|session| async move {
-        db_clone.collection::<PlatformSettings>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$set": {"billing": value}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}}).upsert(true).session(session).await?;
-        crate::services::audit_service::log_actor_event_in_session(&db_clone, session, key, &actor, "billing_config_updated", serde_json::json!({"billing": billing})).await.map_err(|e| mongodb::error::Error::custom(e.to_string()))?;
-        Ok(())
-    }).await.map_err(|e| crate::errors::AppError::Internal(format!("billing config transaction: {e}")))?;
+    session.start_transaction().await?;
+    db_clone
+        .collection::<PlatformSettings>(SETTINGS)
+        .update_one(
+            doc! {"_id": PLATFORM_SETTINGS_ID},
+            doc! {"$set": {"billing": value}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}},
+        )
+        .upsert(true)
+        .session(&mut session)
+        .await?;
+    crate::services::audit_service::log_actor_event_in_session(
+        &db_clone,
+        &mut session,
+        key,
+        &actor,
+        "billing_config_updated",
+        serde_json::json!({"billing": billing}),
+    )
+    .await?;
+    session.commit_transaction().await?;
     Ok(())
 }
 pub async fn load_rates(db: &mongodb::Database) -> AppResult<Vec<BillingRateCache>> {
@@ -79,7 +94,8 @@ pub async fn load_service(
         .await?)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BillingConfigSource {
     Env,
     Global,
@@ -113,7 +129,7 @@ pub fn effective_component_sources(service: &ServiceBilling) -> Vec<EffectiveCom
     {
         let synced = lane.sync_status == crate::models::service_billing::PricingSyncStatus::Synced;
         out.push(EffectiveComponentSource {
-            metric: lane.metric.to_string(),
+            metric: lane.metric.slug().to_string(),
             source: if synced {
                 BillingConfigSource::Service
             } else {
@@ -122,7 +138,7 @@ pub fn effective_component_sources(service: &ServiceBilling) -> Vec<EffectiveCom
         });
         for component in &lane.components {
             out.push(EffectiveComponentSource {
-                metric: component.metric.to_string(),
+                metric: component.metric.slug().to_string(),
                 source: if synced
                     && component.sync_status
                         == crate::models::service_billing::PricingSyncStatus::Synced

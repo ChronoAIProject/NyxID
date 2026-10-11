@@ -174,9 +174,9 @@ mod tests {
                 .map(|s| (&s.metric, format!("{:?}", s.source).to_lowercase()))
                 .collect::<Vec<_>>(),
             vec![
-                ("requests".into(), "service".into()),
-                ("tokens".into(), "service".into()),
-                ("images".into(), "free".into())
+                ("requests".to_string(), "service".to_string()),
+                ("tokens".to_string(), "service".to_string()),
+                ("images".to_string(), "free".to_string())
             ]
         );
         billing.byok_pricing.as_mut().unwrap().sync_status =

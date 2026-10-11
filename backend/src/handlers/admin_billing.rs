@@ -238,11 +238,12 @@ pub async fn get_overview(
                     effective_source: source,
                     effective_metric:
                         crate::services::billing::metric_resolution::effective_platform_metric(&s)
+                            .slug()
                             .to_string(),
                     allowance_metrics:
                         crate::services::billing::metric_resolution::allowance_metrics(&s)
                             .into_iter()
-                            .map(|m| m.to_string())
+                            .map(|m| m.slug().to_string())
                             .collect(),
                     sync_status: s
                         .billing
