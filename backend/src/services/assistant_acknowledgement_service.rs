@@ -297,6 +297,7 @@ pub async fn audit_access_request_denied(
                     .await;
             }
     }
+}
 
 /// An org permission request may use the person's NyxBot only while that
 /// person maintains the agent. Otherwise a maintainer must make the change.
