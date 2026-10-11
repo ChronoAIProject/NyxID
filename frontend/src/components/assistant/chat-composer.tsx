@@ -138,7 +138,6 @@ interface ChatComposerProps {
   readonly mentions?: readonly ComposerMention[];
   readonly onSend: (content: string) => Promise<void>;
   readonly onContentChange?: (content: string) => void;
-  readonly onContentReplace?: (content: string) => void;
   readonly onStop: () => Promise<void>;
   readonly onVoice?: () => void;
 }
@@ -175,7 +174,6 @@ function DraftedChatComposer({
   mentions,
   onSend,
   onContentChange,
-  onContentReplace,
   onStop,
   onVoice,
 }: ChatComposerProps) {
