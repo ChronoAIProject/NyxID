@@ -415,7 +415,9 @@ function SkillsTab({ query, agentId }: { readonly query: string; readonly agentI
         onActivate={() => {
           if (!agentId || !attached.data) return toast.info("Select an agent to attach this skill.");
           const existing = attached.data.skills.find((pin) => pin.skill_id === item.id);
-          const skills = existing ? attached.data.skills.filter((pin) => pin.skill_id !== item.id) : [...attached.data.skills, { source: "ornn" as const, skill_id: item.id, name: item.name, version: "latest", sha256: "" }];
+          const skills = existing
+            ? attached.data.skills.map((pin) => pin.skill_id === item.id ? { ...pin, disabled: !pin.disabled } : pin)
+            : [...attached.data.skills, { source: "ornn" as const, skill_id: item.id, name: item.name, version: "latest", sha256: "" }];
           setSkills.mutate({ expected_revision: attached.data.revision, skills });
         }}
       />
