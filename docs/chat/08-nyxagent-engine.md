@@ -1196,3 +1196,5 @@ unavailable, the UI marks it unavailable and asks the owner to choose another.
 ### Model selection
 
 NyxAgent model ids are server-validated against the live `GET /assistant/nyxagent/models` list. The conversation model endpoint rejects changes during an active turn (`turn_active`), clears the provider session and instruction binding, and records a `model_changed` context reset. Invalid or upstream-unavailable choices return `model_unavailable` with the actionable message “Choose another model in the selector.” A specialist inherits the workspace default unless its profile supplies a validated model override; unavailable entries remain disabled in selectors.
+
+The API uses `model_unavailable` (HTTP 400) when a model is absent or rejected; clients should choose another model in the selector. Changing a conversation model during an active turn returns `turn_active` (HTTP 409). Access-mode policy floors remain enforced for service proxy approval policies, `machine_confirm`, webhook confirmation policy, and guest rules.
