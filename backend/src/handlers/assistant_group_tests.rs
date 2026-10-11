@@ -189,6 +189,7 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         Path(id.clone()),
         Json(PostMessageRequest {
             attachment_ids: Vec::new(),
+            recipient_agent_ids: None,
             text: "hello team".into(),
         }),
     )

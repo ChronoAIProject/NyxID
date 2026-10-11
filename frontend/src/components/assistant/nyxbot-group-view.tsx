@@ -102,6 +102,7 @@ export function GroupMessageRow({
       <div className="ml-[30px] flex justify-end">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
           {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+          {message.recipient_agent_ids?.length ? <p className="mb-1 text-11 text-muted-foreground">to {message.recipient_agent_ids.map((id) => `@${names.find((name) => name.toLowerCase() === id.toLowerCase()) ?? id}`).join(", ")}</p> : null}
           <UserText text={message.text} names={names} />
           {message.attachments?.map((item) => (
             <ToolImage
@@ -629,6 +630,10 @@ export function NyxAgentGroupPage({
                 const member = group.members.find((row) => row.id === id);
                 return member ? <Button key={id} type="button" size="sm" variant="secondary" aria-label={`Remove recipient ${member.name}`} onClick={() => setRecipientAgentIds((current) => current.filter((value) => value !== id))}>@{member.name} ×</Button> : null;
               })}
+              <select aria-label="Add recipient" className="h-8 rounded-lg border bg-card px-2 text-12" value="" onChange={(event) => { if (event.target.value) setRecipientAgentIds((current) => current.includes(event.target.value) ? current : [...current, event.target.value]); }}>
+                <option value="">+ add</option>
+                {group.members.filter((member) => !recipientAgentIds.includes(member.id)).map((member) => <option key={member.id} value={member.id}>@{member.name}</option>)}
+              </select>
             </div> : undefined}
             onStop={async () => undefined}
           />
