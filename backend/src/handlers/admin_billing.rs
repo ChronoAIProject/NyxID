@@ -1,6 +1,4 @@
-use crate::models::platform_settings::{
-    BillingSettings, COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID, PlatformSettings,
-};
+use crate::models::platform_settings::BillingSettings;
 use crate::{
     AppState, errors::AppResult, handlers::admin_helpers::require_admin, mw::auth::AuthUser,
 };
@@ -8,7 +6,6 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
@@ -83,8 +80,13 @@ pub async fn get_rates(
     auth: AuthUser,
 ) -> AppResult<Json<Vec<BillingRateResponse>>> {
     require_admin(&state, &auth).await?;
-    let ttl = chrono::Duration::seconds(state.config.billing_rate_cache_ttl_secs as i64);
+    let ttl_secs = i64::try_from(state.config.billing_rate_cache_ttl_secs).map_err(|_| {
+        crate::errors::AppError::ValidationError("billing rate cache TTL is too large".into())
+    })?;
+    let ttl = chrono::Duration::seconds(ttl_secs);
     let rows = crate::services::billing::config::load_rates(&state.db).await?;
+    let mut rows = rows;
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(
         rows.into_iter()
             .map(|r| BillingRateResponse {
@@ -115,12 +117,7 @@ pub async fn get_overview(
 ) -> AppResult<Json<Vec<BillingServiceResponse>>> {
     require_admin(&state, &auth).await?;
     let rows = crate::services::billing::config::load_services(&state.db).await?;
-    let global = state
-        .db
-        .collection::<PlatformSettings>(SETTINGS)
-        .find_one(doc! {"_id": PLATFORM_SETTINGS_ID})
-        .await?
-        .and_then(|settings| settings.billing);
+    let global = crate::services::billing::config::load_settings(&state.db).await?;
     Ok(Json(
         rows.into_iter()
             .filter(|s| s.billing.is_some())
@@ -156,10 +153,8 @@ pub async fn resync_service(
     Path(id): Path<String>,
 ) -> AppResult<Json<bool>> {
     require_admin(&state, &auth).await?;
-    let service = crate::services::billing::config::load_services(&state.db)
+    let service = crate::services::billing::config::load_service(&state.db, &id)
         .await?
-        .into_iter()
-        .find(|service| service.id == id)
         .ok_or(crate::errors::AppError::NotFound(
             "service not found".into(),
         ))?;
@@ -172,4 +167,31 @@ pub async fn resync_service(
     )
     .await?;
     Ok(Json(synced))
+}
+
+pub async fn update_service_billing(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: crate::telemetry::TelemetryContext,
+    Path(service_id): Path<String>,
+    Json(body): Json<crate::handlers::services::UpdateServiceRequest>,
+) -> AppResult<Json<crate::handlers::services::ServiceResponse>> {
+    require_admin(&state, &auth_user).await?;
+    if body.billing.is_none()
+        || body.name.is_some()
+        || body.base_url.is_some()
+        || body.is_active.is_some()
+        || body.description.is_some()
+        || body.visibility.is_some()
+        || body.service_category.is_some()
+        || body.offering_kind.is_some()
+        || body.topics.is_some()
+        || body.destination_targets.is_some()
+        || body.credential.is_some()
+    {
+        return Err(crate::errors::AppError::ValidationError(
+            "billing update must contain only billing".into(),
+        ));
+    }
+    crate::handlers::services::update_service_inner(state, auth_user, tele, service_id, body).await
 }

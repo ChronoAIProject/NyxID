@@ -48,6 +48,15 @@ pub async fn load_services(db: &mongodb::Database) -> AppResult<Vec<DownstreamSe
         .try_collect()
         .await?)
 }
+pub async fn load_service(
+    db: &mongodb::Database,
+    id: &str,
+) -> AppResult<Option<DownstreamService>> {
+    Ok(db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(doc! {"_id": id})
+        .await?)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BillingConfigSource {

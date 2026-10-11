@@ -1929,7 +1929,7 @@ pub async fn update_service(
     .await
 }
 
-async fn update_service_inner(
+pub(crate) async fn update_service_inner(
     state: AppState,
     auth_user: AuthUser,
     tele: TelemetryContext,
