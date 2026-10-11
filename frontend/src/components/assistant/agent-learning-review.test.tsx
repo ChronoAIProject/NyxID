@@ -89,6 +89,17 @@ describe("AgentLearningReview", () => {
     await waitFor(() => expect(mocks.approve).toHaveBeenLastCalledWith({ proposalId: "proposal", acknowledgementId: "card" }));
   });
 
+  it("clicks Save draft with a top-level revision and rejects the edited revision", async () => {
+    mocks.feature.mockReturnValue(true);
+    render(<AgentLearningReview agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Skill draft" }), { target: { value: "# Edited" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith(expect.objectContaining({ proposalId: "proposal", revision: 2 })));
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await waitFor(() => expect(mocks.reject).toHaveBeenCalledWith({ proposalId: "proposal", revision: 2 }));
+  });
+
   it("keeps authored proposals visible without the invalid approval button", () => {
     mocks.feature.mockReturnValue(true);
     mocks.review.mockReturnValue({
