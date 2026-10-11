@@ -316,6 +316,27 @@ async fn groups_validate_members_and_delete_with_their_member_threads() {
         .await
         .is_err()
     );
+    state
+        .db
+        .collection::<crate::models::assistant_message_feedback::AssistantMessageFeedback>(
+            crate::models::assistant_message_feedback::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::assistant_message_feedback::AssistantMessageFeedback {
+                id: "group-feedback-delete".into(),
+                user_id: OWNER.into(),
+                conversation_id: None,
+                group_id: Some(group.id.clone()),
+                message_id: thread.id.clone(),
+                turn_id: None,
+                vote: "up".into(),
+                comment: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
     delete_group(
         State(state.clone()),
         test_auth_user(OWNER),
@@ -324,6 +345,17 @@ async fn groups_validate_members_and_delete_with_their_member_threads() {
     .await
     .unwrap();
     assert!(groups::get(&state.db, OWNER, &group.id).await.is_err());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(
+                crate::models::assistant_message_feedback::COLLECTION_NAME
+            )
+            .count_documents(doc! {"group_id": &group.id})
+            .await
+            .unwrap(),
+        0
+    );
     assert!(
         groups::messages(&state.db, OWNER, &group.id, 50, None)
             .await
