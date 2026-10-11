@@ -580,3 +580,60 @@ pub async fn admin_release_target(
         .await?,
     ))
 }
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::services::{assistant_authority_tests::orchestrator_fixture, feature_flag_service};
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn validate_route_returns_not_found_for_other_owner() {
+        let f = orchestrator_fixture("learning_validate_owner_route").await;
+        feature_flag_service::set_platform_override(
+            &f.state.db,
+            feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
+            &feature_flag_service::FlagTarget::User(f.owner.clone()),
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        let other = uuid::Uuid::new_v4().to_string();
+        let err = validate(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&other),
+            Path((f.chat.agent_id.clone(), "proposal".into())),
+            Json(ValidateBody {
+                revision: None,
+                draft: json!({"name":"candidate"}),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_route_returns_engine_error_when_disabled() {
+        let f = orchestrator_fixture("learning_validate_engine_route").await;
+        let err = validate(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            Path((f.chat.agent_id.clone(), "proposal".into())),
+            Json(ValidateBody {
+                revision: None,
+                draft: json!({"name":"candidate"}),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::errors::AppError::NotFound(message) if message.contains("Assistant route"))
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
