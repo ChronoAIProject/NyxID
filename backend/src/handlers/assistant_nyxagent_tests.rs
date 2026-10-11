@@ -439,7 +439,7 @@ async fn context_checkpoint_pending_includes_running_activity() {
     )
     .await
     .unwrap();
-    activity_started(&db, OWNER, &row.id, "mcp.long_call")
+    engine::activity_started(&db, OWNER, &row.id, "mcp.long_call")
         .await
         .unwrap();
     let checkpoint = engine::checkpoint_summary(&db, OWNER, &row.id)
