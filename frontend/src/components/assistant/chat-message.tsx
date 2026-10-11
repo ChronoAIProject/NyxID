@@ -363,6 +363,7 @@ export function ChatMessageList({
   notice,
   projectionVersion,
   renderMessage,
+  feedbackEnabled = false,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
