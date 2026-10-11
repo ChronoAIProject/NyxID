@@ -762,6 +762,18 @@ pub async fn change_access_mode(
 pub struct RenameRequest {
     title: String,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRequest { model: String }
+
+pub async fn change_model(State(state): State<AppState>, auth: AuthUser, Path(id): Path<String>, Json(body): Json<ModelRequest>) -> AppResult<Json<ConversationResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let row = engine::change_model(&state.db, &owner, &id, &body.model).await?;
+    Ok(Json(ConversationResponse::from(row)))
+}
 pub async fn rename(
     State(state): State<AppState>,
     auth: AuthUser,
