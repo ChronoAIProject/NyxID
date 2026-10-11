@@ -115,7 +115,7 @@ describe("AgentLearningReview", () => {
       run: { mutate: mocks.run, isPending: false },
     });
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.getByText(/owner binding is required/)).toBeInTheDocument();
+    expect(screen.getByText(/no owner binding.*only the bound owner can publish/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: /consent to learning/i }));
     expect(mocks.consent).toHaveBeenCalledWith(true);
   });
