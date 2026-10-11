@@ -163,18 +163,10 @@ fn legacy_instruction_change(
     if row.guest_turn {
         return false; // Owner memory is never part of a guest's stable context.
     }
-    let last_reply = history.iter().rev().find(|message| {
-        message.role == "assistant"
-            && row
-                .context_reset_at
-                .is_none_or(|reset| message.created_at > reset)
-    });
-    last_reply.is_some_and(|reply| {
-        agent
-            .memory
-            .iter()
-            .any(|note| note.updated_at > reply.created_at)
-    })
+    // Memory is delivered in per-turn input and is deliberately excluded from
+    // the stable instruction fingerprint, including for legacy bindings.
+    let _ = history;
+    false
 }
 
 #[cfg(test)]
