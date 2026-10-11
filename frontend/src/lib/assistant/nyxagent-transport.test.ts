@@ -36,7 +36,7 @@ it("keeps a persisted diagnostic detail visible after reload", () => {
   expect(parsed.error_detail?.upstream_request_id).toBe("req-1");
 });
 
-it.each([["turn_failed", "previous turn failed"], ["memory_updated", "new note"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
+it.each([["turn_failed", "completed actions"], ["memory_updated", "new note"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
   expect(contextResetCopy(reason)).toContain(text);
 });
 

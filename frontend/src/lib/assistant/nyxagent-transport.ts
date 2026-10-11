@@ -100,12 +100,12 @@ export function storedError(code: string | null): string {
 
 export function contextResetCopy(reason: string | null | undefined): string {
   switch (reason) {
-    case "turn_failed": return "The previous turn failed; completed actions were preserved for review.";
+    case "turn_failed": return CONTEXT_RESET_NOTICE;
     case "memory_updated": return "Memory was updated; the next turn will use the new note.";
     case "instructions_changed": return "Instructions changed; the assistant context was refreshed.";
     case "stopped": return "The turn was stopped; review pending actions before retrying.";
     case "user_reset": return "You reset the working context.";
-    default: return "Context was refreshed; review the working context before continuing.";
+    default: return CONTEXT_RESET_NOTICE;
   }
 }
 
@@ -524,7 +524,7 @@ export class NyxAgentTransport {
       messages.splice(position < 0 ? messages.length : position, 0, {
         id: `nyxagent-context-reset:${id ?? "draft"}`,
         role: "system",
-        content: contextResetCopy(conversation?.context_reset_reason) + " " + CONTEXT_RESET_NOTICE,
+        content: contextResetCopy(conversation?.context_reset_reason),
         timestamp,
         status: "complete",
       });
