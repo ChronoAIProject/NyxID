@@ -39,6 +39,7 @@ function agent(fields: Partial<AssistantAgent>): AssistantAgent {
 it("names the thread's agent with its kind and opens its details", async () => {
   const open = vi.fn();
   render(<ThreadHeader name="researcher" kind="specialist" destroyed={false} onOpenDetails={open} />);
+  expect(screen.getByLabelText("Access mode")).toHaveTextContent("NyxMode");
   expect(screen.getByRole("heading")).toHaveTextContent("researcher");
   expect(screen.getByText("Specialist")).toBeVisible();
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
