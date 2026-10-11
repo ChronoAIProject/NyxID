@@ -766,19 +766,4 @@ mod s9_denial_tests {
             "This route requires a first-party human session"
         );
     }
-
-    #[tokio::test]
-    async fn specialist_and_guest_cannot_change_disabled_pin() {
-        let f = crate::services::assistant_authority_tests::fixture("s9_specialist_guest").await;
-        let mut auth = f.auth.clone();
-        auth.auth_method = crate::mw::auth::AuthMethod::Session;
-        let err = crate::handlers::agent_skills::history(
-            State(f.state.clone()),
-            auth,
-            Path(f.chat.agent_id.clone()),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.to_string(), "Agent not found");
-    }
 }

@@ -3643,3 +3643,25 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
 }
 #[path = "async_service_operation_tests.rs"]
 mod async_service_operation_tests;
+
+#[tokio::test]
+async fn s9_specialist_guest_disabled_pin_denial() {
+    let f = fixture("s9_mcp_disabled_pin").await;
+    let specialist = authenticate(&f).await;
+    let args = json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[{"source":"ornn","skill_id":uuid::Uuid::new_v4().to_string(),"name":"disabled","version":"1.0","sha256":"a".repeat(64),"dependencies":[],"disabled":true}]}});
+    let refusal = result(
+        call(&f, &specialist, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(refusal["error"], "owner_only");
+    let mut guest = authenticate(&f).await;
+    guest.chat.as_mut().unwrap().guest = true;
+    let guest_refusal = result(
+        direct_call(&f, &guest, "nyxid__set_agent_skills", args).await,
+        true,
+    )
+    .await;
+    assert_eq!(guest_refusal["error"], "owner_only");
+    f.state.db.drop().await.unwrap();
+}
