@@ -459,10 +459,83 @@ async fn feedback_route_limits_one_user_burst() {
 }
 
 #[tokio::test]
-async fn feedback_engine_flag_is_checked_before_unknown_message() {
-    let f = fixture("feedback-s5-engine", false).await;
-    let result = crate::services::assistant_nyxagent::require_enabled(&f.state.db, &f.owner).await;
-    assert!(result.is_ok());
+async fn feedback_routes_reject_when_engine_flag_is_disabled() {
+    let f = fixture("feedback-s5-engine-off", false).await;
+    let message_id = "engine-gated-reply";
+    let conversation_id = "engine-gated-conversation";
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
+    let override_doc = crate::models::feature_flag_override::FeatureFlagOverride {
+        id: "s5-off".into(),
+        org_user_id: None,
+        flag_key: crate::services::feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY.into(),
+        target_kind: crate::models::feature_flag_override::FlagTargetKind::User,
+        target_key: Some(f.owner.clone()),
+        enabled: false,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        updated_by: f.owner.clone(),
+    };
+    f.state
+        .db
+        .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
+            crate::models::feature_flag_override::COLLECTION_NAME,
+        )
+        .insert_one(override_doc)
+        .await
+        .unwrap();
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Assistant route not found."));
+    f.state
+        .db
+        .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
+            crate::models::feature_flag_override::COLLECTION_NAME,
+        )
+        .delete_many(doc! {"id":"s5-off"})
+        .await
+        .unwrap();
+    let (status, _) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
