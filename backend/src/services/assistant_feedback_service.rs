@@ -38,7 +38,7 @@ pub async fn admin_counts(
         let Ok(vote) = id.get_str("vote") else {
             continue;
         };
-        let count: i64 = row.get_i64("count").unwrap_or(0);
+        let count: i64 = match row.get("count") { Some(bson::Bson::Int32(v)) => i64::from(*v), Some(bson::Bson::Int64(v)) => *v, _ => continue };
         let entry = out.entry(day.clone()).or_insert(AdminCount {
             day,
             up: 0,
