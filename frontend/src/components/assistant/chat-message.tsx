@@ -165,7 +165,7 @@ export function ChatMessageBubble({
       ? sanitizeAssistantMessageContent(message.content)
       : message.content;
   const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
-  const feedback = useAssistantFeedback("conversation", conversationId ?? "", message.id, message.feedback);
+  const feedback = useAssistantFeedback("conversation", conversationId ?? "", message.id);
   const setFeedback = async (next: "up" | "down") => {
     const previous = vote; const selected = previous === next ? undefined : next; setVote(selected);
     if (!conversationId || !feedbackEnabled) return;

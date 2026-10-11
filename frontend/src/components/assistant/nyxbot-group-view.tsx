@@ -88,7 +88,7 @@ export function GroupMessageRow({
   readonly names: readonly string[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
-  const feedback = useAssistantFeedback("group", groupId, message.id, message.feedback);
+  const feedback = useAssistantFeedback("group", groupId, message.id);
   const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
   if (message.role === "notice") {
     return (
