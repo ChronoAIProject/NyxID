@@ -171,3 +171,7 @@ Another registry adapter would implement:
 Legacy recovery (`assistant_learning_recovery.rs`) sits above this boundary: it
 decides eligibility, fences and audits, and calls only the publication module
 for registry reads. No registry response detail reaches an admin.
+
+## Editable pin controls and routes
+
+Agent pin references include `disabled` (default `false`); disabled pins are excluded from `skill_read` and prompt injection. Attached preview is `GET /assistant/nyxagent/agents/{id}/skills/{skill_id}/preview`; bounded audit history is `GET /assistant/nyxagent/agents/{id}/skills/history`; proposal validation is `POST /assistant/nyxagent/agents/{id}/learning/proposals/{proposal_id}/validate`. Proposal edits use `{revision, draft}` with the top-level revision canonical. All NyxAgent routes enforce the engine flag and acting-person ownership.

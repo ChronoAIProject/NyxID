@@ -927,3 +927,7 @@ authorizes another write.
   tag back; the agent's pin stays on the verified new version.
 - The flags and drain procedure of "Rollout and compatibility" still apply;
   keep learning disabled until the migration marker is present.
+
+## Current HTTP editor contract
+
+The learning status response is flat and includes `enabled`, `threshold`, `org_owned`, `opted_in`, and `publication_blocked`. Organization members can update only their own learning consent with `PUT /assistant/nyxagent/agents/{id}/learning/consent`. Proposal edits use `{revision, draft}`; validation is a dry run and returns field diagnostics where available. Preview and history are metadata-bounded owner surfaces.
