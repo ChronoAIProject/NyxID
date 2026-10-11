@@ -765,9 +765,16 @@ pub struct RenameRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelRequest { model: String }
+pub struct ModelRequest {
+    model: String,
+}
 
-pub async fn change_model(State(state): State<AppState>, auth: AuthUser, Path(id): Path<String>, Json(body): Json<ModelRequest>) -> AppResult<Json<ConversationResponse>> {
+pub async fn change_model(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<ModelRequest>,
+) -> AppResult<Json<ConversationResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
