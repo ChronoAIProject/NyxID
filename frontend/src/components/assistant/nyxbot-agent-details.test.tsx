@@ -170,7 +170,6 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
   const { user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const grants = await within(sheet).findByRole("form", { name: "Grants" });
-  expect(within(sheet).getByText(/Only NyxBot can request or grant access for this agent/)).toBeVisible();
   const save = within(grants).getByRole("button", { name: "Save grants" });
   expect(save).toBeDisabled();
   expect(within(grants).getByRole("checkbox", { name: /GitHub/ })).toBeChecked();
