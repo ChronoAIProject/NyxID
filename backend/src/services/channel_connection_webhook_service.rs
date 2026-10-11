@@ -211,7 +211,7 @@ async fn configure_inner(
         let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
             doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
             doc! {"$set": {"webhook_registered": true, "status": "active", "error": null,
-                "poll_lease_until": null, "poll_error_count": 0, "updated_at": bson::DateTime::now()}},
+                "poll_lease_until": null, "poll_error_count": 0, "diagnostics.subscription_state": {"registered": true, "checked_at": bson::DateTime::now(), "last_error": null}, "updated_at": bson::DateTime::now()}},
         ).await?;
         if result.matched_count == 0 {
             let latest = super::channel_bot_service::get_bot(db, &current.id).await?;
