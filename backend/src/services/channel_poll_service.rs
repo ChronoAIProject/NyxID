@@ -170,6 +170,9 @@ pub(crate) async fn poll_bot(
             );
             set.insert("poll_error_count", 0);
             set.insert("error", bson::Bson::Null);
+            set.insert("diagnostics.last_inbound_source", "poll");
+            set.insert("diagnostics.consecutive_errors", 0);
+            set.insert("diagnostics.failure_reason", bson::Bson::Null);
             None
         }
         Err(error) => {
@@ -180,6 +183,8 @@ pub(crate) async fn poll_bot(
             let count = bot.poll_error_count.saturating_add(1);
             set.insert("poll_error_count", i64::from(count));
             set.insert("error", &cause);
+            set.insert("diagnostics.consecutive_errors", i64::from(count));
+            set.insert("diagnostics.failure_reason", &cause);
             set.insert(
                 "poll_backoff_until",
                 bson::DateTime::from_chrono(

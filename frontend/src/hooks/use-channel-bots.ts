@@ -11,6 +11,7 @@ import type {
   TelegramBotProfile,
   UpdateChannelBotRequest,
   VerifyChannelBotResponse,
+  ChannelBotHealth,
 } from "@/types/channels";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +74,22 @@ export function useChannelBot(id: string) {
     },
     enabled: Boolean(id),
     refetchInterval: (query) => query.state.data?.last_verification?.status === "pending" ? 2000 : false,
+  });
+}
+
+export function useChannelBotHealth(id: string) {
+  return useQuery({
+    queryKey: [...channelBotsQueryKeys.detail(id), "health"],
+    queryFn: () => api.get<ChannelBotHealth>(`/channel-bots/${id}/health`),
+    enabled: Boolean(id),
+  });
+}
+
+export function useResubscribeChannelBot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post<ChannelBotHealth>(`/channel-bots/${id}/resubscribe`, {}),
+    onSettled: (_data, _error, id) => { void queryClient.invalidateQueries({ queryKey: channelBotsQueryKeys.detail(id) }); },
   });
 }
 

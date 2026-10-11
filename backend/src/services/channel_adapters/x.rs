@@ -213,13 +213,15 @@ fn response_error(status: StatusCode, backoff: Option<Duration>) -> AppError {
             "authorization expired or revoked; reconnect the account".to_string()
         }
         StatusCode::FORBIDDEN => {
-            "DM access denied; check granted scopes and the app's paid API access".to_string()
+            "DM access denied; check granted scopes first; if scopes are present, verify app tier/access".to_string()
         }
+        StatusCode::PAYMENT_REQUIRED => "X credits depleted or payment is required; restore the app tier/credits".to_string(),
         StatusCode::TOO_MANY_REQUESTS => format!(
             "rate limited; retry after {}s",
             backoff.unwrap_or(Duration::from_secs(900)).as_secs()
         ),
-        _ => "API request failed; retry later".to_string(),
+        status if status.is_server_error() => "X is unavailable (5xx); retry after provider recovery".to_string(),
+        _ => "X API request failed; inspect the health diagnostics and retry".to_string(),
     };
     AppError::ChannelPlatformError(format!("X: {cause} (HTTP {})", status.as_u16()))
 }

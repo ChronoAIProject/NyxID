@@ -21,6 +21,7 @@ import {
   completeManagedOAuth,
   useManagedOnboarding,
 } from "@/hooks/use-channel-managed";
+import { useChannelBotHealth, useResubscribeChannelBot } from "@/hooks/use-channel-bots";
 import type {
   ManagedFlowProps,
   ManagedDetailProps,
@@ -228,8 +229,20 @@ export function ManagedOAuthConnect({
 export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
   const { getPlatform } = useChannelPlatformViews();
   const bootstrap = useManagedOnboarding(bot.platform);
+  const health = useChannelBotHealth(bot.id);
+  const resubscribe = useResubscribeChannelBot();
   return (
     <DetailSection title="Connected account">
+      {bot.platform === "x" && health.data && (
+        <div className="rounded-md border border-border p-3 text-sm" data-testid="x-health-card">
+          <div className="font-medium">Health · {health.data.mode}</div>
+          <div className="text-muted-foreground">Inbound: {health.data.diagnostics.last_inbound_at ?? "never"} ({health.data.diagnostics.last_inbound_source ?? "-"})</div>
+          <div className="text-muted-foreground">Outbound: {health.data.diagnostics.last_outbound_at ?? "never"}</div>
+          <div className="text-muted-foreground">Errors: {health.data.diagnostics.consecutive_errors ?? 0}</div>
+          <div className="text-warning">Next action: {health.data.recommended_action_text}</div>
+          <Button type="button" size="sm" variant="outline" onClick={() => resubscribe.mutate(bot.id)} disabled={resubscribe.isPending}>Resubscribe</Button>
+        </div>
+      )}
       <DetailRow label="Handle" value={bot.platform_bot_username} />
       <DetailRow
         label="Connection"

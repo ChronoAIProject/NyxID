@@ -923,6 +923,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = Router::new()
+        .route("/channel-bots", get(handlers::channel_bots::admin_list))
+        .route(
+            "/channel-bots/{id}/health",
+            get(handlers::channel_bots::admin_health),
+        )
         .route(
             "/ownership/{kind}",
             get(handlers::admin_ownership::list_resources),

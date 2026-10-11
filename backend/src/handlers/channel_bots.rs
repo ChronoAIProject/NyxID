@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -285,6 +286,7 @@ pub struct VerifyBotResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
+    pub diagnostics: crate::models::channel_bot::ChannelBotDiagnostics,
     pub mode: &'static str,
     pub status: String,
     pub webhook_registered: bool,
@@ -294,6 +296,52 @@ pub struct ChannelBotHealthResponse {
     pub error: Option<String>,
     pub recommended_action: &'static str,
     pub recommended_action_text: &'static str,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AdminChannelBotQuery {
+    pub platform: Option<String>,
+    pub status: Option<String>,
+}
+
+pub async fn admin_list(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AdminChannelBotQuery>,
+) -> AppResult<Json<Vec<ChannelBotHealthResponse>>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    let mut filter = mongodb::bson::doc! {};
+    if let Some(platform) = query.platform {
+        filter.insert(
+            "platform",
+            if platform == "x" { "twitter" } else { platform },
+        );
+    }
+    if let Some(status) = query.status {
+        filter.insert("status", status);
+    }
+    let bots: Vec<crate::models::channel_bot::ChannelBot> = state
+        .db
+        .collection(crate::models::channel_bot::COLLECTION_NAME)
+        .find(filter)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(Json(
+        bots.iter()
+            .map(|bot| health_for(bot, state.config.billing_enabled))
+            .collect(),
+    ))
+}
+
+pub async fn admin_health(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
+    Ok(Json(health_for(&bot, state.config.billing_enabled)))
 }
 
 fn health_for(
@@ -331,6 +379,7 @@ fn health_for(
         ("verify", "Verify the live X subscription and credentials.")
     };
     ChannelBotHealthResponse {
+        diagnostics: bot.diagnostics.clone(),
         mode,
         status: bot.status.clone(),
         webhook_registered: bot.webhook_registered,
@@ -1704,6 +1753,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -1780,6 +1830,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

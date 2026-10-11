@@ -54,6 +54,8 @@ pub(crate) async fn process_inbound_messages(
     if messages.is_empty() {
         return Ok(true);
     }
+    state.db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(mongodb::bson::doc! {"_id": &bot.id}, mongodb::bson::doc! {"$set": {"diagnostics.last_inbound_at": mongodb::bson::DateTime::now(), "diagnostics.last_inbound_source": if bot.webhook_registered { "webhook" } else { "poll" }, "diagnostics.last_webhook_at": if bot.webhook_registered { bson::Bson::DateTime(mongodb::bson::DateTime::now()) } else { bson::Bson::Null }, "diagnostics.consecutive_errors": 0}}).await?;
 
     // Parse bot owner UUID once (used for relay token generation per-message)
     let bot_owner_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
