@@ -1302,6 +1302,17 @@ pub async fn context_checkpoint(
     history_page(db, user_id, id, 100, None).await
 }
 
+/// The canonical checkpoint source shared by context inspection and turn
+/// preparation. Callers must project this result rather than rebuilding a
+/// second history window.
+pub async fn checkpoint_for_turn(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
+    context_checkpoint(db, user_id, id).await
+}
+
 /// Fence and first message commit together, before any upstream work.
 /// Legacy Ask-mode orchestrators upgrade to Full access here, inside the same
 /// transaction that claims the turn, so no startup sweep races a live turn.

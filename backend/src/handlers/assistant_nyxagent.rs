@@ -652,7 +652,7 @@ pub async fn context(
 ) -> AppResult<Json<ContextResponse>> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let (row, messages) = engine::context_checkpoint(&state.db, &user_id, &id).await?;
+    let (row, messages) = engine::checkpoint_for_turn(&state.db, &user_id, &id).await?;
     let goal = messages
         .iter()
         .find(|m| m.role == "user")
