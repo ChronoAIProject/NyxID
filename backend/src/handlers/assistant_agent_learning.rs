@@ -600,4 +600,13 @@ mod tests {
         assert_eq!(body.revision, None);
         assert_eq!(body.draft["revision"], 4);
     }
+
+    #[test]
+    fn validate_body_is_dry_run_input_only() {
+        let body: ValidateBody = serde_json::from_value(json!({
+            "draft": {"name": "candidate", "skill_md": "# Skill"}
+        }))
+        .expect("validation accepts a draft payload");
+        assert_eq!(body.draft["name"], "candidate");
+    }
 }
