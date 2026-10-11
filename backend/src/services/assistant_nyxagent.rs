@@ -465,7 +465,6 @@ pub fn question_key(text: &str) -> Option<String> {
     Some(hex::encode(Sha256::digest(normalized.as_bytes())))
 }
 impl std::fmt::Debug for TurnStart {
-        retry_of: None,
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnStart")
             .field("conversation_id", &self.conversation_id)
@@ -474,15 +473,14 @@ impl std::fmt::Debug for TurnStart {
     }
 }
 impl From<&TurnStart> for TurnStart {
-        retry_of: None,
     fn from(start: &TurnStart) -> Self {
         start.clone()
     }
 }
 impl From<&TurnRequest> for TurnStart {
-        retry_of: None,
     fn from(request: &TurnRequest) -> Self {
         Self {
+            retry_of: request.retry_of.clone(),
             channel_event_id: None,
             org_access: None,
             attachment_ids: request.attachment_ids.clone(),
@@ -1709,7 +1707,7 @@ pub async fn begin_turn_with_voice(
                     .as_ref().filter(|_| !hidden_voice)
                     .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
-                    retry_of: None,
+                    retry_of: start.retry_of.clone(),
                     running_response: None,
                     channel_event_id: start.channel_event_id.clone(),
                     initiating_message_seq: Some(input_seq),

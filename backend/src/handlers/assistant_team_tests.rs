@@ -1592,7 +1592,6 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
 // Prompt refresh regressions exercise the real detached turn + Mongo settlement
 // path. Captured prompts contain a private marker: never print request bodies.
 fn refresh_start(id: Option<&str>, agent_id: Option<&str>, text: &str) -> TurnStart {
-        retry_of: None,
     TurnStart::from(&engine::TurnRequest {
         attachment_ids: Vec::new(),
         agent_id: agent_id.map(str::to_owned),
