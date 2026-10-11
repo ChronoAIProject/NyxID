@@ -315,12 +315,12 @@ export function AgentLearningReview({
                   }
                 }}
               >
-                {proposal.status === "publication_failed"
-                  ? "Retry publication"
-                  : checkOnly
+                {checkOnly
                   ? card
                     ? "Confirm check"
                     : "Check publication"
+                  : proposal.status === "publication_failed"
+                    ? "Retry publication"
                   : card
                     ? "Confirm publish & attach"
                     : "Publish & request confirmation"}
