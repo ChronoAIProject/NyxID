@@ -157,16 +157,27 @@ fn legacy_instruction_change(
         return false;
     };
     let earliest_binding = row.context_reset_at.unwrap_or(row.created_at);
-    if agent.updated_at > earliest_binding {
+    // MongoDB stores these timestamps at millisecond precision. Compare the
+    // persisted values at that precision so legacy adoption at the original
+    // conversation timestamp is not mistaken for a profile edit.
+    if agent.updated_at.timestamp_millis() > earliest_binding.timestamp_millis() {
         return true; // Persona/description changes also apply to guest sessions.
     }
     if row.guest_turn {
         return false; // Owner memory is never part of a guest's stable context.
     }
-    // Memory is delivered in per-turn input and is deliberately excluded from
-    // the stable instruction fingerprint, including for legacy bindings.
-    let _ = history;
-    false
+    let last_reply = history.iter().rev().find(|message| {
+        message.role == "assistant"
+            && row
+                .context_reset_at
+                .is_none_or(|reset| message.created_at > reset)
+    });
+    last_reply.is_some_and(|reply| {
+        agent
+            .memory
+            .iter()
+            .any(|note| note.updated_at > reply.created_at)
+    })
 }
 
 #[cfg(test)]
