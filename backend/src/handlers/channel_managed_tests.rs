@@ -595,7 +595,7 @@ async fn aurinko_platform_credentials_share_provider_pair_and_keep_signing_secre
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
     let db = crate::test_utils::connect_transaction_test_database("aurinko_credentials").await;
     let (state, auth, _) = fixture_with_db(db).await;
-    let provider: ProviderConfig = bson::from_document::<ChannelBot>(doc! {
+    let provider: ProviderConfig = bson::from_document::<ProviderConfig>(doc! {
         "_id": uuid::Uuid::new_v4().to_string(), "slug": "aurinko", "name": "Aurinko",
         "provider_type": "api_key", "is_active": true, "created_by": auth.user_id.to_string(),
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
@@ -786,7 +786,7 @@ async fn aurinko_composite_reads_never_mix_concurrent_rotations() {
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
     let db = crate::test_utils::connect_transaction_test_database("aurinko_rotations").await;
     let (state, auth, _) = fixture_with_db(db).await;
-    let provider: ProviderConfig = bson::from_document::<ChannelBot>(doc! {
+    let provider: ProviderConfig = bson::from_document::<ProviderConfig>(doc! {
         "_id": uuid::Uuid::new_v4().to_string(), "slug": "aurinko", "name": "Aurinko",
         "provider_type": "api_key", "is_active": true, "created_by": "seed-author",
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
