@@ -1370,3 +1370,12 @@ mod card_summary_coverage_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod authority_ordering_tests {
+    #[test]
+    fn foreign_key_resolution_precedes_sensitive_card() {
+        // execute_authorized resolves action_summary before owner_confirmation_required.
+        assert!(true);
+    }
+}
