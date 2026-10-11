@@ -264,7 +264,7 @@ pub async fn get_overview(
                                 .as_ref()
                                 .or(b.platform_key_pricing.as_ref())
                                 .map(|p| {
-                                    crate::services::billing::config::effective_component_sources(p)
+                                    crate::services::billing::config::effective_component_sources(b)
                                         .into_iter()
                                         .map(|c| format!("{:?}", c.source).to_lowercase())
                                         .collect()

@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(
             sources
                 .iter()
-                .map(|s| (&s.metric, format!("{:?}", s.source).to_lowercase()))
+                .map(|s| (s.metric.clone(), format!("{:?}", s.source).to_lowercase()))
                 .collect::<Vec<_>>(),
             vec![
                 ("requests".to_string(), "service".to_string()),
