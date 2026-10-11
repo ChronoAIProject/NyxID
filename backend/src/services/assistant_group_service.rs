@@ -126,6 +126,7 @@ pub async fn create(
         name,
         member_agent_ids: members.iter().map(|member| member.id.clone()).collect(),
         lead_agent_id: lead_of(&members),
+        last_recipient_ids: Vec::new(),
         created_by: created_by.into(),
         message_count: 0,
         pending_agent_ids: Vec::new(),
@@ -327,6 +328,7 @@ pub async fn append(
         agent_id: agent.map(|agent| agent.id.clone()),
         agent_name: agent.map(|agent| agent.name.clone()),
         text: text.into(),
+        recipient_agent_ids: Vec::new(),
         created_at: now,
     };
     db.collection::<GroupMessage>(MESSAGES)
@@ -391,6 +393,7 @@ pub async fn append_with_uploads(
         agent_id: agent.map(|agent| agent.id.clone()),
         agent_name: agent.map(|agent| agent.name.clone()),
         text: text.into(),
+        recipient_agent_ids: Vec::new(),
         created_at: now,
     };
     db.collection::<GroupMessage>(MESSAGES)

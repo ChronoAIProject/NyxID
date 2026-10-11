@@ -2,6 +2,7 @@ import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { MachineToolCard } from "./machine-tool-card";
 import {
   Fragment,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -458,6 +459,7 @@ export function NyxAgentGroupPage({
   const [composerHeight, setComposerHeight] = useState(0);
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [recipientAgentIds, setRecipientAgentIds] = useState<string[]>([]);
   // Group payloads name agents by handle; their display names live on the agent list.
   const group = transcript.data && !transcript.error
     ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
@@ -465,6 +467,16 @@ export function NyxAgentGroupPage({
   const messages = (transcript.error ? [] : transcript.data?.messages ?? []).map((message) =>
     message.agent ? { ...message, agent: withDisplayName(message.agent, agents.data?.agents) } : message,
   );
+  useEffect(() => {
+    if (group && !recipientAgentIds.length) setRecipientAgentIds(group.default_recipient_ids);
+  }, [group, recipientAgentIds.length]);
+  const onComposerContentChange = (content: string) => {
+    if (!group) return;
+    const mentioned = group.members.filter((member) =>
+      new RegExp(`(^|\\s)@${member.name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}(?=\\s|$)`, "i").test(content),
+    ).map((member) => member.id);
+    if (mentioned.length) setRecipientAgentIds(mentioned);
+  };
 
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -602,7 +614,7 @@ export function NyxAgentGroupPage({
             onSend={async (text, uploads) => {
               try {
                 await transcript.post.mutateAsync(
-                  uploads ? { text, attachmentIds: uploads.attachmentIds } : text,
+                  uploads ? { text, attachmentIds: uploads.attachmentIds, recipientAgentIds } : { text, attachmentIds: [], recipientAgentIds },
                 );
               } catch (error) {
                 toast.error(
@@ -611,6 +623,13 @@ export function NyxAgentGroupPage({
                 throw error;
               }
             }}
+            onContentChange={onComposerContentChange}
+            controls={group ? <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Message recipients">
+              {recipientAgentIds.map((id) => {
+                const member = group.members.find((row) => row.id === id);
+                return member ? <Button key={id} type="button" size="sm" variant="secondary" aria-label={`Remove recipient ${member.name}`} onClick={() => setRecipientAgentIds((current) => current.filter((value) => value !== id))}>@{member.name} ×</Button> : null;
+              })}
+            </div> : undefined}
             onStop={async () => undefined}
           />
         </div>

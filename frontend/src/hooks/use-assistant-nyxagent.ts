@@ -42,7 +42,7 @@ function liveSend(
   onAdopt: (id: string) => void,
   agent?: NyxAgentConversationAgent,
   attachmentIds?: string[],
-  attachments?: import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
+  attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
   adoptExisting?: boolean,
 ) {
   const actorId = currentCreditsActor();

@@ -49,6 +49,7 @@ pub struct GroupResponse {
     name: String,
     members: Vec<GroupMemberResponse>,
     lead_agent_id: String,
+    default_recipient_ids: Vec<String>,
     working_agent_ids: Vec<String>,
     message_count: i64,
     last_message_at: Option<DateTime<Utc>>,
@@ -74,6 +75,7 @@ pub struct GroupMessageResponse {
     role: String,
     agent: Option<GroupAgentRef>,
     text: String,
+    recipient_agent_ids: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -99,6 +101,7 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         role: row.role,
         agent,
         text: row.text,
+        recipient_agent_ids: row.recipient_agent_ids,
         created_at: row.created_at,
     }
 }
@@ -125,6 +128,11 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
         id: group.id,
         name: group.name,
         lead_agent_id: group.lead_agent_id,
+        default_recipient_ids: if group.last_recipient_ids.is_empty() {
+            vec![]
+        } else {
+            group.last_recipient_ids.clone()
+        },
         working_agent_ids: working,
         message_count: group.message_count,
         last_message_at: group.last_message_at,
@@ -497,7 +505,11 @@ async fn post_with_uploads(
         }
         ids.to_vec()
     } else {
-        groups::mentions(text, &live)
+        let mentioned = groups::mentions(text, &live);
+        if !mentioned.is_empty() { mentioned } else {
+            let sticky = group.last_recipient_ids.iter().filter(|id| live.iter().any(|member| &member.id == *id)).cloned().collect::<Vec<_>>();
+            if sticky.is_empty() { Vec::new() } else { sticky }
+        }
     };
     if let Some(member) = confirmed {
         addressed.retain(|id| id != &member);
@@ -509,7 +521,11 @@ async fn post_with_uploads(
     {
         addressed.push(group.lead_agent_id.clone());
     }
-    let message = Box::pin(groups::append_with_uploads(
+    if author.is_none() {
+        state.db.collection::<AssistantGroup>(crate::models::assistant_group::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc! {"_id": group_id, "user_id": owner}, mongodb::bson::doc! {"$set": {"last_recipient_ids": &addressed}}).await?;
+    }
+    let mut message = Box::pin(groups::append_with_uploads(
         &state.db,
         owner,
         group_id,
@@ -519,6 +535,9 @@ async fn post_with_uploads(
         ids,
     ))
     .await?;
+    message.recipient_agent_ids = addressed.clone();
+    state.db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
+        .update_one(mongodb::bson::doc! {"_id": &message.id}, mongodb::bson::doc! {"$set": {"recipient_agent_ids": &addressed}}).await?;
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.

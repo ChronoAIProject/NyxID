@@ -136,6 +136,7 @@ interface ChatComposerProps {
    */
   readonly mentions?: readonly ComposerMention[];
   readonly onSend: (content: string) => Promise<void>;
+  readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
   readonly onVoice?: () => void;
 }
@@ -170,6 +171,7 @@ function DraftedChatComposer({
   placeholder,
   mentions,
   onSend,
+  onContentChange,
   onStop,
   onVoice,
 }: ChatComposerProps) {
@@ -250,6 +252,7 @@ function DraftedChatComposer({
     renderedOwnerUserIdRef.current = ownerUserId;
     renderedDraftKeyRef.current = draftKey;
     setContent(nextContent);
+    onContentChange?.(nextContent);
   }
 
   const syncComposerLayout = useCallback((draft?: string) => {
