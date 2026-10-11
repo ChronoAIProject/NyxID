@@ -774,7 +774,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
-        retry_of: None,
+            retry_of: None,
             running_response: None,
             channel_event_id: None,
             initiating_message_seq: None,
