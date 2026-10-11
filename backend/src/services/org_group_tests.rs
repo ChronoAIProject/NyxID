@@ -634,6 +634,11 @@ async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() 
 }
 
 #[tokio::test]
+async fn org_group_sticky_recipients_are_per_actor() {
+    org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants().await;
+}
+
+#[tokio::test]
 async fn org_group_http_tools_and_demoted_or_inactive_members_are_refused() {
     use crate::handlers::{assistant_group as handler, assistant_team};
     let f = Fixture::new("org_group_routes").await;
