@@ -1,5 +1,53 @@
+use crate::errors::AppResult;
 use crate::models::platform_settings::BillingSettings;
 use crate::models::service_billing::ServiceBilling;
+use crate::models::{
+    billing_rate_cache::{BillingRateCache, COLLECTION_NAME as RATES},
+    downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
+    platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID, PlatformSettings},
+};
+use futures::TryStreamExt;
+use mongodb::bson::doc;
+
+pub async fn load_settings(db: &mongodb::Database) -> AppResult<Option<BillingSettings>> {
+    Ok(db
+        .collection::<PlatformSettings>(SETTINGS)
+        .find_one(doc! {"_id": PLATFORM_SETTINGS_ID})
+        .await?
+        .and_then(|s| s.billing))
+}
+pub async fn save_settings(
+    db: &mongodb::Database,
+    billing: Option<BillingSettings>,
+) -> AppResult<()> {
+    let value = mongodb::bson::to_bson(&billing).map_err(|e| {
+        crate::errors::AppError::Internal(format!("serialize billing settings: {e}"))
+    })?;
+    db.collection::<PlatformSettings>(SETTINGS)
+        .update_one(
+            doc! {"_id": PLATFORM_SETTINGS_ID},
+            doc! {"$set": {"billing": value}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}},
+        )
+        .upsert(true)
+        .await?;
+    Ok(())
+}
+pub async fn load_rates(db: &mongodb::Database) -> AppResult<Vec<BillingRateCache>> {
+    Ok(db
+        .collection::<BillingRateCache>(RATES)
+        .find(doc! {})
+        .await?
+        .try_collect()
+        .await?)
+}
+pub async fn load_services(db: &mongodb::Database) -> AppResult<Vec<DownstreamService>> {
+    Ok(db
+        .collection::<DownstreamService>(SERVICES)
+        .find(doc! {})
+        .await?
+        .try_collect()
+        .await?)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BillingConfigSource {
@@ -40,7 +88,10 @@ pub fn effective_config(
             },
         },
     };
-    let (overdraft_cap_credits, overdraft_source) = match global.map(|g| g.default_overdraft_cap_credits).unwrap_or(None) {
+    let (overdraft_cap_credits, overdraft_source) = match global
+        .map(|g| g.default_overdraft_cap_credits)
+        .unwrap_or(None)
+    {
         Some(v) => (Some(v), BillingConfigSource::Global),
         None => match env_overdraft {
             Some(v) => (Some(v), BillingConfigSource::Env),

@@ -30,12 +30,7 @@ pub async fn get_config(
     auth: AuthUser,
 ) -> AppResult<Json<BillingConfigResponse>> {
     require_admin(&state, &auth).await?;
-    let global = state
-        .db
-        .collection::<PlatformSettings>(SETTINGS)
-        .find_one(doc! {"_id": PLATFORM_SETTINGS_ID})
-        .await?
-        .and_then(|s| s.billing);
+    let global = crate::services::billing::config::load_settings(&state.db).await?;
     Ok(Json(BillingConfigResponse {
         billing_enabled: state.billing.billing_enabled(),
         lago_configured: state.billing.lago_configured(),
@@ -66,18 +61,7 @@ pub async fn put_config(
             "default overdraft cap must be non-negative".into(),
         ));
     }
-    let billing = mongodb::bson::to_bson(&input.billing).map_err(|error| {
-        crate::errors::AppError::Internal(format!("serialize billing settings: {error}"))
-    })?;
-    state
-        .db
-        .collection::<PlatformSettings>(SETTINGS)
-        .update_one(
-            doc! {"_id": PLATFORM_SETTINGS_ID},
-            doc! {"$set": {"billing": billing}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}},
-        )
-        .upsert(true)
-        .await?;
+    crate::services::billing::config::save_settings(&state.db, input.billing.clone()).await?;
     crate::services::audit_service::log_actor_event(
         state.db.clone(),
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
@@ -105,13 +89,7 @@ pub async fn get_rates(
 ) -> AppResult<Json<Vec<BillingRateResponse>>> {
     require_admin(&state, &auth).await?;
     let ttl = chrono::Duration::seconds(state.config.billing_rate_cache_ttl_secs as i64);
-    let rows = state
-        .db
-        .collection::<BillingRateCache>(RATES)
-        .find(doc! {})
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
+    let rows = crate::services::billing::config::load_rates(&state.db).await?;
     Ok(Json(
         rows.into_iter()
             .map(|r| BillingRateResponse {
@@ -141,13 +119,7 @@ pub async fn get_overview(
     auth: AuthUser,
 ) -> AppResult<Json<Vec<BillingServiceResponse>>> {
     require_admin(&state, &auth).await?;
-    let rows = state
-        .db
-        .collection::<DownstreamService>(SERVICES)
-        .find(doc! {})
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
+    let rows = crate::services::billing::config::load_services(&state.db).await?;
     let global = state
         .db
         .collection::<PlatformSettings>(SETTINGS)
@@ -189,11 +161,10 @@ pub async fn resync_service(
     Path(id): Path<String>,
 ) -> AppResult<Json<bool>> {
     require_admin(&state, &auth).await?;
-    let service = state
-        .db
-        .collection::<DownstreamService>(SERVICES)
-        .find_one(doc! {"_id": &id})
+    let service = crate::services::billing::config::load_services(&state.db)
         .await?
+        .into_iter()
+        .find(|service| service.id == id)
         .ok_or(crate::errors::AppError::NotFound(
             "service not found".into(),
         ))?;
