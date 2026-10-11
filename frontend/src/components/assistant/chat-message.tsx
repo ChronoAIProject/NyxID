@@ -171,7 +171,7 @@ export function ChatMessageBubble({
   const setFeedback = async (next: "up" | "down") => {
     const previous = vote; const selected = previous === next ? undefined : next; setVote(selected);
     if (!conversationId || !feedbackEnabled) return;
-    try { await feedback.mutateAsync(selected ? { vote: selected } : {}); } catch { setVote(previous); }
+    try { await feedback.mutateAsync(selected ? { vote: selected } : {}); } catch { setVote(previous); return; }
     if (selected) capture({ name: "ui.assistant_feedback_submitted", props: { message_id: message.id, vote: selected } });
   };
   if (message.role === "user") {
