@@ -155,6 +155,19 @@ impl Fixture {
                 .await
                 .unwrap();
         }
+        // These tests exercise the legacy permission-card contract explicitly.
+        // Production settings default to denied; routed mode keeps this fixture's
+        // card assertions intentional during rollout.
+        for id in ids.iter().take(4) {
+            db.collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+                .insert_one(doc! {
+                    "_id": id,
+                    "specialist_access_requests": "routed_to_nyxbot",
+                    "updated_at": bson::DateTime::now(),
+                })
+                .await
+                .unwrap();
+        }
         for (i, role) in [OrgRole::Admin, OrgRole::Member, OrgRole::Viewer]
             .into_iter()
             .enumerate()
