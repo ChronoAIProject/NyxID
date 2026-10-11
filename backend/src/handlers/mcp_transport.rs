@@ -1772,6 +1772,21 @@ async fn handle_tools_call(
         .await
         .unwrap_or(false)
     {
+        let _ = audit_service::log_actor_event(
+            state.db.clone(),
+            &audit_service::AuditActor {
+                user_id: auth.user_id.clone(),
+                ip_address: auth.ip_address.clone(),
+                user_agent: auth.user_agent.clone(),
+                api_key_id: auth.api_key_id.clone(),
+                api_key_name: auth.api_key_name.clone(),
+            },
+            "assistant_mcp_tool_call",
+            Some(
+                serde_json::json!({"error_code": "retry_duplicate_action", "metadata_only": true}),
+            ),
+        )
+        .await;
         return rpc_success(
             request.id.clone(),
             serde_json::json!({

@@ -985,14 +985,38 @@ async fn b4_duplicate_action_fence_through_tools_call() {
     let auth = authenticate(&f).await;
     let first = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "issues"})).await;
     assert_eq!(first.status(), StatusCode::OK);
-    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
     let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
-    crate::services::assistant_nyxagent::mark_retry_of(&f.state.db, &f.owner, &f.row.id, &turn_id).await.unwrap();
+    assert!(
+        row.active_turn
+            .as_ref()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|activity| activity.digest.is_some())
+    );
+    crate::services::assistant_nyxagent::mark_retry_of(&f.state.db, &f.owner, &f.row.id, &turn_id)
+        .await
+        .unwrap();
     let retry = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "issues"})).await;
-    let body = axum::body::to_bytes(retry.into_body(), 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(retry.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["result"]["isError"], true);
-    assert_eq!(value["result"]["content"][0]["text"], "retry_duplicate_action");
+    assert_eq!(
+        value["result"]["content"][0]["text"],
+        "retry_duplicate_action"
+    );
+    let audit = f.state.db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type": "assistant_mcp_tool_call", "event_data.error_code": "retry_duplicate_action"})
+        .await.unwrap();
+    assert!(
+        audit.is_some(),
+        "duplicate refusal must be metadata-audited"
+    );
     let different = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "calendar"})).await;
     assert_eq!(different.status(), StatusCode::OK);
 }
