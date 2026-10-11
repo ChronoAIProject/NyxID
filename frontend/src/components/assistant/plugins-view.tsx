@@ -8,18 +8,13 @@ import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
+import { useSkillSearch } from "@/hooks/use-agent-skills";
 import {
   deriveConnectorItems,
   matchesPluginQuery,
   type ConnectorCardItem,
   type PluginKind,
 } from "@/lib/assistant/plugins";
-import {
-  addSkill,
-  listAddedSkillIds,
-  SKILL_CATALOG,
-  type SkillCatalogItem,
-} from "@/lib/assistant/skills";
 
 interface PluginCardShape {
   readonly id: string;
@@ -431,17 +426,8 @@ function ConnectorsTab({ query }: { readonly query: string }) {
 }
 
 function SkillsTab({ query }: { readonly query: string }) {
-  const [addedIds, setAddedIds] = useState<ReadonlySet<string>>(() =>
-    listAddedSkillIds(),
-  );
-
-  const items = SKILL_CATALOG.map((skill) => toSkillCard(skill, addedIds)).filter(
-    (item) => matchesPluginQuery(item, query),
-  );
-  const added = items.filter((item) => item.added);
-  const available = items.filter((item) => !item.added);
-  const searching = Boolean(query.trim());
-  const showOwnSkillCard = !searching;
+  const search = useSkillSearch(query.trim() || null, 1);
+  const items = (search.data?.items ?? []).map((skill) => ({ id: skill.id, name: skill.name, initial: skill.name.slice(0, 2).toUpperCase(), category: "Skill", description: skill.description, meta: "Ornn catalog", added: false }));
 
   if (searching && items.length === 0) {
     return (
@@ -458,53 +444,23 @@ function SkillsTab({ query }: { readonly query: string }) {
         item={item}
         addedBadge="Installed"
         actionLabel={item.added ? "Manage" : "Install"}
-        // Skill management isn't built yet, so an installed skill's card is
-        // inert rather than offering an action that does nothing.
-        onActivate={
-          item.added ? undefined : () => setAddedIds(addSkill(item.id))
-        }
+        onActivate={() => toast.info("Attach this skill from an agent's Skills panel.")}
       />
     );
   }
 
   return (
     <>
-      {added.length > 0 && (
+      {items.length > 0 && (
         <>
-          <SectionHeading>Added</SectionHeading>
-          <div className="mb-7">
-            <CardGrid>{added.map(card)}</CardGrid>
-          </div>
-        </>
-      )}
-
-      {(available.length > 0 || showOwnSkillCard) && (
-        <>
-          <SectionHeading>Available to add</SectionHeading>
-          <CardGrid>
-            {available.map(card)}
-            {showOwnSkillCard && <AddYourOwnSkillCard />}
-          </CardGrid>
+          <SectionHeading>Ornn catalog</SectionHeading>
+          <CardGrid>{items.map(card)}</CardGrid>
         </>
       )}
     </>
   );
 }
 
-function toSkillCard(
-  skill: SkillCatalogItem,
-  addedIds: ReadonlySet<string>,
-): PluginCardShape {
-  return {
-    id: skill.id,
-    name: skill.name,
-    initial: skill.initial,
-    category: "Skill",
-    description: skill.description,
-    meta: `${skill.author} · ${skill.version}`,
-    added: addedIds.has(skill.id),
-  };
-}
 
 export function PluginsView() {
   const [tab, setTab] = useState<PluginKind>("connector");

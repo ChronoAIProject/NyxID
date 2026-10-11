@@ -4,8 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { ReactNode } from "react";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
-import { resetSkillCatalog } from "@/lib/assistant/skills";
 import { ApiError } from "@/lib/api-client";
+
+vi.mock("@/hooks/use-agent-skills", () => ({ useSkillSearch: vi.fn(() => ({ data: { items: [], total_pages: 1 }, isLoading: false })) }));
 
 const mocks = vi.hoisted(() => ({
   useCatalog: vi.fn(),
@@ -164,7 +165,6 @@ function mockLoaded({
 describe("PluginsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    resetSkillCatalog();
     mockLoaded();
     mocks.addDialogProps = null;
     // Manage-modal hooks: a fully-shaped key + no-op mutations.
