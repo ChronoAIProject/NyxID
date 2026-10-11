@@ -550,6 +550,30 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
     }
 }
 
+#[tokio::test]
+async fn feedback_group_acl_rejects_non_participant_as_not_found() {
+    let f = fixture("feedback-group-acl", false).await;
+    let path = "/api/v1/assistant/nyxagent/groups/missing-group/messages/missing/feedback";
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            path,
+            &f.human_token,
+            Some(json!({"vote":"up"}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&f.state, "DELETE", path, &f.human_token, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
