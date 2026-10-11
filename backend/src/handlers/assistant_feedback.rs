@@ -236,3 +236,41 @@ pub async fn admin(
         next_cursor,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_accepts_votes_and_bounds_comments() {
+        let input = FeedbackInput { vote: "up".into(), comment: Some(format!("  {}  ", "x".repeat(1_200))) };
+        let comment = validate(&input).unwrap().unwrap();
+        assert_eq!(comment.len(), 1_000);
+        assert!(comment.chars().all(|c| c == 'x'));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_vote_with_stable_code() {
+        let error = validate(&FeedbackInput { vote: "maybe".into(), comment: None }).unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(code) if code == "feedback_vote_invalid"));
+    }
+
+    #[test]
+    fn empty_comment_is_omitted() {
+        assert!(validate(&FeedbackInput { vote: "down".into(), comment: Some("  \n".into()) }).unwrap().is_none());
+    }
+
+    #[test]
+    fn response_does_not_expose_owner_or_message_text() {
+        let now = Utc::now();
+        let response: FeedbackResponse = AssistantMessageFeedback {
+            id: Uuid::new_v4().to_string(), user_id: "u".into(), conversation_id: Some("c".into()), group_id: None,
+            message_id: "m".into(), turn_id: Some("t".into()), vote: "up".into(), comment: None,
+            created_at: now, updated_at: now,
+        }.into();
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json.get("vote").and_then(|v| v.as_str()), Some("up"));
+        assert!(json.get("user_id").is_none());
+        assert!(json.get("message_id").is_none());
+    }
+}
