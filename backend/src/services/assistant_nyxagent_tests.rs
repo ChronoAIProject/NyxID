@@ -424,6 +424,41 @@ fn guest_recap_omits_owner_tool_metadata() {
     assert!(!recap.contains("turn_lost"));
 }
 
+#[test]
+fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
+    let mut row = AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "retry-recap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "partial".into(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "activity-42".into(),
+            label: "mail.send".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap(std::slice::from_mut(&mut row));
+    assert!(recap.contains("mail.send=completed"));
+    assert!(recap.contains("activity-42") || recap.contains("mail.send"));
+}
+
 #[tokio::test]
 async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes() {
     let db = connect_transaction_test_database("nyxa_persist").await;
