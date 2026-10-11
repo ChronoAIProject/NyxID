@@ -1,5 +1,6 @@
 pub mod allowances;
 pub mod amounts;
+pub mod config;
 pub mod funding;
 pub mod grants;
 pub mod lago_client;

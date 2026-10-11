@@ -494,3 +494,12 @@ while retaining the primary. Prices accept up to 12 fractional digits. Catalog c
 ## Service-instance history
 
 Explicit platform/user credential-binding transitions and platform-instance settings are recorded in the service journal. Automatic provisioning and removal use verified system attribution; retained UUID history remains available after physical cleanup under current owner/admin scope. Re-provisioning starts a new instance history even when the slug is reused. Platform credential material is never included. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe details, archive discovery, and MongoDB transaction prerequisites.
+## Billing configuration
+
+Billing configuration has an explicit, inspectable precedence order:
+
+1. Deployment environment values are read-only in the admin UI and provide process defaults.
+2. `PlatformSettings.billing` contains optional global defaults editable by administrators.
+3. A service's `ServiceBilling` is the highest-precedence scoped override.
+
+Every effective value reports its source (`env`, `global`, `service`, `legacy`, or `free`). The central admin billing surface exposes the effective source, cached rates and sync state. This configuration surface does not alter money arithmetic, reservations, settlement, or reconciliation.
