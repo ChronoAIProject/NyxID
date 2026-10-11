@@ -239,10 +239,10 @@ export function AgentLearningReview({
                   onChange={(event) => setDraftDescriptions((current) => ({ ...current, [proposal.id]: event.target.value }))}
                 />
                 {(draftFiles[proposal.id] ?? draft.files).map((file, index) => (
-                  <div key={`${proposal.id}-${index}`} className="space-y-1 rounded border border-border/50 p-2">
+                  <div key={`${proposal.id}-${file.path}`} className="space-y-1 rounded border border-border/50 p-2">
                     <Input aria-label={`File ${index + 1} path`} value={file.path} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, path: event.target.value } : f) }))} />
                     <Textarea aria-label={`File ${index + 1} content`} value={file.content} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, content: event.target.value } : f) }))} />
-                    {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).filter((_, i) => i !== index) }))}>Remove file</Button> : null}
+                    {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).filter((_, i) => i !== index) }))}>{`Remove file ${file.path}`}</Button> : null}
                   </div>
                 ))}
                 {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: [...(current[proposal.id] ?? draft.files), { path: "", content: "" }] }))}>Add file</Button> : null}
