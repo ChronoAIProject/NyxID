@@ -74,7 +74,7 @@ function path(id: string): string {
   return `${ROOT}/conversations/${id}`;
 }
 
-function storedError(code: string | null): string {
+export function storedError(code: string | null): string {
   if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
   if (code === "continuation_no_progress") return "Paused because the task repeated without progress. Its context is saved; give it new guidance.";
   if (code === "idle_timeout") return "The assistant stopped responding. Try again.";

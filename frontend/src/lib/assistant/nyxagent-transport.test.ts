@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NyxAgentTransport, CONTEXT_RESET_NOTICE } from "./nyxagent-transport";
+import { NyxAgentTransport, CONTEXT_RESET_NOTICE, storedError } from "./nyxagent-transport";
 import { transitionAssistantIdentity } from "./identity";
 import { assistantChatSurface } from "./conversation-ids";
 import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
@@ -9,6 +9,16 @@ const other = `nyxa-${"2".repeat(32)}`;
 const start = "2026-09-17T00:00:00Z";
 const reset = "2026-09-17T00:00:01Z";
 const afterReset = "2026-09-17T00:00:02Z";
+
+it.each([
+  ["turn_lost", "interrupted"], ["assistant_unavailable", "temporarily unavailable"],
+  ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
+  ["output_too_large", "response limit"], ["nyxid_error", "authorize"],
+  ["stale_response", "context changed"], ["context_unavailable", "could not be restored"],
+  ["some_upstream_code", "could not complete"],
+])("maps %s to actionable copy", (code, text) => {
+  expect(storedError(code)).toContain(text);
+});
 
 function conversation(key = id): NyxAgentConversation {
   return {

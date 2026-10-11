@@ -579,6 +579,13 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     )
     .await
     .unwrap();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &old.id},
+            doc! {"$set": {"active_turn.activities": [{"id": "act-1", "label": "nyxid__check", "status": "running", "started_at": bson::DateTime::now(), "ended_at": bson::Bson::Null}], "active_turn.attachments": [{"id": "att-1", "content_type": "text/plain", "size": 4i64, "label": "result.txt", "origin": "tool"}]}},
+        )
+        .await
+        .unwrap();
     expire_turn(&db, &old).await;
     let next = begin_turn(
         &db,
@@ -602,6 +609,8 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     assert_eq!(lost.status, "failed");
     assert_eq!(lost.error_code.as_deref(), Some("turn_lost"));
     assert!(lost.text.is_empty());
+    assert_eq!(lost.activities[0].status, "error");
+    assert_eq!(lost.attachments[0].id, "att-1");
     assert_eq!(
         lost.created_at.timestamp_millis(),
         next.context_reset_at.unwrap().timestamp_millis()
