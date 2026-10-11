@@ -63,6 +63,8 @@ export function ThreadHeader({
   destroyed,
   channelPlatform,
   onOpenDetails,
+  model,
+  onModelChange,
 }: {
   /** The agent's display name (or handle). */
   readonly name: string;
@@ -75,6 +77,8 @@ export function ThreadHeader({
   /** Set when the thread answers one of the user's channel bots. */
   readonly channelPlatform?: string | null;
   readonly onOpenDetails?: () => void;
+  readonly model?: string;
+  readonly onModelChange?: (model: string) => void;
 }) {
   return (
     <div className="space-y-2">
