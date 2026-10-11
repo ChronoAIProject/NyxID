@@ -154,10 +154,10 @@ describe("canonical chat presentation", () => {
     render(
       <ChatMessageEntry
         message={{
-          ...BASE,
-          id: "nyxagent-context-reset:conversation",
-          role: "system",
-          content,
+      ...BASE,
+      id: "nyxagent-context-reset:conversation",
+      role: "system",
+      content,
         }}
       />,
     );
@@ -176,19 +176,19 @@ describe("canonical chat presentation", () => {
           thinking: "Checking state",
           steps: [
             {
-              id: "step-1",
-              name: "Inspect",
-              status: "done",
-              startedAt: 1,
-              finishedAt: 2,
+            id: "step-1",
+            name: "Inspect",
+            status: "done",
+            startedAt: 1,
+            finishedAt: 2,
             },
           ],
           toolCalls: [
             {
-              id: "tool-1",
-              name: "catalog.read",
-              status: "running",
-              startedAt: 1,
+            id: "tool-1",
+            name: "catalog.read",
+            status: "running",
+            startedAt: 1,
             },
           ],
           status: "error",
