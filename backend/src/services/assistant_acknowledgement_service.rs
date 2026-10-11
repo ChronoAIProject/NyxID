@@ -279,14 +279,24 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
-            org_agent_access: None, turn_id: None, turn_stopped: false, turn_live: true,
-            machine_node_ids: vec![], saved_login_ids: vec![], conversation_id: "c".into(),
-            user_id: "u".into(), api_key_id: "k".into(), role: AgentRole::Orchestrator,
-            agent_id: "a".into(), agent_name: "NyxBot".into(), guest: false,
+            org_agent_access: None,
+            turn_id: None,
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            api_key_id: "k".into(),
+            role: AgentRole::Orchestrator,
+            agent_id: "a".into(),
+            agent_name: "NyxBot".into(),
+            guest: false,
             confirmation_policy: Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes),
         };
         assert!(webhook_confirmation_required(&chat, false, false));
-        chat.confirmation_policy = Some(crate::models::trigger_schedule::ConfirmationPolicy::Destructive);
+        chat.confirmation_policy =
+            Some(crate::models::trigger_schedule::ConfirmationPolicy::Destructive);
         assert!(!webhook_confirmation_required(&chat, false, false));
         assert!(webhook_confirmation_required(&chat, false, true));
     }
