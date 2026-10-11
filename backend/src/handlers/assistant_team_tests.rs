@@ -1841,7 +1841,11 @@ async fn instruction_refresh_legacy_adopts_then_detects_changes_without_grant_ti
     .unwrap();
     let (changed, notices) =
         refresh_turn(&state, refresh_start(Some(&first.id), None, "Again")).await;
-    assert_eq!(notices, 0);
+    assert_eq!(notices, 1);
+    assert_eq!(
+        changed.context_reset_reason.as_deref(),
+        Some("instructions_changed")
+    );
     assert!(
         changed
             .nyxagent_instruction_binding
