@@ -85,7 +85,6 @@ pub enum LiveEvent {
     },
     /// A channel bot was created or changed.
     ChannelBot {
-        diagnostics: Default::default(),
         id: String,
         user_id: String,
         active: bool,
