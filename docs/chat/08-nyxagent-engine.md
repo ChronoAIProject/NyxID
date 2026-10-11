@@ -1192,3 +1192,7 @@ and live models returned by the owner-scoped `/assistant/nyxagent/models` route)
 Changing a thread model clears its upstream binding and causes a recap on the
 next turn; active turns cannot be changed. If a provider reports a model as
 unavailable, the UI marks it unavailable and asks the owner to choose another.
+
+### Model selection
+
+NyxAgent model ids are server-validated against the live `GET /assistant/nyxagent/models` list. The conversation model endpoint rejects changes during an active turn (`turn_active`), clears the provider session and instruction binding, and records a `model_changed` context reset. Invalid or upstream-unavailable choices return `model_unavailable` with the actionable message “Choose another model in the selector.” A specialist inherits the workspace default unless its profile supplies a validated model override; unavailable entries remain disabled in selectors.

@@ -1092,3 +1092,7 @@ rules always remain enforced. The legacy `skip_destructive_confirmation` field i
 kept synchronized for one rolling release; rows without `access_mode` migrate
 from its value (`true` means `autopilot`). Specialists may override the owner
 mode with `access_mode_override`.
+
+### Access modes
+
+NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; policy floors remain enforced in every mode. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
