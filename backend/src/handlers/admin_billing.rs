@@ -56,12 +56,15 @@ pub async fn put_config(
     Json(input): Json<UpdateConfigRequest>,
 ) -> AppResult<Json<BillingConfigResponse>> {
     require_admin(&state, &auth).await?;
-    if let Some(b) = &input.billing {
-        if b.default_overdraft_cap_credits.is_some_and(|v| v < 0) {
+    if input
+        .billing
+        .as_ref()
+        .and_then(|b| b.default_overdraft_cap_credits)
+        .is_some_and(|v| v < 0)
+    {
             return Err(crate::errors::AppError::ValidationError(
                 "default overdraft cap must be non-negative".into(),
             ));
-        }
     }
     let billing = mongodb::bson::to_bson(&input.billing).map_err(|error| {
         crate::errors::AppError::Internal(format!("serialize billing settings: {error}"))
@@ -109,6 +112,7 @@ pub async fn get_rates(
         .await?
         .try_collect::<Vec<_>>()
         .await?;
+    let global = state.db.collection::<PlatformSettings>(SETTINGS).find_one(doc! {"_id": PLATFORM_SETTINGS_ID}).await?.and_then(|s| s.billing);
     Ok(Json(
         rows.into_iter()
             .map(|r| BillingRateResponse {
@@ -148,13 +152,16 @@ pub async fn get_overview(
     Ok(Json(
         rows.into_iter()
             .filter(|s| s.billing.is_some())
-            .map(|s| BillingServiceResponse {
+            .map(|s| {
+                let effective = crate::services::billing::config::effective_config(s.billing.as_ref(), global.as_ref(), None, Some(state.config.billing_default_overdraft_cap_credits));
+                let source = match effective.lane_source { crate::services::billing::config::BillingConfigSource::Env => "env", crate::services::billing::config::BillingConfigSource::Global => "global", crate::services::billing::config::BillingConfigSource::Service => "service", crate::services::billing::config::BillingConfigSource::Legacy => "legacy", crate::services::billing::config::BillingConfigSource::Free => "free" };
+                BillingServiceResponse {
                 id: s.id,
                 slug: s.slug,
                 name: s.name,
                 has_billing: true,
-                effective_source: "service",
-            })
+                effective_source: source,
+            }}
             .collect(),
     ))
 }

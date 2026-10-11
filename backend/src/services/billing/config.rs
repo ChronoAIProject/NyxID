@@ -40,14 +40,11 @@ pub fn effective_config(
             },
         },
     };
-    let (overdraft_cap_credits, overdraft_source) = match service.and_then(|_| None) {
-        Some(v) => (Some(v), BillingConfigSource::Service),
-        None => match global.and_then(|g| g.default_overdraft_cap_credits) {
-            Some(v) => (Some(v), BillingConfigSource::Global),
-            None => match env_overdraft {
-                Some(v) => (Some(v), BillingConfigSource::Env),
-                None => (None, BillingConfigSource::Legacy),
-            },
+    let (overdraft_cap_credits, overdraft_source) = match global.map(|g| g.default_overdraft_cap_credits).unwrap_or(None) {
+        Some(v) => (Some(v), BillingConfigSource::Global),
+        None => match env_overdraft {
+            Some(v) => (Some(v), BillingConfigSource::Env),
+            None => (None, BillingConfigSource::Legacy),
         },
     };
     EffectiveBillingConfig {
