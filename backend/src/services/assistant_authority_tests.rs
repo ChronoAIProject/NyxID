@@ -910,7 +910,11 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
         if !tools::read_only(name) {
             assert_eq!(result.value["error"], "orchestrator_only", "{name}");
         } else if name.starts_with("list_") && *name != "list_agent_key_bindings" {
-            assert!(!result.is_error, "{name}: unexpected error result");
+            assert!(
+                !result.is_error,
+                "{name}: unexpected error result: {}",
+                result.value
+            );
         } else {
             assert!(result.is_error, "{name}");
             assert!(
@@ -979,7 +983,11 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
         args["acknowledgement_id"] = json!(id);
         result = f.tools().execute(&f.auth, &name, &args).await;
     }
-    assert!(!result.is_error, "{name}: unexpected error result");
+    assert!(
+        !result.is_error,
+        "{name}: unexpected error result: {}",
+        result.value
+    );
     let serialized = result.value.to_string();
     for secret_field in [
         "key_hash",
