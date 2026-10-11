@@ -77,9 +77,12 @@ mod tests {
     #[test]
     fn service_override_wins_over_global_and_env() {
         let service = ServiceBilling {
-            platform_pricing: Some(
-                crate::models::service_billing::ServicePlatformPricing::default(),
-            ),
+            platform_pricing: Some(crate::models::service_billing::ServicePlatformPricing {
+                credits_per_unit: "1".into(),
+                lago_metric_code: String::new(),
+                sync_status: Default::default(),
+                sync_error: None,
+            }),
             ..Default::default()
         };
         let global = BillingSettings {
