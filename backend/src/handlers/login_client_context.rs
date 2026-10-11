@@ -56,7 +56,7 @@ mod management_route_tests {
             "DELETE /agents/{id}/memory/{note}",
         ];
         for route in routes {
-            let mut auth = crate::test_utils::test_auth_user("owner");
+            let mut auth = crate::test_utils::test_auth_user("00000000-0000-0000-0000-000000000001");
             auth.api_key_id = Some("specialist-conversation-key".into());
             assert!(require_first_party_human(&auth).is_err(), "{route}");
         }
