@@ -21,6 +21,26 @@ use std::sync::{
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
 
 #[test]
+fn long_tool_call_keepalives_use_no_progress_bound() {
+    assert_eq!(
+        stream_timeout(
+            false,
+            std::time::Duration::from_secs(119),
+            std::time::Duration::from_secs(300)
+        ),
+        std::time::Duration::from_secs(1)
+    );
+    assert_eq!(
+        stream_timeout(
+            false,
+            std::time::Duration::from_secs(0),
+            std::time::Duration::from_secs(609)
+        ),
+        std::time::Duration::from_secs(1)
+    );
+}
+
+#[test]
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {

@@ -2123,13 +2123,23 @@ async fn execute_turn(
         let mut body = response.into_body().into_data_stream();
         let mut decoder = ResponseStream::default();
         let mut first = true;
-        let mut last_progress = tokio::time::Instant::now();
+        // Keepalive frames keep the transport open, but they do not prove that
+        // the upstream turn is making semantic progress.  Use the documented
+        // per-request turn cap for the no-progress bound so long tool calls and
+        // silent reasoning can complete; the outer turn deadline still bounds
+        // the whole operation.
+        let mut last_transport_activity = tokio::time::Instant::now();
+        let mut last_semantic_progress = tokio::time::Instant::now();
         let mut emitted_bytes = completed.len();
         loop {
             let timeout = if first {
                 deadline.saturating_duration_since(tokio::time::Instant::now())
             } else {
-                Duration::from_secs(120).saturating_sub(last_progress.elapsed())
+                stream_timeout(
+                    false,
+                    last_transport_activity.elapsed(),
+                    last_semantic_progress.elapsed(),
+                )
             };
             let next = tokio::time::timeout(timeout, body.next())
                 .await
@@ -2144,6 +2154,7 @@ async fn execute_turn(
                 break;
             };
             let chunk = chunk.map_err(|_| TurnError::new("invalid_stream"))?;
+            last_transport_activity = tokio::time::Instant::now();
             let before_text = decoder.text.len();
             let decoded = decoder.push(&chunk);
             if decoder.text.len() != before_text
@@ -2151,7 +2162,7 @@ async fn execute_turn(
                 || decoder.terminal.is_some()
             {
                 first = false;
-                last_progress = tokio::time::Instant::now();
+                last_semantic_progress = tokio::time::Instant::now();
             }
             *partial = completed.clone()
                 + &context.redact(
@@ -2290,6 +2301,20 @@ async fn continue_turn(
         json!({"turn_id":active.turn_id,"continuation":continuations.count}),
     );
     Ok(true)
+}
+
+fn stream_timeout(
+    first: bool,
+    transport_elapsed: Duration,
+    semantic_elapsed: Duration,
+) -> Duration {
+    if first {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(120)
+            .saturating_sub(transport_elapsed)
+            .min(Duration::from_secs(610).saturating_sub(semantic_elapsed))
+    }
 }
 
 #[cfg(test)]
