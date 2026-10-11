@@ -629,13 +629,24 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
         })
         .await
         .unwrap();
-    let original = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &f.human_token).unwrap();
-    let mut claims = serde_json::to_value(&original).unwrap();
-    claims["sub"] = json!(Uuid::new_v4().to_string());
-    let token = jsonwebtoken::encode(
-        &jsonwebtoken::decode_header(&f.human_token).unwrap(),
-        &claims,
-        &f.state.jwt_keys.encoding,
+    let other_id = Uuid::new_v4().to_string();
+    let other = test_utils::test_user(&other_id, UserType::Person);
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(other)
+        .await
+        .unwrap();
+    let token = jwt::generate_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &Uuid::parse_str(&other_id).unwrap(),
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .unwrap();
     let path = format!(
