@@ -13,6 +13,10 @@ use crate::{
     AppState,
     crypto::jwt,
     models::{
+        assistant_group::{
+            AssistantGroup, COLLECTION_NAME as GROUPS, GroupMessage,
+            MESSAGES_COLLECTION_NAME as GROUP_MESSAGES,
+        },
         assistant_message::{AssistantMessage, COLLECTION_NAME as ASSISTANT_MESSAGES},
         assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME as FEEDBACK},
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
@@ -626,25 +630,96 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
 #[tokio::test]
 async fn feedback_group_acl_rejects_non_participant_as_not_found() {
     let f = fixture("feedback-group-acl", false).await;
-    let path = "/api/v1/assistant/nyxagent/groups/missing-group/messages/missing/feedback";
-    assert_eq!(
-        request(
-            &f.state,
-            "PUT",
-            path,
-            &f.human_token,
-            Some(json!({"vote":"up"}))
-        )
+    let group_id = "feedback-real-group";
+    let message_id = "feedback-group-reply";
+    let now = Utc::now();
+    f.state
+        .db
+        .collection::<AssistantGroup>(GROUPS)
+        .insert_one(AssistantGroup {
+            id: group_id.into(),
+            user_id: f.owner.clone(),
+            participant_user_ids: vec![f.owner.clone()],
+            created_by_user_id: Some(f.owner.clone()),
+            name: "Feedback".into(),
+            member_agent_ids: vec!["agent".into()],
+            lead_agent_id: "agent".into(),
+            created_by: "user".into(),
+            message_count: 1,
+            pending_agent_ids: vec![],
+            hops_remaining: 0,
+            followers: vec![],
+            pending_checked_at: None,
+            last_message_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        })
         .await
-        .0,
-        StatusCode::NOT_FOUND
-    );
+        .unwrap();
+    f.state
+        .db
+        .collection::<GroupMessage>(GROUP_MESSAGES)
+        .insert_one(GroupMessage {
+            activities: vec![],
+            org_group: false,
+            author_user_id: None,
+            author_display_name: None,
+            request_id: None,
+            attachments: vec![],
+            id: message_id.into(),
+            group_id: group_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            role: "agent".into(),
+            agent_id: Some("agent".into()),
+            agent_name: None,
+            text: "reply".into(),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    let path =
+        format!("/api/v1/assistant/nyxagent/groups/{group_id}/messages/{message_id}/feedback");
+    let (status, _) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        request(&f.state, "DELETE", path, &f.human_token, None)
+        request(&f.state, "DELETE", &path, &f.human_token, None)
             .await
             .0,
-        StatusCode::NOT_FOUND
+        StatusCode::NO_CONTENT
     );
+    let other_id = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&other_id, UserType::Person))
+        .await
+        .unwrap();
+    let token = jwt::generate_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &Uuid::parse_str(&other_id).unwrap(),
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (status, body) = request(&f.state, "PUT", &path, &token, Some(json!({"vote":"up"}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    let (status, body) = request(&f.state, "DELETE", &path, &token, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
 }
 
 #[tokio::test]
