@@ -759,6 +759,16 @@ export class NyxAgentTransport {
       }
     }
   }
+
+  /** Retry the most recent failed turn. The server recap is authoritative;
+   * completed activities are listed there and must not be replayed. */
+  async retry(id: string, onAdopt: (id: string) => void) {
+    const messages = this.histories.get(id)?.messages ?? [];
+    const failed = [...messages].reverse().find((message) => message.role === "assistant" && message.status === "failed");
+    const user = failed && [...messages].reverse().find((message) => message.role === "user" && message.seq < failed.seq && !message.execution_pending);
+    if (!user) throw new Error("No failed turn is available to retry.");
+    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true });
+  }
 }
 
 export const nyxAgentTransport = new NyxAgentTransport();

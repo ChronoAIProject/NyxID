@@ -226,6 +226,16 @@ mod tests {
     }
 
     #[test]
+    fn memory_note_is_per_turn_input_and_does_not_change_stable_binding() {
+        let context = prepared();
+        let fingerprint = context.binding.fingerprint.clone();
+        let input = context.input("new memory note", "continue");
+        assert!(input.contains("new memory note"));
+        assert_eq!(context.binding.fingerprint, fingerprint);
+        assert!(!context.instructions(&[], false).contains("new memory note"));
+    }
+
+    #[test]
     fn unmarked_legacy_context_never_claims_authenticated_provenance() {
         let context = prepared();
         let input = context.input("Current facts", "The user's question");
