@@ -469,7 +469,11 @@ export class NyxAgentTransport {
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? "streaming" : "complete",
-          ...(streaming ? liveActivity : settledImages.get(message.id)),
+          ...(message.attachments?.length
+            ? images(id, message.attachments)
+            : streaming
+              ? liveActivity
+              : settledImages.get(message.id)),
         };
       });
     }
@@ -560,6 +564,7 @@ export class NyxAgentTransport {
     options: {
       readonly agent?: NyxAgentConversationAgent;
       readonly attachmentIds?: string[];
+      readonly attachments?: readonly NyxAgentAttachment[];
       readonly adoptExisting?: boolean;
     } = {},
   ) {
@@ -613,6 +618,7 @@ export class NyxAgentTransport {
             schema_version: 1,
             created_at: now,
             blocks: [{ type: "text", block_id: userMessageId, text }],
+            attachments: options.attachments,
           },
         ],
       },
@@ -736,7 +742,9 @@ export class NyxAgentTransport {
         reader.releaseLock();
       }
       if (!terminal) {
-        throw new Error("The connection was interrupted. The assistant may still be working.");
+        const error = new Error("The connection was interrupted. The assistant may still be working.");
+        (error as Error & { admitted?: boolean }).admitted = true;
+        throw error;
       }
     } finally {
       this.requests.delete(controller);
