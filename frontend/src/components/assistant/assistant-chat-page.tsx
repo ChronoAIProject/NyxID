@@ -52,6 +52,7 @@ import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
+import type { ChatSessionState } from "@/lib/assistant/chat-types";
 import {
   DirectChatControls,
   DirectModeBanner,
@@ -88,6 +89,28 @@ function sidebarConversation(
     llm_route: conversation.llmRoute,
     llm_model: conversation.llmModel,
   };
+}
+
+export function AevatarAssistantMessageList({
+  session,
+  bottomInset,
+}: {
+  readonly session: ChatSessionState | null;
+  readonly bottomInset: number;
+}) {
+  return <ChatMessageList session={session} bottomInset={bottomInset} />;
+}
+
+export function NyxAgentThreadMessageList({
+  session,
+  bottomInset,
+  renderMessage,
+}: {
+  readonly session: ChatSessionState | null;
+  readonly bottomInset: number;
+  readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode;
+}) {
+  return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} />;
 }
 
 export function AssistantChatPage() {
@@ -442,10 +465,9 @@ export function DirectAssistantChatPage() {
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <DirectModeBanner />
         <AssistantLinkModalHost>
-        <ChatMessageList
+        <AevatarAssistantMessageList
           session={chat.session}
           bottomInset={composerHeight}
-          emptyDescription={DIRECT_MODE_COPY}
         />
         </AssistantLinkModalHost>
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
@@ -718,9 +740,9 @@ function NyxAgentThreadPage() {
           <AssistantLinkModalHost>
             {chat.isStreaming && chat.continuations > 0 ? <p role="status" className="mx-auto w-full max-w-[758px] px-4 pb-2 text-11 text-muted-foreground">Continuing task…</p> : null}
             {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
-            <ChatMessageList
+            <NyxAgentThreadMessageList
               session={chat.session}
-              feedbackEnabled
+              bottomInset={composerHeight}
               renderMessage={(message) => {
                 if (message.role === "event") return <NyxBotEventNotice message={message} />;
                 if (message.role === "orchestrator") {

@@ -5,6 +5,10 @@ import {
   ChatMessageEntry,
   ChatMessageList,
 } from "@/components/assistant/chat-message";
+import {
+  AevatarAssistantMessageList,
+  NyxAgentThreadMessageList,
+} from "@/components/assistant/assistant-chat-page";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 
 const BASE: ChatMessage = {
@@ -16,7 +20,7 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
-  it("shows feedback only in the NyxAgent page message-list composition", () => {
+  it("shows feedback only in the page-owned NyxAgent message-list composition", () => {
     const session = {
       conversationId: "nyxagent-page",
       status: "complete" as const,
@@ -24,15 +28,12 @@ describe("canonical chat presentation", () => {
       isStreaming: false,
     } as ChatSessionState;
     const { rerender } = render(
-      <ChatMessageList session={session} bottomInset={0} feedbackEnabled />,
+      <NyxAgentThreadMessageList session={session} bottomInset={0} />,
     );
     expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
 
     rerender(
-      <ChatMessageList
-        session={{ ...session, conversationId: "aevatar-page" }}
-        bottomInset={0}
-      />,
+      <AevatarAssistantMessageList session={{ ...session, conversationId: "aevatar-page" }} bottomInset={0} />,
     );
     expect(
       screen.queryByRole("button", { name: "Helpful" }),
