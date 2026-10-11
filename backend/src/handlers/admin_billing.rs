@@ -1,9 +1,5 @@
-use crate::models::{
-    billing_rate_cache::{BillingRateCache, COLLECTION_NAME as RATES},
-    downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
-    platform_settings::{
-        BillingSettings, COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID, PlatformSettings,
-    },
+use crate::models::platform_settings::{
+    BillingSettings, COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID, PlatformSettings,
 };
 use crate::{
     AppState, errors::AppResult, handlers::admin_helpers::require_admin, mw::auth::AuthUser,
