@@ -350,8 +350,8 @@ describe("NyxAgent server-backed transport", () => {
     const transport = new NyxAgentTransport();
     await expect(transport.send(id, "Question", vi.fn())).rejects.toMatchObject(
       {
-        status: 409,
-        message: "A turn is already active",
+      status: 409,
+      message: "A turn is already active",
       },
     );
     expect(transport.isRunning(id)).toBe(false);
@@ -1033,7 +1033,7 @@ it("optimistically renames during a turn and rolls back on failure without losin
       ? new Promise<Response>((resolve) => {
           finish = resolve;
         })
-      : json({ ...history(), conversation: activeRow });
+    : json({ ...history(), conversation: activeRow });
   const transport = new NyxAgentTransport();
   await transport.history(id);
   const pending = transport.rename(id, "My chosen title");
