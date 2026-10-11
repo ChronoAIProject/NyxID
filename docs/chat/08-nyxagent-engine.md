@@ -17,7 +17,10 @@ not a new instruction. The conversation DTO exposes `context_reset_reason` so
 clients can explain failed turns, memory changes, stopped turns, and explicit
 user resets.
 
-Retries must inspect this checkpoint before issuing work. Completed actions are
+Memory notes are delivered in the per-turn input/turn note and are deliberately
+excluded from the stable instruction fingerprint. Updating memory therefore
+does not reset an unrelated thread's binding; guest turns receive no owner
+memory. Retries must inspect this checkpoint before issuing work. Completed actions are
 listed with their stable labels and are not replayed solely because the reply
 failed; only pending or errored actions may be attempted again. Acknowledgement
 cards from a failed turn are treated as expired and may be re-presented with a

@@ -1770,6 +1770,18 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
             _ => unreachable!(),
         }
         let prepared = prepare(&row, &changed);
+        if field == "memory" {
+            assert!(
+                !prepared.reset,
+                "memory changes are per-turn input, not stable instructions"
+            );
+            assert!(
+                prepared
+                    .input("Current preferences", "continue")
+                    .contains("Current preferences")
+            );
+            continue;
+        }
         assert!(
             prepared.reset,
             "stable field {field} must invalidate the binding"
