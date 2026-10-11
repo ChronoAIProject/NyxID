@@ -3,15 +3,15 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "assistant_settings";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessMode {
     Autopilot,
+    #[default]
     Nyxmode,
     AskEveryTime,
 }
 
-impl Default for AccessMode { fn default() -> Self { Self::Nyxmode } }
 
 pub const DEFAULT_MAX_LIVE_SUBAGENTS: i32 = 8;
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS: i32 = 3;
