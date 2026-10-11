@@ -70,13 +70,13 @@ export function AgentLearningReview({
         <label className="flex items-center gap-2 text-12">
           <Switch
             checked={review.status.data.opted_in ?? false}
-            disabled={review.consent.isPending}
-            onCheckedChange={(checked) => review.consent.mutate(checked)}
+            disabled={review.consent?.isPending}
+            onCheckedChange={(checked) => review.consent?.mutate(checked)}
           />
           I consent to learning proposals for this organization
         </label>
       ) : null}
-      {[review.run.error, review.configure.error, review.consent.error, review.edit.error, review.approve.error, review.reject.error]
+      {[review.run.error, review.configure.error, review.consent?.error, review.edit.error, review.approve.error, review.reject.error]
         .filter(Boolean)
         .map((error, index) => (
           <p key={index} role="alert" className="text-12 text-destructive">

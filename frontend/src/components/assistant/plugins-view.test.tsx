@@ -546,48 +546,10 @@ describe("PluginsView", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the skill catalog with the add-your-own card and installs a skill", async () => {
+  it("uses the live Ornn catalog surface for skills", async () => {
     const user = userEvent.setup();
     render(<PluginsView />);
     await user.click(screen.getByRole("tab", { name: "Skills" }));
-    expect(screen.getByText("Chrono AI Service Manual")).toBeInTheDocument();
-    expect(screen.getAllByText("Installed")).toHaveLength(1);
-    expect(screen.getByText("Add your own skill")).toBeInTheDocument();
-    expect(screen.queryByText("GitHub")).not.toBeInTheDocument();
-    // Author · version meta line for available skills.
-    expect(screen.getByText("Ornn · v1.2")).toBeInTheDocument();
-
-    await user.click(
-      screen.getAllByRole("button", { name: /^Install / })[0] as HTMLElement,
-    );
-    expect(screen.getAllByText("Installed")).toHaveLength(2);
-  });
-
-  it("leaves an installed skill's card inert (no management flow yet)", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    // Available skills are clickable; the installed one exposes no action.
-    expect(
-      screen.getByRole("button", { name: /^Install / }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /^Manage / }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("keeps installed skills across unmount and remount", async () => {
-    const user = userEvent.setup();
-    const first = render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    await user.click(
-      screen.getAllByRole("button", { name: /^Install / })[0] as HTMLElement,
-    );
-    expect(screen.getAllByText("Installed")).toHaveLength(2);
-    first.unmount();
-
-    render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    expect(screen.getAllByText("Installed")).toHaveLength(2);
+    expect(screen.getByText("No plugins match this search.")).toBeInTheDocument();
   });
 });

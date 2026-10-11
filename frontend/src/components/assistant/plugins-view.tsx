@@ -429,7 +429,7 @@ function SkillsTab({ query }: { readonly query: string }) {
   const search = useSkillSearch(query.trim() || null, 1);
   const items = (search.data?.items ?? []).map((skill) => ({ id: skill.id, name: skill.name, initial: skill.name.slice(0, 2).toUpperCase(), category: "Skill", description: skill.description, meta: "Ornn catalog", added: false }));
 
-  if (searching && items.length === 0) {
+  if (query.trim() && items.length === 0) {
     return (
       <p className="py-14 text-center text-11 text-text-tertiary">
         No plugins match this search.
