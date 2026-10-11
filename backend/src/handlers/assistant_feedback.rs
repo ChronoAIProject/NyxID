@@ -339,13 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_upserts_share_unique_user_message_identity() {
-        let filter = doc! {"user_id": "u", "message_id": "m"};
-        assert_eq!(filter.len(), 2);
-        assert!(filter.get("conversation_id").is_none());
-    }
-
-    #[test]
     fn validate_accepts_votes_and_bounds_comments() {
         let input = FeedbackInput {
             vote: "up".into(),

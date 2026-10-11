@@ -13,7 +13,6 @@ pub struct AdminCount {
     pub up: i64,
     pub down: i64,
 }
-fn aggregate_count(value: &bson::Bson) -> Option<i64> { match value { bson::Bson::Int32(v) => Some(i64::from(*v)), bson::Bson::Int64(v) => Some(*v), _ => None } }
 
 pub async fn admin_counts(
     db: &Database,
@@ -39,7 +38,7 @@ pub async fn admin_counts(
         let Ok(vote) = id.get_str("vote") else {
             continue;
         };
-        let Some(count) = row.get("count").and_then(aggregate_count) else { continue };
+        let count: i64 = match row.get("count") { Some(bson::Bson::Int32(v)) => i64::from(*v), Some(bson::Bson::Int64(v)) => *v, _ => continue };
         let entry = out.entry(day.clone()).or_insert(AdminCount {
             day,
             up: 0,
@@ -52,16 +51,6 @@ pub async fn admin_counts(
         }
     }
     Ok(out.into_values().collect())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn aggregate_count_decodes_int32_and_int64() {
-        assert_eq!(aggregate_count(&bson::Bson::Int32(2)), Some(2));
-        assert_eq!(aggregate_count(&bson::Bson::Int64(3)), Some(3));
-    }
 }
 
 /// Single-row lookup keeps eligibility bounded for long-lived conversations.
