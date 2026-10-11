@@ -975,7 +975,9 @@ pub(crate) async fn ordinary_key(f: &Fixture) -> String {
 async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
     let name = format!("nyxid__{name}");
     let mut result = f.tools().execute(&f.auth, &name, &args).await;
-    if result.value["error"] == "acknowledgement_required" && result.value["kind"] == "action" {
+    if result.value["error"] == "acknowledgement_required"
+        && result.value["acknowledgement_id"].is_string()
+    {
         let id = result.value["acknowledgement_id"].as_str().unwrap();
         acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
             .await
