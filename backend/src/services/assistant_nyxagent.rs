@@ -305,7 +305,6 @@ pub struct TurnRequest {
     pub text: String,
     pub model: Option<String>,
     #[serde(default)]
-    pub retry_of: Option<String>,
     /// Retired Ask/Full selector. Accepted from older clients and ignored:
     /// every chat runs with Full access.
     #[allow(dead_code)]
@@ -316,6 +315,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
     pub org_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub attachment_ids: Vec<String>,
@@ -1706,6 +1706,7 @@ pub async fn begin_turn_with_voice(
                     .as_ref().filter(|_| !hidden_voice)
                     .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
+                    retry_of: None,
                     running_response: None,
                     channel_event_id: start.channel_event_id.clone(),
                     initiating_message_seq: Some(input_seq),

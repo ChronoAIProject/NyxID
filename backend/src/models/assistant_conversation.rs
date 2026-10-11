@@ -125,6 +125,8 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub retry_of: Option<String>,
     /// The running response, not the previous committed response head.
     #[serde(default)]
     pub running_response: Option<Box<RunningResponse>>,
