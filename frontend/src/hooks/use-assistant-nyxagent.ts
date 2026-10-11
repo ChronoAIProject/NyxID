@@ -322,6 +322,7 @@ export function useNyxAgentAssistantChat({
     isLoading: history.isLoading,
     error: history.error?.message ?? threads.error?.message ?? agents.error?.message,
     send,
+    retry: (id: string) => nyxAgentTransport.retry(id, onConversationAdopted),
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],
     decideAcknowledgement: decision.mutateAsync,
