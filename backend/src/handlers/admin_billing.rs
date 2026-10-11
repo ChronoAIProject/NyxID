@@ -15,6 +15,15 @@ pub struct BillingConfigResponse {
     pub resale_enabled: bool,
     pub global: Option<BillingSettings>,
     pub precedence: [&'static str; 4],
+    pub environment: Vec<ConfigValue>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigValue {
+    pub key: &'static str,
+    pub value: Option<String>,
+    pub source: &'static str,
+    pub secret_set: Option<bool>,
 }
 
 pub async fn get_config(
@@ -29,6 +38,85 @@ pub async fn get_config(
         resale_enabled: state.billing.resale_enabled(),
         global,
         precedence: ["env", "global", "service", "legacy/free"],
+        environment: vec![
+            ConfigValue {
+                key: "LAGO_API_URL",
+                value: state.config.lago_api_url.clone(),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "LAGO_PLAN_CODE",
+                value: Some(state.config.lago_plan_code.clone()),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "LAGO_PAYMENT_PROVIDER_CODE",
+                value: state.config.lago_payment_provider_code.clone(),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "BILLING_RECONCILE_INTERVAL_SECS",
+                value: Some(state.config.billing_reconcile_interval_secs.to_string()),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "BILLING_RATE_CACHE_TTL_SECS",
+                value: Some(state.config.billing_rate_cache_ttl_secs.to_string()),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "BILLING_RESERVATION_ABANDON_SECS",
+                value: Some(state.config.billing_reservation_abandon_secs.to_string()),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS",
+                value: Some(
+                    state
+                        .config
+                        .billing_default_overdraft_cap_credits
+                        .to_string(),
+                ),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "BILLING_FAIL_CLOSED",
+                value: Some(state.config.billing_fail_closed.to_string()),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "BILLING_EXACT_CUTOVER_DRAINED",
+                value: Some(state.config.billing_exact_cutover_drained.to_string()),
+                source: "env",
+                secret_set: None,
+            },
+            ConfigValue {
+                key: "LAGO_API_KEY",
+                value: None,
+                source: "env",
+                secret_set: Some(state.config.lago_api_key.is_some()),
+            },
+            ConfigValue {
+                key: "LAGO_WEBHOOK_SECRET",
+                value: None,
+                source: "env",
+                secret_set: Some(state.config.lago_webhook_secret.is_some()),
+            },
+            ConfigValue {
+                key: "BILLING_LEDGER_HMAC_KEY",
+                value: None,
+                source: "env",
+                secret_set: Some(std::env::var_os("BILLING_LEDGER_HMAC_KEY").is_some()),
+            },
+        ],
     }))
 }
 
