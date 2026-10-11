@@ -2144,12 +2144,15 @@ async fn execute_turn(
                 break;
             };
             let chunk = chunk.map_err(|_| TurnError::new("invalid_stream"))?;
-            // SSE comments/keepalives do not extend the useful-response deadline.
-            if chunk.windows(5).any(|bytes| bytes == b"data:") {
+            let before_text = decoder.text.len();
+            let decoded = decoder.push(&chunk);
+            if decoder.text.len() != before_text
+                || decoder.created.is_some()
+                || decoder.terminal.is_some()
+            {
                 first = false;
                 last_progress = tokio::time::Instant::now();
             }
-            let decoded = decoder.push(&chunk);
             *partial = completed.clone()
                 + &context.redact(
                     &decoder
