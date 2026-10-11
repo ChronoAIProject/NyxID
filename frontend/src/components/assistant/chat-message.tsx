@@ -203,7 +203,7 @@ export function ChatMessageBubble({
           <MachineToolCard key={tool.id} receipt={tool.machine!} conversationId={tool.conversationId} images={message.images} />
         ))}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
-        {message.status === "failed" && message.errorDetail ? (
+        {message.status === "error" && message.errorDetail ? (
           <details className="mt-2 text-11 text-text-tertiary">
             <summary className="cursor-pointer">Details</summary>
             <div className="mt-1 space-y-1 rounded border border-hairline p-2 font-mono">

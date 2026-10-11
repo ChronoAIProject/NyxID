@@ -196,7 +196,6 @@ pub fn base_prompt(
                     prompt.push_str("\n\nThis specialist belongs to an organization. Its memory notes are shared organization data, visible to maintainers. NEVER store a member's private messages, personal content or secrets in shared memory. This thread is private to the acting member; never read or disclose another member's thread.");
                 }
             }
-            prompt.push_str(&super::assistant_team_service::memory_note(agent));
             // NyxBot's implicit reachability is snapshotted in machine_access,
             // not the specialist machine picker. Reuse the loaded policy; this
             // is guidance only, and machine_list/execution recheck live access.
@@ -2837,7 +2836,7 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
         if remaining <= prefix.len() {
             break;
         }
-        let budget = remaining - prefix.len();
+        let budget = (remaining - prefix.len()).min(2048);
         let head = budget / 2;
         let tail = budget - head;
         let mut end = message.text.len().min(head);
@@ -2851,7 +2850,7 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
         let body = if start > end {
             format!("{} … {}", &message.text[..end], &message.text[start..])
         } else {
-            message.text[..end].to_owned()
+            message.text.clone()
         };
         let activities = if message.activities.is_empty() {
             String::new()
@@ -2879,8 +2878,18 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
                     .join(", ")
             )
         };
-        let line = format!("{prefix}{body}{activities}{attachments}");
-        remaining -= line.len();
+        let mut line = format!(
+            "{prefix}{body}{activities}{attachments} [error: {}]",
+            message.error_code.as_deref().unwrap_or("none")
+        );
+        if line.len() > remaining {
+            let mut end = remaining;
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            line.truncate(end);
+        }
+        remaining = remaining.saturating_sub(line.len());
         recap.push(line);
     }
     recap.reverse();

@@ -2079,12 +2079,13 @@ async fn execute_turn(
         let mut body = response.into_body().into_data_stream();
         let mut decoder = ResponseStream::default();
         let mut first = true;
+        let mut last_progress = tokio::time::Instant::now();
         let mut emitted_bytes = completed.len();
         loop {
             let timeout = if first {
                 deadline.saturating_duration_since(tokio::time::Instant::now())
             } else {
-                Duration::from_secs(120)
+                Duration::from_secs(120).saturating_sub(last_progress.elapsed())
             };
             let next = tokio::time::timeout(timeout, body.next())
                 .await
@@ -2095,11 +2096,15 @@ async fn execute_turn(
                         "idle_timeout"
                     })
                 })?;
-            first = false;
             let Some(chunk) = next else {
                 break;
             };
             let chunk = chunk.map_err(|_| TurnError::new("invalid_stream"))?;
+            // SSE comments/keepalives do not extend the useful-response deadline.
+            if chunk.windows(5).any(|bytes| bytes == b"data:") {
+                first = false;
+                last_progress = tokio::time::Instant::now();
+            }
             let decoded = decoder.push(&chunk);
             *partial = completed.clone()
                 + &context.redact(

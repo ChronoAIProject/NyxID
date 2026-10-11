@@ -444,6 +444,7 @@ export class NyxAgentTransport {
         turnId: message.turn_id,
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
+        errorDetail: message.error_detail ? { stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id } : undefined,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
         via: message.via,
