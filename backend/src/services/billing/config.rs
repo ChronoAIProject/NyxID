@@ -89,4 +89,13 @@ mod tests {
         let effective = effective_config(Some(&service), Some(&global), Some("legacy"), Some(5));
         assert_eq!(effective.lane_source, BillingConfigSource::Service);
     }
+
+    #[test]
+    fn every_source_is_representable() {
+        assert_eq!(format!("{:?}", BillingConfigSource::Env), "Env");
+        assert_eq!(format!("{:?}", BillingConfigSource::Global), "Global");
+        assert_eq!(format!("{:?}", BillingConfigSource::Service), "Service");
+        assert_eq!(format!("{:?}", BillingConfigSource::Legacy), "Legacy");
+        assert_eq!(format!("{:?}", BillingConfigSource::Free), "Free");
+    }
 }
