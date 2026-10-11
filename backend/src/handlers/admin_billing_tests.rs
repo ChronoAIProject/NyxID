@@ -5,6 +5,9 @@ mod tests {
 
     async fn mongo_fixture(name: &str) -> Option<(crate::AppState, crate::mw::auth::AuthUser)> {
         let db = crate::test_utils::connect_test_database(name).await?;
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .ok()?;
         let id = uuid::Uuid::new_v4().to_string();
         let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
         let roles = crate::services::role_service::get_platform_role_ids(&db)
@@ -32,6 +35,7 @@ mod tests {
                 default_overdraft_cap_credits: None,
             }),
             precedence: ["env", "global", "service", "legacy/free"],
+            environment: vec![],
         };
         let body = serde_json::to_string(&response).unwrap();
         assert!(!body.contains("LAGO_API_KEY"));
@@ -62,7 +66,8 @@ mod tests {
                 lago_configured: false,
                 resale_enabled: false,
                 global: None,
-                precedence: ["env", "global", "service", "legacy/free"]
+                precedence: ["env", "global", "service", "legacy/free"],
+                environment: vec![]
             }
             .precedence
             .len(),
@@ -78,6 +83,10 @@ mod tests {
             name: "Service".into(),
             has_billing: true,
             effective_source: "service",
+            effective_metric: "requests".into(),
+            allowance_metrics: vec!["requests".into()],
+            sync_status: Some("synced".into()),
+            sync_error: None,
         };
         assert_eq!(response.effective_source, "service");
     }
