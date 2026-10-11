@@ -372,6 +372,8 @@ pub async fn audit_access_request_denied(
             {
                 let message = crate::models::assistant_message::AssistantMessage {
                     steering: None,
+                    error_detail: None,
+                    upstream_error_code: None,
                     voice: None,
                     execution_pending: false,
                     id: Uuid::new_v4().to_string(),
