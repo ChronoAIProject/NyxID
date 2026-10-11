@@ -163,6 +163,62 @@ async fn feedback_admin_counts_group_exact_per_day_through_service_and_route() {
     );
 }
 
+#[tokio::test]
+async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
+    let f = fixture("feedback-b2-cursor", false).await;
+    let created = Utc::now();
+    let rows = (0..101)
+        .map(|i| AssistantMessageFeedback {
+            id: format!("b2-{i:03}"),
+            user_id: f.owner.clone(),
+            conversation_id: None,
+            group_id: None,
+            message_id: format!("b2-message-{i}"),
+            turn_id: None,
+            vote: "up".into(),
+            comment: None,
+            created_at: created,
+            updated_at: created,
+        })
+        .collect::<Vec<_>>();
+    f.state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let (status, body) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(body["recent"].as_array().unwrap().len(), 100);
+    let cursor = body["next_cursor"].as_str().unwrap();
+    let (status, next) = request(
+        &f.state,
+        "GET",
+        &format!("/api/v1/admin/assistant/feedback?cursor={cursor}"),
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(next["recent"].as_array().unwrap().len(), 1);
+    let (status, _) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback?cursor=bad",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
