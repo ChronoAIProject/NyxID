@@ -24,7 +24,7 @@ pub struct SkillReference {
     pub sha256: String,
     #[serde(default)]
     pub dependencies: Vec<SkillPin>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
 }
 

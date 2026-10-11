@@ -15,6 +15,7 @@ import {
   type ConnectorCardItem,
   type PluginKind,
 } from "@/lib/assistant/plugins";
+import type { AgentSkill } from "@/schemas/agent-skills";
 
 interface PluginCardShape {
   readonly id: string;
@@ -415,9 +416,9 @@ function SkillsTab({ query, agentId }: { readonly query: string; readonly agentI
         onActivate={() => {
           if (!agentId || !attached.data) return toast.info("Select an agent to attach this skill.");
           const existing = attached.data.skills.find((pin) => pin.skill_id === item.id);
-          const skills = existing
+          const skills: AgentSkill[] = existing
             ? attached.data.skills.map((pin) => pin.skill_id === item.id ? { ...pin, disabled: !pin.disabled } : pin)
-            : [...attached.data.skills, { source: "ornn" as const, skill_id: item.id, name: item.name, version: "latest", sha256: "" }];
+            : [...attached.data.skills, { source: "ornn", skill_id: item.id, name: item.name, version: "latest", sha256: "", dependencies: [], disabled: false }];
           setSkills.mutate({ expected_revision: attached.data.revision, skills });
         }}
       />

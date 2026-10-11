@@ -639,7 +639,9 @@ async fn disabled_pins_are_omitted_from_prompt_instructions() {
     let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
         .await
         .unwrap();
-    agent.skills[0].disabled = true;
+    for pin in &mut agent.skills {
+        pin.disabled = true;
+    }
     assert!(instructions(&agent).is_empty());
     f.state.db.drop().await.unwrap();
 }
