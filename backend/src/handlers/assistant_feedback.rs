@@ -47,7 +47,10 @@ fn validate(input: &FeedbackInput) -> AppResult<Option<String>> {
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.chars().take(1000).collect::<String>());
+        .map(|s| {
+            if s.chars().count() > 1000 { return Err(AppError::BadRequest("feedback_comment_too_long".into())); }
+            Ok(s.to_string())
+        }).transpose()?;
     Ok(comment)
 }
 async fn upsert(
