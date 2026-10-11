@@ -22,11 +22,18 @@ pub async fn get(db: &Database, user_id: &str) -> AppResult<AssistantSettings> {
         .collection::<AssistantSettings>(COLLECTION_NAME)
         .find_one(doc! {"_id": user_id})
         .await?;
-    let Some(mut row) = row else { return Ok(AssistantSettings::defaults(user_id)); };
+    let Some(mut row) = row else {
+        return Ok(AssistantSettings::defaults(user_id));
+    };
     // Legacy rows predate access_mode. Preserve their explicit opt-out as Autopilot.
-    let raw = db.collection::<bson::Document>(COLLECTION_NAME)
-        .find_one(doc! {"_id": user_id}).await?;
-    if raw.as_ref().is_some_and(|d| !d.contains_key("access_mode") && row.skip_destructive_confirmation) {
+    let raw = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id": user_id})
+        .await?;
+    if raw
+        .as_ref()
+        .is_some_and(|d| !d.contains_key("access_mode") && row.skip_destructive_confirmation)
+    {
         row.access_mode = crate::models::assistant_settings::AccessMode::Autopilot;
     }
     Ok(row)
@@ -159,9 +166,19 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         defaults.remove("skip_destructive_confirmation");
     }
     if let Some(value) = update.access_mode {
-        set.insert("access_mode", bson::to_bson(&value).map_err(|_| AppError::Internal("Access mode serialization failed".into()))?);
+        set.insert(
+            "access_mode",
+            bson::to_bson(&value)
+                .map_err(|_| AppError::Internal("Access mode serialization failed".into()))?,
+        );
         // Keep the legacy field synchronized during rolling deployment.
-        set.insert("skip_destructive_confirmation", matches!(value, crate::models::assistant_settings::AccessMode::Autopilot));
+        set.insert(
+            "skip_destructive_confirmation",
+            matches!(
+                value,
+                crate::models::assistant_settings::AccessMode::Autopilot
+            ),
+        );
         defaults.remove("access_mode");
         defaults.remove("skip_destructive_confirmation");
     }

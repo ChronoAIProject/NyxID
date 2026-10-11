@@ -110,7 +110,12 @@ pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OwnerActionClass { Read, Change, Sensitive, Destructive }
+pub enum OwnerActionClass {
+    Read,
+    Change,
+    Sensitive,
+    Destructive,
+}
 
 /// Central owner-turn approval policy. A policy floor is supplied by the
 /// service/webhook/machine gate and can never be bypassed by Autopilot.
@@ -119,22 +124,71 @@ pub fn owner_confirmation_required(
     class: OwnerActionClass,
     policy_floor: bool,
 ) -> bool {
-    if policy_floor { return true; }
+    if policy_floor {
+        return true;
+    }
     match mode {
-        crate::models::assistant_settings::AccessMode::AskEveryTime => !matches!(class, OwnerActionClass::Read),
-        crate::models::assistant_settings::AccessMode::Nyxmode => matches!(class, OwnerActionClass::Sensitive | OwnerActionClass::Destructive),
+        crate::models::assistant_settings::AccessMode::AskEveryTime => {
+            !matches!(class, OwnerActionClass::Read)
+        }
+        crate::models::assistant_settings::AccessMode::Nyxmode => matches!(
+            class,
+            OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+        ),
         crate::models::assistant_settings::AccessMode::Autopilot => false,
     }
 }
 
 pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionClass {
     let lower = tool.to_ascii_lowercase();
-    if method.is_some_and(|m| matches!(m, "DELETE" | "PUT" | "PATCH")) ||
-        ["delete", "destroy", "revoke", "disconnect", "forget", "machine_", "set_guest_access", "grant_subagent", "spawn_subagent", "create_schedule", "enable"].iter().any(|p| lower.contains(p)) {
-        return if ["delete", "destroy", "revoke", "disconnect", "forget", "machine_"].iter().any(|p| lower.contains(p)) { OwnerActionClass::Destructive } else { OwnerActionClass::Sensitive };
+    if method.is_some_and(|m| matches!(m, "DELETE" | "PUT" | "PATCH"))
+        || [
+            "delete",
+            "destroy",
+            "revoke",
+            "disconnect",
+            "forget",
+            "machine_",
+            "set_guest_access",
+            "grant_subagent",
+            "spawn_subagent",
+            "create_schedule",
+            "enable",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+    {
+        return if [
+            "delete",
+            "destroy",
+            "revoke",
+            "disconnect",
+            "forget",
+            "machine_",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+        {
+            OwnerActionClass::Destructive
+        } else {
+            OwnerActionClass::Sensitive
+        };
     }
-    if ["update_settings", "connect_channel_bot", "mint", "credential", "link"].iter().any(|p| lower.contains(p)) { return OwnerActionClass::Sensitive; }
-    if method.is_some_and(|m| matches!(m, "POST")) { return OwnerActionClass::Change; }
+    if [
+        "update_settings",
+        "connect_channel_bot",
+        "mint",
+        "credential",
+        "link",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+    {
+        return OwnerActionClass::Sensitive;
+    }
+    if method.is_some_and(|m| matches!(m, "POST")) {
+        return OwnerActionClass::Change;
+    }
     OwnerActionClass::Read
 }
 
@@ -145,10 +199,22 @@ mod access_mode_tests {
 
     #[test]
     fn mode_class_matrix() {
-        let cases = [(OwnerActionClass::Read, false), (OwnerActionClass::Change, true), (OwnerActionClass::Sensitive, true), (OwnerActionClass::Destructive, true)];
+        let cases = [
+            (OwnerActionClass::Read, false),
+            (OwnerActionClass::Change, true),
+            (OwnerActionClass::Sensitive, true),
+            (OwnerActionClass::Destructive, true),
+        ];
         for mode in [Autopilot, Nyxmode, AskEveryTime] {
             for (class, expected) in cases {
-                let want = match mode { Autopilot => false, Nyxmode => matches!(class, OwnerActionClass::Sensitive|OwnerActionClass::Destructive), AskEveryTime => expected };
+                let want = match mode {
+                    Autopilot => false,
+                    Nyxmode => matches!(
+                        class,
+                        OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+                    ),
+                    AskEveryTime => expected,
+                };
                 assert_eq!(owner_confirmation_required(mode, class, false), want);
                 assert!(owner_confirmation_required(mode, class, true));
             }
@@ -163,7 +229,11 @@ mod access_mode_tests {
             ("delete_agent_key", None, OwnerActionClass::Destructive),
             ("nyx__call_tool", Some("GET"), OwnerActionClass::Read),
             ("create_schedule", None, OwnerActionClass::Sensitive),
-            ("service_operation", Some("DELETE"), OwnerActionClass::Destructive),
+            (
+                "service_operation",
+                Some("DELETE"),
+                OwnerActionClass::Destructive,
+            ),
             ("set_guest_access", None, OwnerActionClass::Sensitive),
             ("nyx__search_tools", Some("GET"), OwnerActionClass::Read),
         ];
@@ -1545,16 +1615,33 @@ pub async fn webhook_action_gate(
     destructive: bool,
 ) -> AppResult<Option<Value>> {
     if chat.confirmation_policy.is_none() && !chat.guest {
-        let mode = crate::services::assistant_settings_service::get(db, &chat.user_id).await?.access_mode;
+        let mode = crate::services::assistant_settings_service::get(db, &chat.user_id)
+            .await?
+            .access_mode;
         if !owner_confirmation_required(mode, classify_owner_action(tool, None), false) {
             return Ok(None);
         }
         // Owner turns use the same single-use card path as webhook turns.
-        let summary = format!("NyxBot requests {tool} ({:?}). Review the action and its scope before allowing it.", classify_owner_action(tool, None));
+        let summary = format!(
+            "NyxBot requests {tool} ({:?}). Review the action and its scope before allowing it.",
+            classify_owner_action(tool, None)
+        );
         if let Some(id) = args["acknowledgement_id"].as_str() {
             return Ok((!consume_action(db, chat, id, tool, args).await?).then(|| json!({"error":"acknowledgement_invalid","instructions":"This action card is missing, expired, used or does not match the call."})));
         }
-        let card = request(db, chat, Request { kind: "action", service: None, tool: Some(tool), arguments: Some(args), summary: &summary, platform: false }).await?;
+        let card = request(
+            db,
+            chat,
+            Request {
+                kind: "action",
+                service: None,
+                tool: Some(tool),
+                arguments: Some(args),
+                summary: &summary,
+                platform: false,
+            },
+        )
+        .await?;
         return Ok(Some(refusal(&card)));
     }
     if !webhook_confirmation_required(chat, read_only, destructive) {

@@ -11,7 +11,11 @@ pub enum AccessMode {
     AskEveryTime,
 }
 
-impl Default for AccessMode { fn default() -> Self { Self::Nyxmode } }
+impl Default for AccessMode {
+    fn default() -> Self {
+        Self::Nyxmode
+    }
+}
 
 pub const DEFAULT_MAX_LIVE_SUBAGENTS: i32 = 8;
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS: i32 = 3;

@@ -1854,13 +1854,18 @@ async fn dispatch_settings(
     Ok(match name {
         "update_settings" => {
             let before = settings::get(&state.db, &chat.user_id).await?;
-            let maximum = args["max_auto_continuations"].as_i64().and_then(|v| i32::try_from(v).ok()).unwrap_or(before.max_auto_continuations);
+            let maximum = args["max_auto_continuations"]
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(before.max_auto_continuations);
             let after = settings::update(
                 &state.db,
                 &chat.user_id,
                 settings::Update {
                     max_auto_continuations: Some(maximum),
-                    access_mode: args["access_mode"].as_str().and_then(|v| serde_json::from_value(serde_json::Value::String(v.into())).ok()),
+                    access_mode: args["access_mode"].as_str().and_then(|v| {
+                        serde_json::from_value(serde_json::Value::String(v.into())).ok()
+                    }),
                     ..Default::default()
                 },
             )
@@ -2387,10 +2392,20 @@ pub async fn update_agent(
     }
     if let Some(model) = body.model.as_deref() {
         if !crate::services::assistant_nyxagent::valid_model(model) {
-            return Err(AppError::ValidationError("model_unavailable: choose another model".into()));
+            return Err(AppError::ValidationError(
+                "model_unavailable: choose another model".into(),
+            ));
         }
-        state.db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
-            .update_one(mongodb::bson::doc! {"_id": &agent.id, "user_id": &owner}, mongodb::bson::doc! {"$set": {"model": model}}).await?;
+        state
+            .db
+            .collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
+            .update_one(
+                mongodb::bson::doc! {"_id": &agent.id, "user_id": &owner},
+                mongodb::bson::doc! {"$set": {"model": model}},
+            )
+            .await?;
     }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
