@@ -1,6 +1,9 @@
 use crate::models::platform_settings::BillingSettings;
 use crate::{
-    AppState, errors::AppResult, handlers::admin_helpers::require_admin, mw::auth::AuthUser,
+    AppState,
+    errors::AppResult,
+    handlers::admin_helpers::{require_admin, require_admin_or_operator},
+    mw::auth::AuthUser,
 };
 use axum::{
     Json,
@@ -30,7 +33,7 @@ pub async fn get_config(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<BillingConfigResponse>> {
-    require_admin(&state, &auth).await?;
+    require_admin_or_operator(&state, &auth, "admin.billing.config").await?;
     let global = crate::services::billing::config::load_settings(&state.db).await?;
     Ok(Json(BillingConfigResponse {
         billing_enabled: state.billing.billing_enabled(),
@@ -167,7 +170,7 @@ pub async fn get_rates(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<Vec<BillingRateResponse>>> {
-    require_admin(&state, &auth).await?;
+    require_admin_or_operator(&state, &auth, "admin.billing.rates").await?;
     let ttl_secs = i64::try_from(state.config.billing_rate_cache_ttl_secs).map_err(|_| {
         crate::errors::AppError::ValidationError("billing rate cache TTL is too large".into())
     })?;
@@ -207,7 +210,7 @@ pub async fn get_overview(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<Vec<BillingServiceResponse>>> {
-    require_admin(&state, &auth).await?;
+    require_admin_or_operator(&state, &auth, "admin.billing.overview").await?;
     let rows = crate::services::billing::config::load_services(&state.db).await?;
     let global = crate::services::billing::config::load_settings(&state.db).await?;
     Ok(Json(
