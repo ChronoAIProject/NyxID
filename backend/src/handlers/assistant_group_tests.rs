@@ -307,6 +307,13 @@ async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recip
     let phrase = format!("yes {}", acks::confirm_code(&card.id));
     let (_, addressed) = post(&state, OWNER, &group.id, &phrase, None).await.unwrap();
     assert_eq!(addressed, vec![nyxbot.id.clone()]);
+    let decided = acks::history(&state.db, OWNER, &thread.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|ack| ack.id == card.id)
+        .unwrap();
+    assert_eq!(decided.status, "allowed");
     server.abort();
 }
 #[tokio::test]
