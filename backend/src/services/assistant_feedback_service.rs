@@ -13,6 +13,39 @@ pub struct AdminCount {
     pub up: i64,
     pub down: i64,
 }
+pub struct AdminRow {
+    pub message_id: String,
+    pub vote: String,
+    pub comment: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub id: String,
+}
+pub async fn admin_recent(
+    db: &Database,
+    filter: mongodb::bson::Document,
+    limit: i64,
+) -> mongodb::error::Result<Vec<AdminRow>> {
+    let rows = db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find(filter)
+        .sort(doc! {"created_at": -1, "_id": -1})
+        .limit(limit)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| AdminRow {
+            message_id: r.message_id,
+            vote: r.vote,
+            comment: r.comment,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            id: r.id,
+        })
+        .collect())
+}
 
 pub async fn admin_counts(
     db: &Database,
