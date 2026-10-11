@@ -3658,7 +3658,7 @@ async fn s9_specialist_guest_disabled_pin_denial() {
     let mut guest = authenticate(&f).await;
     guest.chat.as_mut().unwrap().guest = true;
     let guest_refusal = result(
-        direct_call(&f, &guest, "nyxid__set_agent_skills", args).await,
+        direct_call(&f, &guest, "nyxid__set_agent_skills", args.clone()).await,
         true,
     )
     .await;
