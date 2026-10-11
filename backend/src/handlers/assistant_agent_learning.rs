@@ -727,8 +727,10 @@ mod s9_denial_tests {
     #[tokio::test]
     async fn viewer_put_refused_but_preview_history_are_owner_scoped() {
         let f = orchestrator_fixture("s9_viewer_routes").await;
+        let viewer = uuid::Uuid::new_v4().to_string();
         enable(&f.state.db, &f.owner).await;
-        let auth = crate::test_utils::test_auth_user(&f.owner);
+        enable(&f.state.db, &viewer).await;
+        let auth = crate::test_utils::test_auth_user(&viewer);
         let preview = crate::handlers::agent_skills::preview_attached(
             State(f.state.clone()),
             auth.clone(),
@@ -749,11 +751,34 @@ mod s9_denial_tests {
 
     #[tokio::test]
     async fn agent_key_is_refused_on_new_skill_routes() {
-        assert!(true);
+        let f = orchestrator_fixture("s9_agent_key").await;
+        let mut auth = f.auth.clone();
+        auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        let err = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            auth,
+            Path(f.chat.agent_id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "This route requires a first-party human session"
+        );
     }
 
     #[tokio::test]
     async fn specialist_and_guest_cannot_change_disabled_pin() {
-        assert!(true);
+        let f = crate::services::assistant_authority_tests::fixture("s9_specialist_guest").await;
+        let mut auth = f.auth.clone();
+        auth.auth_method = crate::mw::auth::AuthMethod::Session;
+        let err = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            auth,
+            Path(f.chat.agent_id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Agent not found");
     }
 }
