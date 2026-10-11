@@ -69,11 +69,16 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     let path = format!(
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let make = |vote: &'static str| {
         let state = f.state.clone();
         let token = f.human_token.clone();
         let path = path.clone();
-        async move { request(&state, "PUT", &path, &token, Some(json!({"vote": vote}))).await }
+        let barrier = barrier.clone();
+        async move {
+            barrier.wait().await;
+            request(&state, "PUT", &path, &token, Some(json!({"vote": vote}))).await
+        }
     };
     let (a, b) = tokio::join!(make("up"), make("up"));
     assert!(a.0.is_success());
@@ -453,6 +458,7 @@ async fn feedback_engine_flag_is_checked_before_unknown_message() {
 
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
+    crate::db::ensure_indexes(&db).await.unwrap();
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
     crate::services::role_service::seed_system_roles(&db)
         .await
