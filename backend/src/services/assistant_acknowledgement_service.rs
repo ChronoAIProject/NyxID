@@ -1678,6 +1678,10 @@ pub async fn webhook_action_gate(
     read_only: bool,
     destructive: bool,
 ) -> AppResult<Option<Value>> {
+    if !chat.guest && tool.starts_with("nyxid__") {
+        // Native account tools own their card lifecycle and audit.
+        return Ok(None);
+    }
     if chat.confirmation_policy.is_none() && !chat.guest && tool.starts_with("nyxid__") {
         // Native account tools own their per-tool card summaries. The shared gate
         // only classifies service/team actions and must not emit a duplicate card.
