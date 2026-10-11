@@ -51,6 +51,9 @@ export function PlatformServiceFields({
       inference?.voice?.billing_metrics.includes(metric),
   );
   const { data: endpoints = [] } = useEndpoints(service?.id ?? "");
+  const billingSource = service?.billing?.platform_pricing
+    ? "service"
+    : "global or environment";
   // Active endpoints, declared channel operations, then any saved key that is
   // no longer listed, so a stale price can still be cleared.
   const operationChoices = (
@@ -80,6 +83,9 @@ export function PlatformServiceFields({
   }
   return (
     <div className="space-y-5">
+      <p className="text-xs text-muted-foreground">
+        Effective billing source: {billingSource}. Central defaults are managed in Admin → Billing.
+      </p>
       <section className="space-y-3">
         <h3 className="text-13 font-semibold">Inference</h3>
         <Label htmlFor="inference-protocol">Wire protocol</Label>

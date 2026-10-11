@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod admin_anonymous_endpoints;
 pub mod admin_billing;
+#[cfg(test)]
+mod admin_billing_tests;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
