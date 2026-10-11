@@ -707,3 +707,5 @@ stores live inside its private locked update volume; keep tmpfs flags in both
 rendered commands for 0.41.0 compatibility. Failures expose fixed stage/reason
 codes and guidance only. Production-image verification tests must exercise real
 TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions.
+
+- Admin billing configuration mirrors non-secret environment values with per-value sources and redacts secret material; service lane precedence follows the synced BYOK/platform-key, legacy fallback, and free rules documented in `docs/PLATFORM_KEYS_AND_INFERENCE.md`.
