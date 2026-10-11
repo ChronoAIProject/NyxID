@@ -720,6 +720,76 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
     let (status, body) = request(&f.state, "DELETE", &path, &token, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"].as_str(), Some("Group not found"));
+    let org_id = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&org_id, UserType::Org))
+        .await
+        .unwrap();
+    let org_group_id = "feedback-org-group";
+    let org_message_id = "feedback-org-reply";
+    f.state
+        .db
+        .collection::<AssistantGroup>(GROUPS)
+        .insert_one(AssistantGroup {
+            id: org_group_id.into(),
+            user_id: org_id.clone(),
+            participant_user_ids: vec![f.owner.clone()],
+            created_by_user_id: Some(f.owner.clone()),
+            name: "Org feedback".into(),
+            member_agent_ids: vec!["agent".into()],
+            lead_agent_id: "agent".into(),
+            created_by: "user".into(),
+            message_count: 1,
+            pending_agent_ids: vec![],
+            hops_remaining: 0,
+            followers: vec![],
+            pending_checked_at: None,
+            last_message_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<GroupMessage>(GROUP_MESSAGES)
+        .insert_one(GroupMessage {
+            activities: vec![],
+            org_group: true,
+            author_user_id: None,
+            author_display_name: None,
+            request_id: None,
+            attachments: vec![],
+            id: org_message_id.into(),
+            group_id: org_group_id.into(),
+            user_id: org_id,
+            seq: 1,
+            role: "agent".into(),
+            agent_id: Some("agent".into()),
+            agent_name: None,
+            text: "org reply".into(),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    let org_path = format!(
+        "/api/v1/assistant/nyxagent/groups/{org_group_id}/messages/{org_message_id}/feedback"
+    );
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &org_path,
+        &token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    let (status, body) = request(&f.state, "DELETE", &org_path, &token, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
 }
 
 #[tokio::test]
