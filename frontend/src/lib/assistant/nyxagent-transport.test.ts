@@ -143,6 +143,36 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
+  it("keeps stopped replies complete with a cancellation code", async () => {
+    globalThis.__nyxidAssistantHttpMock = () =>
+      json({
+        conversation: conversation(),
+        messages: [
+          {
+            id: "stopped",
+            seq: 1,
+            turn_id: "t",
+            role: "assistant",
+            text: "Partial",
+            status: "failed",
+            error_code: "cancelled",
+            created_at: start,
+            activities: [],
+            attachments: [],
+          },
+        ],
+        before_seq: null,
+        acknowledgements: [],
+        approvals: [],
+        waiting: [],
+      });
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const message = transport.session(id).messages[0];
+    expect(message.status).toBe("complete");
+    expect(message.errorCode).toBe("cancelled");
+    expect(message.error).toBeUndefined();
+  });
   it("adopts server identity, decodes fragmented SSE and a live inline notice, then reads history", async () => {
     const requests: { endpoint: string; body?: BodyInit | null }[] = [];
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {

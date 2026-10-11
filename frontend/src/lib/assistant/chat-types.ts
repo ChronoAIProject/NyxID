@@ -32,6 +32,7 @@ export interface ChatMessage {
   readonly authorName?: string | null;
   readonly authorizationBlockers?: ChatAuthorizationBlocker[];
   readonly error?: string | null;
+  readonly errorCode?: string | null;
   readonly events?: RuntimeEvent[];
   readonly pendingApproval?: RuntimeToolApprovalRequestInfo;
   readonly pendingRunIntervention?: RuntimeRunInterventionInfo;

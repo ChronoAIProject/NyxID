@@ -23,9 +23,15 @@ describe("assistant feedback contracts", () => {
   it("preserves conversation feedback on reload", () => {
     const value = nyxAgentMessageSchema.parse({
       id: "m",
+      seq: 1,
+      turn_id: "t",
       role: "assistant",
       text: "ok",
+      status: "completed",
+      error_code: null,
       created_at: new Date().toISOString(),
+      activities: [],
+      attachments: [],
       feedback: {
         vote: "up",
         comment: "yes",

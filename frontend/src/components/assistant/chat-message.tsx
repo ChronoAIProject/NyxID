@@ -266,7 +266,7 @@ export function ChatMessageBubble({
             <span>{message.error}</span>
           </div>
         ) : null}
-        {feedbackEnabled && conversationId && !streaming && message.status === "complete" && message.id ? (
+        {feedbackEnabled && conversationId && !streaming && message.status === "complete" && message.errorCode !== "cancelled" && message.id ? (
           <div role="group" className="mt-2 flex items-center gap-1" aria-label="Reply feedback">
             <button type="button" aria-label="Helpful" aria-pressed={vote === "up"} onClick={() => void setFeedback("up")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "up" && "text-success") }><ThumbsUp className="h-3.5 w-3.5" /></button>
             <button type="button" aria-label="Not helpful" aria-pressed={vote === "down"} onClick={() => void setFeedback("down")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "down" && "text-destructive") }><ThumbsDown className="h-3.5 w-3.5" /></button>

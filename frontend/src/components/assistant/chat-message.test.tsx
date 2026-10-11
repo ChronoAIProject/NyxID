@@ -79,6 +79,20 @@ describe("canonical chat presentation", () => {
       screen.queryByRole("button", { name: "Helpful" }),
     ).not.toBeInTheDocument();
   });
+  it("renders stopped replies without an error banner or feedback controls", () => {
+    render(
+      <ChatMessageBubble
+        message={{ ...BASE, errorCode: "cancelled" }}
+        conversationId="conversation-1"
+      />,
+    );
+    expect(
+      screen.queryByText("The assistant could not complete this turn."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Helpful" }),
+    ).not.toBeInTheDocument();
+  });
   it("keeps feedback controls visibly pressed and blocks duplicate pending clicks", () => {
     render(
       <ChatMessageBubble

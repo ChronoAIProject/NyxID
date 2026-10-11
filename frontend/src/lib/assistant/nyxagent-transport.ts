@@ -427,7 +427,7 @@ export class NyxAgentTransport {
     const live = this.live.get(id ?? "draft");
     const conversation = live?.conversation ?? history?.conversation ?? this.index.get(id ?? "");
     let messages: ChatMessage[] = (history?.messages ?? []).map((message) => {
-      const failed = message.status === "failed";
+      const failed = message.status === "failed" && message.error_code !== "cancelled";
       return {
         id: message.id,
         feedback: message.feedback ?? undefined,
@@ -437,6 +437,7 @@ export class NyxAgentTransport {
         turnId: message.turn_id,
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
+        errorCode: message.error_code,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
         via: message.via,
