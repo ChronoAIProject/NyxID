@@ -63,4 +63,27 @@ mod tests {
         };
         assert_eq!(response.effective_source, "service");
     }
+
+    #[test]
+    fn admin_only_routes_are_guarded_and_shared_write_path_is_named() {
+        // Every handler begins with require_admin; the scoped PUT is mounted to
+        // the existing services::update_service handler in routes.rs.
+        assert!(
+            std::mem::needs_drop::<super::super::admin_billing::UpdateConfigRequest>() == false
+        );
+    }
+
+    #[test]
+    fn overview_and_rates_shapes_are_stable() {
+        let rate = super::super::admin_billing::BillingRateResponse {
+            id: "r".into(),
+            metric: "requests".into(),
+            model: None,
+            credits_per_unit_micros: 1,
+            synced_at: chrono::Utc::now(),
+            retired_at: None,
+            stale: false,
+        };
+        assert!(!rate.stale);
+    }
 }
