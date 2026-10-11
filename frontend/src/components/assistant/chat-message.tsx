@@ -371,6 +371,7 @@ export function ChatMessageList({
   readonly notice?: ReactNode;
   readonly projectionVersion?: string | number;
   readonly renderMessage?: (message: ChatMessage) => ReactNode;
+  readonly feedbackEnabled?: boolean;
 }) {
   const [detectedMessageId, setDetectedMessageId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -473,7 +474,7 @@ export function ChatMessageList({
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
           <div id={`message-${message.id}`} key={message.id}>
-            {renderMessage?.(message) ?? <ChatMessageEntry message={message} conversationId={session?.conversationId} />}
+            {renderMessage?.(message) ?? <ChatMessageEntry message={message} conversationId={session?.conversationId} feedbackEnabled={feedbackEnabled} />}
           </div>
         ))}
         {footer}

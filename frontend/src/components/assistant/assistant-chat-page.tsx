@@ -288,6 +288,7 @@ export function AssistantChatPage() {
           <AssistantLinkModalHost>
             <ChatMessageList
               session={chat.session}
+              feedbackEnabled
               bottomInset={composerHeight}
               footer={actorControls}
               notice={threadNotice}
