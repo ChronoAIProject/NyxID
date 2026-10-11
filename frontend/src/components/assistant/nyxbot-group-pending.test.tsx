@@ -3,6 +3,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GroupPendingActions } from "@/components/assistant/nyxbot-group-view";
 import { assistantGroupMessagesSchema } from "@/schemas/assistant-nyxagent";
+import { api } from "@/lib/api-client";
+vi.mock("@/lib/api-client", () => ({ api: { put: vi.fn(), delete: vi.fn() } }));
 
 const action = {
   conversation_id: "nyxa-00000000000000000000000000000001",
@@ -130,7 +132,8 @@ it("decides an org card by id instead of posting a confirmation phrase", async (
 
 import { GroupMessageRow } from "@/components/assistant/nyxbot-group-view";
 
-it("group message composition mirrors pressed feedback controls", () => {
+it("group message composition toggles pressed state through the feedback handler", async () => {
+  vi.mocked(api.put).mockResolvedValue({ vote: "up" });
   render(
     <GroupMessageRow
       groupId="g"
@@ -156,4 +159,13 @@ it("group message composition mirrors pressed feedback controls", () => {
     "true",
   );
   expect(screen.getByRole("button", { name: "Not helpful" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+  expect(api.put).toHaveBeenCalledWith(
+    "/assistant/nyxagent/groups/g/messages/m/feedback",
+    { vote: "down", comment: undefined },
+  );
+  expect(screen.getByRole("button", { name: "Not helpful" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });

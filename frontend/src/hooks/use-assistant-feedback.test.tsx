@@ -62,6 +62,25 @@ describe("useAssistantFeedback", () => {
     expect(result.current.isPending).toBe(false);
   });
 
+  it("invalidates the real history cache key after a successful vote", async () => {
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const customWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    vi.mocked(api.put).mockResolvedValue({ vote: "up" });
+    const { result } = renderHook(
+      () => useAssistantFeedback("conversation", "c", "m"),
+      { wrapper: customWrapper },
+    );
+    await act(async () => {
+      await result.current.mutateAsync({ vote: "up" });
+    });
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["assistant", "nyxagent", undefined, "history", "c"],
+    });
+  });
+
   it("exposes mutation state for optimistic cache owners", () => {
     const { result } = renderHook(
       () => useAssistantFeedback("group", "g", "m"),
