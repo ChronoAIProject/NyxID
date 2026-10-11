@@ -293,6 +293,14 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(schema.safeParse({ ...valid, max_live_subagents: Number.NaN }).success).toBe(false);
   });
 
+  it("accepts each persisted access mode", () => {
+    const schema = nyxAgentSettingsFormSchema(limits);
+    const base = { confirm_destructive: true, max_live_subagents: 0, max_concurrent_subagent_turns: 1, max_group_handoffs: 0, max_group_handoffs_per_hour: 0, max_auto_continuations: 8 };
+    for (const access_mode of ["autopilot", "nyxmode", "ask_every_time"] as const) {
+      expect(schema.parse({ ...base, access_mode }).access_mode).toBe(access_mode);
+    }
+  });
+
   it("treats missing and future channel follow readiness as unavailable", () => {
     const channel = {
       id: "c", channel_bot_id: "bot", platform: "slack", bot_label: "Bot",
