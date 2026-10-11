@@ -600,6 +600,59 @@ async fn feedback_admin_route_rejects_non_admin() {
     );
 }
 
+#[tokio::test]
+async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
+    let f = fixture("feedback-other-user", false).await;
+    let conversation_id = "owned-conversation";
+    let message_id = "owned-reply";
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let original = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &f.human_token).unwrap();
+    let mut claims = serde_json::to_value(&original).unwrap();
+    claims["sub"] = json!(Uuid::new_v4().to_string());
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::decode_header(&f.human_token).unwrap(),
+        &claims,
+        &f.state.jwt_keys.encoding,
+    )
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
+    assert_eq!(
+        request(&f.state, "PUT", &path, &token, Some(json!({"vote":"up"})))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&f.state, "DELETE", &path, &token, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
