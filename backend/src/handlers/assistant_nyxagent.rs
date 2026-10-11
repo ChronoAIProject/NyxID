@@ -2014,7 +2014,7 @@ async fn execute_turn(
                 .headers()
                 .get("x-request-id")
                 .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
+                .and_then(sanitize_upstream_request_id);
             let bytes = tokio::time::timeout(
                 Duration::from_secs(10),
                 axum::body::to_bytes(response.into_body(), 65536),
@@ -2315,6 +2315,15 @@ fn stream_timeout(
             .saturating_sub(transport_elapsed)
             .min(Duration::from_secs(610).saturating_sub(semantic_elapsed))
     }
+}
+
+fn sanitize_upstream_request_id(value: &str) -> Option<String> {
+    (value.len() <= 128
+        && !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)))
+        .then(|| value.to_owned())
 }
 
 #[cfg(test)]

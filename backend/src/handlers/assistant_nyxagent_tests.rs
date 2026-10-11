@@ -21,6 +21,13 @@ use std::sync::{
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
 
 #[test]
+fn upstream_request_id_is_bounded_and_validated() {
+    assert_eq!(sanitize_upstream_request_id("req_123:abc"), Some("req_123:abc".into()));
+    assert_eq!(sanitize_upstream_request_id("bad id"), None);
+    assert_eq!(sanitize_upstream_request_id(&"x".repeat(129)), None);
+}
+
+#[test]
 fn long_tool_call_keepalives_use_no_progress_bound() {
     assert_eq!(
         stream_timeout(
