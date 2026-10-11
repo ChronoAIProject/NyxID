@@ -174,6 +174,9 @@ export function AgentLearningReview({
               {proposal.evidence_count} evidence items ·{" "}
               {proposal.body_bytes.toLocaleString()} bytes
             </p>
+            {proposal.published_version ? (
+              <p className="text-11 text-success">Published version: {proposal.published_version}</p>
+            ) : null}
             {proposal.failure_code ? (
               <p role="alert" className="text-11 text-destructive">
                 {publicationFailureText(proposal.failure_code, proposal.status)}

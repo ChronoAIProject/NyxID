@@ -136,7 +136,18 @@ describe("AgentLearningReview", () => {
       consent: { mutate: mocks.consent, isPending: false },
     });
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.getByText(/name:3 \(frontmatter.required\): Set a name/)).toBeInTheDocument();
+    expect(screen.getByText(/name:3 \(frontmatter.required\): Fix name/)).toBeInTheDocument();
+  });
+
+  it("renders the published version on status rows", () => {
+    mocks.feature.mockReturnValue(true);
+    mocks.review.mockReturnValue({
+      data: { proposals: [{ ...proposal, status: "published_unpinned", published_version: "1.2.0" }] },
+      status: { data: { enabled: true } },
+      configure: { mutate: mocks.configure, isPending: false }, approve: { mutateAsync: mocks.approve, isPending: false }, edit: { mutate: mocks.edit, isPending: false }, reject: { mutateAsync: mocks.reject, isPending: false }, run: { mutate: mocks.run, isPending: false }, consent: { mutate: mocks.consent, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText("Published version: 1.2.0")).toBeInTheDocument();
   });
 
   it("keeps authored proposals visible without the invalid approval button", () => {
