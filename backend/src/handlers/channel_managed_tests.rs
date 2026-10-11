@@ -1637,6 +1637,7 @@ fn verify_reports_live_subscription_state_and_recommended_action() {
             last_error: None,
         });
     let registered = super::channel_bots::health_for(&bot, false);
+    assert_eq!(registered.recommended_action, "verify");
     assert!(
         registered
             .diagnostics
