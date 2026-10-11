@@ -42,6 +42,7 @@ function liveSend(
   onAdopt: (id: string) => void,
   agent?: NyxAgentConversationAgent,
   attachmentIds?: string[],
+  attachments?: import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
   adoptExisting?: boolean,
 ) {
   const actorId = currentCreditsActor();
@@ -51,6 +52,7 @@ function liveSend(
     return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
       ...(!conversationId && agent ? { agent } : {}),
       attachmentIds,
+      attachments,
       adoptExisting,
     });
   }
@@ -166,7 +168,7 @@ export function useNyxAgentAssistantChat({
         const id = selectedConversationId ?? uploads?.conversationId;
         await liveSend(
           id, text, onConversationAdopted, draftAgent,
-          uploads?.attachmentIds, Boolean(id && !selectedConversationId),
+          uploads?.attachmentIds, uploads?.attachments, Boolean(id && !selectedConversationId),
         );
       } finally {
         // A new thread changes its agent's summary. (Model routing is

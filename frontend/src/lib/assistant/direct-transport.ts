@@ -51,6 +51,7 @@ export interface DirectAssistantMessage {
   readonly schema_version: 1;
   readonly blocks: DirectTextBlock[];
   readonly created_at: string;
+  readonly attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[];
 }
 
 interface DirectActiveTurn {

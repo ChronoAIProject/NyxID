@@ -18,6 +18,15 @@ const baseProps = {
 };
 
 describe("ChatComposer drafts", () => {
+  it("accepts pasted clipboard items when files is empty", () => {
+    const onFiles = vi.fn();
+    render(<ChatComposer {...baseProps} onFiles={onFiles} />);
+    const file = new File(["png"], "image.png", { type: "image/png" });
+    fireEvent.paste(screen.getByRole("textbox"), {
+      clipboardData: { files: [], items: [{ getAsFile: () => file }] },
+    });
+    expect(onFiles).toHaveBeenCalledWith([expect.objectContaining({ name: "pasted-image-1.png" })]);
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();

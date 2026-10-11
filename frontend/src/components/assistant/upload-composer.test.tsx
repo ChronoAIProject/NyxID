@@ -45,6 +45,33 @@ beforeEach(() => {
   vi.mocked(uploadFile).mockResolvedValue(item);
 });
 describe("Assistant uploads composer", () => {
+  it("rejects unsupported formats with the exact copy", async () => {
+    render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+    choose(new File(["svg"], "drawing.svg", { type: "image/svg+xml" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Format not supported. Please try again.");
+    expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("opens and closes an image preview", async () => {
+    vi.mocked(uploadFile).mockResolvedValue({ ...item, id: "image-1", label: "photo.png", content_type: "image/png" });
+    render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+    choose(new File(["png"], "photo.png", { type: "image/png" }));
+    await screen.findByText("Ready");
+    fireEvent.click(screen.getByRole("button", { name: "Preview photo.png" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("does not restore attachments after an admitted stream failure", async () => {
+    const error = Object.assign(new Error("stream ended"), { admitted: true });
+    const onSend = vi.fn().mockRejectedValue(error);
+    render(<UploadComposer {...base} onSend={onSend} scope={{ kind: "conversations", id: "one" }} />);
+    choose();
+    await screen.findByText("Ready");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })));
+    expect(screen.queryByRole("list", { name: "Attachments" })).not.toBeInTheDocument();
+  });
   it("detaches submitted files while the reply streams so text guidance stays available", async () => {
     let finish!: () => void;
     const onSend = vi.fn().mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }))
@@ -53,7 +80,7 @@ describe("Assistant uploads composer", () => {
     choose();
     await screen.findByText("Ready");
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-    expect(onSend).toHaveBeenCalledWith("", { attachmentIds: [item.id], conversationId: "one" });
+    expect(onSend).toHaveBeenCalledWith("", { attachmentIds: [item.id], attachments: [item], conversationId: "one" });
     rerender(<UploadComposer {...base} onSend={onSend} active allowActiveInput sendLabel="Send guidance" scope={{ kind: "conversations", id: "one" }} />);
     expect(screen.queryByRole("list", { name: "Attachments" })).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Focus on the summary" } });
@@ -99,6 +126,7 @@ describe("Assistant uploads composer", () => {
     await waitFor(() =>
       expect(base.onSend).toHaveBeenCalledWith("", {
         attachmentIds: [item.id],
+        attachments: [item],
         conversationId: "nyxa-draft",
       }),
     );
@@ -138,6 +166,7 @@ describe("Assistant uploads composer", () => {
     await waitFor(() =>
       expect(base.onSend).toHaveBeenCalledWith("", {
         attachmentIds: Array.from({ length: 10 }, (_, i) => `${i}.txt`),
+        attachments: Array.from({ length: 10 }, (_, i) => ({ ...item, id: `${i}.txt`, label: `${i}.txt` })),
         conversationId: "one",
       }),
     );
@@ -187,7 +216,7 @@ describe("Assistant uploads composer", () => {
       );
       expect(screen.getByLabelText("Choose attachments")).not.toHaveAttribute("accept");
       choose(new File(["<svg/>"], "drawing.svg", { type: "image/svg+xml" }));
-      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(await screen.findByRole("alert")).toHaveTextContent("Format not supported. Please try again.");
       fireEvent.change(screen.getByRole("textbox"), { target: { value: "hello" } });
       expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
       expect(base.onSend).not.toHaveBeenCalled();

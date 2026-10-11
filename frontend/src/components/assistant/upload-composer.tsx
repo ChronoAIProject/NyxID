@@ -12,6 +12,8 @@ import {
 } from "@/lib/assistant/uploads";
 import type { NyxAgentAttachment } from "@/schemas/assistant-nyxagent";
 
+const UNSUPPORTED_FORMAT_MESSAGE = "Format not supported. Please try again.";
+
 type Pending = {
   key: string;
   name: string;
@@ -31,6 +33,7 @@ type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
 export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
+  const [preview, setPreview] = useState<Pending>();
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
@@ -82,6 +85,12 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         progress: 0,
         controller: new AbortController(),
       };
+      if (["image/svg+xml", "video/mp4", "audio/mpeg"].includes(file.type)) {
+        entry.error = UNSUPPORTED_FORMAT_MESSAGE;
+        pending.current.set(entry.key, entry);
+        refresh();
+        continue;
+      }
       if (
         ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(
           file.type,
@@ -157,11 +166,13 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                   className="flex min-w-0 items-center gap-2 rounded-lg border border-hairline bg-card p-2 text-xs"
                 >
                   {file.preview ? (
+                    <button type="button" className="shrink-0" aria-label={`Preview ${file.name}`} onClick={() => file.preview && setPreview(file)} onKeyDown={(event) => { if (event.key === "Enter") setPreview(file); }}>
                     <img
                       src={file.preview}
-                      alt="Upload preview"
-                      className="h-8 w-8 shrink-0 rounded object-cover"
+                        alt={file.name}
+                      className="h-16 w-16 shrink-0 rounded object-cover"
                     />
+                    </button>
                   ) : (
                     <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
                   )}
@@ -199,6 +210,14 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             <p role="status" className="text-xs text-muted-foreground">
               {notice}
             </p>
+          )}
+          {preview?.preview && (
+            <div role="dialog" aria-label={`Preview ${preview.name}`} className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={() => setPreview(undefined)}>
+              <div className="relative max-h-full max-w-full rounded-xl bg-card p-3" onClick={(event) => event.stopPropagation()}>
+                <img src={preview.preview} alt={preview.name} className="max-h-[80vh] max-w-[90vw] object-contain" />
+                <Button type="button" variant="secondary" className="mt-3" onClick={() => setPreview(undefined)}>Close preview</Button>
+              </div>
+            </div>
           )}
         </div>
       }
@@ -256,6 +275,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             items.length
               ? {
                   attachmentIds: items.map((file) => file.item!.id),
+                  attachments: items.map((file) => file.item!),
                   conversationId:
                     scope.kind === "conversations"
                       ? resolved.current.id
@@ -263,10 +283,11 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                 }
               : undefined,
           );
-        } catch (error) {
-          for (const file of items) {
-            if (alive.current) pending.current.set(file.key, file);
-            else if (file.preview) URL.revokeObjectURL(file.preview);
+          } catch (error) {
+            const admitted = error instanceof Error && (error as Error & { admitted?: boolean }).admitted;
+            for (const file of items) {
+              if (alive.current && !admitted) pending.current.set(file.key, file);
+              else if (file.preview) URL.revokeObjectURL(file.preview);
           }
           refresh();
           throw error;

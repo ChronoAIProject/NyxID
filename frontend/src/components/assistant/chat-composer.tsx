@@ -677,9 +677,20 @@ function DraftedChatComposer({
             }
           }}
           onPaste={(event) => {
-            if (onFiles && event.clipboardData.files.length) {
+            const files = event.clipboardData.files.length
+              ? Array.from(event.clipboardData.files)
+              : Array.from(event.clipboardData.items)
+                  .map((item) => item.getAsFile())
+                  .filter((file): file is File => Boolean(file));
+            if (onFiles && files.length) {
               event.preventDefault();
-              if (!locked && !disabled && !sending) onFiles(Array.from(event.clipboardData.files));
+              if (!locked && !disabled && !sending) {
+                onFiles(files.map((file, index) =>
+                  file.name && file.name !== "image.png"
+                    ? file
+                    : new File([file], `pasted-image-${index + 1}.png`, { type: file.type || "image/png" }),
+                ));
+              }
             }
           }}
           className={cn("relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
