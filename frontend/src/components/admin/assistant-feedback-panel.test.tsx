@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantFeedbackPanel } from "./assistant-feedback-panel";
-const get = vi.fn();
+const { get } = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("@/lib/api-client", () => ({ api: { get } }));
 describe("AssistantFeedbackPanel", () => {
   beforeEach(() => {
