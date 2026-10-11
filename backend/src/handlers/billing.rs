@@ -18,7 +18,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
+use crate::models::billing_rate_cache::BillingRateCache;
 use crate::models::billing_topup_session::BillingTopUpStatus;
 use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
 use crate::models::service_billing::BillingMetric;
