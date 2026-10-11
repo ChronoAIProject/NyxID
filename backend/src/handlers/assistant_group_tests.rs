@@ -194,7 +194,7 @@ async fn nyxbot_post_to_group_is_never_sticky() {
     group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
 }
 
-#[PLACEHOLDER]
+#[allow(dead_code)]
 async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl() {
     let (state, _, server) = setup("group_routing").await;
     let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
