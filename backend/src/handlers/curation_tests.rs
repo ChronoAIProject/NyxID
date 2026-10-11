@@ -17,6 +17,7 @@ use crate::{
         service_account::{COLLECTION_NAME as ACCOUNTS, ServiceAccount},
         service_account_token::{COLLECTION_NAME as TOKENS, ServiceAccountToken},
         user::{COLLECTION_NAME as USERS, User, UserType},
+        assistant_message::{AssistantMessage, COLLECTION_NAME as ASSISTANT_MESSAGES},
     },
     services::{
         catalog_skill_service,
@@ -33,6 +34,25 @@ pub(super) struct Fixture {
     pub service: DownstreamService,
     pub owner: String,
     pub human_token: String,
+}
+
+#[tokio::test]
+async fn feedback_concurrent_first_puts_share_one_row() {
+    let f = fixture("feedback-r3", false).await;
+    let conversation_id = "nyxa-feedback-r3";
+    let message_id = "reply-feedback-r3";
+    f.state.db.collection::<AssistantMessage>(ASSISTANT_MESSAGES).insert_one(AssistantMessage {
+        steering: None, voice: None, execution_pending: false, id: message_id.into(), conversation_id: conversation_id.into(), user_id: f.owner.clone(), seq: 1, turn_id: "turn-r3".into(), role: "assistant".into(), text: "reply".into(), status: "completed".into(), error_code: None, created_at: Utc::now(), activities: vec![], attachments: vec![], origin: None, via: None,
+    }).await.unwrap();
+    let path = format!("/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback");
+    let make = |vote: &'static str| {
+        let state = f.state.clone(); let token = f.human_token.clone(); let path = path.clone();
+        async move { request(&state, "PUT", &path, &token, Some(json!({"vote": vote}))).await }
+    };
+    let (a, b) = tokio::join!(make("up"), make("up"));
+    assert!(a.0.is_success()); assert!(b.0.is_success());
+    let count = f.state.db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME).count_documents(doc! {"user_id": &f.owner, "message_id": message_id}).await.unwrap();
+    assert_eq!(count, 1);
 }
 
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
