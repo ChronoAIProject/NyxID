@@ -6,7 +6,11 @@ import type { ReactNode } from "react";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { ApiError } from "@/lib/api-client";
 
-vi.mock("@/hooks/use-agent-skills", () => ({ useSkillSearch: vi.fn(() => ({ data: { items: [], total_pages: 1 }, isLoading: false })) }));
+vi.mock("@/hooks/use-agent-skills", () => ({
+  useSkillSearch: vi.fn(() => ({ data: { items: [], total_pages: 1 }, isLoading: false })),
+  useAgentSkills: vi.fn(() => ({ data: undefined })),
+  useSetAgentSkills: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+}));
 
 const mocks = vi.hoisted(() => ({
   useCatalog: vi.fn(),

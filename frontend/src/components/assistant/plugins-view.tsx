@@ -8,7 +8,7 @@ import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
-import { useSkillSearch } from "@/hooks/use-agent-skills";
+import { useAgentSkills, useSetAgentSkills, useSkillSearch } from "@/hooks/use-agent-skills";
 import {
   deriveConnectorItems,
   matchesPluginQuery,
@@ -391,8 +391,10 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   );
 }
 
-function SkillsTab({ query }: { readonly query: string }) {
+function SkillsTab({ query, agentId }: { readonly query: string; readonly agentId?: string }) {
   const search = useSkillSearch(query.trim() || null, 1);
+  const attached = useAgentSkills(agentId ?? "");
+  const setSkills = useSetAgentSkills(agentId ?? "");
   const items = (search.data?.items ?? []).map((skill) => ({ id: skill.id, name: skill.name, initial: skill.name.slice(0, 2).toUpperCase(), category: "Skill", description: skill.description, meta: "Ornn catalog", added: false }));
 
   if (query.trim() && items.length === 0) {
@@ -410,7 +412,12 @@ function SkillsTab({ query }: { readonly query: string }) {
         item={item}
         addedBadge="Installed"
         actionLabel={item.added ? "Manage" : "Install"}
-        onActivate={() => toast.info("Attach this skill from an agent's Skills panel.")}
+        onActivate={() => {
+          if (!agentId || !attached.data) return toast.info("Select an agent to attach this skill.");
+          const existing = attached.data.skills.find((pin) => pin.skill_id === item.id);
+          const skills = existing ? attached.data.skills.filter((pin) => pin.skill_id !== item.id) : [...attached.data.skills, { source: "ornn" as const, skill_id: item.id, name: item.name, version: "latest", sha256: "" }];
+          setSkills.mutate({ expected_revision: attached.data.revision, skills });
+        }}
       />
     );
   }
@@ -428,7 +435,7 @@ function SkillsTab({ query }: { readonly query: string }) {
 }
 
 
-export function PluginsView() {
+export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
   const [tab, setTab] = useState<PluginKind>("connector");
   const [query, setQuery] = useState("");
 
@@ -483,7 +490,7 @@ export function PluginsView() {
         {tab === "connector" ? (
           <ConnectorsTab query={query} />
         ) : (
-          <SkillsTab query={query} />
+          <SkillsTab query={query} agentId={agentId} />
         )}
       </div>
     </div>
