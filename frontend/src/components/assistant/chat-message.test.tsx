@@ -103,6 +103,17 @@ describe("canonical chat presentation", () => {
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Send" })).toBeVisible();
   });
+  it("keeps comment submission optional", () => {
+    render(
+      <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Add feedback comment" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("textbox", { name: "Optional feedback comment" }),
+    ).not.toBeInTheDocument();
+  });
 
   it("renders an inline context reset as a system note without assistant controls", () => {
     const content =
