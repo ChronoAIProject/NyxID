@@ -332,6 +332,34 @@ async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
 }
 
 #[tokio::test]
+async fn retried_turn_does_not_re_run_completed_actions() {
+    let (state, calls, server) = setup_options(None, Duration::ZERO, vec!["tool_completed"], false).await;
+    let first = turns(State(state.clone()), test_auth_user(OWNER), turn_request(None)).await.unwrap();
+    let _ = axum::body::to_bytes(first.into_body(), 100_000).await.unwrap();
+    let failed = settled(&state).await;
+    let failed_message = engine::messages(&state.db, OWNER, &failed.id, 10, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.status == "failed")
+        .expect("failed turn reply");
+    let retry = Request::builder()
+        .method("POST")
+        .uri("/api/v1/assistant/nyxagent/turns")
+        .body(Body::from(json!({
+            "conversation_id": failed.id,
+            "text": "hello",
+            "retry_of": failed_message.turn_id,
+        }).to_string()))
+        .unwrap();
+    let _ = turns(State(state.clone()), test_auth_user(OWNER), retry).await.unwrap();
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].body["input"].as_str().unwrap().contains("must not be repeated"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn browser_disconnect_does_not_cancel_detached_turn_and_headers_are_server_owned() {
     let (state, calls, server) = setup(None, Duration::from_millis(150)).await;
     let response = turns(
