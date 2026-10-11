@@ -425,6 +425,30 @@ async fn feedback_put_rejects_unknown_conversation_as_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn feedback_route_limits_one_user_burst() {
+    let f = fixture("feedback-s4-limit", false).await;
+    let mut limited = false;
+    for i in 0..31 {
+        let path =
+            format!("/api/v1/assistant/nyxagent/conversations/missing-{i}/messages/m/feedback");
+        if request(
+            &f.state,
+            "PUT",
+            &path,
+            &f.human_token,
+            Some(json!({"vote":"up"})),
+        )
+        .await
+        .0 == StatusCode::TOO_MANY_REQUESTS
+        {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited);
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
