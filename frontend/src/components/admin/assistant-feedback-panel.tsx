@@ -1,38 +1,32 @@
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api-client";
+import { useMemo, useState } from "react";
+import { useAssistantFeedbackAdmin } from "@/hooks/use-assistant-feedback-admin";
 
-type FeedbackAdmin = {
-  counts: readonly { day: string; up: number; down: number }[];
-  recent: readonly {
-    message_id: string;
-    vote: string;
-    comment?: string | null;
-    created_at: string;
-    updated_at: string;
-  }[];
-  next_cursor?: string | null;
-};
 export function AssistantFeedbackPanel() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [vote, setVote] = useState("");
   const [cursor, setCursor] = useState<string>();
-  const [data, setData] = useState<FeedbackAdmin>();
-  const [error, setError] = useState<string>();
-  useEffect(() => {
-    const params = new URLSearchParams();
-    if (from) params.set("from", new Date(`${from}T00:00:00Z`).toISOString());
-    if (to) params.set("to", new Date(`${to}T23:59:59Z`).toISOString());
-    if (vote) params.set("vote", vote);
-    if (cursor) params.set("cursor", cursor);
-    void api
-      .get<FeedbackAdmin>(`/admin/assistant/feedback?${params}`)
-      .then((next) => {
-        setData(next);
-        setError(undefined);
-      })
-      .catch(() => setError("Unable to load assistant feedback."));
+  const params = useMemo(() => {
+    const next = new URLSearchParams();
+    if (from) next.set("from", new Date(`${from}T00:00:00Z`).toISOString());
+    if (to) next.set("to", new Date(`${to}T23:59:59Z`).toISOString());
+    if (vote) next.set("vote", vote);
+    if (cursor) next.set("cursor", cursor);
+    return next;
   }, [from, to, vote, cursor]);
+  const query = useAssistantFeedbackAdmin(params);
+  const data = query.data;
+  const error = query.error ? "Unable to load assistant feedback." : undefined;
+  /* TanStack Query owns fetch lifecycle, schema validation, and cache identity. */
+  if (query.isPending)
+    return (
+      <section
+        aria-label="Assistant reply feedback"
+        className="mb-6 rounded-xl border border-border/50 bg-card p-4"
+      >
+        Loading assistant feedback…
+      </section>
+    );
   return (
     <section
       aria-labelledby="assistant-feedback-heading"

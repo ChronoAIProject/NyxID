@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantFeedbackPanel } from "./assistant-feedback-panel";
 const { get } = vi.hoisted(() => ({ get: vi.fn() }));
@@ -19,7 +20,11 @@ describe("AssistantFeedbackPanel", () => {
     });
   });
   it("renders filters, timestamps and paging data", async () => {
-    render(<AssistantFeedbackPanel />);
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <AssistantFeedbackPanel />
+      </QueryClientProvider>,
+    );
     await waitFor(() => expect(screen.getByText("2026-01-01")).toBeVisible());
     expect(screen.getByLabelText("From")).toBeVisible();
     expect(screen.getByLabelText("To")).toBeVisible();
@@ -31,7 +36,11 @@ describe("AssistantFeedbackPanel", () => {
   });
   it("shows a visible load error", async () => {
     get.mockRejectedValueOnce(new Error("offline"));
-    render(<AssistantFeedbackPanel />);
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <AssistantFeedbackPanel />
+      </QueryClientProvider>,
+    );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Unable to load",
     );
