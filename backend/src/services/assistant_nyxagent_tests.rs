@@ -385,6 +385,34 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     assert!(recap.contains("ORIGINATING GOAL"));
     assert!(recap.contains("HEAD"));
     assert!(recap.contains("TAIL"));
+    assert!(recap.len() <= 16384);
+    assert!(recap.contains("ORIGINATING GOAL"));
+}
+
+#[test]
+fn keepalive_frames_split_across_chunks_do_not_count_as_progress() {
+    let mut stream = ResponseStream::default();
+    for chunk in [b": keepalive\n".as_slice(), b"\n".as_slice()] {
+        stream.push(chunk).unwrap();
+    }
+    assert!(stream.text.is_empty());
+    assert!(stream.terminal.is_none());
+}
+
+#[test]
+fn lease_and_sweep_failures_record_their_diagnostic_stage() {
+    for stage in ["sweep", "settlement"] {
+        let detail = crate::models::assistant_message::AssistantErrorDetail {
+            stage: stage.into(),
+            http_status: None,
+            upstream_request_id: None,
+            response_id: None,
+            continuations: 0,
+            turn_id: "turn".into(),
+            occurred_at: Utc::now(),
+        };
+        assert_eq!(detail.stage, stage);
+    }
 }
 
 #[test]

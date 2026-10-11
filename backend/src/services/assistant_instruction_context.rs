@@ -266,6 +266,13 @@ mod tests {
     }
 
     #[test]
+    fn rollout_reestablishes_same_fingerprint_without_reset() {
+        let context = prepared();
+        assert!(!context.reset);
+        assert_eq!(context.binding.fingerprint, "test-fingerprint");
+    }
+
+    #[test]
     fn unmarked_legacy_context_never_claims_authenticated_provenance() {
         let context = prepared();
         let input = context.input("Current facts", "The user's question");
