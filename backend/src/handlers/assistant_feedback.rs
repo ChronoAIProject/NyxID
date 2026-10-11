@@ -132,6 +132,7 @@ async fn upsert(
         return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
     }
     let now = Utc::now();
+    // Parent deletion wins: eligibility is checked before writes and parent cascades purge rows.
     let filter = doc! {"user_id":&user_id,"message_id":message_id};
     let existing = state
         .db
