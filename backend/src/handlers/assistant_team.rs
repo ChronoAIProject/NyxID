@@ -163,6 +163,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 }
 
 fn event_turn(conversation_id: &str) -> TurnStart {
+        retry_of: None,
     TurnStart {
         channel_event_id: None,
         org_access: None,
@@ -742,6 +743,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+        retry_of: None,
             channel_event_id: None,
             org_access: None,
             attachment_ids: Vec::new(),

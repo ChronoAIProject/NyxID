@@ -774,6 +774,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+        retry_of: None,
             running_response: None,
             channel_event_id: None,
             initiating_message_seq: None,
@@ -1314,15 +1315,45 @@ async fn b4_duplicate_action_fence_end_to_end_keeps_tool_counter_at_one() {
     let db = connect_transaction_test_database("nyxa_retry_fence").await;
     ensure_indexes(&db).await.unwrap();
     let user = Uuid::new_v4().to_string();
-    db.collection(USERS).insert_one(test_user(&user, UserType::Person)).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
     let state = test_app_state(db.clone());
-    let row = begin_turn(&db, &user, &request(None, "send mail"), &state.encryption_keys).await.unwrap();
+    let row = begin_turn(
+        &db,
+        &user,
+        &request(None, "send mail"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
     let digest = "digest-mail-1";
-    let activity = activity_started_with_digest(&db, &user, &row.id, "mcp.mail.send", Some(digest)).await.unwrap().unwrap();
-    activity_finished(&db, &user, &row.id, &activity, true).await.unwrap();
-    mark_retry_of(&db, &user, &row.id, &row.active_turn.as_ref().unwrap().turn_id).await.unwrap();
-    assert!(retry_duplicate_digest(&db, &user, &row.id, digest).await.unwrap());
-    assert!(!retry_duplicate_digest(&db, &user, &row.id, "digest-mail-2").await.unwrap());
+    let activity = activity_started_with_digest(&db, &user, &row.id, "mcp.mail.send", Some(digest))
+        .await
+        .unwrap()
+        .unwrap();
+    activity_finished(&db, &user, &row.id, &activity, true)
+        .await
+        .unwrap();
+    mark_retry_of(
+        &db,
+        &user,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        retry_duplicate_digest(&db, &user, &row.id, digest)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !retry_duplicate_digest(&db, &user, &row.id, "digest-mail-2")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]

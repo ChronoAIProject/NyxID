@@ -465,6 +465,7 @@ pub fn question_key(text: &str) -> Option<String> {
     Some(hex::encode(Sha256::digest(normalized.as_bytes())))
 }
 impl std::fmt::Debug for TurnStart {
+        retry_of: None,
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnStart")
             .field("conversation_id", &self.conversation_id)
@@ -473,11 +474,13 @@ impl std::fmt::Debug for TurnStart {
     }
 }
 impl From<&TurnStart> for TurnStart {
+        retry_of: None,
     fn from(start: &TurnStart) -> Self {
         start.clone()
     }
 }
 impl From<&TurnRequest> for TurnStart {
+        retry_of: None,
     fn from(request: &TurnRequest) -> Self {
         Self {
             channel_event_id: None,

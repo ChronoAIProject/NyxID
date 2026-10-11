@@ -402,7 +402,10 @@ async fn context_checkpoint_matches_turn_source_and_reset_reason_is_visible() {
         .await
         .unwrap();
     assert_eq!(turn_row.id, route_row.id);
-    assert_eq!(turn_messages, route_messages);
+    assert_eq!(
+        serde_json::to_value(&turn_messages).unwrap(),
+        serde_json::to_value(&route_messages).unwrap()
+    );
     engine::reset_context(&state.db, OWNER, &row.id)
         .await
         .unwrap();
