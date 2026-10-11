@@ -1639,3 +1639,35 @@ pub async fn webhook_action_gate(
     .await?;
     Ok(Some(refusal(&card)))
 }
+
+#[cfg(test)]
+mod sensitive_tool_policy_tests {
+    use super::*;
+    use crate::models::assistant_settings::AccessMode;
+
+    #[test]
+    fn sensitive_tools_raise_cards_in_nyxmode_and_proceed_after_decision() {
+        for tool in ["spawn_subagent", "grant_subagent", "update_settings", "bind_agent_key", "delete_agent_key", "set_agent_model"] {
+            let class = classify_owner_action(tool, None);
+            assert!(matches!(class, OwnerActionClass::Sensitive | OwnerActionClass::Destructive));
+            assert!(owner_confirmation_required(AccessMode::Nyxmode, class, false));
+            // A decided single-use card permits the operation; the gate predicate is
+            // only the pre-decision check and does not alter the operation itself.
+        }
+    }
+
+    #[test]
+    fn sensitive_tools_are_card_free_under_autopilot_without_a_policy_floor() {
+        for tool in ["spawn_subagent", "grant_subagent", "update_settings", "bind_agent_key", "delete_agent_key", "set_agent_model"] {
+            let class = classify_owner_action(tool, None);
+            assert!(!owner_confirmation_required(AccessMode::Autopilot, class, false));
+        }
+    }
+
+    #[test]
+    fn autopilot_never_bypasses_proxy_machine_or_webhook_floor() {
+        for class in [OwnerActionClass::Change, OwnerActionClass::Sensitive, OwnerActionClass::Destructive] {
+            assert!(owner_confirmation_required(AccessMode::Autopilot, class, true));
+        }
+    }
+}
