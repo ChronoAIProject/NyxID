@@ -11,7 +11,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -172,7 +172,12 @@ async fn withdraw(
         if group {
             crate::services::org_group_service::get(&state.db, &user_id, cid, None).await?;
         } else {
-            engine::history_page(&state.db, &user_id, cid, 1, None).await?;
+            let row = feedback_service::conversation_message(&state.db, &user_id, cid, &message_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+            if row.role != "assistant" || row.status != "completed" {
+                return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
+            }
         }
     }
     let filter = doc! {"user_id":&user_id,"message_id":&message_id};
@@ -285,8 +290,13 @@ pub async fn admin(
         .collect::<Vec<_>>();
     let next_cursor = (rows.len() == 100)
         .then(|| {
-            rows.last()
-                .map(|r| format!("{}|{}", r.created_at.to_rfc3339(), r.id))
+            rows.last().map(|r| {
+                format!(
+                    "{}|{}",
+                    r.created_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+                    r.id
+                )
+            })
         })
         .flatten();
     Ok(Json(AdminResponse {
