@@ -281,8 +281,32 @@ async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recip
     post(&state, OWNER, &group.id, "@researcher approve this", None)
         .await
         .unwrap();
-    let rows = settled(&state, &group.id, 3).await;
-    assert!(rows.iter().any(|row| row.role == "agent"));
+    settled(&state, &group.id, 3).await;
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (card, _) = acks::request_tracked(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_agent_key"),
+            arguments: Some(&json!({"key_id":"ci-bot"})),
+            summary: "Delete agent key",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let phrase = format!("yes {}", acks::confirm_code(&card.id));
+    let (_, addressed) = post(&state, OWNER, &group.id, &phrase, None).await.unwrap();
+    assert_eq!(addressed, vec![nyxbot.id.clone()]);
     server.abort();
 }
 #[tokio::test]
@@ -306,10 +330,27 @@ async fn nyxbot_post_to_group_is_never_sticky() {
         .await
         .unwrap();
     settled(&state, &group.id, 3).await;
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (value, error) = super::super::assistant_team::execute_tool(
+        &state,
+        &chat,
+        "nyxid__post_to_group",
+        &json!({"group": group.id, "text": "NyxBot update"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    settled(&state, &group.id, 4).await;
     post(&state, OWNER, &group.id, "bare follow-up", None)
         .await
         .unwrap();
-    let rows = settled(&state, &group.id, 7).await;
+    let rows = settled(&state, &group.id, 6).await;
     assert_eq!(
         rows.iter()
             .rev()
