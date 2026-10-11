@@ -286,7 +286,7 @@ export function AgentLearningReview({
                 >
                   Review updated package
                 </Button>
-              ) : settled || (proposal.status !== "pending" && proposal.status !== "publication_failed") ? null : <Button
+              ) : settled || (!checkOnly && proposal.status !== "pending" && proposal.status !== "publication_failed") ? null : <Button
                 size="sm"
                 disabled={readOnly || review.approve.isPending}
                 onClick={async () => {

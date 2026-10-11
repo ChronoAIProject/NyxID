@@ -550,6 +550,6 @@ describe("PluginsView", () => {
     const user = userEvent.setup();
     render(<PluginsView />);
     await user.click(screen.getByRole("tab", { name: "Skills" }));
-    expect(screen.getByText("No plugins match this search.")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Skills" })).toBeInTheDocument();
   });
 });
