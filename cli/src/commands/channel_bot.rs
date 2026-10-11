@@ -702,6 +702,26 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     if let Some(error) = bot["error"].as_str() {
                         eprintln!("Error: {error}");
                     }
+                    if let Some(diagnostics) = bot["diagnostics"].as_object() {
+                        for field in [
+                            "last_inbound_at",
+                            "last_inbound_source",
+                            "last_outbound_at",
+                            "last_webhook_at",
+                            "consecutive_errors",
+                            "failure_reason",
+                        ] {
+                            if let Some(value) = diagnostics.get(field) {
+                                eprintln!(
+                                    "{field}: {}",
+                                    value
+                                        .as_str()
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| value.to_string())
+                                );
+                            }
+                        }
+                    }
                     eprintln!("Active:         {active}");
                     eprintln!("Conversations:  {conversations}");
                     eprintln!("Created:        {created}");
