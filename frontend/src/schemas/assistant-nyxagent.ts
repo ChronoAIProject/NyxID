@@ -315,7 +315,7 @@ export function nyxAgentSettingsFormSchema(limits: {
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),
     max_group_handoffs: whole(0, limits.max_group_handoffs_limit),
     max_group_handoffs_per_hour: whole(0, limits.max_group_handoffs_per_hour_limit),
-    specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]).default("denied"),
+    specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]),
   });
 }
 export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFormSchema>>;

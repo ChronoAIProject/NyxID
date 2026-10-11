@@ -277,6 +277,7 @@ describe("NyxBot team, settings and channel schemas", () => {
       max_group_handoffs: 0,
       max_group_handoffs_per_hour: 0,
       max_auto_continuations: 8,
+      specialist_access_requests: "denied",
     };
     expect(schema.safeParse(valid).success).toBe(true);
     expect(schema.safeParse({ ...valid, max_auto_continuations: 0 }).success).toBe(true);
