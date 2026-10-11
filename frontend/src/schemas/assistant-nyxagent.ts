@@ -355,6 +355,8 @@ export const assistantAgentSchema = z.object({
   /** Personality and tone the user asked for; style only, never authority. */
   persona: z.string().nullable().default(null),
   description: z.string().default(""),
+  model: z.string().optional(),
+  access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
