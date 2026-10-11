@@ -86,6 +86,7 @@ export const ADMIN_NAV = [
   { to: "/admin/usage", icon: ChartNoAxesCombined, label: "Usage" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
   { to: "/admin/credits", icon: Coins, label: "Credits" },
+  { to: "/admin/billing", icon: Coins, label: "Billing" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/oauth-clients", icon: KeyRound, label: "OAuth Clients" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },

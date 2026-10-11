@@ -25,6 +25,18 @@ pub struct PlatformSettings {
     pub utility_inference: Option<UtilityInference>,
     #[serde(default)]
     pub utility_inference_admin_modified: bool,
+    #[serde(default)]
+    pub billing: Option<BillingSettings>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillingSettings {
+    /// Defaults used when a service has no scoped override. Prices remain
+    /// service-owned; this is deliberately configuration metadata only.
+    #[serde(default)]
+    pub default_lane: Option<String>,
+    #[serde(default)]
+    pub default_overdraft_cap_credits: Option<i64>,
 }
 
 /// Server-owned metadata tasks share one atomic, admin-selected route.
@@ -43,6 +55,7 @@ impl PlatformSettings {
             broker_policy_revision: 0,
             utility_inference: None,
             utility_inference_admin_modified: false,
+            billing: None,
         }
     }
 }
