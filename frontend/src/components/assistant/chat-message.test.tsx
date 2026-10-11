@@ -21,12 +21,15 @@ const BASE: ChatMessage = {
 
 describe("canonical chat presentation", () => {
   it("shows feedback only in the page-owned NyxAgent message-list composition", () => {
-    const session = {
+    const session: ChatSessionState = {
+      clientId: "test-client",
       conversationId: "nyxagent-page",
       status: "complete" as const,
+      title: "Test",
       messages: [BASE],
       isStreaming: false,
-    } as ChatSessionState;
+      expectedTurnCount: 0,
+    };
     const { rerender } = render(
       <NyxAgentThreadMessageList session={session} bottomInset={0} />,
     );

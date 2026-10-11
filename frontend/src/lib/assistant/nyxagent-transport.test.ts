@@ -1109,5 +1109,5 @@ it("maps cancelled replies to an error state so feedback stays ineligible", () =
     activities: [],
     attachments: [],
   } as never;
-  expect(message.error_code).toBe("cancelled");
+  expect((message as { error_code: string }).error_code).toBe("cancelled");
 });

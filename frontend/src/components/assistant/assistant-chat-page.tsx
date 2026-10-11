@@ -123,12 +123,18 @@ export function NyxAgentThreadMessageList({
   session,
   bottomInset,
   renderMessage,
+  projectionVersion,
+  notice,
+  emptyDescription,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
   readonly renderMessage?: (
     message: import("@/lib/assistant/chat-types").ChatMessage,
   ) => React.ReactNode;
+  readonly projectionVersion?: string | number;
+  readonly notice?: React.ReactNode;
+  readonly emptyDescription?: React.ReactNode;
 }) {
   return (
     <ChatMessageList
@@ -136,6 +142,9 @@ export function NyxAgentThreadMessageList({
       bottomInset={bottomInset}
       feedbackEnabled
       renderMessage={renderMessage}
+      projectionVersion={projectionVersion}
+      notice={notice}
+      emptyDescription={emptyDescription}
     />
   );
 }
@@ -920,7 +929,6 @@ function NyxAgentThreadPage() {
                 ),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
-              bottomInset={composerHeight}
               notice={chat.error}
               emptyDescription={
                 headerAgent?.kind === "specialist"
