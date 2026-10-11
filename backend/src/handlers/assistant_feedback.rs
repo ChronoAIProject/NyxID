@@ -277,7 +277,7 @@ pub async fn admin(
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
         .find(filter)
-        .sort(doc! {"created_at":-1})
+        .sort(doc! {"created_at":-1, "_id":-1})
         .limit(100)
         .await?
         .try_collect::<Vec<_>>()
