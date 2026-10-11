@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   search: vi.fn(),
   versions: vi.fn(),
   preview: vi.fn(),
+  attachedPreview: vi.fn(),
+  history: vi.fn(),
 }));
 vi.mock("@/hooks/use-agent-skills", () => ({
   useAgentSkills: mocks.current,
@@ -15,6 +17,8 @@ vi.mock("@/hooks/use-agent-skills", () => ({
   useSkillSearch: mocks.search,
   useSkillVersions: mocks.versions,
   useSkillPreview: mocks.preview,
+  useAttachedSkillPreview: mocks.attachedPreview,
+  useAgentSkillHistory: mocks.history,
 }));
 const pin = {
   source: "ornn",
@@ -35,6 +39,8 @@ beforeEach(() => {
       },
     },
   });
+  mocks.attachedPreview.mockReturnValue({ data: { description: "Attached guidance" } });
+  mocks.history.mockReturnValue({ data: { items: [{ id: "h1", event_data: { action: "disabled" } }] } });
   mocks.search.mockReturnValue({ data: undefined });
   mocks.versions.mockReturnValue({
     data: {
