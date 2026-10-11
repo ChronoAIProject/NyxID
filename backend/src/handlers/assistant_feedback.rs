@@ -83,6 +83,8 @@ async fn upsert(
     enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
+        let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
+        engine::authorize_thread_read(&state.db, &conversation).await?;
         let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
@@ -172,6 +174,8 @@ async fn withdraw(
         if group {
             crate::services::org_group_service::get(&state.db, &user_id, cid, None).await?;
         } else {
+            let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
+            engine::authorize_thread_read(&state.db, &conversation).await?;
             let row = feedback_service::conversation_message(&state.db, &user_id, cid, &message_id)
                 .await?
                 .ok_or_else(|| AppError::NotFound("message not found".into()))?;

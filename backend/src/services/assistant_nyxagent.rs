@@ -1101,7 +1101,7 @@ pub(crate) async fn get_authorized(
     Ok((row, access))
 }
 
-async fn authorize_thread_read(
+pub(crate) async fn authorize_thread_read(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<Option<std::sync::Arc<super::org_agent_service::RequestAccess>>> {
