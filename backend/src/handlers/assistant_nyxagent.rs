@@ -607,6 +607,68 @@ pub async fn history(
         before_seq,
     }))
 }
+
+#[derive(Serialize)]
+pub struct ContextResponse {
+    pub conversation_id: String,
+    pub goal: Option<String>,
+    pub completed_actions: Vec<String>,
+    pub pending_actions: Vec<String>,
+    pub reset_reason: Option<String>,
+    pub binding_state: String,
+}
+
+pub async fn context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ContextResponse>> {
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    let (row, messages) = engine::history_page(&state.db, &user_id, &id, 100, None).await?;
+    let goal = messages
+        .iter()
+        .find(|m| m.role == "user")
+        .map(|m| m.text.clone());
+    let actions = messages
+        .iter()
+        .flat_map(|m| m.activities.iter())
+        .map(|a| format!("{}={}", a.label, a.status))
+        .collect::<Vec<_>>();
+    Ok(Json(ContextResponse {
+        conversation_id: row.id,
+        goal,
+        completed_actions: actions
+            .iter()
+            .filter(|a| a.ends_with("=completed"))
+            .cloned()
+            .collect(),
+        pending_actions: actions
+            .iter()
+            .filter(|a| a.ends_with("=running"))
+            .cloned()
+            .collect(),
+        reset_reason: row.context_reset_reason,
+        binding_state: if row.nyxagent_session_id.is_some() {
+            "bound".into()
+        } else {
+            "reset".into()
+        },
+    }))
+}
+
+pub async fn reset_context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ContextResponse>> {
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    let now = Utc::now();
+    state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &id, "user_id": &user_id}, doc! {"$set": {"nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::from_chrono(now), "context_reset_reason": "user_reset"}}).await?;
+    context(State(state), auth, Path(id)).await
+}
 /// An image a tool returned during one of the owner's turns. Only verified
 /// raster types are ever stored, and they are served inline with nosniff.
 pub async fn attachment(

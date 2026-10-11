@@ -2130,6 +2130,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
         )
         .route(
+            "/nyxagent/conversations/{id}/context",
+            get(handlers::assistant_nyxagent::context),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/context/reset",
+            post(handlers::assistant_nyxagent::reset_context),
+        )
+        .route(
             "/nyxagent/conversations/{id}/stop",
             post(handlers::assistant_nyxagent::stop),
         )
