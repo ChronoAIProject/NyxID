@@ -406,6 +406,19 @@ async fn context_checkpoint_matches_turn_source_and_reset_reason_is_visible() {
         serde_json::to_value(&turn_messages).unwrap(),
         serde_json::to_value(&route_messages).unwrap()
     );
+    let endpoint = context(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        axum::extract::Path(row.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let summary = engine::checkpoint_summary(&state.db, OWNER, &row.id)
+        .await
+        .unwrap();
+    assert_eq!(endpoint.goal, summary.goal);
+    assert_eq!(endpoint.pending_actions, summary.pending_actions);
     engine::reset_context(&state.db, OWNER, &row.id)
         .await
         .unwrap();
@@ -531,6 +544,14 @@ async fn user_reset_changes_the_next_turn_recap() {
             .unwrap(),
     );
     assert_ne!(before, after);
+    let reset_reason = engine::get(&db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .context_reset_reason;
+    let next_turn_recap = (reset_reason.as_deref() != Some("user_reset"))
+        .then_some(after.as_str())
+        .unwrap_or("");
+    assert!(!next_turn_recap.contains(&before));
 }
 
 #[tokio::test]

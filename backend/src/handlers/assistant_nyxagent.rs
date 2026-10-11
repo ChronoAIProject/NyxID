@@ -1782,7 +1782,11 @@ async fn execute_turn(
         binding = None;
     }
     let recap = binding.is_none()
-        && (context.reset || row.context_reset_reason.as_deref().is_some_and(|reason| reason != "user_reset"));
+        && (context.reset
+            || row
+                .context_reset_reason
+                .as_deref()
+                .is_some_and(|reason| reason != "user_reset"));
     if recap {
         events.notice();
     }
