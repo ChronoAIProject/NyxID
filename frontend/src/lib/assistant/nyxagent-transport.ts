@@ -25,7 +25,7 @@ import {
 
 const ROOT = "/assistant/nyxagent";
 export const CONTEXT_RESET_NOTICE =
-  "Conversation context was reset; the assistant was given a recap of this chat.";
+  "Context was reset; completed actions, attachments, and decided cards were preserved. Review them and rerun any incomplete action.";
 
 interface LiveTurn {
   state: DirectTurnState;
@@ -524,7 +524,7 @@ export class NyxAgentTransport {
       messages.splice(position < 0 ? messages.length : position, 0, {
         id: `nyxagent-context-reset:${id ?? "draft"}`,
         role: "system",
-        content: CONTEXT_RESET_NOTICE,
+        content: contextResetCopy(conversation?.context_reset_reason) + " " + CONTEXT_RESET_NOTICE,
         timestamp,
         status: "complete",
       });
