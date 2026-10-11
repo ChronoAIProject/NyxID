@@ -288,7 +288,6 @@ export function AssistantChatPage() {
           <AssistantLinkModalHost>
             <ChatMessageList
               session={chat.session}
-              feedbackEnabled
               bottomInset={composerHeight}
               footer={actorControls}
               notice={threadNotice}
@@ -721,6 +720,7 @@ function NyxAgentThreadPage() {
             {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
             <ChatMessageList
               session={chat.session}
+              feedbackEnabled
               renderMessage={(message) => {
                 if (message.role === "event") return <NyxBotEventNotice message={message} />;
                 if (message.role === "orchestrator") {
