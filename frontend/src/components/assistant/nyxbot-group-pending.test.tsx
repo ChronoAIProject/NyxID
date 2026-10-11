@@ -130,7 +130,7 @@ it("decides an org card by id instead of posting a confirmation phrase", async (
 
 import { GroupMessageRow } from "@/components/assistant/nyxbot-group-view";
 
-test("group message composition mirrors pressed feedback controls", () => {
+it("group message composition mirrors pressed feedback controls", () => {
   render(
     <GroupMessageRow
       groupId="g"
