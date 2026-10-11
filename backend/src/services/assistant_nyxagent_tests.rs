@@ -322,6 +322,72 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 }
 
 #[test]
+fn failure_matrix_covers_envelope_less_5xx_and_first_byte_timeout_codes() {
+    assert_eq!(upstream_error_code(503, &Value::Null), "");
+    assert_eq!(
+        TurnError::new("first_byte_timeout").code,
+        "first_byte_timeout"
+    );
+    assert_eq!(TurnError::new("idle_timeout").code, "idle_timeout");
+    assert_eq!(
+        TurnError::new("settlement_deadline").code,
+        "assistant_unavailable"
+    );
+}
+
+#[test]
+fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
+    let mut rows = vec![
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "goal".into(),
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            seq: 1,
+            turn_id: "t1".into(),
+            role: "user".into(),
+            text: "ORIGINATING GOAL".into(),
+            status: "completed".into(),
+            error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
+            created_at: Utc::now(),
+            activities: Vec::new(),
+            attachments: Vec::new(),
+            origin: None,
+            via: None,
+        },
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "last".into(),
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            seq: 2,
+            turn_id: "t2".into(),
+            role: "assistant".into(),
+            text: format!("HEAD {} TAIL", "x".repeat(6000)),
+            status: "completed".into(),
+            error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
+            created_at: Utc::now(),
+            activities: Vec::new(),
+            attachments: Vec::new(),
+            origin: None,
+            via: None,
+        },
+    ];
+    let recap = bounded_recap(&mut rows);
+    assert!(recap.contains("ORIGINATING GOAL"));
+    assert!(recap.contains("HEAD"));
+    assert!(recap.contains("TAIL"));
+}
+
+#[test]
 fn turn_error_diagnostics_carry_stage_and_upstream_correlation_fields() {
     let mut error = TurnError::new("assistant_unavailable");
     error.stage = "upstream_response".into();
