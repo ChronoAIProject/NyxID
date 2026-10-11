@@ -2,11 +2,10 @@ use crate::{
     AppState,
     errors::{AppError, AppResult},
     models::{
-        assistant_group::MESSAGES_COLLECTION_NAME,
         assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME},
     },
     mw::auth::AuthUser,
-    services::{assistant_nyxagent as engine, audit_service},
+    services::{assistant_feedback_service as feedback_service, assistant_nyxagent as engine, audit_service},
 };
 use axum::{
     Json,
@@ -62,10 +61,7 @@ async fn upsert(
     let comment = validate(&input)?;
     let user_id = auth.user_id.to_string();
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
-        let (_, rows) = engine::history_page(&state.db, &user_id, cid, 2000, None).await?;
-        let row = rows
-            .into_iter()
-            .find(|r| r.id == message_id)
+        let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id).await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
         (
             Some(row.turn_id),
@@ -75,11 +71,7 @@ async fn upsert(
         let gid = group_id.as_deref().unwrap();
         let access =
             crate::services::org_group_service::get(&state.db, &user_id, gid, None).await?;
-        let row = state
-            .db
-            .collection::<crate::models::assistant_group::GroupMessage>(MESSAGES_COLLECTION_NAME)
-            .find_one(doc! {"_id":message_id,"group_id":gid})
-            .await?
+        let row = feedback_service::group_message(&state.db, gid, message_id).await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
         (None, row.role == "agent" && access.group.id == gid)
     };

@@ -17,6 +17,7 @@ pub mod assistant_action_receipts;
 pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_direct;
+pub mod assistant_feedback_service;
 mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
