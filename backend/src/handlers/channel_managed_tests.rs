@@ -1565,3 +1565,23 @@ async fn admin_channel_bot_list_filters_platform_and_status_and_requires_admin()
     .unwrap_err();
     assert!(matches!(error, crate::errors::AppError::Forbidden(_)));
 }
+
+#[tokio::test]
+async fn admin_health_requires_admin() {
+    let (state, auth, _server) = fixture().await;
+    let bot_id = "admin-health";
+    let owner = auth.user_id.to_string();
+    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+        "_id": bot_id, "user_id": &owner, "platform": "twitter", "label": "health",
+        "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": true, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+    }).unwrap()).await.unwrap();
+    let ok = super::channel_bots::admin_health(State(state.clone()), auth, Path(bot_id.into()))
+        .await
+        .unwrap();
+    assert_eq!(ok.0.mode, "webhook");
+    let other = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let err = super::channel_bots::admin_health(State(state), other, Path(bot_id.into()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
+}
