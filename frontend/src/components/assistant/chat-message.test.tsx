@@ -24,7 +24,7 @@ describe("canonical chat presentation", () => {
     const session: ChatSessionState = {
       clientId: "test-client",
       conversationId: "nyxagent-page",
-      status: "complete" as const,
+      status: "completed_text",
       title: "Test",
       messages: [BASE],
       isStreaming: false,
