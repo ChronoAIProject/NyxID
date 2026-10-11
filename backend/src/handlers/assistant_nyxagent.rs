@@ -639,6 +639,8 @@ pub struct ContextResponse {
     pub goal: Option<String>,
     pub completed_actions: Vec<String>,
     pub pending_actions: Vec<String>,
+    pub failed_actions: Vec<String>,
+    pub last_successful_turn: Option<String>,
     pub reset_reason: Option<String>,
     pub binding_state: String,
 }
@@ -650,7 +652,7 @@ pub async fn context(
 ) -> AppResult<Json<ContextResponse>> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let (row, messages) = engine::history_page(&state.db, &user_id, &id, 100, None).await?;
+    let (row, messages) = engine::context_checkpoint(&state.db, &user_id, &id).await?;
     let goal = messages
         .iter()
         .find(|m| m.role == "user")
@@ -673,6 +675,16 @@ pub async fn context(
             .filter(|a| a.ends_with("=running"))
             .cloned()
             .collect(),
+        failed_actions: actions
+            .iter()
+            .filter(|a| a.ends_with("=error"))
+            .cloned()
+            .collect(),
+        last_successful_turn: messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant" && m.status == "completed")
+            .map(|m| m.turn_id.clone()),
         reset_reason: row.context_reset_reason,
         binding_state: if row.nyxagent_session_id.is_some() {
             "bound".into()

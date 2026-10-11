@@ -1288,6 +1288,14 @@ pub async fn history_page(
         .map_err(transactions::map_transaction_error)
 }
 
+pub async fn context_checkpoint(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
+    history_page(db, user_id, id, 100, None).await
+}
+
 /// Fence and first message commit together, before any upstream work.
 /// Legacy Ask-mode orchestrators upgrade to Full access here, inside the same
 /// transaction that claims the turn, so no startup sweep races a live turn.
