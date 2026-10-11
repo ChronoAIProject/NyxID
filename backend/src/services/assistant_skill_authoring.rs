@@ -128,7 +128,7 @@ struct BaseInput {
 }
 
 #[path = "assistant_skill_authoring_validation.rs"]
-mod validation;
+pub(crate) mod validation;
 use validation::invalid;
 pub(crate) use validation::{decode as decode_body, validate as validate_body};
 

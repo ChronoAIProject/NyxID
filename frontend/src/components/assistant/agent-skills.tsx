@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectTrigger,
@@ -25,6 +26,7 @@ function AttachedSkill({
   disabled,
   remove,
   review,
+  toggle,
 }: {
   readonly skill: AgentSkill;
   readonly description?: string;
@@ -32,6 +34,7 @@ function AttachedSkill({
   readonly disabled: boolean;
   readonly remove: () => void;
   readonly review: () => void;
+  readonly toggle: (enabled: boolean) => void;
 }) {
   const versions = useSkillVersions(skill.skill_id);
   const latest = versions.data?.items[0]?.version;
@@ -61,6 +64,15 @@ function AttachedSkill({
         <Button size="sm" disabled={disabled} onClick={remove}>
           Remove {skill.name}
         </Button>
+        <label className="flex items-center gap-2 text-11">
+          <Switch
+            checked={!skill.disabled}
+            disabled={disabled}
+            aria-label={`${skill.disabled ? "Enable" : "Disable"} ${skill.name}`}
+            onCheckedChange={toggle}
+          />
+          {skill.disabled ? "Disabled" : "Enabled"}
+        </label>
       </div>
     </div>
   );
@@ -143,6 +155,7 @@ export function AgentSkills({
           size={current.data.metadata[skill.skill_id]?.size_bytes}
           disabled={disabled}
           review={() => choose(skill.skill_id, skill.name)}
+          toggle={(enabled) => save(current.data!.skills.map((item) => item.skill_id === skill.skill_id ? { ...item, disabled: !enabled } : item))}
           remove={() =>
             save(
               current.data.skills.filter((s) => s.skill_id !== skill.skill_id),

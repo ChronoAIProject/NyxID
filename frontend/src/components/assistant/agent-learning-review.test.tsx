@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   edit: vi.fn(),
   reject: vi.fn(),
   run: vi.fn(),
+  consent: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: mocks.feature }));
@@ -56,6 +57,7 @@ beforeEach(() => {
     edit: { mutate: mocks.edit, isPending: false },
     reject: { mutateAsync: mocks.reject, isPending: false },
     run: { mutate: mocks.run, isPending: false },
+    consent: { mutate: mocks.consent, isPending: false },
   });
   mocks.approve.mockResolvedValue({
     status: "confirmation_required",
@@ -87,6 +89,54 @@ describe("AgentLearningReview", () => {
     expect(screen.getByRole("button", { name: "Confirm publish & attach" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm publish & attach" }));
     await waitFor(() => expect(mocks.approve).toHaveBeenLastCalledWith({ proposalId: "proposal", acknowledgementId: "card" }));
+  });
+
+  it("clicks Save draft with a top-level revision and rejects the edited revision", async () => {
+    mocks.feature.mockReturnValue(true);
+    render(<AgentLearningReview agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Skill draft" }), { target: { value: "# Edited" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith(expect.objectContaining({ proposalId: "proposal", revision: 2 })));
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await waitFor(() => expect(mocks.reject).toHaveBeenCalledWith({ proposalId: "proposal", revision: 2 }));
+  });
+
+  it("renders organization consent and sends the PUT learning consent mutation", () => {
+    mocks.feature.mockReturnValue(true);
+    mocks.review.mockReturnValue({
+      data: { proposals: [] },
+      status: { data: { enabled: true, org_owned: true, opted_in: false, publication_blocked: true } },
+      consent: { mutate: mocks.consent, isPending: false },
+      configure: { mutate: mocks.configure, isPending: false },
+      approve: { mutateAsync: mocks.approve, isPending: false },
+      edit: { mutate: mocks.edit, isPending: false },
+      reject: { mutateAsync: mocks.reject, isPending: false },
+      run: { mutate: mocks.run, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText(/owner binding is required/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: /consent to learning/i }));
+    expect(mocks.consent).toHaveBeenCalledWith(true);
+  });
+
+  it("renders validation diagnostics at their field and line", () => {
+    mocks.feature.mockReturnValue(true);
+    const error = Object.assign(new Error("validation failed"), {
+      diagnostics: [{ rule: "frontmatter.required", field: "name", line: 3, remediation: "Set a name" }],
+    });
+    mocks.review.mockReturnValue({
+      data: { proposals: [] },
+      status: { data: { enabled: true } },
+      edit: { error, isPending: false },
+      configure: { mutate: mocks.configure, isPending: false },
+      approve: { mutateAsync: mocks.approve, isPending: false },
+      reject: { mutateAsync: mocks.reject, isPending: false },
+      run: { mutate: mocks.run, isPending: false },
+      consent: { mutate: mocks.consent, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText(/name:3 \(frontmatter.required\): Set a name/)).toBeInTheDocument();
   });
 
   it("keeps authored proposals visible without the invalid approval button", () => {

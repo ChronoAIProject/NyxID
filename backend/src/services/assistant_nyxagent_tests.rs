@@ -1683,6 +1683,7 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
                 version: "1.0.0".into(),
                 sha256: "a".repeat(64),
                 dependencies: vec![],
+                disabled: false,
             }),
             "machines" => changed.machine_node_ids.push("machine".into()),
             "owner" => changed.user_id = "organization".into(),

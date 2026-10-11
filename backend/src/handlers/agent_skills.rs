@@ -11,12 +11,15 @@ use crate::{
         assistant_team_service as team,
     },
 };
+
+const SKILL_HISTORY_LIMIT: i64 = 50;
 use axum::{
     Json,
     body::{Body, to_bytes},
     extract::{Path, Query, State},
     http::{self, Request},
 };
+use futures::TryStreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -364,6 +367,48 @@ pub async fn set(
         .await?,
     ))
 }
+
+pub async fn preview_attached(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, skill_id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
+    let agent = team::agent(&state.db, &owner, &id).await?;
+    let pin = agent
+        .skills
+        .iter()
+        .find(|s| s.skill_id == skill_id)
+        .ok_or_else(|| AppError::NotFound("Attached skill not found".into()))?;
+    let reader = Reader {
+        state: &state,
+        person: &owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    let preview = skills::preview(&reader, &pin.skill_id, &pin.version).await?;
+    Ok(Json(
+        json!({"reference": pin, "description": preview.description, "size_bytes": preview.size_bytes, "disabled": pin.disabled}),
+    ))
+}
+
+pub async fn history(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
+    let _ = team::agent(&state.db, &owner, &id).await?;
+    let rows: Vec<crate::models::audit_log::AuditLog> = state.db.collection(crate::models::audit_log::COLLECTION_NAME)
+        .find(mongodb::bson::doc! {"user_id": &owner, "event_type": "assistant_skills_updated", "event_data.agent_id": &id})
+        .sort(mongodb::bson::doc! {"created_at": -1}).limit(SKILL_HISTORY_LIMIT).await?.try_collect().await?;
+    Ok(Json(
+        json!({"items": rows.into_iter().map(|r| json!({"id": r.id, "created_at": r.created_at, "event_data": r.event_data})).collect::<Vec<_>>() }),
+    ))
+}
 fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args[key].as_str().unwrap_or_default()
 }
@@ -644,6 +689,69 @@ mod tests {
     };
     use mongodb::bson::doc;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    fn authority(
+        role: crate::models::assistant_conversation::AgentRole,
+        guest: bool,
+    ) -> ChatAuthority {
+        ChatAuthority {
+            org_agent_access: None,
+            turn_id: None,
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            api_key_id: "k".into(),
+            role,
+            agent_id: "a".into(),
+            agent_name: "a".into(),
+            guest,
+            confirmation_policy: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn guest_skill_mutation_is_denied_before_state_access() {
+        let f = orchestrator_fixture("guest_skill_mutation").await;
+        let err = super::dispatch(
+            &f.state,
+            &authority(
+                crate::models::assistant_conversation::AgentRole::Orchestrator,
+                true,
+            ),
+            "set_agent_skills",
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("owner turns"));
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn specialist_learning_mutation_is_denied() {
+        let f = orchestrator_fixture("specialist_learning_mutation").await;
+        let err = super::dispatch(
+            &f.state,
+            &authority(
+                crate::models::assistant_conversation::AgentRole::Subagent,
+                false,
+            ),
+            "learning_run_now",
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("managed"));
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn skill_history_is_bounded_for_owner_reads() {
+        assert_eq!(SKILL_HISTORY_LIMIT, 50);
+    }
 
     #[tokio::test]
     async fn agent_skills_ornn_requires_live_person_identity_and_refuses_master_credentials() {

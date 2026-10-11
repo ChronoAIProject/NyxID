@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Plus, RefreshCw, Search } from "lucide-react";
+import { ArrowRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,18 +8,14 @@ import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
+import { useAgentSkills, useSetAgentSkills, useSkillSearch } from "@/hooks/use-agent-skills";
 import {
   deriveConnectorItems,
   matchesPluginQuery,
   type ConnectorCardItem,
   type PluginKind,
 } from "@/lib/assistant/plugins";
-import {
-  addSkill,
-  listAddedSkillIds,
-  SKILL_CATALOG,
-  type SkillCatalogItem,
-} from "@/lib/assistant/skills";
+import type { AgentSkill } from "@/schemas/agent-skills";
 
 interface PluginCardShape {
   readonly id: string;
@@ -164,40 +160,6 @@ function PluginCard({
           {actionLabel}
           {interactive && <ArrowRight className="h-3 w-3" />}
         </span>
-      </div>
-    </div>
-  );
-}
-
-function AddYourOwnSkillCard() {
-  return (
-    <div
-      className={`flex ${CARD_HEIGHT} flex-col gap-2.5 rounded-xl border border-dashed border-border p-4`}
-    >
-      <div className="flex items-start gap-2.5">
-        <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-          <Plus className="h-3.5 w-3.5" />
-        </div>
-        <div className="min-w-0">
-          <p className="text-13 font-medium text-foreground">
-            Add your own skill
-          </p>
-          <p className="text-10 uppercase tracking-[0.5px] text-text-tertiary">
-            Skill
-          </p>
-        </div>
-      </div>
-      <p className="flex-1 text-12 leading-[17px] text-muted-foreground line-clamp-3">
-        Register a skill from a Git repo or paste a SKILL.md - your assistant
-        loads it on demand in every chat.
-      </p>
-      <div className="flex shrink-0 items-center justify-between gap-2">
-        <span className="font-mono text-10 text-text-tertiary">
-          git url or upload
-        </span>
-        <Button type="button" variant="outline" size="sm" disabled>
-          Add skill
-        </Button>
       </div>
     </div>
   );
@@ -430,20 +392,13 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   );
 }
 
-function SkillsTab({ query }: { readonly query: string }) {
-  const [addedIds, setAddedIds] = useState<ReadonlySet<string>>(() =>
-    listAddedSkillIds(),
-  );
+function SkillsTab({ query, agentId }: { readonly query: string; readonly agentId?: string }) {
+  const search = useSkillSearch(query.trim() || null, 1);
+  const attached = useAgentSkills(agentId ?? "");
+  const setSkills = useSetAgentSkills(agentId ?? "");
+  const items = (search.data?.items ?? []).map((skill) => ({ id: skill.id, name: skill.name, initial: skill.name.slice(0, 2).toUpperCase(), category: "Skill", description: skill.description, meta: "Ornn catalog", added: false }));
 
-  const items = SKILL_CATALOG.map((skill) => toSkillCard(skill, addedIds)).filter(
-    (item) => matchesPluginQuery(item, query),
-  );
-  const added = items.filter((item) => item.added);
-  const available = items.filter((item) => !item.added);
-  const searching = Boolean(query.trim());
-  const showOwnSkillCard = !searching;
-
-  if (searching && items.length === 0) {
+  if (query.trim() && items.length === 0) {
     return (
       <p className="py-14 text-center text-11 text-text-tertiary">
         No plugins match this search.
@@ -458,55 +413,32 @@ function SkillsTab({ query }: { readonly query: string }) {
         item={item}
         addedBadge="Installed"
         actionLabel={item.added ? "Manage" : "Install"}
-        // Skill management isn't built yet, so an installed skill's card is
-        // inert rather than offering an action that does nothing.
-        onActivate={
-          item.added ? undefined : () => setAddedIds(addSkill(item.id))
-        }
+        onActivate={() => {
+          if (!agentId || !attached.data) return toast.info("Select an agent to attach this skill.");
+          const existing = attached.data.skills.find((pin) => pin.skill_id === item.id);
+          const skills: AgentSkill[] = existing
+            ? attached.data.skills.map((pin) => pin.skill_id === item.id ? { ...pin, disabled: !pin.disabled } : pin)
+            : [...attached.data.skills, { source: "ornn", skill_id: item.id, name: item.name, version: "latest", sha256: "", dependencies: [], disabled: false }];
+          setSkills.mutate({ expected_revision: attached.data.revision, skills });
+        }}
       />
     );
   }
 
   return (
     <>
-      {added.length > 0 && (
+      {items.length > 0 && (
         <>
-          <SectionHeading>Added</SectionHeading>
-          <div className="mb-7">
-            <CardGrid>{added.map(card)}</CardGrid>
-          </div>
-        </>
-      )}
-
-      {(available.length > 0 || showOwnSkillCard) && (
-        <>
-          <SectionHeading>Available to add</SectionHeading>
-          <CardGrid>
-            {available.map(card)}
-            {showOwnSkillCard && <AddYourOwnSkillCard />}
-          </CardGrid>
+          <SectionHeading>Ornn catalog</SectionHeading>
+          <CardGrid>{items.map(card)}</CardGrid>
         </>
       )}
     </>
   );
 }
 
-function toSkillCard(
-  skill: SkillCatalogItem,
-  addedIds: ReadonlySet<string>,
-): PluginCardShape {
-  return {
-    id: skill.id,
-    name: skill.name,
-    initial: skill.initial,
-    category: "Skill",
-    description: skill.description,
-    meta: `${skill.author} · ${skill.version}`,
-    added: addedIds.has(skill.id),
-  };
-}
 
-export function PluginsView() {
+export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
   const [tab, setTab] = useState<PluginKind>("connector");
   const [query, setQuery] = useState("");
 
@@ -561,7 +493,7 @@ export function PluginsView() {
         {tab === "connector" ? (
           <ConnectorsTab query={query} />
         ) : (
-          <SkillsTab query={query} />
+          <SkillsTab query={query} agentId={agentId} />
         )}
       </div>
     </div>

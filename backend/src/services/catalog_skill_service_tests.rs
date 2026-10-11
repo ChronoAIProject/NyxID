@@ -237,6 +237,7 @@ async fn curation_exact_refs_and_explicit_names_transition() {
         version: "1.5".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     let input = SkillUpdate {
         recommended_skill_refs: Some(vec![reference.clone()]),

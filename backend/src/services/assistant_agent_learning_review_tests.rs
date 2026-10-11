@@ -1037,6 +1037,7 @@ async fn exact_root_provenance_is_active_even_when_legacy_active_is_false() {
         version: "1.0".into(),
         sha256: "b".repeat(64),
         dependencies: Vec::new(),
+        disabled: false,
     };
     fixture
         .state
@@ -2432,6 +2433,7 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
         version: base.version.clone(),
         sha256: base.sha256.clone(),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db

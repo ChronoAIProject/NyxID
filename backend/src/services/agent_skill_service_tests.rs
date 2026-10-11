@@ -141,6 +141,7 @@ impl Registry {
             version: "1.0".into(),
             sha256: hex::encode(Sha256::digest(&self.bytes)),
             dependencies: vec![],
+            disabled: false,
         }
     }
 }
@@ -188,6 +189,19 @@ async fn agent_skill_pin_integrity_and_exact_guid_version() {
         matches!(preview(&broken,ID,"1.0").await,Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
     );
     assert!(preview(&registry, ID, "latest").await.is_err());
+}
+
+#[tokio::test]
+async fn preview_returns_bounded_metadata_and_rejects_unavailable_owner_reader() {
+    let registry = Registry::new();
+    let p = preview(&registry, ID, "1.0").await.unwrap();
+    assert!(p.description.len() <= 1024);
+    assert!(p.size_bytes <= 1024 * 1024);
+    let denied = Registry {
+        deny: true,
+        ..Registry::new()
+    };
+    assert!(preview(&denied, ID, "1.0").await.is_err());
 }
 #[tokio::test]
 async fn agent_skill_invisible_cannot_be_pinned_and_removal_needs_no_ornn() {
@@ -602,4 +616,53 @@ async fn agent_skill_version_pages_keep_older_pins_available() {
     assert_eq!(last["items"][6]["version"], "1.0");
     assert_eq!(last["total_pages"], 2);
     assert!(first.to_string().len() < 8000);
+}
+
+#[tokio::test]
+async fn disabled_pins_are_omitted_from_prompt_instructions() {
+    let f = fixture("agent_skill_disabled_prompt").await;
+    let reader = Registry::new();
+    let selection = Selection {
+        expected_revision: 0,
+        skills: vec![reader.reference()],
+    };
+    set(
+        &f.state.db,
+        &reader,
+        &f.owner,
+        &f.chat.agent_id,
+        &selection,
+        true,
+    )
+    .await
+    .unwrap();
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    let mut disabled = reader.reference();
+    disabled.skill_id = "disabled-skill".into();
+    disabled.name = "Disabled Skill".into();
+    agent.skills = vec![reader.reference(), disabled];
+    agent.skills[1].disabled = true;
+    let prompt = instructions(&agent);
+    assert!(prompt.contains(&reader.reference().name));
+    assert!(!prompt.contains("Disabled Skill"));
+    for pin in &mut agent.skills {
+        pin.disabled = true;
+    }
+    assert!(instructions(&agent).is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn disabled_pins_are_inaccessible_to_skill_read() {
+    let f = fixture("agent_skill_disabled_read").await;
+    let reader = Registry::new();
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    agent.skills = vec![reader.reference()];
+    agent.skills[0].disabled = true;
+    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_err());
+    f.state.db.drop().await.unwrap();
 }

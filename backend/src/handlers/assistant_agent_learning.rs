@@ -34,6 +34,16 @@ pub struct DecisionBody {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditBody {
+    /// Revision fence. Kept top-level for the public contract; nested legacy
+    /// drafts are still accepted for one release.
+    #[serde(default)]
+    revision: Option<i64>,
+    draft: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateBody {
     draft: Value,
 }
 
@@ -61,16 +71,9 @@ pub async fn status(
     engine::require_enabled(&state.db, &actor).await?;
     let agent = team::agent(&state.db, &actor, &agent_id).await?;
     crate::services::org_agent_service::require_use(&state.db, &actor, &agent).await?;
-    let config = state
-        .db
-        .collection::<crate::models::assistant_agent_learning::AssistantAgentLearning>(
-            crate::models::assistant_agent_learning::CONFIG_COLLECTION_NAME,
-        )
-        .find_one(mongodb::bson::doc! {"_id": &agent_id})
-        .await?;
-    Ok(Json(
-        json!({"enabled": config.as_ref().is_some_and(|c| c.enabled), "config": config.map(|c| json!({"threshold": c.threshold, "learning_epoch": c.learning_epoch, "config_revision": c.config_revision, "eligible_count": c.eligible_count, "last_run_at": c.last_run_at, "last_success_at": c.last_success_at, "last_error_code": c.last_error_code}))}),
-    ))
+    Ok(Json(json!(
+        review::status(&state.db, &actor, &agent_id).await?
+    )))
 }
 
 pub async fn configure(
@@ -156,9 +159,8 @@ pub async fn edit(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let revision = body
-        .draft
-        .get("revision")
-        .and_then(Value::as_i64)
+        .revision
+        .or_else(|| body.draft.get("revision").and_then(Value::as_i64))
         .unwrap_or(0);
     review::edit(
         &state,
@@ -170,6 +172,20 @@ pub async fn edit(
     )
     .await?;
     Ok(Json(json!({"status": "updated"})))
+}
+
+pub async fn validate(
+    State(_state): State<AppState>,
+    auth: AuthUser,
+    Path((_agent_id, _proposal_id)): Path<(String, String)>,
+    Json(body): Json<ValidateBody>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let text = serde_json::to_string(&body.draft)
+        .map_err(|_| AppError::ValidationError("Invalid draft JSON".into()))?;
+    let generated = crate::services::assistant_skill_authoring::validation::decode(&text)?;
+    let bytes = crate::services::assistant_skill_authoring::validation::validate(&generated)?;
+    Ok(Json(json!({"valid": true, "bytes": bytes.len()})))
 }
 
 pub async fn approve(
@@ -558,4 +574,39 @@ pub async fn admin_release_target(
         )
         .await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EditBody, ValidateBody};
+    use serde_json::json;
+
+    #[test]
+    fn edit_accepts_top_level_revision() {
+        let body: EditBody = serde_json::from_value(json!({
+            "revision": 7,
+            "draft": {"name": "n"}
+        }))
+        .expect("top-level revision is part of the public form");
+        assert_eq!(body.revision, Some(7));
+    }
+
+    #[test]
+    fn edit_accepts_legacy_nested_revision() {
+        let body: EditBody = serde_json::from_value(json!({
+            "draft": {"revision": 4, "name": "n"}
+        }))
+        .expect("legacy nested form remains readable");
+        assert_eq!(body.revision, None);
+        assert_eq!(body.draft["revision"], 4);
+    }
+
+    #[test]
+    fn validate_body_is_dry_run_input_only() {
+        let body: ValidateBody = serde_json::from_value(json!({
+            "draft": {"name": "candidate", "skill_md": "# Skill"}
+        }))
+        .expect("validation accepts a draft payload");
+        assert_eq!(body.draft["name"], "candidate");
+    }
 }

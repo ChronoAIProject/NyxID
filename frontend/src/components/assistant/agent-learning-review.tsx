@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,11 @@ function requestFailure(cause: unknown): string {
     : "The request could not be completed. Check the proposal and try again.";
 }
 
+function diagnostics(cause: unknown): Array<{ rule: string; field: string; line?: number; remediation?: string }> {
+  const value = cause as { diagnostics?: unknown } | null;
+  return Array.isArray(value?.diagnostics) ? value.diagnostics.filter((item): item is { rule: string; field: string; line?: number; remediation?: string } => Boolean(item && typeof item === "object" && "rule" in item && "field" in item)) : [];
+}
+
 export function AgentLearningReview({
   agentId,
   readOnly = false,
@@ -27,9 +32,19 @@ export function AgentLearningReview({
   const review = useAgentLearningReview(agentId, enabled);
   const [open, setOpen] = useState<string>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [draftNames, setDraftNames] = useState<Record<string, string>>({});
+  const [draftDescriptions, setDraftDescriptions] = useState<Record<string, string>>({});
+  const [draftRationales, setDraftRationales] = useState<Record<string, string>>({});
+  const [draftBases, setDraftBases] = useState<Record<string, string>>({});
+  const [draftFiles, setDraftFiles] = useState<Record<string, { path: string; content: string }[]>>({});
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
+
+  const serverThreshold = review.status.data?.threshold;
+  useEffect(() => {
+    if (serverThreshold !== undefined) setThreshold(serverThreshold);
+  }, [serverThreshold]);
 
   if (!enabled || (readOnly && !review.data)) {
     return null;
@@ -54,6 +69,29 @@ export function AgentLearningReview({
           Automatic learning is unavailable.
         </p>
       ) : null}
+      {review.status.data?.publication_blocked ? (
+        <p role="alert" className="text-12 text-warning">
+          Publishing is unavailable for this organization: owner binding is required.
+        </p>
+      ) : null}
+      {review.status.data?.org_owned && !readOnly ? (
+        <label className="flex items-center gap-2 text-12">
+          <Switch
+            checked={review.status.data.opted_in ?? false}
+            disabled={review.consent?.isPending}
+            onCheckedChange={(checked) => review.consent?.mutate(checked)}
+          />
+          I consent to learning proposals for this organization
+        </label>
+      ) : null}
+      {[review.run.error, review.configure.error, review.consent?.error, review.edit.error, review.approve.error, review.reject.error]
+        .filter(Boolean)
+        .map((error, index) => (
+          <div key={index} role="alert" className="text-12 text-destructive">
+            <p>{requestFailure(error)}</p>
+            {diagnostics(error).map((item) => <p key={`${item.rule}-${item.field}-${item.line ?? 0}`}>{item.field}{item.line ? `:${item.line}` : ""} ({item.rule}): {item.remediation ?? "update this field"}</p>)}
+          </div>
+        ))}
 
       {!readOnly ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3">
@@ -169,12 +207,44 @@ export function AgentLearningReview({
                     }))
                   }
                 />
+                <Textarea
+                  aria-label="Rationale"
+                  placeholder="Why this skill should be published"
+                  value={draftRationales[proposal.id] ?? draft.rationale ?? ""}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftRationales((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
+                <Input
+                  aria-label="Base skill"
+                  placeholder="Base skill id@version (optional)"
+                  value={draftBases[proposal.id] ?? (draft.base_skill && typeof draft.base_skill === "object" && "skill_id" in draft.base_skill && "version" in draft.base_skill ? `${String(draft.base_skill.skill_id)}@${String(draft.base_skill.version)}` : "")}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftBases((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
+                <Input
+                  aria-label="Skill name"
+                  value={draftNames[proposal.id] ?? draft.name}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftNames((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
+                <Textarea
+                  aria-label="Skill description"
+                  value={draftDescriptions[proposal.id] ?? draft.description}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftDescriptions((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
+                {(draftFiles[proposal.id] ?? draft.files).map((file, index) => (
+                  <div key={`${proposal.id}-${index}`} className="space-y-1 rounded border border-border/50 p-2">
+                    <Input aria-label={`File ${index + 1} path`} value={file.path} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, path: event.target.value } : f) }))} />
+                    <Textarea aria-label={`File ${index + 1} content`} value={file.content} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, content: event.target.value } : f) }))} />
+                    {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).filter((_, i) => i !== index) }))}>Remove file</Button> : null}
+                  </div>
+                ))}
+                {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: [...(current[proposal.id] ?? draft.files), { path: "", content: "" }] }))}>Add file</Button> : null}
                 <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2 text-11">
                   {draft.safety_notes}
                 </pre>
-                {!readOnly &&
-                drafts[proposal.id] !== undefined &&
-                drafts[proposal.id] !== draft.skill_md ? (
+                {!readOnly && (drafts[proposal.id] !== undefined || draftRationales[proposal.id] !== undefined || draftFiles[proposal.id] !== undefined) ? (
                   <Button
                     size="sm"
                     variant="secondary"
@@ -182,10 +252,14 @@ export function AgentLearningReview({
                     onClick={() =>
                       review.edit.mutate({
                         proposalId: proposal.id,
+                        revision: proposal.revision,
                         draft: {
                           ...draft,
-                          revision: proposal.revision,
+                          name: draftNames[proposal.id] ?? draft.name,
+                          description: draftDescriptions[proposal.id] ?? draft.description,
                           skill_md: drafts[proposal.id],
+                          rationale: draftRationales[proposal.id] ?? draft.rationale,
+                          files: draftFiles[proposal.id] ?? draft.files,
                         },
                       })
                     }
@@ -237,7 +311,7 @@ export function AgentLearningReview({
                 >
                   Review updated package
                 </Button>
-              ) : settled ? null : <Button
+              ) : settled || (!checkOnly && proposal.status !== "pending" && proposal.status !== "publication_failed") ? null : <Button
                 size="sm"
                 disabled={readOnly || review.approve.isPending}
                 onClick={async () => {
@@ -270,6 +344,8 @@ export function AgentLearningReview({
                   ? card
                     ? "Confirm check"
                     : "Check publication"
+                  : proposal.status === "publication_failed"
+                    ? "Retry publication"
                   : card
                     ? "Confirm publish & attach"
                     : "Publish & request confirmation"}
@@ -301,11 +377,12 @@ export function AgentLearningReview({
                 </Button>
               ) : null}
             </div>
-            {card && proposal.source !== "authored" && !checkOnly ? (
+              {card && proposal.source !== "authored" && !checkOnly ? (
               <p className="text-11 text-warning">
-                Confirming this exact card will publish the private skill and
-                attach its pinned version. The card expires if the draft or
-                agent changes.
+                This is a two-step approval: first request the owner confirmation
+                card, then confirm that exact card. Confirming this exact card
+                will publish the private skill and attach its pinned version.
+                The card expires if the draft or agent changes.
               </p>
             ) : null}
           </article>
