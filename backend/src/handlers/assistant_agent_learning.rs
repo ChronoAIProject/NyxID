@@ -185,12 +185,15 @@ pub async fn edit(
 }
 
 pub async fn validate(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     auth: AuthUser,
-    Path((_agent_id, _proposal_id)): Path<(String, String)>,
+    Path((agent_id, _proposal_id)): Path<(String, String)>,
     Json(body): Json<ValidateBody>,
 ) -> AppResult<Json<Value>> {
     super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let _agent = team::agent(&state.db, &owner, &agent_id).await?;
     let text = serde_json::to_string(&body.draft)
         .map_err(|_| AppError::ValidationError("Invalid draft JSON".into()))?;
     let generated = crate::services::assistant_skill_authoring::validation::decode(&text)?;
