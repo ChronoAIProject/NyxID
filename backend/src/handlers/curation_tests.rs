@@ -13,11 +13,12 @@ use crate::{
     AppState,
     crypto::jwt,
     models::{
+        assistant_message::{AssistantMessage, COLLECTION_NAME as ASSISTANT_MESSAGES},
+        assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME as FEEDBACK},
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         service_account::{COLLECTION_NAME as ACCOUNTS, ServiceAccount},
         service_account_token::{COLLECTION_NAME as TOKENS, ServiceAccountToken},
         user::{COLLECTION_NAME as USERS, User, UserType},
-        assistant_message::{AssistantMessage, COLLECTION_NAME as ASSISTANT_MESSAGES},
     },
     services::{
         catalog_skill_service,
@@ -41,18 +42,125 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     let f = fixture("feedback-r3", false).await;
     let conversation_id = "nyxa-feedback-r3";
     let message_id = "reply-feedback-r3";
-    f.state.db.collection::<AssistantMessage>(ASSISTANT_MESSAGES).insert_one(AssistantMessage {
-        steering: None, voice: None, execution_pending: false, id: message_id.into(), conversation_id: conversation_id.into(), user_id: f.owner.clone(), seq: 1, turn_id: "turn-r3".into(), role: "assistant".into(), text: "reply".into(), status: "completed".into(), error_code: None, created_at: Utc::now(), activities: vec![], attachments: vec![], origin: None, via: None,
-    }).await.unwrap();
-    let path = format!("/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback");
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn-r3".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
     let make = |vote: &'static str| {
-        let state = f.state.clone(); let token = f.human_token.clone(); let path = path.clone();
+        let state = f.state.clone();
+        let token = f.human_token.clone();
+        let path = path.clone();
         async move { request(&state, "PUT", &path, &token, Some(json!({"vote": vote}))).await }
     };
     let (a, b) = tokio::join!(make("up"), make("up"));
-    assert!(a.0.is_success()); assert!(b.0.is_success());
-    let count = f.state.db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME).count_documents(doc! {"user_id": &f.owner, "message_id": message_id}).await.unwrap();
+    assert!(a.0.is_success());
+    assert!(b.0.is_success());
+    let count = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+        .count_documents(doc! {"user_id": &f.owner, "message_id": message_id})
+        .await
+        .unwrap();
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn feedback_admin_counts_group_exact_per_day_through_service_and_route() {
+    let f = fixture("feedback-r2", false).await;
+    let day_a = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let day_b = chrono::DateTime::parse_from_rfc3339("2026-01-11T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut rows = Vec::new();
+    for (i, (vote, created)) in [("up", day_a), ("up", day_a), ("down", day_a), ("up", day_b)]
+        .into_iter()
+        .enumerate()
+    {
+        rows.push(AssistantMessageFeedback {
+            id: format!("r2-{i}"),
+            user_id: f.owner.clone(),
+            conversation_id: None,
+            group_id: None,
+            message_id: format!("r2-message-{i}"),
+            turn_id: None,
+            vote: vote.into(),
+            comment: None,
+            created_at: created,
+            updated_at: created,
+        });
+    }
+    for i in 0..120 {
+        rows.push(AssistantMessageFeedback {
+            id: format!("r2-fill-{i}"),
+            user_id: f.owner.clone(),
+            conversation_id: None,
+            group_id: None,
+            message_id: format!("r2-fill-message-{i}"),
+            turn_id: None,
+            vote: "up".into(),
+            comment: None,
+            created_at: day_b,
+            updated_at: day_b,
+        });
+    }
+    f.state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let counts = crate::services::assistant_feedback_service::admin_counts(&f.state.db, doc! {})
+        .await
+        .unwrap();
+    let a = counts.iter().find(|v| v.day == "2026-01-10").unwrap();
+    let b = counts.iter().find(|v| v.day == "2026-01-11").unwrap();
+    assert_eq!((a.up, a.down), (2, 1));
+    assert_eq!((b.up, b.down), (121, 0));
+    let (status, body) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let route_a = body["counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["day"] == "2026-01-10")
+        .unwrap();
+    assert_eq!(
+        (route_a["up"].as_i64(), route_a["down"].as_i64()),
+        (Some(2), Some(1))
+    );
 }
 
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
