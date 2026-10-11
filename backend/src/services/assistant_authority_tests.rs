@@ -1771,10 +1771,10 @@ async fn action_summary_succeeds_for_every_sensitive_or_destructive_tool() {
             "unbind_agent_key_credential",
             json!({"api_key_id": key.clone(), "binding_id": Uuid::new_v4().to_string()}),
         ),
-        ("delete_service", json!({"service_id": service.id.clone()})),
+        ("delete_service", json!({"service_id": service.clone()})),
         (
             "set_service_enabled",
-            json!({"service_id": service.id.clone()}),
+            json!({"service_id": service.clone()}),
         ),
     ] {
         assert!(
