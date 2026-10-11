@@ -155,6 +155,11 @@ impl Fixture {
                 .await
                 .unwrap();
         }
+        for id in &ids {
+            db.collection(crate::models::assistant_settings::COLLECTION_NAME)
+                .insert_one(crate::models::assistant_settings::AssistantSettings { access_mode: crate::models::assistant_settings::AccessMode::Autopilot, ..crate::models::assistant_settings::AssistantSettings::defaults(id) })
+                .await.unwrap();
+        }
         for (i, role) in [OrgRole::Admin, OrgRole::Member, OrgRole::Viewer]
             .into_iter()
             .enumerate()
