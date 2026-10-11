@@ -342,6 +342,31 @@ impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscript
     }
 }
 #[derive(Serialize)]
+pub struct ErrorDetailResponse {
+    stage: String,
+    http_status: Option<u16>,
+    upstream_request_id: Option<String>,
+    response_id: Option<String>,
+    continuations: u32,
+    turn_id: String,
+    occurred_at: DateTime<Utc>,
+}
+
+impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetailResponse {
+    fn from(value: crate::models::assistant_message::AssistantErrorDetail) -> Self {
+        Self {
+            stage: value.stage,
+            http_status: value.http_status,
+            upstream_request_id: value.upstream_request_id,
+            response_id: value.response_id,
+            continuations: value.continuations,
+            turn_id: value.turn_id,
+            occurred_at: value.occurred_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
 pub struct MessageResponse {
     steering: Option<steering::SteeringResponse>,
     voice: Option<VoiceTranscriptResponse>,
@@ -354,7 +379,7 @@ pub struct MessageResponse {
     status: String,
     error_code: Option<String>,
     upstream_error_code: Option<String>,
-    error_detail: Option<crate::models::assistant_message::AssistantErrorDetail>,
+    error_detail: Option<ErrorDetailResponse>,
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
     attachments: Vec<AttachmentResponse>,
@@ -378,7 +403,7 @@ impl From<AssistantMessage> for MessageResponse {
             status: row.status,
             error_code: row.error_code,
             upstream_error_code: row.upstream_error_code,
-            error_detail: row.error_detail,
+            error_detail: row.error_detail.map(ErrorDetailResponse::from),
             created_at: row.created_at,
             activities: row
                 .activities

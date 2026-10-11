@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     models::{
+        assistant_message::{AssistantErrorDetail, AssistantMessage},
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
@@ -18,6 +19,61 @@ use std::sync::{
 };
 
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
+
+#[test]
+fn failed_message_response_serializes_error_detail_as_rfc3339() {
+    let occurred_at = Utc::now();
+    let response = MessageResponse::from(AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "message".into(),
+        conversation_id: "conversation".into(),
+        user_id: OWNER.into(),
+        seq: 1,
+        turn_id: "turn".into(),
+        role: "assistant".into(),
+        text: String::new(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: Some(AssistantErrorDetail {
+            stage: "lease".into(),
+            http_status: Some(504),
+            upstream_request_id: Some("req".into()),
+            response_id: None,
+            continuations: 0,
+            turn_id: "turn".into(),
+            occurred_at,
+        }),
+        created_at: occurred_at,
+        activities: Vec::new(),
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    });
+    let json = serde_json::to_value(response).unwrap();
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["error_detail"]["stage"], "lease");
+    assert_eq!(json["error_detail"]["http_status"], 504);
+    assert_eq!(
+        json["error_detail"]["occurred_at"],
+        occurred_at.to_rfc3339()
+    );
+}
+
+#[test]
+fn preexisting_message_row_without_diagnostics_remains_readable() {
+    let row = mongodb::bson::from_document::<AssistantMessage>(mongodb::bson::doc! {
+        "_id": "old-message", "conversation_id": "conversation", "user_id": OWNER,
+        "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "old",
+        "status": "completed", "error_code": mongodb::bson::Bson::Null,
+        "created_at": mongodb::bson::DateTime::now(), "activities": [], "attachments": []
+    })
+    .unwrap();
+    assert!(row.error_detail.is_none());
+    assert!(row.upstream_error_code.is_none());
+}
 const SESSION: &str = "conv_11111111111111111111111111111111";
 const RESPONSE: &str = "resp_11111111111111111111111111111111_22222222222222222222222222222222";
 struct Capture {
