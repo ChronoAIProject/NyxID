@@ -302,6 +302,63 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     );
 }
 
+#[tokio::test]
+async fn feedback_vote_change_preserves_comment_without_comment_field() {
+    let f = fixture("feedback-s2-comment", false).await;
+    let message_id = "s2-reply";
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: "s2-conv".into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "s2-turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let path =
+        format!("/api/v1/assistant/nyxagent/conversations/s2-conv/messages/{message_id}/feedback");
+    request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up","comment":"keep"})),
+    )
+    .await;
+    request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"down"})),
+    )
+    .await;
+    let row = f
+        .state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .find_one(doc! {"message_id": message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.comment.as_deref(), Some("keep"));
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
