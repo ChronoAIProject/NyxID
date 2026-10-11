@@ -304,6 +304,8 @@ pub struct TurnRequest {
     pub agent_id: Option<String>,
     pub text: String,
     pub model: Option<String>,
+    #[serde(default)]
+    pub retry_of: Option<String>,
     /// Retired Ask/Full selector. Accepted from older clients and ignored:
     /// every chat runs with Full access.
     #[allow(dead_code)]

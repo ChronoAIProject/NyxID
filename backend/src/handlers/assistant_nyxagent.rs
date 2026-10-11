@@ -1182,7 +1182,19 @@ pub async fn turns(
     let (parts, body) = request.into_parts();
     let bytes =
         super::body_limit::read_body(body, engine::MAX_REQUEST_BYTES, "Assistant turn").await?;
-    let input = engine::parse_turn(&bytes)?;
+    let mut input = engine::parse_turn(&bytes)?;
+    if let (Some(retry_of), Some(conversation_id)) = (&input.retry_of, &input.conversation_id) {
+        let history = engine::messages(&state.db, &user_id, conversation_id, 100, None).await?;
+        let completed = history
+            .iter()
+            .find(|message| message.turn_id == *retry_of)
+            .map(|message| engine::bounded_recap(std::slice::from_ref(message)))
+            .unwrap_or_default();
+        input.text = format!(
+            "{}\n\n[NyxID retry context: completed actions from turn {} must not be repeated.]\n{}",
+            input.text, retry_of, completed
+        );
+    }
     if !input.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
     }

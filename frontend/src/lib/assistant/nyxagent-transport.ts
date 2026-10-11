@@ -581,6 +581,7 @@ export class NyxAgentTransport {
       readonly agent?: NyxAgentConversationAgent;
       readonly attachmentIds?: string[];
       readonly adoptExisting?: boolean;
+      readonly retryOf?: string;
     } = {},
   ) {
     const generation = this.identity();
@@ -650,6 +651,7 @@ export class NyxAgentTransport {
               ? { conversation_id: id }
               : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
             text,
+            ...(options.retryOf ? { retry_of: options.retryOf } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
           headers: { Accept: "text/event-stream" },
@@ -778,7 +780,7 @@ export class NyxAgentTransport {
     const failed = [...messages].reverse().find((message) => message.role === "assistant" && message.status === "failed");
     const user = failed && [...messages].reverse().find((message) => message.role === "user" && message.seq < failed.seq && !message.execution_pending);
     if (!user) throw new Error("No failed turn is available to retry.");
-    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true });
+    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true, retryOf: failed?.turnId });
   }
 }
 
