@@ -75,6 +75,13 @@ pub async fn put_config(
         )
         .upsert(true)
         .await?;
+    crate::services::audit_service::log_actor_event(
+        state.db.clone(),
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        "billing_config_updated",
+        Some(serde_json::json!({"billing": input.billing})),
+    )
+    .await?;
     get_config(State(state), auth).await
 }
 
@@ -166,5 +173,13 @@ pub async fn resync_service(
         .ok_or(crate::errors::AppError::NotFound(
             "service not found".into(),
         ))?;
-    Ok(Json(state.billing.sync_service_price(&service).await?))
+    let synced = state.billing.sync_service_price(&service).await?;
+    crate::services::audit_service::log_actor_event(
+        state.db.clone(),
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        "billing_service_resynced",
+        Some(serde_json::json!({"service_id": id, "synced": synced})),
+    )
+    .await?;
+    Ok(Json(synced))
 }
