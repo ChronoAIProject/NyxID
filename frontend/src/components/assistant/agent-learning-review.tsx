@@ -73,7 +73,7 @@ export function AgentLearningReview({
       ) : null}
       {review.status.data?.publication_blocked ? (
         <p role="alert" className="text-12 text-warning">
-          Publishing is unavailable for this organization: owner binding is required.
+          Publishing is unavailable for this organization because it has no owner binding. Organization members may consent to learning, but only the bound owner can publish private Ornn skills. Contact an organization owner to publish.
         </p>
       ) : null}
       {review.status.data?.org_owned && !readOnly ? (
