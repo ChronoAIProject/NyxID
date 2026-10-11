@@ -80,7 +80,7 @@ pub struct EffectiveBillingConfig {
 /// deployment fallback. `None` is explicitly represented as free.
 pub fn effective_config(
     service: Option<&ServiceBilling>,
-    _global: Option<&BillingSettings>,
+    global: Option<&BillingSettings>,
     env_lane: Option<&str>,
     env_overdraft: Option<i64>,
 ) -> EffectiveBillingConfig {
@@ -88,8 +88,7 @@ pub fn effective_config(
         let lane = b
             .byok_pricing
             .as_ref()
-            .or(b.platform_key_pricing.as_ref())
-            .or(b.platform_pricing.as_ref())?;
+            .or(b.platform_key_pricing.as_ref())?;
         (lane.sync_status == crate::models::service_billing::PricingSyncStatus::Synced).then(|| {
             if b.byok_pricing.is_some() {
                 "byok"
