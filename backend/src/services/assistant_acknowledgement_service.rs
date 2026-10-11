@@ -138,6 +138,33 @@ pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionCla
     OwnerActionClass::Read
 }
 
+#[cfg(test)]
+mod access_mode_tests {
+    use super::*;
+    use crate::models::assistant_settings::AccessMode::*;
+
+    #[test]
+    fn mode_class_matrix() {
+        let cases = [(Read, false), (Change, true), (Sensitive, true), (Destructive, true)];
+        for mode in [Autopilot, Nyxmode, AskEveryTime] {
+            for (class, expected) in cases {
+                let want = match mode { Autopilot => false, Nyxmode => matches!(class, Sensitive|Destructive), AskEveryTime => expected };
+                assert_eq!(owner_confirmation_required(mode, class, false), want);
+                assert!(owner_confirmation_required(mode, class, true));
+            }
+        }
+    }
+
+    #[test]
+    fn classifier_covers_tool_families() {
+        assert_eq!(classify_owner_action("nyx__machine_exec", None), OwnerActionClass::Destructive);
+        assert_eq!(classify_owner_action("grant_subagent", None), OwnerActionClass::Sensitive);
+        assert_eq!(classify_owner_action("delete_agent_key", None), OwnerActionClass::Destructive);
+        assert_eq!(classify_owner_action("list_services", Some("GET")), OwnerActionClass::Read);
+        assert_eq!(classify_owner_action("create_schedule", None), OwnerActionClass::Sensitive);
+    }
+}
+
 #[derive(Clone)]
 pub struct ChatAuthority {
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,

@@ -2358,6 +2358,8 @@ pub struct UpdateAgentRequest {
     /// Empty clears it.
     #[serde(default)]
     persona: Option<String>,
+    #[serde(default)]
+    access_mode_override: Option<Option<crate::models::assistant_settings::AccessMode>>,
 }
 
 pub async fn update_agent(
@@ -2380,6 +2382,10 @@ pub async fn update_agent(
         },
     )
     .await?;
+    if body.access_mode_override.is_some() {
+        state.db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc! {"_id": &agent.id, "user_id": &owner}, mongodb::bson::doc! {"$set": {"access_mode_override": mongodb::bson::to_bson(&body.access_mode_override).map_err(|_| AppError::Internal("access mode serialization failed".into()))?}}).await?;
+    }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
         "persona": agent.persona})))
