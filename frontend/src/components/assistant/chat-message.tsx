@@ -276,7 +276,7 @@ export function ChatMessageBubble({
         {feedbackEnabled && conversationId && commentOpen && !streaming ? (
           <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
             <textarea aria-label="Optional feedback comment" value={comment} maxLength={1000} onChange={(event) => setComment(event.target.value)} className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none" placeholder="Optional comment" />
-            <button type="button" className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10" onClick={() => { if (conversationId && vote) void feedback.mutateAsync({ vote, comment }); setCommentOpen(false); }}>Send</button>
+            <button type="button" disabled={!vote || feedback.isPending} className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10 disabled:opacity-50" onClick={() => { if (!conversationId || !vote) return; void feedback.mutateAsync({ vote, comment }).then(() => setCommentOpen(false)).catch(() => undefined); }}>Send</button>
           </div>
         ) : null}
       </div>
