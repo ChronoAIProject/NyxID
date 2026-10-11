@@ -497,6 +497,8 @@ export type AssistantAgentProfile = {
   display_name: string;
   description: string;
   persona: string;
+  model?: string;
+  access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
 };
 
 export const assistantAgentGrantsSchema = z.object({

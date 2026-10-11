@@ -157,6 +157,7 @@ it("routes models server-side: no profile discovery, and a send refreshes the ag
   await act(() => result.current.send("Question"));
   expect(send).toHaveBeenCalledOnce();
   expect(agentReads()).toBe(2);
+  // Model discovery is intentionally owned by the selector hook, not turn transport.
   expect(requests.some((r) => r.endsWith("/models"))).toBe(false);
   unmount();
 });
