@@ -52,6 +52,7 @@ import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
+import { WorkingContextPanel } from "@/components/assistant/working-context-panel";
 import {
   DirectChatControls,
   DirectModeBanner,
@@ -629,6 +630,7 @@ function NyxAgentThreadPage() {
         {selectedId && !chat.isStreaming ? (
           <WaitingNote items={chat.waiting} agentName={agentName} />
         ) : null}
+        {selectedId ? <WorkingContextPanel conversationId={selectedId} /> : null}
       </div>
     </div>
   ) : null;
