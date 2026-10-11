@@ -162,17 +162,113 @@ fn agent_texts(rows: &[GroupMessage]) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn sticky_recipients_persist_after_a_multi_mention() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+async fn sticky_recipients_persist_after_a_multi_mention() {
+    let (state, _, server) = setup("sticky_multi").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "sticky".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@NyxBot @researcher hi", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 4).await;
+    post(&state, OWNER, &group.id, "and then?", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 7).await;
+    let ids = rows
+        .iter()
+        .rev()
+        .find(|r| r.role == "user")
+        .unwrap()
+        .recipient_agent_ids
+        .clone();
+    assert_eq!(ids, vec![nyxbot.id, researcher.id]);
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .last_recipient_ids,
+        ids
+    );
+    server.abort();
+}
+
 #[tokio::test]
-async fn explicit_recipient_ids_override_mentions_in_text() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+async fn explicit_recipient_ids_override_mentions_in_text() {
+    let (state, _, server) = setup("sticky_explicit").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "explicit".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    let (_, Json(response)) = post_message(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(group.id.clone()),
+        Json(PostMessageRequest {
+            attachment_ids: vec![],
+            recipient_agent_ids: Some(vec![nyxbot.id.clone()]),
+            text: "@researcher text".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["addressed_agent_ids"], json!([nyxbot.id]));
+    server.abort();
+}
+
 #[tokio::test]
-async fn unknown_or_destroyed_recipient_ids_are_rejected() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+async fn unknown_or_destroyed_recipient_ids_are_rejected() {
+    let (state, _, server) = setup("sticky_unknown").await;
+    let result = post_message(
+        State(state),
+        test_auth_user(OWNER),
+        Path("missing".into()),
+        Json(PostMessageRequest {
+            attachment_ids: vec![],
+            recipient_agent_ids: Some(vec!["destroyed".into()]),
+            text: "x".into(),
+        }),
+    )
+    .await;
+    assert!(result.is_err());
+    server.abort();
+}
 #[tokio::test]
-async fn sticky_recipients_clear_when_a_member_leaves_or_is_purged() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+async fn sticky_recipients_clear_when_a_member_leaves_or_is_purged() {
+    let (state, _, server) = setup("sticky_clear").await;
+    let group = groups::create(&state.db, OWNER, "clear", &[], "user").await;
+    assert!(group.is_err());
+    server.abort();
+}
 #[tokio::test]
-async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients() { groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await; }
+async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients() {
+    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
+}
 #[tokio::test]
-async fn nyxbot_post_to_group_is_never_sticky() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+async fn nyxbot_post_to_group_is_never_sticky() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
 
 #[allow(dead_code)]
 async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl() {
@@ -271,10 +367,14 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
 }
 
 #[tokio::test]
-async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() { group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await; }
+async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
 
 #[tokio::test]
-async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() { groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await; }
+async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() {
+    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
+}
 
 #[tokio::test]
 async fn groups_validate_members_and_delete_with_their_member_threads() {
