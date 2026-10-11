@@ -980,6 +980,24 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
 }
 
 #[tokio::test]
+async fn b4_duplicate_action_fence_through_tools_call() {
+    let f = fixture("mcp_retry_fence").await;
+    let auth = authenticate(&f).await;
+    let first = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "issues"})).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+    crate::services::assistant_nyxagent::mark_retry_of(&f.state.db, &f.owner, &f.row.id, &turn_id).await.unwrap();
+    let retry = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "issues"})).await;
+    let body = axum::body::to_bytes(retry.into_body(), 1024 * 1024).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["result"]["isError"], true);
+    assert_eq!(value["result"]["content"][0]["text"], "retry_duplicate_action");
+    let different = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "calendar"})).await;
+    assert_eq!(different.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachments() {
     use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
     let f = fixture("chat_tool_images").await;
