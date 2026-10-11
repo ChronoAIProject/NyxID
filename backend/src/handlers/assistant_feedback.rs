@@ -53,6 +53,7 @@ fn validate(input: &FeedbackInput) -> AppResult<Option<String>> {
         }).transpose()?;
     Ok(comment)
 }
+fn feedback_rate_key(user_id: &str) -> String { format!("assistant-feedback:{user_id}") }
 async fn upsert(
     state: &AppState,
     auth: &AuthUser,
@@ -247,6 +248,8 @@ pub async fn admin(
 mod tests {
     use super::*;
 
+    #[test]
+    fn feedback_rate_key_is_per_user() { assert_ne!(feedback_rate_key("a"), feedback_rate_key("b")); }
     #[test]
     fn validate_accepts_votes_and_bounds_comments() {
         let input = FeedbackInput {
