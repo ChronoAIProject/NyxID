@@ -690,6 +690,26 @@ mod tests {
     use mongodb::bson::doc;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
+    fn authority(role: crate::models::assistant_conversation::AgentRole, guest: bool) -> ChatAuthority {
+        ChatAuthority { org_agent_access: None, turn_id: None, turn_stopped: false, turn_live: true, machine_node_ids: vec![], saved_login_ids: vec![], conversation_id: "c".into(), user_id: "u".into(), api_key_id: "k".into(), role, agent_id: "a".into(), agent_name: "a".into(), guest, confirmation_policy: None }
+    }
+
+    #[tokio::test]
+    async fn guest_skill_mutation_is_denied_before_state_access() {
+        let f = orchestrator_fixture("guest_skill_mutation").await;
+        let err = super::dispatch(&f.state, &authority(crate::models::assistant_conversation::AgentRole::Orchestrator, true), "set_agent_skills", &json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("owner turns"));
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn specialist_learning_mutation_is_denied() {
+        let f = orchestrator_fixture("specialist_learning_mutation").await;
+        let err = super::dispatch(&f.state, &authority(crate::models::assistant_conversation::AgentRole::Specialist, false), "learning_run_now", &json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("managed"));
+        f.state.db.drop().await.unwrap();
+    }
+
     #[test]
     fn skill_history_is_bounded_for_owner_reads() {
         assert_eq!(SKILL_HISTORY_LIMIT, 50);
