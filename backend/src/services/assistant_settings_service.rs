@@ -18,11 +18,18 @@ use crate::{
 
 /// Settings for `user_id`, or the defaults when none were saved.
 pub async fn get(db: &Database, user_id: &str) -> AppResult<AssistantSettings> {
-    Ok(db
+    let row = db
         .collection::<AssistantSettings>(COLLECTION_NAME)
         .find_one(doc! {"_id": user_id})
-        .await?
-        .unwrap_or_else(|| AssistantSettings::defaults(user_id)))
+        .await?;
+    let Some(mut row) = row else { return Ok(AssistantSettings::defaults(user_id)); };
+    // Legacy rows predate access_mode. Preserve their explicit opt-out as Autopilot.
+    let raw = db.collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id": user_id}).await?;
+    if raw.as_ref().is_some_and(|d| !d.contains_key("access_mode") && row.skip_destructive_confirmation) {
+        row.access_mode = crate::models::assistant_settings::AccessMode::Autopilot;
+    }
+    Ok(row)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -34,6 +41,7 @@ pub struct Update {
     pub trigger_runs_per_hour: Option<i32>,
     pub trigger_runs_per_day: Option<i32>,
     pub skip_destructive_confirmation: Option<bool>,
+    pub access_mode: Option<crate::models::assistant_settings::AccessMode>,
     pub max_live_subagents: Option<i32>,
     pub max_concurrent_subagent_turns: Option<i32>,
     pub max_group_handoffs: Option<i32>,
@@ -148,6 +156,13 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
     }
     if let Some(value) = update.skip_destructive_confirmation {
         set.insert("skip_destructive_confirmation", value);
+        defaults.remove("skip_destructive_confirmation");
+    }
+    if let Some(value) = update.access_mode {
+        set.insert("access_mode", bson::to_bson(&value).map_err(|_| AppError::Internal("Access mode serialization failed".into()))?);
+        // Keep the legacy field synchronized during rolling deployment.
+        set.insert("skip_destructive_confirmation", matches!(value, crate::models::assistant_settings::AccessMode::Autopilot));
+        defaults.remove("access_mode");
         defaults.remove("skip_destructive_confirmation");
     }
     if let Some(value) = update.max_live_subagents {

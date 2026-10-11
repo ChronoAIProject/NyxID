@@ -1185,3 +1185,10 @@ authority are unchanged. Guest connected search/list includes only granted
 UserManaged and Platform connections and drops Internal catalog entries before
 ranking. Native `nyxid` virtual tools remain subject to their separate guest
 authorization; including that virtual catalog does not grant execution access.
+# NyxBot model selection
+
+NyxBot profiles expose a validated model identifier (currently `nyxagent/chat`
+and live models returned by the owner-scoped `/assistant/nyxagent/models` route).
+Changing a thread model clears its upstream binding and causes a recap on the
+next turn; active turns cannot be changed. If a provider reports a model as
+unavailable, the UI marks it unavailable and asks the owner to choose another.

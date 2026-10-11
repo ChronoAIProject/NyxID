@@ -109,6 +109,35 @@ pub async fn enforce_turn_gate(
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerActionClass { Read, Change, Sensitive, Destructive }
+
+/// Central owner-turn approval policy. A policy floor is supplied by the
+/// service/webhook/machine gate and can never be bypassed by Autopilot.
+pub fn owner_confirmation_required(
+    mode: crate::models::assistant_settings::AccessMode,
+    class: OwnerActionClass,
+    policy_floor: bool,
+) -> bool {
+    if policy_floor { return true; }
+    match mode {
+        crate::models::assistant_settings::AccessMode::AskEveryTime => !matches!(class, OwnerActionClass::Read),
+        crate::models::assistant_settings::AccessMode::Nyxmode => matches!(class, OwnerActionClass::Sensitive | OwnerActionClass::Destructive),
+        crate::models::assistant_settings::AccessMode::Autopilot => false,
+    }
+}
+
+pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionClass {
+    let lower = tool.to_ascii_lowercase();
+    if method.is_some_and(|m| matches!(m, "DELETE" | "PUT" | "PATCH")) ||
+        ["delete", "destroy", "revoke", "disconnect", "forget", "machine_", "set_guest_access", "grant_subagent", "spawn_subagent", "create_schedule", "enable"].iter().any(|p| lower.contains(p)) {
+        return if ["delete", "destroy", "revoke", "disconnect", "forget", "machine_"].iter().any(|p| lower.contains(p)) { OwnerActionClass::Destructive } else { OwnerActionClass::Sensitive };
+    }
+    if ["update_settings", "connect_channel_bot", "mint", "credential", "link"].iter().any(|p| lower.contains(p)) { return OwnerActionClass::Sensitive; }
+    if method.is_some_and(|m| matches!(m, "POST")) { return OwnerActionClass::Change; }
+    OwnerActionClass::Read
+}
+
 #[derive(Clone)]
 pub struct ChatAuthority {
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
