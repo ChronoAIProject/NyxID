@@ -309,12 +309,40 @@ fn failure_diagnostics_normalize_unknown_upstream_codes() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let mut row = AssistantMessage {
-        steering: None, voice: None, execution_pending: false,
-        id: "m".into(), conversation_id: "c".into(), user_id: "u".into(), seq: 1,
-        turn_id: "t".into(), role: "assistant".into(), text: "head goal details tail".into(),
-        status: "failed".into(), error_code: Some("turn_lost".into()), upstream_error_code: Some("upstream_x".into()), error_detail: None,
-        created_at: Utc::now(), activities: vec![crate::models::assistant_conversation::TurnActivity { machine: None, id: "a".into(), label: "tool.check".into(), status: "completed".into(), started_at: Utc::now(), ended_at: None }],
-        attachments: vec![crate::models::assistant_conversation::TurnAttachment { image_input: None, origin: "tool".into(), pages: None, id: "att".into(), content_type: "text/plain".into(), size: 4, label: "result.txt".into() }], origin: None, via: None,
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "m".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "head goal details tail".into(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: Some("upstream_x".into()),
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "a".into(),
+            label: "tool.check".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            image_input: None,
+            origin: "tool".into(),
+            pages: None,
+            id: "att".into(),
+            content_type: "text/plain".into(),
+            size: 4,
+            label: "result.txt".into(),
+        }],
+        origin: None,
+        via: None,
     };
     let recap = bounded_recap(std::slice::from_mut(&mut row));
     assert!(recap.contains("Previous context (after reset)"));
