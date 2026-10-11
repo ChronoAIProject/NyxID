@@ -1536,6 +1536,19 @@ pub async fn webhook_action_gate(
     read_only: bool,
     destructive: bool,
 ) -> AppResult<Option<Value>> {
+    if chat.confirmation_policy.is_none() && !chat.guest {
+        let mode = crate::services::assistant_settings_service::get(db, &chat.user_id).await?.access_mode;
+        if !owner_confirmation_required(mode, classify_owner_action(tool, None), false) {
+            return Ok(None);
+        }
+        // Owner turns use the same single-use card path as webhook turns.
+        let summary = format!("NyxBot requests {tool} ({:?}). Review the action and its scope before allowing it.", classify_owner_action(tool, None));
+        if let Some(id) = args["acknowledgement_id"].as_str() {
+            return Ok((!consume_action(db, chat, id, tool, args).await?).then(|| json!({"error":"acknowledgement_invalid","instructions":"This action card is missing, expired, used or does not match the call."})));
+        }
+        let card = request(db, chat, Request { kind: "action", service: None, tool: Some(tool), arguments: Some(args), summary: &summary, platform: false }).await?;
+        return Ok(Some(refusal(&card)));
+    }
     if !webhook_confirmation_required(chat, read_only, destructive) {
         return Ok(None);
     }

@@ -70,6 +70,7 @@ export function NyxBotSettingsContent() {
 
 function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
   return {
+    access_mode: settings.access_mode ?? (settings.skip_destructive_confirmation ? "autopilot" : "nyxmode"),
     max_auto_continuations: settings.max_auto_continuations ?? 8,
     confirm_destructive: !settings.skip_destructive_confirmation,
     max_live_subagents: settings.max_live_subagents,
@@ -93,6 +94,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
     const dirty = form.formState.dirtyFields;
     // Send only what changed, so a concurrent edit elsewhere is not overwritten.
     const body: NyxAgentSettingsUpdate = {
+      ...(dirty.access_mode ? { access_mode: values.access_mode } : {}),
       ...(dirty.max_auto_continuations
         ? { max_auto_continuations: values.max_auto_continuations }
         : {}),
@@ -130,6 +132,16 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
         onSubmit={form.handleSubmit(save)}
         className="space-y-4"
       >
+        <FormField control={form.control} name="access_mode" render={({ field }) => (
+          <FormItem><FormLabel>Access mode</FormLabel><FormDescription>Controls when NyxBot asks for approval.</FormDescription>
+            <FormControl><select aria-label="Access mode" className="h-9 rounded-md border bg-background px-3 text-sm" value={field.value} onChange={field.onChange}>
+              <option value="nyxmode">NyxMode — confirm sensitive actions</option>
+              <option value="autopilot">Autopilot — bypass routine approvals</option>
+              <option value="ask_every_time">Ask Every Time — confirm every change</option>
+            </select></FormControl>
+            {field.value === "autopilot" ? <div role="alert" className="text-12 text-warning">Approvals are bypassed for routine actions; policy-protected actions still require confirmation.</div> : null}
+          </FormItem>
+        )} />
         <FormField
           control={form.control}
           name="confirm_destructive"
