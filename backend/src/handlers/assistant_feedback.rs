@@ -15,7 +15,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::{doc, oid::ObjectId};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -63,7 +63,7 @@ async fn upsert(
     let comment = validate(&input)?;
     let user_id = auth.user_id.to_string();
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
-        let (conv, rows) = engine::history_page(&state.db, &user_id, cid, 2000, None).await?;
+        let (_, rows) = engine::history_page(&state.db, &user_id, cid, 2000, None).await?;
         let row = rows
             .into_iter()
             .find(|r| r.id == message_id)
@@ -197,7 +197,9 @@ pub async fn admin(
         filter.insert("created_at", doc! {"$gte":bson::DateTime::from_chrono(f)});
     }
     if let Some(t) = q.to {
-        filter.entry("created_at").or_insert(doc! {}.into());
+        filter
+            .entry("created_at".to_string())
+            .or_insert(doc! {}.into());
         if let Some(b) = filter.get_document_mut("created_at").ok() {
             b.insert("$lte", bson::DateTime::from_chrono(t));
         }
