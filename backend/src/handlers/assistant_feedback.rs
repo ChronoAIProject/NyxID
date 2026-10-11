@@ -80,7 +80,10 @@ async fn upsert(
     }
     let now = Utc::now();
     let filter = doc! {"user_id":&user_id,"message_id":message_id};
-    let update = doc! {"$set":{"vote":&input.vote,"comment":comment.clone(),"updated_at":bson::DateTime::from_chrono(now),"conversation_id":conversation_id.clone(),"group_id":group_id.clone(),"turn_id":turn_id.clone()},"$setOnInsert":{"_id":Uuid::new_v4().to_string(),"created_at":bson::DateTime::from_chrono(now)}};
+    let existing = state.db.collection::<AssistantMessageFeedback>(COLLECTION_NAME).find_one(filter.clone()).await?;
+    let mut set = doc! {"vote":&input.vote,"updated_at":bson::DateTime::from_chrono(now),"conversation_id":conversation_id.clone(),"group_id":group_id.clone(),"turn_id":turn_id.clone()};
+    if input.comment.is_some() { set.insert("comment", comment.clone()); }
+    let update = doc! {"$set":set,"$setOnInsert":{"_id":Uuid::new_v4().to_string(),"created_at":bson::DateTime::from_chrono(now)}};
     let row = state
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
@@ -89,6 +92,7 @@ async fn upsert(
         .return_document(mongodb::options::ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::Internal("feedback write failed".into()))?;
+    if existing.as_ref().map(|r| r.vote.as_str() == input.vote.as_str() && (input.comment.is_none() || r.comment == comment)).unwrap_or(false) { return Ok(Json(row.into())); }
     audit_service::log_for_user(
         state.db.clone(),
         auth,
@@ -131,11 +135,12 @@ async fn withdraw(
         }
     }
     let filter = doc! {"user_id":&user_id,"message_id":&message_id};
-    state
+    let result = state
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
         .delete_one(filter)
         .await?;
+    if result.deleted_count == 0 { return Ok(StatusCode::NO_CONTENT); }
     audit_service::log_for_user(
         state.db.clone(),
         auth,
