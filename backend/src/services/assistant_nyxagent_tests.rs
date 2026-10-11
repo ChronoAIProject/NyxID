@@ -4,8 +4,8 @@ use crate::services::assistant_agent_credential_service as credentials;
 use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
-            retry_of: None,
     TurnRequest {
+        retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: None,
         conversation_id: id.map(str::to_owned),

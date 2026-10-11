@@ -531,7 +531,6 @@ pub fn event_text_limit(event: &AgentEvent) -> usize {
 
 pub const MAX_PENDING_EVENTS: usize = 20;
 impl std::fmt::Debug for TurnRequest {
-            retry_of: None,
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnRequest")
             .field("conversation_id", &self.conversation_id)
