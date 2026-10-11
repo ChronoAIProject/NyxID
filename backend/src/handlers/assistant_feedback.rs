@@ -53,7 +53,11 @@ fn validate(input: &FeedbackInput) -> AppResult<Option<String>> {
         }).transpose()?;
     Ok(comment)
 }
-fn feedback_rate_key(user_id: &str) -> String { format!("assistant-feedback:{user_id}") }
+async fn enforce_feedback_limit(state: &AppState, user_id: &str) -> AppResult<()> {
+    let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(state.db.clone(), "assistant_feedback", 30, 60);
+    if !limiter.check_shared(&format!("assistant-feedback:{user_id}")).await? { return Err(AppError::RateLimited); }
+    Ok(())
+}
 async fn upsert(
     state: &AppState,
     auth: &AuthUser,
@@ -64,6 +68,7 @@ async fn upsert(
 ) -> AppResult<Json<FeedbackResponse>> {
     let comment = validate(&input)?;
     let user_id = auth.user_id.to_string();
+    enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
         let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id).await?
@@ -134,6 +139,7 @@ async fn withdraw(
     group: bool,
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
+    enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
     if let Some(cid) = scope.as_deref() {
         if group {
@@ -248,8 +254,6 @@ pub async fn admin(
 mod tests {
     use super::*;
 
-    #[test]
-    fn feedback_rate_key_is_per_user() { assert_ne!(feedback_rate_key("a"), feedback_rate_key("b")); }
     #[test]
     fn validate_accepts_votes_and_bounds_comments() {
         let input = FeedbackInput {
