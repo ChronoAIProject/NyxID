@@ -495,8 +495,10 @@ export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
         {tab === "connector" ? (
           <ConnectorsTab query={query} />
         ) : (
-          {tab === "skill" && !selectedAgent ? <Input aria-label="Agent id for skill management" placeholder="Agent ID to manage skills" value={selectedAgent} onChange={(event) => setSelectedAgent(event.target.value)} /> : null}
-          <SkillsTab query={query} agentId={selectedAgent || undefined} />
+          <>
+            {tab === "skill" && !selectedAgent ? <Input aria-label="Agent id for skill management" placeholder="Agent ID to manage skills" value={selectedAgent} onChange={(event) => setSelectedAgent(event.target.value)} /> : null}
+            <SkillsTab query={query} agentId={selectedAgent || undefined} />
+          </>
         )}
       </div>
     </div>
