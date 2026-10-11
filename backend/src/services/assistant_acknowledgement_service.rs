@@ -204,6 +204,38 @@ pub fn access_request_denied() -> Value {
     })
 }
 
+/// Record a metadata-only denial. Callers use this before returning the stable
+/// refusal so denied attempts remain visible without storing arguments or
+/// credentials.
+pub async fn audit_access_request_denied(
+    db: &Database,
+    chat: &ChatAuthority,
+    target: Option<&str>,
+    scope: &str,
+) {
+    let sample = format!("{}:{}:{}", chat.agent_id, chat.conversation_id, scope);
+    if !crate::telemetry::should_sample_event("assistant_access_request_denied", &sample, 100) {
+        return;
+    }
+    let _ = audit_service::log_actor_event(
+        db.clone(),
+        &audit_service::AuditActor {
+            user_id: chat.user_id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: Some(chat.api_key_id.clone()),
+            api_key_name: None,
+        },
+        "assistant_access_request_denied",
+        Some(
+            json!({"requester_agent": chat.agent_id, "thread": chat.conversation_id,
+            "key": chat.api_key_id, "target": target, "scope": scope,
+            "decision": "denied"}),
+        ),
+    )
+    .await;
+}
+
 /// An org permission request may use the person's NyxBot only while that
 /// person maintains the agent. Otherwise a maintainer must make the change.
 const ORG_MAINTAINER_REQUIRED: &str = "This organization agent needs a permission or skill change that you cannot maintain. Ask an organization maintainer to update the agent; your personal NyxBot cannot approve it on your behalf.";
@@ -1002,6 +1034,7 @@ pub async fn service_gate(
         return Ok(Some((guest_refusal(), None)));
     }
     if !chat.access_request_allowed() {
+        audit_access_request_denied(db, chat, Some(id), "service").await;
         return Ok(Some((access_request_denied(), None)));
     }
     access = super::org_agent_service::key_access_with_snapshot(
@@ -1048,6 +1081,7 @@ pub async fn account_gate(
         return Ok(None);
     }
     if !chat.access_request_allowed() {
+        audit_access_request_denied(db, chat, None, "account").await;
         return Ok(Some((access_request_denied(), None)));
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;

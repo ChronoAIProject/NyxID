@@ -3634,6 +3634,13 @@ async fn handle_meta_connect(
 ) -> Response {
     if let Some(chat) = auth.chat.as_ref() {
         if !chat.access_request_allowed() {
+            crate::services::assistant_acknowledgement_service::audit_access_request_denied(
+                &state.db,
+                chat,
+                arguments.get("service_id").and_then(|v| v.as_str()),
+                "connect_service",
+            )
+            .await;
             return tool_result(
                 request_id,
                 &crate::services::assistant_acknowledgement_service::access_request_denied()
