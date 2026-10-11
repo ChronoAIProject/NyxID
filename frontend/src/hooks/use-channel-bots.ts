@@ -81,7 +81,7 @@ export function useChannelBotHealth(id: string) {
   return useQuery({
     queryKey: [...channelBotsQueryKeys.detail(id), "health"],
     queryFn: () => api.get<ChannelBotHealth>(`/channel-bots/${id}/health`),
-    enabled: Boolean(id),
+    enabled: false,
   });
 }
 

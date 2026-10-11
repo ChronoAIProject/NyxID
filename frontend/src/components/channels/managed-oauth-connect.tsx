@@ -26,6 +26,7 @@ import type {
   ManagedFlowProps,
   ManagedDetailProps,
 } from "./managed-flow-types";
+import type { ChannelBotHealth } from "@/types/channels";
 
 export function ManagedOAuthConnect({
   platform,
@@ -231,15 +232,20 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
   const bootstrap = useManagedOnboarding(bot.platform);
   const health = useChannelBotHealth(bot.id);
   const resubscribe = useResubscribeChannelBot();
+  const healthView = health.data ?? ({
+    diagnostics: bot.diagnostics ?? {},
+    mode: bot.webhook_registered ? "webhook" : "poll",
+    recommended_action_text: bot.error ? "Reconnect or verify the X account." : "Verify the live X subscription.",
+  } as ChannelBotHealth);
   return (
     <DetailSection title="Connected account">
-      {bot.platform === "x" && health.data && (
+      {bot.platform === "x" && (
         <div className="rounded-md border border-border p-3 text-sm" data-testid="x-health-card">
-          <div className="font-medium">Health · {health.data.mode}</div>
-          <div className="text-muted-foreground">Inbound: {health.data.diagnostics.last_inbound_at ?? "never"} ({health.data.diagnostics.last_inbound_source ?? "-"})</div>
-          <div className="text-muted-foreground">Outbound: {health.data.diagnostics.last_outbound_at ?? "never"}</div>
-          <div className="text-muted-foreground">Errors: {health.data.diagnostics.consecutive_errors ?? 0}</div>
-          <div className="text-warning">Next action: {health.data.recommended_action_text}</div>
+          <div className="font-medium">Health · {healthView.mode}</div>
+          <div className="text-muted-foreground">Inbound: {healthView.diagnostics.last_inbound_at ?? "never"} ({healthView.diagnostics.last_inbound_source ?? "-"})</div>
+          <div className="text-muted-foreground">Outbound: {healthView.diagnostics.last_outbound_at ?? "never"}</div>
+          <div className="text-muted-foreground">Errors: {healthView.diagnostics.consecutive_errors ?? 0}</div>
+          <div className="text-warning">Next action: {healthView.recommended_action_text}</div>
           <Button type="button" size="sm" variant="outline" onClick={() => resubscribe.mutate(bot.id)} disabled={resubscribe.isPending}>Resubscribe</Button>
         </div>
       )}

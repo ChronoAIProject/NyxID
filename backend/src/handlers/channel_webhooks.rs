@@ -388,6 +388,7 @@ async fn handle_webhook_inner_impl(
             actual = %bot.platform,
             "webhook platform mismatch"
         );
+        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(mongodb::bson::doc! {"_id": bot_id}, mongodb::bson::doc! {"$set": {"diagnostics.last_webhook_error": {"code": "target", "at": mongodb::bson::DateTime::now()}, "diagnostics.failure_reason": "target"}}).await;
         return Ok(None);
     }
 
