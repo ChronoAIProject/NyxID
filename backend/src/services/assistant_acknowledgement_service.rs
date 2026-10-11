@@ -133,7 +133,7 @@ pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionCla
         ["delete", "destroy", "revoke", "disconnect", "forget", "machine_", "set_guest_access", "grant_subagent", "spawn_subagent", "create_schedule", "enable"].iter().any(|p| lower.contains(p)) {
         return if ["delete", "destroy", "revoke", "disconnect", "forget", "machine_"].iter().any(|p| lower.contains(p)) { OwnerActionClass::Destructive } else { OwnerActionClass::Sensitive };
     }
-    if ["update_settings", "connect_channel_bot", "mint", "credential", "link"].iter().any(|p| lower.contains(p)) { return OwnerActionClass::Sensitive; }
+    if ["update_settings", "set_agent_model", "bind_agent_key", "connect_channel_bot", "mint", "credential", "link"].iter().any(|p| lower.contains(p)) { return OwnerActionClass::Sensitive; }
     if method.is_some_and(|m| matches!(m, "POST")) { return OwnerActionClass::Change; }
     OwnerActionClass::Read
 }
