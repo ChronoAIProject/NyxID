@@ -750,6 +750,64 @@ mod s9_denial_tests {
     }
 
     #[tokio::test]
+    async fn viewer_membership_denies_skill_write_but_allows_reads() {
+        let f = orchestrator_fixture("s9_viewer_membership").await;
+        let org = uuid::Uuid::new_v4().to_string();
+        let viewer = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                crate::test_utils::test_user(&org, crate::models::user::UserType::Org),
+                crate::test_utils::test_user(&viewer, crate::models::user::UserType::Person),
+            ])
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &viewer,
+                crate::models::org_membership::OrgRole::Viewer,
+                None,
+            ))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                mongodb::bson::doc! {"_id": &f.chat.agent_id},
+                mongodb::bson::doc! {"$set":{"user_id":&org}},
+            )
+            .await
+            .unwrap();
+        enable(&f.state.db, &viewer).await;
+        let auth = crate::test_utils::test_auth_user(&viewer);
+        let put = crate::handlers::agent_skills::set(
+            State(f.state.clone()),
+            auth.clone(),
+            Path(f.chat.agent_id.clone()),
+            Json(crate::services::agent_skill_service::Selection {
+                expected_revision: 0,
+                skills: vec![],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(put.to_string(), "Agent skill changes require owner access");
+        let history = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            auth,
+            Path(f.chat.agent_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(history.0.get("items").is_some());
+    }
+
+    #[tokio::test]
     async fn agent_key_is_refused_on_new_skill_routes() {
         let f = orchestrator_fixture("s9_agent_key").await;
         let mut auth = f.auth.clone();
