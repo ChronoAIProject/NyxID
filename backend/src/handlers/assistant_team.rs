@@ -1854,24 +1854,21 @@ async fn dispatch_settings(
     Ok(match name {
         "update_settings" => {
             let before = settings::get(&state.db, &chat.user_id).await?;
-            let maximum = args["max_auto_continuations"]
-                .as_i64()
-                .and_then(|v| i32::try_from(v).ok())
-                .ok_or_else(|| {
-                    AppError::ValidationError(
-                        "max_auto_continuations must be an integer from 0 to 32".into(),
-                    )
-                })?;
+            let maximum = args["max_auto_continuations"].as_i64().and_then(|v| i32::try_from(v).ok()).unwrap_or(before.max_auto_continuations);
             let after = settings::update(
                 &state.db,
                 &chat.user_id,
                 settings::Update {
                     max_auto_continuations: Some(maximum),
+                    access_mode: args["access_mode"].as_str().and_then(|v| serde_json::from_value(serde_json::Value::String(v.into())).ok()),
                     ..Default::default()
                 },
             )
             .await?;
             settings::audit(&state.db, &chat.user_id, &before, &after).await;
+            if before.access_mode != after.access_mode {
+                let _ = crate::services::audit_service::log_actor_event(state.db.clone(), &crate::services::audit_service::AuditActor { user_id: owner.into(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None }, "assistant_access_mode_changed", Some(json!({"old": before.access_mode, "new": after.access_mode, "source": "tool"}))).await;
+            }
             (
                 serde_json::to_value(SettingsResponse::from(after))
                     .map_err(|_| AppError::Internal("Settings response failed".into()))?,
@@ -2636,6 +2633,14 @@ pub async fn update_settings(
     )
     .await?;
     settings::audit(&state.db, &owner, &before, &after).await;
+    if before.access_mode != after.access_mode {
+        let _ = crate::services::audit_service::log_actor_event(
+            state.db.clone(),
+            &crate::services::audit_service::AuditActor { user_id: owner.clone(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None },
+            "assistant_access_mode_changed",
+            Some(serde_json::json!({"old": before.access_mode, "new": after.access_mode, "owner": owner})),
+        ).await;
+    }
     Ok(Json(after.into()))
 }
 
