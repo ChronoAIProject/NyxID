@@ -271,6 +271,10 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
     // writes the same parent, so an in-flight parser cannot leave orphan files.
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
+    db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+        .delete_many(doc! {"group_id": id})
+        .session(&mut session)
+        .await?;
     db.collection::<AssistantGroup>(GROUPS)
         .delete_one(owner_filter(owner, id)?)
         .session(&mut session)
