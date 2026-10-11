@@ -2704,6 +2704,7 @@ pub async fn put_profile_routes(
     auth: AuthUser,
     Json(body): Json<ProfileRoutesRequest>,
 ) -> AppResult<Json<ProfileRoutesResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     crate::handlers::admin_helpers::require_admin(&state, &auth).await?;
     let admin = auth.user_id.to_string();
     let row = crate::services::assistant_profile_routing::set(
@@ -2821,6 +2822,7 @@ pub async fn set_agent_operations(
     Path((id, service_id)): Path<(String, String)>,
     Json(body): Json<crate::models::agent_operation_scope::OperationSelection>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = Box::pin(crate::services::agent_operation_scope_service::set(
