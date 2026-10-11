@@ -158,11 +158,63 @@ mod tests {
         let _ = f.state.billing.ensure_wallet(&f.owner).await.err();
     }
 
-    #[test]
-    fn component_sources_are_part_of_the_overview_contract() {
-        let response = serde_json::json!({"primary_source":"service","component_sources":["service","legacy"]});
-        assert_eq!(response["primary_source"], "service");
-        assert_eq!(response["component_sources"].as_array().unwrap().len(), 2);
+    #[tokio::test]
+    async fn component_sources_follow_sync_state_and_overview() {
+        let mut billing: crate::models::service_billing::ServiceBilling = serde_json::from_value(json!({
+            "byok_pricing": {"metric":"requests", "credits_per_unit":"1", "sync_status":"synced",
+                "components":[
+                    {"metric":"tokens", "credits_per_unit":"1", "sync_status":"synced"},
+                    {"metric":"images", "credits_per_unit":"1", "sync_status":"pending"}
+                ]}
+        })).unwrap();
+        let sources = crate::services::billing::config::effective_component_sources(&billing);
+        assert_eq!(
+            sources
+                .iter()
+                .map(|s| (&s.metric, format!("{:?}", s.source).to_lowercase()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("requests".into(), "service".into()),
+                ("tokens".into(), "service".into()),
+                ("images".into(), "free".into())
+            ]
+        );
+        billing.byok_pricing.as_mut().unwrap().sync_status =
+            crate::models::service_billing::PricingSyncStatus::Pending;
+        let fallback = crate::services::billing::config::effective_component_sources(&billing);
+        assert!(
+            fallback
+                .iter()
+                .all(|s| format!("{:?}", s.source).to_lowercase() == "legacy"
+                    || format!("{:?}", s.source).to_lowercase() == "free")
+        );
+
+        let f = fixture("admin_billing_component_sources_overview", false).await;
+        f.state
+            .db
+            .collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.service.id},
+                doc! {"$set":{"billing": mongodb::bson::to_bson(&billing).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let (status, body) = request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/billing/overview",
+            &f.human_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == f.service.id)
+            .unwrap();
+        assert!(row["component_sources"].is_array());
     }
 
     #[tokio::test]
