@@ -65,6 +65,11 @@ it("marks platform switches dirty and preserves write-only credential entry", as
   expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
   expect(screen.getByText("Owner picker")).toBeInTheDocument();
 });
+it("shows the effective billing source and central configuration copy", () => {
+  render(<Harness servicePatch={{ billing: { platform_pricing: { credits_per_unit: "1", lago_metric_code: "svc", sync_status: "synced" } } } as never} />);
+  expect(screen.getByText(/Effective billing source: service/)).toBeInTheDocument();
+  expect(screen.getByText(/Central defaults are managed in Admin/)).toBeInTheDocument();
+});
 it("enabling a lane shows pricing and marks legacy billing superseded", async () => {
   render(<Harness />);
   await userEvent.click(screen.getAllByRole("switch", { name: "Free" })[0]!);
