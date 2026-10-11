@@ -1527,3 +1527,41 @@ async fn health_is_owner_only_and_not_found_shaped_for_others() {
         crate::errors::AppError::ChannelBotNotFound(_)
     ));
 }
+
+#[tokio::test]
+async fn admin_channel_bot_list_filters_platform_and_status_and_requires_admin() {
+    let (state, auth, _server) = fixture().await;
+    let owner = auth.user_id.to_string();
+    for (id, platform, status) in [
+        ("x-health", "twitter", "failed"),
+        ("other", "telegram", "active"),
+    ] {
+        state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document(doc! {
+            "_id": id, "user_id": &owner, "platform": platform, "label": id,
+            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
+            "platform_bot_id": "p", "platform_bot_username": id, "webhook_registered": false,
+            "webhook_secret_hash": "h", "status": status, "is_active": true,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+        }).unwrap()).await.unwrap();
+    }
+    let listed = super::channel_bots::admin_list(
+        State(state.clone()),
+        auth,
+        axum::extract::Query(super::channel_bots::AdminChannelBotQuery {
+            platform: Some("x".into()),
+            status: Some("failed".into()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed.0.len(), 1);
+    let non_admin = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let error = super::channel_bots::admin_list(
+        State(state),
+        non_admin,
+        axum::extract::Query(super::channel_bots::AdminChannelBotQuery::default()),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, crate::errors::AppError::Forbidden(_)));
+}
