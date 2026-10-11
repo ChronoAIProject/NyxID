@@ -126,7 +126,7 @@ async fn upsert(
         let row = feedback_service::group_message(&state.db, gid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-        (None, row.role == "agent" && access.group.id == gid)
+        (None, row.role == "agent")
     };
     if !eligible {
         return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
@@ -201,6 +201,12 @@ async fn withdraw(
     if let Some(cid) = scope.as_deref() {
         if group {
             crate::services::org_group_service::get(&state.db, &user_id, cid, None).await?;
+            if feedback_service::group_message(&state.db, cid, &message_id)
+                .await?
+                .is_none()
+            {
+                return Err(AppError::NotFound("message not found".into()));
+            }
         } else {
             let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
             engine::authorize_thread_read(&state.db, &conversation).await?;
