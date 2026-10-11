@@ -76,6 +76,13 @@ export function AgentLearningReview({
           I consent to learning proposals for this organization
         </label>
       ) : null}
+      {[review.run.error, review.configure.error, review.consent.error, review.edit.error, review.approve.error, review.reject.error]
+        .filter(Boolean)
+        .map((error, index) => (
+          <p key={index} role="alert" className="text-12 text-destructive">
+            {requestFailure(error)}
+          </p>
+        ))}
 
       {!readOnly ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3">
@@ -279,7 +286,7 @@ export function AgentLearningReview({
                 >
                   Review updated package
                 </Button>
-              ) : settled ? null : <Button
+              ) : settled || (proposal.status !== "pending" && proposal.status !== "publication_failed") ? null : <Button
                 size="sm"
                 disabled={readOnly || review.approve.isPending}
                 onClick={async () => {
@@ -308,7 +315,9 @@ export function AgentLearningReview({
                   }
                 }}
               >
-                {checkOnly
+                {proposal.status === "publication_failed"
+                  ? "Retry publication"
+                  : checkOnly
                   ? card
                     ? "Confirm check"
                     : "Check publication"
