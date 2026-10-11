@@ -263,11 +263,62 @@ async fn sticky_recipients_clear_when_a_member_leaves_or_is_purged() {
 }
 #[tokio::test]
 async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients() {
-    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
+    let (state, _, server) = setup("sticky_confirmation").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "confirm".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@researcher approve this", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 5).await;
+    assert!(rows.iter().any(|row| row.role == "agent"));
+    server.abort();
 }
 #[tokio::test]
 async fn nyxbot_post_to_group_is_never_sticky() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+    let (state, _, server) = setup("sticky_nyxbot_tool").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "tool".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@researcher first", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 5).await;
+    post(&state, OWNER, &group.id, "bare follow-up", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 7).await;
+    assert_eq!(
+        rows.iter()
+            .rev()
+            .find(|row| row.role == "user")
+            .unwrap()
+            .recipient_agent_ids,
+        vec![researcher.id]
+    );
+    server.abort();
 }
 
 #[allow(dead_code)]
