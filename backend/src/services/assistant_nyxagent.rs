@@ -2758,6 +2758,7 @@ pub async fn delete(
                         crate::models::assistant_upload_retention::TOMBSTONES,
                         crate::models::assistant_agent_credential::COLLECTION_NAME,
                         MESSAGES,
+                        crate::models::assistant_message_feedback::COLLECTION_NAME,
                     ] {
                         db.collection::<bson::Document>(collection)
                             .delete_many(doc! {"conversation_id": id, "user_id": user_id})

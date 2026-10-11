@@ -1,0 +1,217 @@
+use crate::{
+    AppState,
+    errors::{AppError, AppResult},
+    models::{
+        assistant_group::MESSAGES_COLLECTION_NAME,
+        assistant_message::COLLECTION_NAME as MESSAGES,
+        assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME},
+    },
+    mw::auth::AuthUser,
+    services::{assistant_nyxagent as engine, audit_service},
+};
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+};
+use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
+use mongodb::bson::{doc, oid::ObjectId};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Deserialize)]
+pub struct FeedbackInput {
+    pub vote: String,
+    pub comment: Option<String>,
+}
+#[derive(Serialize, Clone)]
+pub struct FeedbackResponse {
+    pub vote: String,
+    pub comment: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+impl From<AssistantMessageFeedback> for FeedbackResponse {
+    fn from(v: AssistantMessageFeedback) -> Self {
+        Self {
+            vote: v.vote,
+            comment: v.comment,
+            updated_at: v.updated_at,
+        }
+    }
+}
+
+fn validate(input: &FeedbackInput) -> AppResult<Option<String>> {
+    if input.vote != "up" && input.vote != "down" {
+        return Err(AppError::BadRequest("feedback_vote_invalid".into()));
+    }
+    let comment = input
+        .comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(1000).collect::<String>());
+    Ok(comment)
+}
+async fn upsert(
+    state: &AppState,
+    auth: &AuthUser,
+    message_id: &str,
+    conversation_id: Option<String>,
+    group_id: Option<String>,
+    input: FeedbackInput,
+) -> AppResult<Json<FeedbackResponse>> {
+    let comment = validate(&input)?;
+    let user_id = auth.user_id.to_string();
+    let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
+        let (conv, rows) = engine::history_page(&state.db, &user_id, cid, 2000, None).await?;
+        let row = rows
+            .into_iter()
+            .find(|r| r.id == message_id)
+            .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+        (
+            Some(row.turn_id),
+            row.role == "assistant" && row.status == "completed",
+        )
+    } else {
+        let gid = group_id.as_deref().unwrap();
+        let access =
+            crate::services::org_group_service::get(&state.db, &user_id, gid, None).await?;
+        let row = state
+            .db
+            .collection::<crate::models::assistant_group::GroupMessage>(MESSAGES_COLLECTION_NAME)
+            .find_one(doc! {"_id":message_id,"group_id":gid})
+            .await?
+            .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+        (None, row.role == "agent" && access.group.id == gid)
+    };
+    if !eligible {
+        return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
+    }
+    let now = Utc::now();
+    let filter = doc! {"user_id":&user_id,"message_id":message_id};
+    let update = doc! {"$set":{"vote":&input.vote,"comment":comment.clone(),"updated_at":bson::DateTime::from_chrono(now),"conversation_id":conversation_id.clone(),"group_id":group_id.clone(),"turn_id":turn_id.clone()},"$setOnInsert":{"_id":Uuid::new_v4().to_string(),"created_at":bson::DateTime::from_chrono(now)}};
+    let row = state
+        .db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find_one_and_update(filter, update)
+        .upsert(true)
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::Internal("feedback write failed".into()))?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth,
+        "assistant_feedback_submitted",
+        Some(
+            serde_json::json!({"message_id":message_id,"vote":input.vote,"conversation_id":conversation_id,"group_id":group_id}),
+        ),
+    );
+    Ok(Json(row.into()))
+}
+pub async fn put_conversation(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+    Json(input): Json<FeedbackInput>,
+) -> AppResult<Json<FeedbackResponse>> {
+    upsert(&state, &auth, &message_id, Some(id), None, input).await
+}
+pub async fn put_group(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+    Json(input): Json<FeedbackInput>,
+) -> AppResult<Json<FeedbackResponse>> {
+    upsert(&state, &auth, &message_id, None, Some(id), input).await
+}
+async fn withdraw(
+    state: &AppState,
+    auth: &AuthUser,
+    message_id: String,
+    scope: Option<String>,
+    group: bool,
+) -> AppResult<StatusCode> {
+    let user_id = auth.user_id.to_string();
+    if let Some(cid) = scope.as_deref() {
+        if group {
+            crate::services::org_group_service::get(&state.db, &user_id, cid, None).await?;
+        } else {
+            engine::history_page(&state.db, &user_id, cid, 1, None).await?;
+        }
+    }
+    let filter = doc! {"user_id":&user_id,"message_id":&message_id};
+    state
+        .db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .delete_one(filter)
+        .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth,
+        "assistant_feedback_withdrawn",
+        Some(serde_json::json!({"message_id":message_id,"group":group})),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+use axum::http::StatusCode;
+pub async fn delete_conversation(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    withdraw(&state, &auth, message_id, Some(id), false).await
+}
+pub async fn delete_group(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    withdraw(&state, &auth, message_id, Some(id), true).await
+}
+
+#[derive(Default, Deserialize)]
+pub struct AdminQuery {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub vote: Option<String>,
+    pub cursor: Option<String>,
+}
+#[derive(Serialize)]
+pub struct AdminResponse {
+    pub counts: Vec<serde_json::Value>,
+    pub recent: Vec<AssistantMessageFeedback>,
+}
+pub async fn admin(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(q): Query<AdminQuery>,
+) -> AppResult<Json<AdminResponse>> {
+    super::admin_helpers::require_admin_or_operator(&state, &auth, "admin.assistant.feedback")
+        .await?;
+    let mut filter = doc! {};
+    if let Some(v) = q.vote {
+        filter.insert("vote", v);
+    }
+    if let Some(f) = q.from {
+        filter.insert("created_at", doc! {"$gte":bson::DateTime::from_chrono(f)});
+    }
+    if let Some(t) = q.to {
+        filter.entry("created_at").or_insert(doc! {});
+        if let Some(b) = filter.get_document_mut("created_at").ok() {
+            b.insert("$lte", bson::DateTime::from_chrono(t));
+        }
+    }
+    let rows = state
+        .db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find(filter)
+        .sort(doc! {"created_at":-1})
+        .limit(100)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    Ok(Json(AdminResponse {
+        counts: Vec::new(),
+        recent: rows,
+    }))
+}

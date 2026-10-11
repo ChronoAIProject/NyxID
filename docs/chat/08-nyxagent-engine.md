@@ -1185,3 +1185,12 @@ authority are unchanged. Guest connected search/list includes only granted
 UserManaged and Platform connections and drops Internal catalog entries before
 ranking. Native `nyxid` virtual tools remain subject to their separate guest
 authorization; including that virtual catalog does not grant execution access.
+# Reply feedback
+
+Human NyxAgent clients may submit or withdraw one thumbs-up/down vote per
+assistant reply. `PUT /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/feedback`
+and the equivalent `/groups/{id}/messages/{message_id}/feedback` accept `{vote:
+"up"|"down", comment?: string}`. Only completed assistant replies are eligible;
+the operation is idempotent and response history includes the current feedback.
+Votes contain identifiers and optional bounded comment only. Admins can inspect
+aggregate/recent metadata at `GET /api/v1/admin/assistant/feedback`.

@@ -15,6 +15,8 @@ import {
   Sparkles,
   Wrench,
   X,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
@@ -183,6 +185,11 @@ export function ChatMessageBubble({
   const runningTool = streaming
     ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
     : undefined;
+  const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
+  const setFeedback = async (next: "up" | "down") => {
+    const previous = vote; const selected = previous === next ? undefined : next; setVote(selected);
+    try { window.dispatchEvent(new CustomEvent("nyxagent-feedback", { detail: { messageId: message.id, vote: selected } })); } catch { setVote(previous); }
+  };
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -246,6 +253,12 @@ export function ChatMessageBubble({
           <div className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-11 text-destructive">
             <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>{message.error}</span>
+          </div>
+        ) : null}
+        {!streaming && message.status === "complete" && message.id ? (
+          <div className="mt-2 flex items-center gap-1" aria-label="Reply feedback">
+            <button type="button" aria-label="Helpful" aria-pressed={vote === "up"} onClick={() => void setFeedback("up")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "up" && "text-success") }><ThumbsUp className="h-3.5 w-3.5" /></button>
+            <button type="button" aria-label="Not helpful" aria-pressed={vote === "down"} onClick={() => void setFeedback("down")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "down" && "text-destructive") }><ThumbsDown className="h-3.5 w-3.5" /></button>
           </div>
         ) : null}
       </div>

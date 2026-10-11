@@ -1034,6 +1034,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route(
+            "/assistant/feedback",
+            get(handlers::assistant_feedback::admin),
+        )
         .route("/usage", get(handlers::admin_usage::get_usage))
         .route(
             "/assistant/profile-routes",
@@ -2132,6 +2136,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations/{id}/stop",
             post(handlers::assistant_nyxagent::stop),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/messages/{message_id}/feedback",
+            put(handlers::assistant_feedback::put_conversation)
+                .delete(handlers::assistant_feedback::delete_conversation),
+        )
+        .route(
+            "/nyxagent/groups/{id}/messages/{message_id}/feedback",
+            put(handlers::assistant_feedback::put_group)
+                .delete(handlers::assistant_feedback::delete_group),
         )
         .route(
             "/nyxagent/conversations/{id}/access-mode",
