@@ -136,6 +136,13 @@ impl ChatAuthority {
         self.role == AgentRole::Orchestrator
     }
 
+    /// Only the owner's NyxBot may widen access or create an access request.
+    /// Keeping this predicate here makes every acknowledgement-producing path
+    /// share the same authority decision.
+    pub fn access_request_allowed(&self) -> bool {
+        self.is_orchestrator() && !self.guest
+    }
+
     pub fn turn_fence(&self) -> AssistantTurnFence {
         AssistantTurnFence {
             conversation_id: self.conversation_id.clone(),
@@ -188,6 +195,13 @@ pub fn guest_refusal() -> Value {
         anything that needs their approval, or more than the owner lets guests do with a \
         service. Help with your services otherwise, and say that only the bot's owner can \
         ask for that."})
+}
+
+pub fn access_request_denied() -> Value {
+    json!({
+        "error": "access_request_denied",
+        "instructions": "Only NyxBot can request or grant access. Report the need to NyxBot in your reply."
+    })
 }
 
 /// An org permission request may use the person's NyxBot only while that
@@ -615,6 +629,11 @@ async fn request_tracked_with_machine_context(
     request: Request<'_>,
     machine_context: Option<crate::models::machine_access::HumanContextAction>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
+    if request.kind != "action" && !chat.access_request_allowed() {
+        return Err(AppError::Forbidden(
+            "access_request_denied: only NyxBot can request or grant access; report the need to NyxBot in your reply".into(),
+        ));
+    }
     if request.kind == "operations" {
         Box::pin(
             super::agent_operation_scope_service::require_configuration_enabled(db, &chat.user_id),
@@ -982,6 +1001,9 @@ pub async fn service_gate(
     if chat.guest {
         return Ok(Some((guest_refusal(), None)));
     }
+    if !chat.access_request_allowed() {
+        return Ok(Some((access_request_denied(), None)));
+    }
     access = super::org_agent_service::key_access_with_snapshot(
         db,
         &chat.user_id,
@@ -1024,6 +1046,9 @@ pub async fn account_gate(
 ) -> AppResult<Option<(Value, Option<AssistantAcknowledgement>)>> {
     if chat.is_orchestrator() {
         return Ok(None);
+    }
+    if !chat.access_request_allowed() {
+        return Ok(Some((access_request_denied(), None)));
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
     if key

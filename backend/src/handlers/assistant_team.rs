@@ -2408,6 +2408,7 @@ pub async fn set_agent_grants(
     Path(id): Path<String>,
     Json(body): Json<GrantsRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let current = team::maintained_agent(&state.db, &owner, &id).await?;
@@ -2454,6 +2455,7 @@ pub async fn destroy_agent_route(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
@@ -2540,6 +2542,7 @@ pub struct SettingsResponse {
     max_group_handoffs_per_hour: i32,
     max_group_handoffs_limit: i32,
     max_group_handoffs_per_hour_limit: i32,
+    specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -2562,6 +2565,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_group_handoffs_limit: crate::models::assistant_settings::MAX_GROUP_HANDOFFS_LIMIT,
             max_group_handoffs_per_hour_limit:
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
+            specialist_access_requests: row.specialist_access_requests,
         }
     }
 }
@@ -2593,6 +2597,8 @@ pub struct SettingsRequest {
     max_group_handoffs: Option<i32>,
     #[serde(default)]
     max_group_handoffs_per_hour: Option<i32>,
+    #[serde(default)]
+    specialist_access_requests: Option<crate::models::assistant_settings::SpecialistAccessRequests>,
 }
 
 pub async fn update_settings(
@@ -2622,6 +2628,7 @@ pub async fn update_settings(
             max_concurrent_subagent_turns: body.max_concurrent_subagent_turns,
             max_group_handoffs: body.max_group_handoffs,
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
+            specialist_access_requests: body.specialist_access_requests,
         },
     )
     .await?;
