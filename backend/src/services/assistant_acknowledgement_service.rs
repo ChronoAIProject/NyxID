@@ -248,12 +248,12 @@ pub async fn audit_access_request_denied(
         ),
     )
     .await;
-    if let Ok(agents) = super::assistant_team_service::agents(db, &chat.user_id, false).await {
-        if let Some(home) = agents
+    if let Ok(agents) = super::assistant_team_service::agents(db, &chat.user_id, false).await
+        && let Some(home) = agents
             .into_iter()
             .find(|a| a.is_nyxbot())
             .and_then(|a| a.home_conversation_id)
-        {
+    {
             let conversations = db
                 .collection::<crate::models::assistant_conversation::AssistantConversation>(
                     crate::models::assistant_conversation::COLLECTION_NAME,

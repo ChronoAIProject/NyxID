@@ -14,16 +14,12 @@ pub const DEFAULT_MAX_GROUP_HANDOFFS: i32 = 6;
 pub const DEFAULT_MAX_GROUP_HANDOFFS_PER_HOUR: i32 = 60;
 pub const MAX_GROUP_HANDOFFS_LIMIT: i32 = 24;
 pub const MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT: i32 = 600;
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecialistAccessRequests {
+    #[default]
     Denied,
     RoutedToNyxbot,
-}
-impl Default for SpecialistAccessRequests {
-    fn default() -> Self {
-        Self::Denied
-    }
 }
 
 pub const DEFAULT_SCHEDULE_MINIMUM_MINUTES: i32 = 5;
