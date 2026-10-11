@@ -204,6 +204,8 @@ pub struct BillingServiceResponse {
     pub allowance_metrics: Vec<String>,
     pub sync_status: Option<String>,
     pub sync_error: Option<String>,
+    pub primary_source: &'static str,
+    pub component_sources: Vec<&'static str>,
 }
 
 pub async fn get_overview(
@@ -254,6 +256,18 @@ pub async fn get_overview(
                         .as_ref()
                         .and_then(|b| b.byok_pricing.as_ref().or(b.platform_key_pricing.as_ref()))
                         .and_then(|p| p.sync_error.clone()),
+                    primary_source: source,
+                    component_sources: s
+                        .billing
+                        .as_ref()
+                        .map(|b| {
+                            b.byok_pricing
+                                .as_ref()
+                                .or(b.platform_key_pricing.as_ref())
+                                .map(|p| p.components.iter().map(|_| source).collect())
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default(),
                 }
             })
             .collect(),
