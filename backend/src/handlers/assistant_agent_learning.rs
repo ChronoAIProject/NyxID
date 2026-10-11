@@ -41,6 +41,15 @@ pub struct EditBody {
     draft: Value,
 }
 
+fn normalize_edit_draft(revision: Option<i64>, mut draft: Value) -> Value {
+    if revision.is_none() {
+        if let Some(object) = draft.as_object_mut() {
+            object.remove("revision");
+        }
+    }
+    draft
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateBody {
@@ -162,13 +171,14 @@ pub async fn edit(
         .revision
         .or_else(|| body.draft.get("revision").and_then(Value::as_i64))
         .unwrap_or(0);
+    let draft = normalize_edit_draft(body.revision, body.draft);
     review::edit(
         &state,
         &owner,
         &agent_id,
         &proposal_id,
         revision,
-        &body.draft,
+        &draft,
     )
     .await?;
     Ok(Json(json!({"status": "updated"})))
@@ -599,6 +609,8 @@ mod tests {
         .expect("legacy nested form remains readable");
         assert_eq!(body.revision, None);
         assert_eq!(body.draft["revision"], 4);
+        let normalized = super::normalize_edit_draft(body.revision, body.draft);
+        assert!(normalized.get("revision").is_none());
     }
 
     #[test]
