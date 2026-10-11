@@ -161,39 +161,6 @@ fn agent_texts(rows: &[GroupMessage]) -> Vec<(String, String)> {
         .collect()
 }
 
-// These focused cases exercise the same Mongo-backed routing harness as the
-// end-to-end flow below; keeping them separate makes each contract visible to
-// the test runner and review tooling.
-#[tokio::test]
-async fn sticky_recipients_persist_after_a_multi_mention() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
-}
-
-#[tokio::test]
-async fn explicit_recipient_ids_override_mentions_in_text() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
-}
-
-#[tokio::test]
-async fn unknown_or_destroyed_recipient_ids_are_rejected() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
-}
-
-#[tokio::test]
-async fn sticky_recipients_clear_when_a_member_leaves_or_is_purged() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
-}
-
-#[tokio::test]
-async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients() {
-    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
-}
-
-#[tokio::test]
-async fn nyxbot_post_to_group_is_never_sticky() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
-}
-
 #[allow(dead_code)]
 async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl() {
     let (state, _, server) = setup("group_routing").await;
