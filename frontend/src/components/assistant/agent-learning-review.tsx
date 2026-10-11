@@ -86,7 +86,7 @@ export function AgentLearningReview({
           I consent to learning proposals for this organization
         </label>
       ) : null}
-      {[review.run.error, review.configure.error, review.consent?.error, review.edit.error, review.approve.error, review.reject.error]
+      {[review.run.error, review.configure.error, review.consent?.error, review.edit.error, review.reject.error]
         .filter(Boolean)
         .map((error, index) => (
           <div key={index} role="alert" className="text-12 text-destructive">
