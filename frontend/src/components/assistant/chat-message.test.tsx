@@ -1,5 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as telemetry from "@/lib/telemetry";
+import { api } from "@/lib/api-client";
 import {
   ChatMessageBubble,
   ChatMessageEntry,
@@ -104,6 +106,21 @@ describe("canonical chat presentation", () => {
       "aria-pressed",
       "true",
     );
+  });
+  it("does not capture telemetry when feedback submission fails", async () => {
+    const put = vi
+      .spyOn(api, "put")
+      .mockRejectedValueOnce(new Error("offline"));
+    const capture = vi.spyOn(telemetry, "capture");
+    render(
+      <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    expect(capture).not.toHaveBeenCalled();
+    capture.mockRestore();
+    put.mockRestore();
   });
   afterEach(() => vi.useRealTimers());
 
