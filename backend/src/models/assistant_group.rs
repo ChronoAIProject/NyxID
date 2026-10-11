@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub const COLLECTION_NAME: &str = "assistant_groups";
 pub const MESSAGES_COLLECTION_NAME: &str = "assistant_group_messages";
@@ -28,6 +29,8 @@ pub struct AssistantGroup {
     pub lead_agent_id: String,
     #[serde(default)]
     pub last_recipient_ids: Vec<String>,
+    #[serde(default)]
+    pub last_recipient_ids_by_actor: HashMap<String, Vec<String>>,
     /// `user` or `nyxbot`.
     pub created_by: String,
     pub message_count: i64,

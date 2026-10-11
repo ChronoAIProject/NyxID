@@ -628,7 +628,7 @@ export function NyxAgentGroupPage({
             controls={group ? <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Message recipients">
               {recipientAgentIds.map((id) => {
                 const member = group.members.find((row) => row.id === id);
-                return member ? <Button key={id} type="button" size="sm" variant="secondary" aria-label={`Remove recipient ${member.name}`} onClick={() => setRecipientAgentIds((current) => current.filter((value) => value !== id))}>@{member.name} ×</Button> : null;
+                return member ? <Button key={id} type="button" size="sm" variant="secondary" className="rounded-full" aria-label={`Remove recipient ${member.name}`} onClick={() => setRecipientAgentIds((current) => current.filter((value) => value !== id))}>@{member.name} ×</Button> : null;
               })}
               <select aria-label="Add recipient" className="h-8 rounded-lg border bg-card px-2 text-12" value="" onChange={(event) => { if (event.target.value) setRecipientAgentIds((current) => current.includes(event.target.value) ? current : [...current, event.target.value]); }}>
                 <option value="">+ add</option>

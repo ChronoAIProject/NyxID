@@ -127,6 +127,7 @@ pub async fn create(
         member_agent_ids: members.iter().map(|member| member.id.clone()).collect(),
         lead_agent_id: lead_of(&members),
         last_recipient_ids: Vec::new(),
+        last_recipient_ids_by_actor: std::collections::HashMap::new(),
         created_by: created_by.into(),
         message_count: 0,
         pending_agent_ids: Vec::new(),

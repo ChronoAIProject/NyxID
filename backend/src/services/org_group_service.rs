@@ -344,6 +344,7 @@ pub async fn create(
             member_agent_ids: ids.to_vec(),
             lead_agent_id: agents[0].id.clone(),
             last_recipient_ids: Vec::new(),
+            last_recipient_ids_by_actor: std::collections::HashMap::new(),
             created_by: created_by.into(),
             message_count: 0,
             pending_agent_ids: Vec::new(),
