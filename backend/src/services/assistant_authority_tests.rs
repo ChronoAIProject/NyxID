@@ -194,9 +194,10 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         .db
         .collection::<mongodb::bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
         .update_one(
-            doc! {"owner_id": &fixture.owner},
-            doc! {"$set": {"specialist_access_requests": "routed_to_nyxbot"}},
+            doc! {"_id": &fixture.owner},
+            doc! {"$set": {"specialist_access_requests": "routed_to_nyxbot", "updated_at": bson::DateTime::now()}},
         )
+        .upsert(true)
         .await
         .unwrap();
     fixture
