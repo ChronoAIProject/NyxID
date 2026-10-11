@@ -2,7 +2,10 @@ import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
-import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
+import {
+  NyxBotEventNotice,
+  NyxBotOrchestratorMessage,
+} from "./nyxbot-messages";
 import { NyxBotSettingsButton } from "./nyxbot-settings-button";
 import {
   ChannelBadge,
@@ -19,7 +22,11 @@ import { LazyVoicePanel as VoicePanel } from "./lazy-voice-panel";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useNyxBotSettings } from "@/hooks/use-nyxbot-agents";
 import { NyxBotHome } from "./nyxbot-home";
-import { nyxBotOf, selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import {
+  nyxBotOf,
+  selectedAgentOf,
+  useNyxBotAgents,
+} from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
 import {
   agentHandle,
@@ -51,7 +58,10 @@ import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-lo
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
-import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
+import {
+  ChatMessageBubble,
+  ChatMessageList,
+} from "@/components/assistant/chat-message";
 import type { ChatSessionState } from "@/lib/assistant/chat-types";
 import {
   DirectChatControls,
@@ -94,11 +104,19 @@ function sidebarConversation(
 export function AevatarAssistantMessageList({
   session,
   bottomInset,
+  emptyDescription,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
+  readonly emptyDescription?: React.ReactNode;
 }) {
-  return <ChatMessageList session={session} bottomInset={bottomInset} />;
+  return (
+    <ChatMessageList
+      session={session}
+      bottomInset={bottomInset}
+      emptyDescription={emptyDescription}
+    />
+  );
 }
 
 export function NyxAgentThreadMessageList({
@@ -108,9 +126,18 @@ export function NyxAgentThreadMessageList({
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
-  readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode;
+  readonly renderMessage?: (
+    message: import("@/lib/assistant/chat-types").ChatMessage,
+  ) => React.ReactNode;
 }) {
-  return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} />;
+  return (
+    <ChatMessageList
+      session={session}
+      bottomInset={bottomInset}
+      feedbackEnabled
+      renderMessage={renderMessage}
+    />
+  );
 }
 
 export function AssistantChatPage() {
@@ -127,8 +154,8 @@ export function AssistantChatPage() {
   });
   const fixtureMode = Boolean(
     import.meta.env.DEV &&
-      typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("mock") === "1",
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("mock") === "1",
   );
   const selectedId = drafting ? undefined : selectedConversationId;
   const composerRef = useRef<HTMLDivElement>(null);
@@ -139,7 +166,11 @@ export function AssistantChatPage() {
     (conversationId: string) => {
       void navigate({
         to: "/assistant",
-        search: (previous) => ({ ...parseAccountPanelSearch(previous), c: conversationId, ...(fixtureMode ? { mock: 1 as const } : {}) }),
+        search: (previous) => ({
+          ...parseAccountPanelSearch(previous),
+          c: conversationId,
+          ...(fixtureMode ? { mock: 1 as const } : {}),
+        }),
         replace: true,
       });
     },
@@ -148,7 +179,10 @@ export function AssistantChatPage() {
   const repairMissingConversation = useCallback(() => {
     void navigate({
       to: "/assistant",
-      search: (previous) => ({ ...parseAccountPanelSearch(previous), ...(fixtureMode ? { mock: 1 as const } : {}) }),
+      search: (previous) => ({
+        ...parseAccountPanelSearch(previous),
+        ...(fixtureMode ? { mock: 1 as const } : {}),
+      }),
       replace: true,
     });
   }, [fixtureMode, navigate]);
@@ -187,25 +221,29 @@ export function AssistantChatPage() {
 
   function selectConversation(conversationId: string) {
     setComposerFocusRequest((value) => value + 1);
-    void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant",
-      search: {
-        c: conversationId,
-        ...(fixtureMode ? { mock: 1 } : {}),
-      },
-    }));
+    void navigateWithBuildUpdate(() =>
+      navigate({
+        to: "/assistant",
+        search: {
+          c: conversationId,
+          ...(fixtureMode ? { mock: 1 } : {}),
+        },
+      }),
+    );
   }
 
   function createNewChat() {
     setComposerFocusRequest((value) => value + 1);
     chat.newChat();
-    void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant",
-      search: {
-        draft: true,
-        ...(fixtureMode ? { mock: 1 } : {}),
-      },
-    }));
+    void navigateWithBuildUpdate(() =>
+      navigate({
+        to: "/assistant",
+        search: {
+          draft: true,
+          ...(fixtureMode ? { mock: 1 } : {}),
+        },
+      }),
+    );
   }
 
   async function deleteConversation(conversationId: string) {
@@ -215,7 +253,7 @@ export function AssistantChatPage() {
       if (selectedId === conversationId) {
         void navigate({
           to: "/assistant",
-          search: (fixtureMode ? { mock: 1 } : {}),
+          search: fixtureMode ? { mock: 1 } : {},
         });
       }
     } catch (error) {
@@ -265,7 +303,8 @@ export function AssistantChatPage() {
     />
   );
   const sidebar = (
-    <AssistantEngineSidebar engine="actor"
+    <AssistantEngineSidebar
+      engine="actor"
       conversations={conversations}
       activeConversationId={chat.session?.conversationId}
       onNewChat={createNewChat}
@@ -357,7 +396,10 @@ export function DirectAssistantChatPage() {
     (conversationId: string) => {
       void navigate({
         to: "/assistant",
-        search: (previous) => ({ ...parseAccountPanelSearch(previous), c: conversationId }),
+        search: (previous) => ({
+          ...parseAccountPanelSearch(previous),
+          c: conversationId,
+        }),
         replace: true,
       });
     },
@@ -382,25 +424,32 @@ export function DirectAssistantChatPage() {
     if (!chat.isMissing) return;
     void navigate({
       to: "/assistant",
-      search: (previous) => ({ ...parseAccountPanelSearch(previous), draft: true }),
+      search: (previous) => ({
+        ...parseAccountPanelSearch(previous),
+        draft: true,
+      }),
       replace: true,
     });
   }, [chat.isMissing, navigate]);
 
   function selectConversation(conversationId: string) {
     setComposerFocusRequest((value) => value + 1);
-    void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant",
-      search: { c: conversationId },
-    }));
+    void navigateWithBuildUpdate(() =>
+      navigate({
+        to: "/assistant",
+        search: { c: conversationId },
+      }),
+    );
   }
 
   function createNewChat() {
     setComposerFocusRequest((value) => value + 1);
-    void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant",
-      search: { draft: true },
-    }));
+    void navigateWithBuildUpdate(() =>
+      navigate({
+        to: "/assistant",
+        search: { draft: true },
+      }),
+    );
   }
 
   async function deleteConversation(conversationId: string) {
@@ -443,7 +492,8 @@ export function DirectAssistantChatPage() {
     ? `conv:${chat.session.conversationId}`
     : "screen:direct:assistant";
   const sidebar = (
-    <AssistantEngineSidebar engine="direct"
+    <AssistantEngineSidebar
+      engine="direct"
       conversations={chat.conversations}
       activeConversationId={chat.session.conversationId}
       onNewChat={createNewChat}
@@ -465,10 +515,11 @@ export function DirectAssistantChatPage() {
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <DirectModeBanner />
         <AssistantLinkModalHost>
-        <AevatarAssistantMessageList
-          session={chat.session}
-          bottomInset={composerHeight}
-        />
+          <AevatarAssistantMessageList
+            session={chat.session}
+            bottomInset={composerHeight}
+            emptyDescription={DIRECT_MODE_COPY}
+          />
         </AssistantLinkModalHost>
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <ChatComposer
@@ -498,10 +549,17 @@ export function DirectAssistantChatPage() {
  */
 export function NyxAgentAssistantChatPage() {
   const search = useRouterState({
-    select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
+    select: (state) =>
+      parseAssistantSearch(state.location.search as Record<string, unknown>),
   });
   if (search.g) {
-    return <NyxAgentGroupPage key={search.g} groupId={search.g} mock={Boolean(search.mock)} />;
+    return (
+      <NyxAgentGroupPage
+        key={search.g}
+        groupId={search.g}
+        mock={Boolean(search.mock)}
+      />
+    );
   }
   return <NyxAgentThreadPage />;
 }
@@ -513,7 +571,8 @@ function NyxAgentThreadPage() {
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const search = useRouterState({
-    select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
+    select: (state) =>
+      parseAssistantSearch(state.location.search as Record<string, unknown>),
   });
   const selectedId = search.draft ? undefined : search.c;
   // No thread, draft or agent in the URL: the NyxBot home.
@@ -521,7 +580,8 @@ function NyxAgentThreadPage() {
   // Router state is global: while the sidebar navigates to another page this
   // component is still mounted and sees that page's (thread-less) URL.
   const onChatRoute = useRouterState({
-    select: (state) => state.location.pathname.replace(/\/+$/, "") === "/assistant",
+    select: (state) =>
+      state.location.pathname.replace(/\/+$/, "") === "/assistant",
   });
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -531,22 +591,34 @@ function NyxAgentThreadPage() {
   useLayoutEffect(() => {
     selection.current = selectedId;
   }, [selectedId]);
-  const adopt = useCallback((id: string) => {
-    if (selection.current !== selectedId) return;
-    void navigate({
-      to: "/assistant",
-      search: (previous) => ({ ...parseAccountPanelSearch(previous), c: id, ...(search.mock ? { mock: 1 as const } : {}) }),
-      replace: true,
-    });
-  }, [navigate, search.mock, selectedId]);
+  const adopt = useCallback(
+    (id: string) => {
+      if (selection.current !== selectedId) return;
+      void navigate({
+        to: "/assistant",
+        search: (previous) => ({
+          ...parseAccountPanelSearch(previous),
+          c: id,
+          ...(search.mock ? { mock: 1 as const } : {}),
+        }),
+        replace: true,
+      });
+    },
+    [navigate, search.mock, selectedId],
+  );
   const agents = useNyxBotAgents();
   const groups = useNyxBotGroups();
   // The agent whose details sheet is open (the thread's agent, or NyxBot from home).
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [creating, setCreating] = useState<"agent" | "group">();
   // The open thread's agent, else the agent in the URL, else NyxBot.
-  const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
-  const selectedAgent = selectedAgentOf(agents.data?.agents, threadAgent?.id, search.agent);
+  const threadAgent =
+    nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
+  const selectedAgent = selectedAgentOf(
+    agents.data?.agents,
+    threadAgent?.id,
+    search.agent,
+  );
   const draftAgent: NyxAgentConversationAgent | undefined = selectedAgent
     ? {
         id: selectedAgent.id,
@@ -588,7 +660,11 @@ function NyxAgentThreadPage() {
     }
     void navigate({
       to: "/assistant",
-      search: (previous) => ({ ...parseAccountPanelSearch(previous), c: latestThreadId, ...(search.mock ? { mock: 1 as const } : {}) }),
+      search: (previous) => ({
+        ...parseAccountPanelSearch(previous),
+        c: latestThreadId,
+        ...(search.mock ? { mock: 1 as const } : {}),
+      }),
       replace: true,
     });
   }, [
@@ -602,11 +678,18 @@ function NyxAgentThreadPage() {
     search.mock,
   ]);
 
-  function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
-    void navigateWithBuildUpdate(() => navigate({
-      to: "/assistant",
-      search: { ...next, ...(search.mock ? { mock: 1 } : {}) },
-    }));
+  function navigateTo(next: {
+    c?: string;
+    draft?: true;
+    agent?: string;
+    g?: string;
+  }) {
+    void navigateWithBuildUpdate(() =>
+      navigate({
+        to: "/assistant",
+        search: { ...next, ...(search.mock ? { mock: 1 } : {}) },
+      }),
+    );
   }
 
   /**
@@ -624,44 +707,58 @@ function NyxAgentThreadPage() {
 
   const conversation = chat.conversation;
   // Threads carry the agent's handle; its display name lives on the agent list.
-  const headerNamed = headerAgent ? withDisplayName(headerAgent, agents.data?.agents) : undefined;
+  const headerNamed = headerAgent
+    ? withDisplayName(headerAgent, agents.data?.agents)
+    : undefined;
   const agentName = headerNamed ? agentTitle(headerNamed) : "NyxBot";
-  const destroyed = Boolean(headerAgent?.destroyed) || selectedAgent?.can_use === false;
-  const channelPlatform = selectedId ? (conversation?.channel?.platform ?? null) : null;
+  const destroyed =
+    Boolean(headerAgent?.destroyed) || selectedAgent?.can_use === false;
+  const channelPlatform = selectedId
+    ? (conversation?.channel?.platform ?? null)
+    : null;
   // The home stays until the first message of its new NyxBot thread shows.
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
-  const threadPanels = headerAgent && !showHome ? (
-    <div className="shrink-0 px-4 pt-3 sm:px-6">
-      <div className="mx-auto w-full max-w-[758px] space-y-2">
-        <ThreadHeader
-          name={agentName}
-          handle={headerNamed ? agentHandle(headerNamed) : undefined}
-          kind={headerAgent.kind}
-          agentId={headerAgent.id}
-          destroyed={destroyed}
-          channelPlatform={channelPlatform}
-          onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-        />
-        {headerAgent.kind === "nyxbot" ? (
-          <TeamStrip agents={agents.data?.agents ?? []} onOpenConversation={go} />
-        ) : null}
-        {conversation && !chat.isStreaming ? (
-          <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
-        ) : null}
-        {selectedId && !chat.isStreaming ? (
-          <WaitingNote items={chat.waiting} agentName={agentName} />
-        ) : null}
+  const threadPanels =
+    headerAgent && !showHome ? (
+      <div className="shrink-0 px-4 pt-3 sm:px-6">
+        <div className="mx-auto w-full max-w-[758px] space-y-2">
+          <ThreadHeader
+            name={agentName}
+            handle={headerNamed ? agentHandle(headerNamed) : undefined}
+            kind={headerAgent.kind}
+            agentId={headerAgent.id}
+            destroyed={destroyed}
+            channelPlatform={channelPlatform}
+            onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
+          />
+          {headerAgent.kind === "nyxbot" ? (
+            <TeamStrip
+              agents={agents.data?.agents ?? []}
+              onOpenConversation={go}
+            />
+          ) : null}
+          {conversation && !chat.isStreaming ? (
+            <PendingEventsNote
+              count={conversation.pending_events}
+              agentName={agentName}
+            />
+          ) : null}
+          {selectedId && !chat.isStreaming ? (
+            <WaitingNote items={chat.waiting} agentName={agentName} />
+          ) : null}
+        </div>
       </div>
-    </div>
-  ) : null;
+    ) : null;
 
   return (
     <AssistantShell
       title={showHome ? "Home" : chat.session.title}
       titleKey={selectedId}
-      onRenameTitle={selectedId && !destroyed
-        ? (title) => chat.renameConversation(selectedId, title)
-        : undefined}
+      onRenameTitle={
+        selectedId && !destroyed
+          ? (title) => chat.renameConversation(selectedId, title)
+          : undefined
+      }
       headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
@@ -738,17 +835,33 @@ function NyxAgentThreadPage() {
           </div>
         ) : (
           <AssistantLinkModalHost>
-            {chat.isStreaming && chat.continuations > 0 ? <p role="status" className="mx-auto w-full max-w-[758px] px-4 pb-2 text-11 text-muted-foreground">Continuing task…</p> : null}
-            {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
+            {chat.isStreaming && chat.continuations > 0 ? (
+              <p
+                role="status"
+                className="mx-auto w-full max-w-[758px] px-4 pb-2 text-11 text-muted-foreground"
+              >
+                Continuing task…
+              </p>
+            ) : null}
+            {chat.session.conversationId ? (
+              <ConversationMachineDesktops
+                conversationId={chat.session.conversationId}
+                turnActive={chat.isStreaming}
+              />
+            ) : null}
             <NyxAgentThreadMessageList
               session={chat.session}
               bottomInset={composerHeight}
               renderMessage={(message) => {
-                if (message.role === "event") return <NyxBotEventNotice message={message} />;
+                if (message.role === "event")
+                  return <NyxBotEventNotice message={message} />;
                 if (message.role === "orchestrator") {
                   return <NyxBotOrchestratorMessage message={message} />;
                 }
-                const via = message.role === "user" ? (message.via ?? channelPlatform) : null;
+                const via =
+                  message.role === "user"
+                    ? (message.via ?? channelPlatform)
+                    : null;
                 if (via) {
                   // The user wrote this in a chat app, not here.
                   return (
@@ -777,12 +890,14 @@ function NyxAgentThreadPage() {
                         decision: null,
                         decision_channel: null,
                       }}
-                      onDecide={(approved) => chat.decideApproval(approval.id, approved)}
+                      onDecide={(approved) =>
+                        chat.decideApproval(approval.id, approved)
+                      }
                     />
                   );
                 }
-                const acknowledgement = chat.acknowledgements.find((row) =>
-                  message.id === `nyxagent-acknowledgement:${row.id}`,
+                const acknowledgement = chat.acknowledgements.find(
+                  (row) => message.id === `nyxagent-acknowledgement:${row.id}`,
                 );
                 if (!acknowledgement) return undefined;
                 return (
@@ -790,14 +905,19 @@ function NyxAgentThreadPage() {
                     acknowledgement={acknowledgement}
                     deciding={Boolean(chat.decidingAcknowledgement)}
                     onDecision={async (choice) => {
-                      await chat.decideAcknowledgement({ id: acknowledgement.id, choice });
+                      await chat.decideAcknowledgement({
+                        id: acknowledgement.id,
+                        choice,
+                      });
                       setFocusRequest((value) => value + 1);
                     }}
                   />
                 );
               }}
               projectionVersion={[
-                ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
+                ...chat.acknowledgements.map(
+                  (row) => `${row.id}:${row.status}`,
+                ),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
               bottomInset={composerHeight}
@@ -811,22 +931,41 @@ function NyxAgentThreadPage() {
             />
           </AssistantLinkModalHost>
         )}
-        {voiceEnabled && voiceThread && voiceThread === selectedId && !destroyed && !channelPlatform && (
-          <div className="absolute inset-x-0 top-3 z-20 mx-auto w-full max-w-[758px] px-4">
-            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={voiceSettings.data?.voice}
-              onClose={() => { setVoiceThread(undefined); setFocusRequest((n) => n + 1); }} />
-          </div>
-        )}
+        {voiceEnabled &&
+          voiceThread &&
+          voiceThread === selectedId &&
+          !destroyed &&
+          !channelPlatform && (
+            <div className="absolute inset-x-0 top-3 z-20 mx-auto w-full max-w-[758px] px-4">
+              <VoicePanel
+                key={`${user?.id}:${voiceThread}`}
+                threadId={voiceThread}
+                savedPreferences={voiceSettings.data?.voice}
+                onClose={() => {
+                  setVoiceThread(undefined);
+                  setFocusRequest((n) => n + 1);
+                }}
+              />
+            </div>
+          )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <NyxAgentComposer
             conversation={chat.conversation}
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
-            onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {
-              if (selection.current !== selectedId) return;
-              setVoiceThread(id);
-              adopt(id);
-            } : undefined}
-            scope={{ kind: "conversations", id: selectedId, agentId: headerAgent?.id }}
+            onVoice={
+              voiceEnabled && !destroyed && !channelPlatform
+                ? async (id) => {
+                    if (selection.current !== selectedId) return;
+                    setVoiceThread(id);
+                    adopt(id);
+                  }
+                : undefined
+            }
+            scope={{
+              kind: "conversations",
+              id: selectedId,
+              agentId: headerAgent?.id,
+            }}
             active={chat.isStreaming}
             sending={chat.isStreaming}
             disabled={Boolean(selectedId && chat.error) || destroyed}
@@ -846,7 +985,9 @@ function NyxAgentThreadPage() {
                 await chat.send(text, uploads);
               } catch (error) {
                 toast.error(
-                  error instanceof Error ? error.message : "The assistant is unavailable.",
+                  error instanceof Error
+                    ? error.message
+                    : "The assistant is unavailable.",
                 );
                 throw error;
               }
