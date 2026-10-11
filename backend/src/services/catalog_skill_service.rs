@@ -148,6 +148,11 @@ pub fn resolve_update(current: &SkillState, input: &SkillUpdate) -> AppResult<Sk
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for reference in refs {
+            if reference.disabled {
+                return Err(AppError::BadRequest(
+                    "Catalog recommended skill refs cannot be disabled".into(),
+                ));
+            }
             validate_pin(
                 &reference.source,
                 &reference.skill_id,
