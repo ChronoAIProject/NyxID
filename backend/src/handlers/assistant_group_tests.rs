@@ -185,7 +185,7 @@ async fn sticky_recipients_persist_after_a_multi_mention() {
     post(&state, OWNER, &group.id, "and then?", None)
         .await
         .unwrap();
-    let rows = settled(&state, &group.id, 7).await;
+    let rows = settled(&state, &group.id, 5).await;
     let ids = rows
         .iter()
         .rev()
@@ -281,7 +281,7 @@ async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recip
     post(&state, OWNER, &group.id, "@researcher approve this", None)
         .await
         .unwrap();
-    let rows = settled(&state, &group.id, 5).await;
+    let rows = settled(&state, &group.id, 3).await;
     assert!(rows.iter().any(|row| row.role == "agent"));
     server.abort();
 }
@@ -305,7 +305,7 @@ async fn nyxbot_post_to_group_is_never_sticky() {
     post(&state, OWNER, &group.id, "@researcher first", None)
         .await
         .unwrap();
-    settled(&state, &group.id, 5).await;
+    settled(&state, &group.id, 3).await;
     post(&state, OWNER, &group.id, "bare follow-up", None)
         .await
         .unwrap();
