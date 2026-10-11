@@ -96,6 +96,47 @@ pub struct EffectiveBillingConfig {
     pub overdraft_source: BillingConfigSource,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct EffectiveComponentSource {
+    pub metric: String,
+    pub source: BillingConfigSource,
+}
+
+pub fn effective_component_sources(service: &ServiceBilling) -> Vec<EffectiveComponentSource> {
+    let mut out = Vec::new();
+    for lane in [
+        service.byok_pricing.as_ref(),
+        service.platform_key_pricing.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let synced = lane.sync_status == crate::models::service_billing::PricingSyncStatus::Synced;
+        out.push(EffectiveComponentSource {
+            metric: lane.metric.to_string(),
+            source: if synced {
+                BillingConfigSource::Service
+            } else {
+                BillingConfigSource::Legacy
+            },
+        });
+        for component in &lane.components {
+            out.push(EffectiveComponentSource {
+                metric: component.metric.to_string(),
+                source: if synced
+                    && component.sync_status
+                        == crate::models::service_billing::PricingSyncStatus::Synced
+                {
+                    BillingConfigSource::Service
+                } else {
+                    BillingConfigSource::Free
+                },
+            });
+        }
+    }
+    out
+}
+
 /// Resolves display/configuration precedence without participating in billing
 /// admission, pricing, or settlement: service override, global setting, then
 /// deployment fallback. `None` is explicitly represented as free.

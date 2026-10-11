@@ -203,7 +203,7 @@ pub struct BillingServiceResponse {
     pub sync_status: Option<String>,
     pub sync_error: Option<String>,
     pub primary_source: &'static str,
-    pub component_sources: Vec<&'static str>,
+    pub component_sources: Vec<String>,
 }
 
 pub async fn get_overview(
@@ -262,7 +262,12 @@ pub async fn get_overview(
                             b.byok_pricing
                                 .as_ref()
                                 .or(b.platform_key_pricing.as_ref())
-                                .map(|p| p.components.iter().map(|_| source).collect())
+                                .map(|p| {
+                                    crate::services::billing::config::effective_component_sources(p)
+                                        .into_iter()
+                                        .map(|c| format!("{:?}", c.source).to_lowercase())
+                                        .collect()
+                                })
                                 .unwrap_or_default()
                         })
                         .unwrap_or_default(),
