@@ -16,6 +16,13 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
+  it("hides feedback in replay and without a persisted conversation", () => {
+    const { rerender } = render(<ChatMessageBubble message={BASE} conversationId="conversation-1" feedbackEnabled={false} />);
+    expect(screen.queryByRole("button", { name: "Helpful" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add feedback comment" })).not.toBeInTheDocument();
+    rerender(<ChatMessageBubble message={BASE} />);
+    expect(screen.queryByRole("group", { name: "Reply feedback" })).not.toBeInTheDocument();
+  });
   afterEach(() => vi.useRealTimers());
 
   it("opens the optional feedback comment popover without submitting", () => {
