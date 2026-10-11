@@ -1888,6 +1888,8 @@ Regression coverage lives beside the new service and handlers, in [`telegram_new
 
 Use `GET /api/v1/channel-bots/{id}/health` (or `nyxid channel-bot health <id>`) before reconnecting. The response is metadata-only and gives a stable `recommended_action`.
 
+The `diagnostics` object records `last_inbound_at`/`last_inbound_source`, `last_outbound_at` and its error, webhook receipt/error timestamps, subscription state, consecutive errors, and the stable `failure_reason`. `signature` and `unregistered` webhook drops are retained there, as are poll-threshold failures. These fields are safe to include in support tickets; never include tokens, webhook secrets, or message bodies.
+
 | Symptom | Cause | Diagnostic fields | Action |
 | --- | --- | --- | --- |
 | No inbound events in webhook mode | Subscription missing or callback rejected | `webhook_registered`, `status`, `error` | Choose **Resubscribe** (or `POST .../{id}/resubscribe`), then Verify. |
