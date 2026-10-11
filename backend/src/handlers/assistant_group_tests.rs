@@ -217,21 +217,13 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
     post(&state, OWNER, &id, "ask the researcher for a summary", None)
         .await
         .unwrap();
-    let rows = settled(&state, &id, 8).await;
+    // Sticky routing keeps the previously mentioned researcher as the
+    // recipient when the owner omits a new mention.
+    let rows = settled(&state, &id, 7).await;
+    let owner_message = rows.iter().rev().find(|row| row.role == "user").unwrap();
+    assert_eq!(owner_message.recipient_agent_ids, vec![researcher.id.clone()]);
     let texts = agent_texts(&rows);
-    assert_eq!(
-        texts[texts.len() - 2..].to_vec(),
-        vec![
-            (
-                "NyxBot".to_owned(),
-                "Handing over: @researcher please summarize.".to_owned()
-            ),
-            (
-                "researcher".to_owned(),
-                "Researcher summary ready.".to_owned()
-            ),
-        ]
-    );
+    assert_eq!(texts.last().unwrap().0, "researcher");
     // Members mentioning each other stop after the hand-off budget.
     let before = rows.len();
     post(&state, OWNER, &id, "ping-pong @researcher", None)
