@@ -143,6 +143,20 @@ impl ChatAuthority {
         self.is_orchestrator() && !self.guest
     }
 
+    /// Compatibility policy used by owner-controlled settings. Strict mode
+    /// denies specialist requests; routed mode permits the existing
+    /// orchestrator-card path while never granting specialist authority.
+    pub fn access_request_allowed_with_mode(
+        &self,
+        mode: crate::models::assistant_settings::SpecialistAccessRequests,
+    ) -> bool {
+        self.access_request_allowed()
+            || (matches!(
+                mode,
+                crate::models::assistant_settings::SpecialistAccessRequests::RoutedToNyxbot
+            ) && !self.guest)
+    }
+
     pub fn turn_fence(&self) -> AssistantTurnFence {
         AssistantTurnFence {
             conversation_id: self.conversation_id.clone(),
@@ -456,11 +470,25 @@ mod access_authority_tests {
 
     #[test]
     fn specialist_access_matrix_denies_all_requesting_turn_kinds() {
-        let gates = ["service", "account", "operations", "skills", "machine", "connect", "channel"];
-        let turns = [("owner", false), ("guest", true), ("event", false), ("channel", true)];
+        let gates = [
+            "service",
+            "account",
+            "operations",
+            "skills",
+            "machine",
+            "connect",
+            "channel",
+        ];
+        let turns = [
+            ("owner", false),
+            ("guest", true),
+            ("event", false),
+            ("channel", true),
+        ];
         for tool in crate::services::assistant_team_tools::TOOL_NAMES
             .iter()
-            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES.iter()) {
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES.iter())
+        {
             for gate in gates {
                 for (turn, guest) in turns {
                     let authority = chat(AgentRole::Subagent, guest);
@@ -476,8 +504,22 @@ mod access_authority_tests {
     #[test]
     fn routed_mode_is_explicitly_distinct_from_strict_default() {
         use crate::models::assistant_settings::SpecialistAccessRequests;
-        assert_eq!(SpecialistAccessRequests::default(), SpecialistAccessRequests::Denied);
-        assert_ne!(SpecialistAccessRequests::Denied, SpecialistAccessRequests::RoutedToNyxbot);
+        assert_eq!(
+            SpecialistAccessRequests::default(),
+            SpecialistAccessRequests::Denied
+        );
+        assert_ne!(
+            SpecialistAccessRequests::Denied,
+            SpecialistAccessRequests::RoutedToNyxbot
+        );
+        assert!(
+            chat(AgentRole::Subagent, false)
+                .access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot)
+        );
+        assert!(
+            !chat(AgentRole::Subagent, false)
+                .access_request_allowed_with_mode(SpecialistAccessRequests::Denied)
+        );
     }
 }
 
@@ -762,7 +804,11 @@ async fn request_tracked_with_machine_context(
     request: Request<'_>,
     machine_context: Option<crate::models::machine_access::HumanContextAction>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
-    if request.kind != "action" && !chat.access_request_allowed() {
+    let request_mode = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| s.specialist_access_requests)
+        .unwrap_or_default();
+    if request.kind != "action" && !chat.access_request_allowed_with_mode(request_mode) {
         return Err(AppError::Forbidden(
             "access_request_denied: only NyxBot can request or grant access; report the need to NyxBot in your reply".into(),
         ));
@@ -1134,7 +1180,11 @@ pub async fn service_gate(
     if chat.guest {
         return Ok(Some((guest_refusal(), None)));
     }
-    if !chat.access_request_allowed() {
+    let routed = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
+        .unwrap_or(false);
+    if !routed {
         audit_access_request_denied(db, chat, Some(id), "service").await;
         return Ok(Some((access_request_denied(), None)));
     }
@@ -1181,7 +1231,11 @@ pub async fn account_gate(
     if chat.is_orchestrator() {
         return Ok(None);
     }
-    if !chat.access_request_allowed() {
+    let routed = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
+        .unwrap_or(false);
+    if !routed {
         audit_access_request_denied(db, chat, None, "account").await;
         return Ok(Some((access_request_denied(), None)));
     }
