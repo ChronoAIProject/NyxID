@@ -234,7 +234,7 @@ pub async fn audit_access_request_denied(
         ),
     )
     .await;
-    if let Ok(agents) = super::assistant_team_service::list(db, &chat.user_id).await {
+    if let Ok(agents) = super::assistant_team_service::agents(db, &chat.user_id).await {
         if let Some(home) = agents
             .into_iter()
             .find(|a| a.is_nyxbot())
@@ -428,6 +428,43 @@ pub fn arguments_digest(arguments: &Value) -> String {
         map.remove("acknowledgement_id");
     }
     hex::encode(Sha256::digest(canonical(&value).to_string().as_bytes()))
+}
+
+#[cfg(test)]
+mod access_authority_tests {
+    use super::*;
+    use crate::models::assistant_conversation::AgentRole;
+
+    fn chat(role: AgentRole, guest: bool) -> ChatAuthority {
+        ChatAuthority {
+            org_agent_access: None,
+            turn_id: None,
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "thread".into(),
+            user_id: "user".into(),
+            api_key_id: "key".into(),
+            role,
+            agent_id: "agent".into(),
+            agent_name: "specialist".into(),
+            guest,
+            confirmation_policy: None,
+        }
+    }
+
+    #[test]
+    fn specialist_access_matrix_denies_all_requesting_turn_kinds() {
+        for guest in [false, true] {
+            for role in [AgentRole::Subagent] {
+                assert!(!chat(role, guest).access_request_allowed());
+            }
+        }
+        assert!(chat(AgentRole::Orchestrator, false).access_request_allowed());
+        assert!(!chat(AgentRole::Orchestrator, true).access_request_allowed());
+        assert_eq!(access_request_denied()["error"], "access_request_denied");
+    }
 }
 
 async fn fence(

@@ -181,10 +181,13 @@ export function AgentDetailsSheet({
                 agent={agent}
               />
               {agent.kind === "specialist" ? (
-                <GrantsForm
-                  key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
-                  agent={agent}
-                />
+                <>
+                  <Section title="Access authority" description="Only NyxBot can request or grant access for this agent." />
+                  <GrantsForm
+                    key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
+                    agent={agent}
+                  />
+                </>
               ) : (
                 <Section title="Access" description="NyxBot runs with full access to your connected services and account. Machine capabilities are assigned separately. Destructive actions follow your confirmation setting.">
                   <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
