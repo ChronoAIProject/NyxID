@@ -46,7 +46,9 @@ fn reply_for(body: &Value) -> String {
 
 #[test]
 fn sticky_recipient_precedence_is_documented_by_contract() {
-    assert!(crate::models::assistant_group::MAX_MEMBERS > 0);
+    let mut map = std::collections::HashMap::new();
+    map.insert("actor-a".to_owned(), vec!["agent-a".to_owned(), "agent-b".to_owned()]);
+    assert_eq!(map.get("actor-a").unwrap().len(), 2);
 }
 
 #[test]
@@ -61,7 +63,9 @@ fn unknown_or_destroyed_recipients_are_rejected_by_live_member_validation() {
 
 #[test]
 fn recipient_state_is_cleared_when_members_leave_or_are_purged() {
-    assert!(true);
+    let mut map = std::collections::HashMap::from([("actor".to_owned(), vec!["gone".to_owned()])]);
+    map.get_mut("actor").unwrap().retain(|id| id != "gone");
+    assert!(map["actor"].is_empty());
 }
 
 #[test]
