@@ -6,6 +6,7 @@ import { ChatComposer } from "@/components/assistant/chat-composer";
 import {
   createUploadDraft,
   removeUpload,
+  UNSUPPORTED_FORMAT_MESSAGE,
   uploadFile,
   type UploadedMessage,
   type UploadScope,
@@ -82,6 +83,13 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         progress: 0,
         controller: new AbortController(),
       };
+      const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/markdown", "text/csv", "application/json"];
+      if (!allowed.includes(file.type) && !/^text\//.test(file.type)) {
+        entry.error = UNSUPPORTED_FORMAT_MESSAGE;
+        pending.current.set(entry.key, entry);
+        refresh();
+        continue;
+      }
       if (
         ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(
           file.type,
@@ -159,8 +167,8 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                   {file.preview ? (
                     <img
                       src={file.preview}
-                      alt="Upload preview"
-                      className="h-8 w-8 shrink-0 rounded object-cover"
+                        alt={file.name}
+                      className="h-16 w-16 shrink-0 rounded object-cover"
                     />
                   ) : (
                     <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
@@ -256,6 +264,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             items.length
               ? {
                   attachmentIds: items.map((file) => file.item!.id),
+                  attachments: items.map((file) => file.item!),
                   conversationId:
                     scope.kind === "conversations"
                       ? resolved.current.id

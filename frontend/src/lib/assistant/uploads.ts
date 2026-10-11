@@ -12,8 +12,11 @@ export interface UploadScope {
 }
 export interface UploadedMessage {
   readonly attachmentIds: string[];
+  readonly attachments?: readonly NyxAgentAttachment[];
   readonly conversationId?: string;
 }
+
+export const UNSUPPORTED_FORMAT_MESSAGE = "Format not supported. Please try again.";
 
 export async function createUploadDraft(agentId?: string): Promise<string> {
   const draft = await assistantJson<{ id: string }>(
