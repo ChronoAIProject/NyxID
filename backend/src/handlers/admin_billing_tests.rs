@@ -2,6 +2,13 @@
 mod tests {
     use super::super::admin_billing::BillingConfigResponse;
     use crate::models::platform_settings::BillingSettings;
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        response::Response,
+    };
+    use tower::ServiceExt;
 
     async fn mongo_fixture(name: &str) -> Option<(crate::AppState, crate::mw::auth::AuthUser)> {
         let db = crate::test_utils::connect_test_database(name).await?;
@@ -124,15 +131,20 @@ mod tests {
             .await
             .expect_err("non-admin must be rejected");
         assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
-        for route in [
-            "overview",
-            "rates",
-            "config_get",
-            "config_put",
-            "resync",
-            "service_put",
+        let (public, private) = crate::routes::build_router_with_state(state.clone());
+        let router = public.merge(private).with_state(state);
+        for path in [
+            "/api/v1/admin/billing/overview",
+            "/api/v1/admin/billing/rates",
+            "/api/v1/admin/billing/config",
+            "/api/v1/admin/billing/services/missing/resync",
         ] {
-            assert!(!route.is_empty());
+            let response: Response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
     }
 
