@@ -2819,10 +2819,7 @@ async fn webhook_service_gate(
     args: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
-    let chat = auth
-        .chat
-        .as_ref()
-        .filter(|chat| chat.confirmation_policy.is_some())?;
+    let chat = auth.chat.as_ref()?;
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)

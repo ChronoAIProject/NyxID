@@ -157,11 +157,19 @@ mod access_mode_tests {
 
     #[test]
     fn classifier_covers_tool_families() {
-        assert_eq!(classify_owner_action("nyx__machine_exec", None), OwnerActionClass::Destructive);
-        assert_eq!(classify_owner_action("grant_subagent", None), OwnerActionClass::Sensitive);
-        assert_eq!(classify_owner_action("delete_agent_key", None), OwnerActionClass::Destructive);
-        assert_eq!(classify_owner_action("list_services", Some("GET")), OwnerActionClass::Read);
-        assert_eq!(classify_owner_action("create_schedule", None), OwnerActionClass::Sensitive);
+        let cases = [
+            ("nyx__machine_exec", None, OwnerActionClass::Destructive),
+            ("grant_subagent", None, OwnerActionClass::Sensitive),
+            ("delete_agent_key", None, OwnerActionClass::Destructive),
+            ("nyx__call_tool", Some("GET"), OwnerActionClass::Read),
+            ("create_schedule", None, OwnerActionClass::Sensitive),
+            ("service_operation", Some("DELETE"), OwnerActionClass::Destructive),
+            ("set_guest_access", None, OwnerActionClass::Sensitive),
+            ("nyx__search_tools", Some("GET"), OwnerActionClass::Read),
+        ];
+        for (tool, method, expected) in cases {
+            assert_eq!(classify_owner_action(tool, method), expected, "{tool}");
+        }
     }
 }
 
