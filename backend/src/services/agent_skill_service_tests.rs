@@ -609,9 +609,23 @@ async fn agent_skill_version_pages_keep_older_pins_available() {
 async fn disabled_pins_are_omitted_from_prompt_instructions() {
     let f = fixture("agent_skill_disabled_prompt").await;
     let reader = Registry::new();
-    let selection = Selection { expected_revision: 0, skills: vec![reader.reference()] };
-    set(&f.state.db, &reader, &f.owner, &f.chat.agent_id, &selection, true).await.unwrap();
-    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id).await.unwrap();
+    let selection = Selection {
+        expected_revision: 0,
+        skills: vec![reader.reference()],
+    };
+    set(
+        &f.state.db,
+        &reader,
+        &f.owner,
+        &f.chat.agent_id,
+        &selection,
+        true,
+    )
+    .await
+    .unwrap();
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
     agent.skills[0].disabled = true;
     assert!(instructions(&agent).is_empty());
     f.state.db.drop().await.unwrap();

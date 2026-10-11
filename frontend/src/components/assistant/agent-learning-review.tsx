@@ -29,6 +29,9 @@ export function AgentLearningReview({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [draftNames, setDraftNames] = useState<Record<string, string>>({});
   const [draftDescriptions, setDraftDescriptions] = useState<Record<string, string>>({});
+  const [draftRationales, setDraftRationales] = useState<Record<string, string>>({});
+  const [draftBases, setDraftBases] = useState<Record<string, string>>({});
+  const [draftFiles, setDraftFiles] = useState<Record<string, { path: string; content: string }[]>>({});
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
@@ -198,6 +201,20 @@ export function AgentLearningReview({
                     }))
                   }
                 />
+                <Textarea
+                  aria-label="Rationale"
+                  placeholder="Why this skill should be published"
+                  value={draftRationales[proposal.id] ?? draft.rationale ?? ""}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftRationales((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
+                <Input
+                  aria-label="Base skill"
+                  placeholder="Base skill id@version (optional)"
+                  value={draftBases[proposal.id] ?? (draft.base_skill ? `${draft.base_skill.skill_id}@${draft.base_skill.version}` : "")}
+                  readOnly={readOnly}
+                  onChange={(event) => setDraftBases((current) => ({ ...current, [proposal.id]: event.target.value }))}
+                />
                 <Input
                   aria-label="Skill name"
                   value={draftNames[proposal.id] ?? draft.name}
@@ -210,18 +227,18 @@ export function AgentLearningReview({
                   readOnly={readOnly}
                   onChange={(event) => setDraftDescriptions((current) => ({ ...current, [proposal.id]: event.target.value }))}
                 />
-                {draft.files.map((file, index) => (
+                {(draftFiles[proposal.id] ?? draft.files).map((file, index) => (
                   <div key={`${proposal.id}-${index}`} className="space-y-1 rounded border border-border/50 p-2">
-                    <Input aria-label={`File ${index + 1} path`} value={file.path} readOnly={readOnly} />
-                    <Textarea aria-label={`File ${index + 1} content`} value={file.content} readOnly={readOnly} />
+                    <Input aria-label={`File ${index + 1} path`} value={file.path} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, path: event.target.value } : f) }))} />
+                    <Textarea aria-label={`File ${index + 1} content`} value={file.content} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, content: event.target.value } : f) }))} />
+                    {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).filter((_, i) => i !== index) }))}>Remove file</Button> : null}
                   </div>
                 ))}
+                {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: [...(current[proposal.id] ?? draft.files), { path: "", content: "" }] }))}>Add file</Button> : null}
                 <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2 text-11">
                   {draft.safety_notes}
                 </pre>
-                {!readOnly &&
-                drafts[proposal.id] !== undefined &&
-                drafts[proposal.id] !== draft.skill_md ? (
+                {!readOnly && (drafts[proposal.id] !== undefined || draftRationales[proposal.id] !== undefined || draftFiles[proposal.id] !== undefined) ? (
                   <Button
                     size="sm"
                     variant="secondary"
@@ -235,6 +252,8 @@ export function AgentLearningReview({
                           name: draftNames[proposal.id] ?? draft.name,
                           description: draftDescriptions[proposal.id] ?? draft.description,
                           skill_md: drafts[proposal.id],
+                          rationale: draftRationales[proposal.id] ?? draft.rationale,
+                          files: draftFiles[proposal.id] ?? draft.files,
                         },
                       })
                     }

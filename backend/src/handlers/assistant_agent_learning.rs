@@ -575,3 +575,29 @@ pub async fn admin_release_target(
         .await?,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::EditBody;
+    use serde_json::json;
+
+    #[test]
+    fn edit_accepts_top_level_revision() {
+        let body: EditBody = serde_json::from_value(json!({
+            "revision": 7,
+            "draft": {"name": "n"}
+        }))
+        .expect("top-level revision is part of the public form");
+        assert_eq!(body.revision, Some(7));
+    }
+
+    #[test]
+    fn edit_accepts_legacy_nested_revision() {
+        let body: EditBody = serde_json::from_value(json!({
+            "draft": {"revision": 4, "name": "n"}
+        }))
+        .expect("legacy nested form remains readable");
+        assert_eq!(body.revision, None);
+        assert_eq!(body.draft["revision"], 4);
+    }
+}
