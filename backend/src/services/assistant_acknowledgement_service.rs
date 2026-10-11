@@ -445,6 +445,7 @@ pub fn arguments_digest(arguments: &Value) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod access_authority_tests {
     use super::*;
     use crate::models::assistant_conversation::AgentRole;
