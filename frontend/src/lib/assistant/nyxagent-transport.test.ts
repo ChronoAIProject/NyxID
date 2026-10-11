@@ -21,6 +21,10 @@ it.each([
   expect(storedError(code)).toContain(text);
 });
 
+it("maps an unknown raw upstream code to specific recoverable copy", () => {
+  expect(storedError("provider_rate_limited")).toContain("could not complete");
+});
+
 it("keeps a persisted diagnostic detail visible after reload", () => {
   const parsed = nyxAgentMessageSchema.parse({
     id: "failed", seq: 2, turn_id: "turn-1", role: "assistant", text: "",

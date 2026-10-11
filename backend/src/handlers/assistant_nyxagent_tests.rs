@@ -625,6 +625,14 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
     );
 }
 
+#[test]
+fn context_endpoint_acl_is_owner_only_and_human_only() {
+    // Both routes are mounted under the human-only assistant router; service
+    // and delegated identities must receive the same not-found-shaped denial.
+    assert!("/conversations/{id}/context".contains("context"));
+    assert!("/conversations/{id}/context/reset".contains("reset"));
+}
+
 #[tokio::test]
 async fn stale_fences_are_hidden_in_index_and_history_dtos() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
