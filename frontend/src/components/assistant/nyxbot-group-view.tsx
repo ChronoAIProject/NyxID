@@ -468,7 +468,7 @@ export function NyxAgentGroupPage({
     message.agent ? { ...message, agent: withDisplayName(message.agent, agents.data?.agents) } : message,
   );
   useEffect(() => {
-    if (group && !recipientAgentIds.length) setRecipientAgentIds(group.default_recipient_ids);
+    if (group && !recipientAgentIds.length) setRecipientAgentIds(group.default_recipient_ids ?? []);
   }, [group, recipientAgentIds.length]);
   const onComposerContentChange = (content: string) => {
     if (!group) return;
