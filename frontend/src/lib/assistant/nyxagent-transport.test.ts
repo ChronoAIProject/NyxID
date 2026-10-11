@@ -169,6 +169,8 @@ describe("NyxAgent server-backed transport", () => {
     const transport = new NyxAgentTransport();
     await transport.history(id);
     const message = transport.session(id).messages[0];
+    expect(message).toBeDefined();
+    if (!message) throw new Error("stopped reply was not loaded");
     expect(message.status).toBe("complete");
     expect(message.errorCode).toBe("cancelled");
     expect(message.error).toBeUndefined();
