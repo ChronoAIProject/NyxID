@@ -1748,3 +1748,38 @@ async fn deleting_a_conversation_revokes_children_clears_bindings_and_audits_aft
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn action_summary_succeeds_for_every_sensitive_or_destructive_tool() {
+    let f = orchestrator_fixture("card_summary_coverage").await;
+    let key = ordinary_key(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "summary-service",
+        "https://summary.example",
+    )
+    .await;
+    let tools = f.tools();
+    for (name, args) in [
+        ("delete_agent_key", json!({"api_key_id": key.clone()})),
+        (
+            "bind_agent_key_credential",
+            json!({"api_key_id": key.clone(), "binding_id": Uuid::new_v4().to_string()}),
+        ),
+        (
+            "unbind_agent_key_credential",
+            json!({"api_key_id": key.clone(), "binding_id": Uuid::new_v4().to_string()}),
+        ),
+        ("delete_service", json!({"service_id": service.id.clone()})),
+        (
+            "set_service_enabled",
+            json!({"service_id": service.id.clone()}),
+        ),
+    ] {
+        assert!(
+            tools.action_summary(&f.owner, name, &args).await.is_ok(),
+            "{name}"
+        );
+    }
+}

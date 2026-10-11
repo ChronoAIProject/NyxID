@@ -1388,21 +1388,3 @@ mod assistant_key_refusal_tests {
         assert!(true);
     }
 }
-
-#[cfg(test)]
-mod exhaustive_card_summary_tests {
-    #[test]
-    fn every_sensitive_or_destructive_account_tool_has_a_summary_arm() {
-        let covered = [
-            "delete_agent_key",
-            "bind_agent_key_credential",
-            "unbind_agent_key_credential",
-            "delete_channel_bot",
-            "delete_channel_route",
-            "delete_service",
-            "delete_node",
-            "set_service_enabled",
-        ];
-        assert!(covered.contains(&"set_service_enabled"));
-    }
-}
