@@ -83,7 +83,9 @@ async fn upsert(
         return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
     }
     let now = Utc::now();
-    let filter = doc! {"user_id":&user_id,"message_id":message_id};
+    let mut filter = doc! {"user_id":&user_id,"message_id":message_id};
+    if let Some(cid) = conversation_id.as_deref() { filter.insert("conversation_id", cid); }
+    if let Some(gid) = group_id.as_deref() { filter.insert("group_id", gid); }
     let existing = state.db.collection::<AssistantMessageFeedback>(COLLECTION_NAME).find_one(filter.clone()).await?;
     let mut set = doc! {"vote":&input.vote,"updated_at":bson::DateTime::from_chrono(now),"conversation_id":conversation_id.clone(),"group_id":group_id.clone(),"turn_id":turn_id.clone()};
     if input.comment.is_some() { set.insert("comment", comment.clone()); }
