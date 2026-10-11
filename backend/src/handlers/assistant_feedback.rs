@@ -197,7 +197,7 @@ pub async fn admin(
         filter.insert("created_at", doc! {"$gte":bson::DateTime::from_chrono(f)});
     }
     if let Some(t) = q.to {
-        filter.entry("created_at").or_insert(doc! {});
+        filter.entry("created_at").or_insert(doc! {}.into());
         if let Some(b) = filter.get_document_mut("created_at").ok() {
             b.insert("$lte", bson::DateTime::from_chrono(t));
         }
@@ -243,7 +243,10 @@ mod tests {
 
     #[test]
     fn validate_accepts_votes_and_bounds_comments() {
-        let input = FeedbackInput { vote: "up".into(), comment: Some(format!("  {}  ", "x".repeat(1_200))) };
+        let input = FeedbackInput {
+            vote: "up".into(),
+            comment: Some(format!("  {}  ", "x".repeat(1_200))),
+        };
         let comment = validate(&input).unwrap().unwrap();
         assert_eq!(comment.len(), 1_000);
         assert!(comment.chars().all(|c| c == 'x'));
@@ -251,23 +254,42 @@ mod tests {
 
     #[test]
     fn validate_rejects_unknown_vote_with_stable_code() {
-        let error = validate(&FeedbackInput { vote: "maybe".into(), comment: None }).unwrap_err();
+        let error = validate(&FeedbackInput {
+            vote: "maybe".into(),
+            comment: None,
+        })
+        .unwrap_err();
         assert!(matches!(error, AppError::BadRequest(code) if code == "feedback_vote_invalid"));
     }
 
     #[test]
     fn empty_comment_is_omitted() {
-        assert!(validate(&FeedbackInput { vote: "down".into(), comment: Some("  \n".into()) }).unwrap().is_none());
+        assert!(
+            validate(&FeedbackInput {
+                vote: "down".into(),
+                comment: Some("  \n".into())
+            })
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
     fn response_does_not_expose_owner_or_message_text() {
         let now = Utc::now();
         let response: FeedbackResponse = AssistantMessageFeedback {
-            id: Uuid::new_v4().to_string(), user_id: "u".into(), conversation_id: Some("c".into()), group_id: None,
-            message_id: "m".into(), turn_id: Some("t".into()), vote: "up".into(), comment: None,
-            created_at: now, updated_at: now,
-        }.into();
+            id: Uuid::new_v4().to_string(),
+            user_id: "u".into(),
+            conversation_id: Some("c".into()),
+            group_id: None,
+            message_id: "m".into(),
+            turn_id: Some("t".into()),
+            vote: "up".into(),
+            comment: None,
+            created_at: now,
+            updated_at: now,
+        }
+        .into();
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json.get("vote").and_then(|v| v.as_str()), Some("up"));
         assert!(json.get("user_id").is_none());
