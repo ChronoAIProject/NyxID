@@ -1997,6 +1997,11 @@ async fn execute_turn(
         .map_err(proxy_turn_error)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let upstream_request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let bytes = tokio::time::timeout(
                 Duration::from_secs(10),
                 axum::body::to_bytes(response.into_body(), 65536),
@@ -2083,11 +2088,14 @@ async fn execute_turn(
                     .await;
                 }
                 RecoveryAction::Fail => {
-                    return Err(TurnError::new(if status == 401 || status == 403 {
+                    let mut error = TurnError::new(if status == 401 || status == 403 {
                         "agent_key_required"
                     } else {
                         code
-                    }));
+                    });
+                    error.http_status = Some(status);
+                    error.upstream_request_id = upstream_request_id;
+                    return Err(error);
                 }
             }
             continue;

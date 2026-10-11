@@ -2234,7 +2234,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 if let Some(error) = &error {
-                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
+                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations), upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
                     steering: None,
@@ -2255,11 +2255,11 @@ async fn finish_turn_inner(
                     .into(),
                     error_code: error.as_ref().map(|e| e.code.into()),
                     upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.clone()),
-                    error_detail: error.as_ref().map(|_| crate::models::assistant_message::AssistantErrorDetail {
-                        stage: "stream".into(),
-                        http_status: None,
-                        upstream_request_id: None,
-                        response_id: result.response_id.clone(),
+                    error_detail: error.as_ref().map(|error| crate::models::assistant_message::AssistantErrorDetail {
+                        stage: error.stage.clone(),
+                        http_status: error.http_status,
+                        upstream_request_id: error.upstream_request_id.clone(),
+                        response_id: error.response_id.clone().or_else(|| result.response_id.clone()),
                         continuations: current.active_turn.as_ref().map_or(0, |t| t.continuations),
                         turn_id: turn_id.clone(),
                         occurred_at: now,
@@ -2947,6 +2947,10 @@ pub struct TurnError {
     pub upstream_code: Option<String>,
     pub code: &'static str,
     pub message: &'static str,
+    pub stage: String,
+    pub http_status: Option<u16>,
+    pub upstream_request_id: Option<String>,
+    pub response_id: Option<String>,
 }
 impl TurnError {
     pub fn preserves_session(&self) -> bool {
@@ -3045,6 +3049,10 @@ impl TurnError {
             code,
             message,
             upstream_code,
+            stage: "stream".into(),
+            http_status: None,
+            upstream_request_id: None,
+            response_id: None,
         }
     }
 }

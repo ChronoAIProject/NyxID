@@ -322,6 +322,19 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 }
 
 #[test]
+fn turn_error_diagnostics_carry_stage_and_upstream_correlation_fields() {
+    let mut error = TurnError::new("assistant_unavailable");
+    error.stage = "upstream_response".into();
+    error.http_status = Some(503);
+    error.upstream_request_id = Some("req-123".into());
+    error.response_id = Some("resp-123".into());
+    assert_eq!(error.stage, "upstream_response");
+    assert_eq!(error.http_status, Some(503));
+    assert_eq!(error.upstream_request_id.as_deref(), Some("req-123"));
+    assert_eq!(error.response_id.as_deref(), Some("resp-123"));
+}
+
+#[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let mut row = AssistantMessage {
         steering: None,
