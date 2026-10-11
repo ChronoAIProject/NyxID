@@ -171,10 +171,11 @@ it("refuses a seventeenth attachment while retaining removal", () => {
   expect(screen.getByRole("button", { name: "Remove Skill 0" })).toBeEnabled();
 });
 
-it("renders attached preview content, bounded history rows, and preview errors", () => {
-  render(<AgentSkills agentId="agent" />);
+it("renders attached preview content, bounded history rows, and bounded preview errors", () => {
+  const view = render(<AgentSkills agentId="agent" />);
   expect(screen.getByText("Attached preview: Attached guidance")).toBeInTheDocument();
   expect(screen.getByText("disabled")).toBeInTheDocument();
   mocks.attachedPreview.mockReturnValue({ error: new Error("preview unavailable"), data: undefined });
-  expect(mocks.attachedPreview).toHaveBeenCalledWith("agent", "skill-id");
+  view.rerender(<AgentSkills agentId="agent" />);
+  expect(screen.getByRole("alert")).toHaveTextContent("Attached preview unavailable. Try again.");
 });

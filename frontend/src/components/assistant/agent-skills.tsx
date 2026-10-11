@@ -129,6 +129,7 @@ export function AgentSkills({
     <section aria-label="Skills" className="space-y-3">
       {history.data?.items?.length ? <div aria-label="Skill history"><p className="text-12 font-medium">Skill history</p>{history.data.items.map((row: { id: string; event_data?: { action?: string } }) => <p key={row.id} className="text-11 text-muted-foreground">{row.event_data?.action ?? "skills updated"}</p>)}</div> : null}
       {attachedPreview.data ? <p role="status">Attached preview: {attachedPreview.data.description}</p> : null}
+      {attachedPreview.error ? <p role="alert" className="text-11 text-destructive">Attached preview unavailable. Try again.</p> : null}
       <div className="space-y-1">
         <h3 className="text-13 font-semibold">Skills</h3>
         <p className="text-12 text-muted-foreground">
