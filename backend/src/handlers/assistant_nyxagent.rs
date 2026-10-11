@@ -1680,15 +1680,10 @@ async fn execute_turn(
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
 ) -> Result<TurnResult, TurnError> {
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
-    let mut history = engine::messages(
-        &state.db,
-        &row.user_id,
-        &row.id,
-        20,
-        Some(row.message_count + 1),
-    )
-    .await
-    .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    let mut history = engine::checkpoint_summary(&state.db, &row.user_id, &row.id)
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?
+        .messages;
     // Queued speech is visible to the human, but never becomes an instruction
     // until its own claim. Include earlier completed replies even if their
     // sequence is after the input that queued this turn.
