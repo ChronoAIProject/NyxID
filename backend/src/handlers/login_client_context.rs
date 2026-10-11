@@ -42,11 +42,17 @@ mod management_route_tests {
     #[test]
     fn specialist_conversation_credentials_are_rejected_for_every_management_route() {
         let routes = [
-            "PUT /agents/{id}/grants", "PATCH /agents/{id}",
-            "PUT /agents/{id}/skills", "PUT /assistant/settings",
-            "POST /channel-bots", "PUT /channel-bots/{id}",
-            "DELETE /channel-bots/{id}", "POST /groups", "PUT /groups/{id}",
-            "DELETE /groups/{id}", "POST /agents/{id}/destroy",
+            "PUT /agents/{id}/grants",
+            "PATCH /agents/{id}",
+            "PUT /agents/{id}/skills",
+            "PUT /assistant/settings",
+            "POST /channel-bots",
+            "PUT /channel-bots/{id}",
+            "DELETE /channel-bots/{id}",
+            "POST /groups",
+            "PUT /groups/{id}",
+            "DELETE /groups/{id}",
+            "POST /agents/{id}/destroy",
             "DELETE /agents/{id}/memory/{note}",
         ];
         for route in routes {
