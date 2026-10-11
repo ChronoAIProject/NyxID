@@ -3,7 +3,6 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_group::MESSAGES_COLLECTION_NAME,
-        assistant_message::COLLECTION_NAME as MESSAGES,
         assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME},
     },
     mw::auth::AuthUser,
