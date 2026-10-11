@@ -592,16 +592,16 @@ mod route_tests {
     #[tokio::test]
     async fn validate_route_returns_not_found_for_other_owner() {
         let f = orchestrator_fixture("learning_validate_owner_route").await;
+        let other = uuid::Uuid::new_v4().to_string();
         feature_flag_service::set_platform_override(
             &f.state.db,
             feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
-            &feature_flag_service::FlagTarget::User(f.owner.clone()),
+            &feature_flag_service::FlagTarget::User(other.clone()),
             true,
-            &f.owner,
+            &other,
         )
         .await
         .unwrap();
-        let other = uuid::Uuid::new_v4().to_string();
         let err = validate(
             State(f.state.clone()),
             crate::test_utils::test_auth_user(&other),
@@ -613,7 +613,7 @@ mod route_tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+        assert!(matches!(err, crate::errors::AppError::NotFound(message) if message == "Agent not found"));
         f.state.db.drop().await.unwrap();
     }
 
