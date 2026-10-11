@@ -123,15 +123,35 @@ pub async fn upsert_feedback(
     comment: Option<String>,
 ) -> mongodb::error::Result<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
     let filter = doc! {"user_id": user_id, "message_id": message_id};
-    let existing = db.collection::<AssistantMessageFeedback>(COLLECTION_NAME).find_one(filter.clone()).await?;
+    let existing = db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find_one(filter.clone())
+        .await?;
     let now = chrono::Utc::now();
     let mut set = doc! {"vote": vote, "updated_at": bson::DateTime::from_chrono(now), "conversation_id": conversation_id, "group_id": group_id, "turn_id": turn_id};
-    if comment.is_some() { set.insert("comment", comment); }
+    if comment.is_some() {
+        set.insert("comment", comment);
+    }
     let update = doc! {"$set": set, "$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "created_at": bson::DateTime::from_chrono(now)}};
-    let row = db.collection::<AssistantMessageFeedback>(COLLECTION_NAME).find_one_and_update(filter, update).upsert(true).return_document(mongodb::options::ReturnDocument::After).await?.ok_or_else(|| mongodb::error::Error::custom("feedback write failed"))?;
+    let row = db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find_one_and_update(filter, update)
+        .upsert(true)
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?
+        .ok_or_else(|| mongodb::error::Error::custom("feedback write failed"))?;
     Ok((row, existing))
 }
 
-pub async fn delete_feedback(db: &Database, user_id: &str, message_id: &str) -> mongodb::error::Result<bool> {
-    Ok(db.collection::<AssistantMessageFeedback>(COLLECTION_NAME).delete_one(doc! {"user_id": user_id, "message_id": message_id}).await?.deleted_count > 0)
+pub async fn delete_feedback(
+    db: &Database,
+    user_id: &str,
+    message_id: &str,
+) -> mongodb::error::Result<bool> {
+    Ok(db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .delete_one(doc! {"user_id": user_id, "message_id": message_id})
+        .await?
+        .deleted_count
+        > 0)
 }
