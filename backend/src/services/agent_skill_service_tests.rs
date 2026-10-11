@@ -197,7 +197,10 @@ async fn preview_returns_bounded_metadata_and_rejects_unavailable_owner_reader()
     let p = preview(&registry, ID, "1.0").await.unwrap();
     assert!(p.description.len() <= 1024);
     assert!(p.size_bytes <= 1024 * 1024);
-    let denied = Registry { deny: true, ..Registry::new() };
+    let denied = Registry {
+        deny: true,
+        ..Registry::new()
+    };
     assert!(preview(&denied, ID, "1.0").await.is_err());
 }
 #[tokio::test]
@@ -645,7 +648,9 @@ async fn disabled_pins_are_omitted_from_prompt_instructions() {
 async fn disabled_pins_are_inaccessible_to_skill_read() {
     let f = fixture("agent_skill_disabled_read").await;
     let reader = Registry::new();
-    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id).await.unwrap();
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
     agent.skills = vec![reader.reference()];
     agent.skills[0].disabled = true;
     assert!(read(&reader, &agent, ID, None, "/", 0).await.is_err());
