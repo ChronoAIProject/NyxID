@@ -543,38 +543,6 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
 }
 
 #[tokio::test]
-async fn feedback_routes_reject_when_engine_flag_is_disabled() {
-    let f = fixture("feedback-s5-engine-off", false).await;
-    f.state
-        .db
-        .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
-            crate::models::feature_flag_override::COLLECTION_NAME,
-        )
-        .insert_one(crate::models::feature_flag_override::FeatureFlagOverride {
-            id: "s5-off".into(),
-            org_user_id: None,
-            flag_key: crate::services::feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY.into(),
-            target_kind: crate::models::feature_flag_override::FlagTargetKind::User,
-            target_key: Some(f.owner.clone()),
-            enabled: false,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            updated_by: f.owner.clone(),
-        })
-        .await
-        .unwrap();
-    let (status, _) = request(
-        &f.state,
-        "PUT",
-        "/api/v1/assistant/nyxagent/conversations/missing/messages/missing/feedback",
-        &f.human_token,
-        Some(json!({"vote":"up"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
 async fn feedback_rejects_user_failed_and_stopped_replies() {
     let f = fixture("feedback-ineligible", false).await;
     for (id, role, status) in [
