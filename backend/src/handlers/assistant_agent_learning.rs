@@ -175,7 +175,7 @@ pub async fn edit(
 }
 
 pub async fn validate(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     auth: AuthUser,
     Path((_agent_id, _proposal_id)): Path<(String, String)>,
     Json(body): Json<ValidateBody>,
