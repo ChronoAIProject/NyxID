@@ -37,6 +37,32 @@ impl From<AssistantMessageFeedback> for FeedbackResponse {
     }
 }
 
+fn sanitize_comment(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    *c,
+                    '\u{200b}'
+                        | '\u{200c}'
+                        | '\u{200d}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'
+                        | '\u{202b}'
+                        | '\u{202c}'
+                        | '\u{202d}'
+                        | '\u{202e}'
+                        | '\u{2060}'
+                        | '\u{2066}'
+                        | '\u{2067}'
+                        | '\u{2069}'
+                )
+        })
+        .collect()
+}
+
 fn validate(input: &FeedbackInput) -> AppResult<Option<String>> {
     if input.vote != "up" && input.vote != "down" {
         return Err(AppError::BadRequest("feedback_vote_invalid".into()));
@@ -47,6 +73,7 @@ fn validate(input: &FeedbackInput) -> AppResult<Option<String>> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| {
+            let s = sanitize_comment(s);
             if s.chars().count() > 1000 {
                 return Err(AppError::BadRequest("feedback_comment_too_long".into()));
             }
