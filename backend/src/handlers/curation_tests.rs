@@ -411,6 +411,20 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     );
 }
 
+#[tokio::test]
+async fn feedback_put_rejects_unknown_conversation_as_not_found() {
+    let f = fixture("feedback-s1-acl", false).await;
+    let (status, _) = request(
+        &f.state,
+        "PUT",
+        "/api/v1/assistant/nyxagent/conversations/not-owned/messages/missing/feedback",
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
