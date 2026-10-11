@@ -952,6 +952,96 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     );
 }
 
+#[tokio::test]
+async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
+    let f = fixture("feedback-r4-org-revoke", false).await;
+    let org = Uuid::new_v4().to_string();
+    let member = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&member, UserType::Person))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(
+            bson::to_document(&test_utils::test_membership(
+                &org,
+                &member,
+                crate::models::org_membership::OrgRole::Member,
+                None,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let now = bson::DateTime::now();
+    f.state.db.collection::<Document>("assistant_conversations").insert_one(doc! {"_id":"org-thread","user_id":&member,"title":"Org","model":"test","credential_api_key_id":"unused","message_count":1,"agent_owner_id":&org,"created_at":now,"updated_at":now}).await.unwrap();
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "org-reply".into(),
+            conversation_id: "org-thread".into(),
+            user_id: member.clone(),
+            seq: 1,
+            turn_id: "t".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let token = jwt::generate_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &Uuid::parse_str(&member).unwrap(),
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let path = "/api/v1/assistant/nyxagent/conversations/org-thread/messages/org-reply/feedback";
+    assert_eq!(
+        request(&f.state, "PUT", path, &token, Some(json!({"vote":"up"})))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    f.state
+        .db
+        .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+        .delete_many(doc! {"org_user_id":&org,"user_id":&member})
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "PUT", path, &token, Some(json!({"vote":"down"}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Conversation not found"));
+    let (status, body) = request(&f.state, "DELETE", path, &token, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Conversation not found"));
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
