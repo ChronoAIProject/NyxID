@@ -27,7 +27,6 @@ describe("canonical chat presentation", () => {
       status: "completed_text",
       title: "Test",
       messages: [BASE],
-      isStreaming: false,
       expectedTurnCount: 0,
     };
     const { rerender } = render(
