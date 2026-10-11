@@ -150,7 +150,7 @@ async fn feedback_admin_counts_group_exact_per_day_through_service_and_route() {
         None,
     )
     .await;
-    assert!(status.is_success());
+    assert!(status.is_success(), "{status} {body}");
     let route_a = body["counts"]
         .as_array()
         .unwrap()
@@ -195,7 +195,7 @@ async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
         None,
     )
     .await;
-    assert!(status.is_success());
+    assert!(status.is_success(), "{status} {body}");
     assert_eq!(body["recent"].as_array().unwrap().len(), 100);
     let cursor = body["next_cursor"].as_str().unwrap();
     let (status, next) = request(
@@ -206,7 +206,7 @@ async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
         None,
     )
     .await;
-    assert!(status.is_success());
+    assert!(status.is_success(), "{status} {next}");
     assert_eq!(next["recent"].as_array().unwrap().len(), 1);
     let (status, _) = request(
         &f.state,
@@ -285,12 +285,8 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
         .unwrap();
     assert_eq!(row.vote, "down");
     assert_eq!(row.comment.as_deref(), Some("kept"));
-    assert!(
-        request(&f.state, "DELETE", &path, &f.human_token, None)
-            .await
-            .0
-            .is_success()
-    );
+    let (status, body) = request(&f.state, "DELETE", &path, &f.human_token, None).await;
+    assert!(status.is_success(), "{status} {body}");
     assert_eq!(
         f.state
             .db
@@ -397,12 +393,8 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
         Some(json!({"vote":"up"})),
     )
     .await;
-    assert!(
-        request(&f.state, "DELETE", &path, &f.human_token, None)
-            .await
-            .0
-            .is_success()
-    );
+    let (status, body) = request(&f.state, "DELETE", &path, &f.human_token, None).await;
+    assert!(status.is_success(), "{status} {body}");
     assert!(
         request(&f.state, "DELETE", &path, &f.human_token, None)
             .await
