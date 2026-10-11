@@ -1791,6 +1791,19 @@ mod tests {
     }
 
     #[test]
+    fn health_recommends_recovery_from_failed_poll() {
+        let mut bot = make_lark_bot(false);
+        bot.platform = "twitter".into();
+        bot.status = "failed".into();
+        bot.error = Some("poll failed".into());
+        bot.diagnostics.consecutive_errors = 5;
+        let health = health_for(&bot, false);
+        assert_eq!(health.mode, "poll");
+        assert_eq!(health.recommended_action, "reconnect");
+        assert_eq!(health.diagnostics.consecutive_errors, 5);
+    }
+
+    #[test]
     fn verify_requires_lark_verification_token_to_be_configured() {
         let bot = make_lark_bot(false);
         let err = ensure_verify_material_present(
