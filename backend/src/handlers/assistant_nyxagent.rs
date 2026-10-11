@@ -664,9 +664,7 @@ pub async fn reset_context(
 ) -> AppResult<Json<ContextResponse>> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let now = Utc::now();
-    state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(doc! {"_id": &id, "user_id": &user_id}, doc! {"$set": {"nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::from_chrono(now), "context_reset_reason": "user_reset"}}).await?;
+    engine::reset_context(&state.db, &user_id, &id).await?;
     context(State(state), auth, Path(id)).await
 }
 /// An image a tool returned during one of the owner's turns. Only verified

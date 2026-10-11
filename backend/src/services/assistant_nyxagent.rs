@@ -1226,6 +1226,22 @@ pub async fn messages(
     Ok(rows)
 }
 
+pub async fn reset_context(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id},
+            doc! {"$set": {
+                "nyxagent_session_id": bson::Bson::Null,
+                "nyxagent_instruction_binding": bson::Bson::Null,
+                "nyxagent_last_response_id": bson::Bson::Null,
+                "context_reset_at": bson::DateTime::now(),
+                "context_reset_reason": "user_reset",
+            }},
+        )
+        .await?;
+    Ok(())
+}
+
 /// Read metadata and its page from one MongoDB transaction snapshot so a reload
 /// never observes a cleared fence without the reply that cleared it.
 pub async fn history_page(
