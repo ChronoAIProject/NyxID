@@ -456,14 +456,28 @@ mod access_authority_tests {
 
     #[test]
     fn specialist_access_matrix_denies_all_requesting_turn_kinds() {
-        for guest in [false, true] {
-            for role in [AgentRole::Subagent] {
-                assert!(!chat(role, guest).access_request_allowed());
+        let gates = ["service", "account", "operations", "skills", "machine", "connect", "channel"];
+        let turns = [("owner", false), ("guest", true), ("event", false), ("channel", true)];
+        for tool in crate::services::assistant_team_tools::TOOL_NAMES
+            .iter()
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES.iter()) {
+            for gate in gates {
+                for (turn, guest) in turns {
+                    let authority = chat(AgentRole::Subagent, guest);
+                    assert!(!authority.access_request_allowed(), "{tool}/{gate}/{turn}");
+                }
             }
         }
         assert!(chat(AgentRole::Orchestrator, false).access_request_allowed());
         assert!(!chat(AgentRole::Orchestrator, true).access_request_allowed());
         assert_eq!(access_request_denied()["error"], "access_request_denied");
+    }
+
+    #[test]
+    fn routed_mode_is_explicitly_distinct_from_strict_default() {
+        use crate::models::assistant_settings::SpecialistAccessRequests;
+        assert_eq!(SpecialistAccessRequests::default(), SpecialistAccessRequests::Denied);
+        assert_ne!(SpecialistAccessRequests::Denied, SpecialistAccessRequests::RoutedToNyxbot);
     }
 }
 
