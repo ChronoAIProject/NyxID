@@ -1321,3 +1321,36 @@ mod search_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod card_summary_coverage_tests {
+    use super::TOOL_NAMES;
+    use crate::services::assistant_acknowledgement_service::{
+        OwnerActionClass, classify_owner_action,
+    };
+
+    #[test]
+    fn every_sensitive_or_destructive_account_tool_is_listed_for_card_summary() {
+        let covered = [
+            "delete_agent_key",
+            "unbind_agent_key_credential",
+            "delete_channel_bot",
+            "delete_channel_route",
+            "delete_service",
+            "delete_node",
+            "bind_agent_key_credential",
+        ];
+        for tool in TOOL_NAMES {
+            let class = classify_owner_action(tool, None);
+            if matches!(
+                class,
+                OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+            ) {
+                assert!(
+                    covered.contains(tool),
+                    "missing card summary coverage for {tool}"
+                );
+            }
+        }
+    }
+}
