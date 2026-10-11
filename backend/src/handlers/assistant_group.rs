@@ -506,9 +506,20 @@ async fn post_with_uploads(
         ids.to_vec()
     } else {
         let mentioned = groups::mentions(text, &live);
-        if !mentioned.is_empty() { mentioned } else {
-            let sticky = group.last_recipient_ids.iter().filter(|id| live.iter().any(|member| &member.id == *id)).cloned().collect::<Vec<_>>();
-            if sticky.is_empty() { Vec::new() } else { sticky }
+        if !mentioned.is_empty() {
+            mentioned
+        } else {
+            let sticky = group
+                .last_recipient_ids
+                .iter()
+                .filter(|id| live.iter().any(|member| &member.id == *id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if sticky.is_empty() {
+                Vec::new()
+            } else {
+                sticky
+            }
         }
     };
     if let Some(member) = confirmed {
@@ -522,8 +533,14 @@ async fn post_with_uploads(
         addressed.push(group.lead_agent_id.clone());
     }
     if author.is_none() {
-        state.db.collection::<AssistantGroup>(crate::models::assistant_group::COLLECTION_NAME)
-            .update_one(mongodb::bson::doc! {"_id": group_id, "user_id": owner}, mongodb::bson::doc! {"$set": {"last_recipient_ids": &addressed}}).await?;
+        state
+            .db
+            .collection::<AssistantGroup>(crate::models::assistant_group::COLLECTION_NAME)
+            .update_one(
+                mongodb::bson::doc! {"_id": group_id, "user_id": owner},
+                mongodb::bson::doc! {"$set": {"last_recipient_ids": &addressed}},
+            )
+            .await?;
     }
     let mut message = Box::pin(groups::append_with_uploads(
         &state.db,
@@ -536,8 +553,14 @@ async fn post_with_uploads(
     ))
     .await?;
     message.recipient_agent_ids = addressed.clone();
-    state.db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
-        .update_one(mongodb::bson::doc! {"_id": &message.id}, mongodb::bson::doc! {"$set": {"recipient_agent_ids": &addressed}}).await?;
+    state
+        .db
+        .collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
+        .update_one(
+            mongodb::bson::doc! {"_id": &message.id},
+            mongodb::bson::doc! {"$set": {"recipient_agent_ids": &addressed}},
+        )
+        .await?;
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.

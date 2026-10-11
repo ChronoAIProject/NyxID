@@ -39,7 +39,12 @@ pub(crate) async fn post(
     .await?;
     let mut addressed = personal::mentions(text, &agents);
     if addressed.is_empty() {
-        addressed = access.group.last_recipient_ids_by_actor.get(&access.actor).cloned().unwrap_or_default();
+        addressed = access
+            .group
+            .last_recipient_ids_by_actor
+            .get(&access.actor)
+            .cloned()
+            .unwrap_or_default();
         addressed.retain(|id| agents.iter().any(|agent| &agent.id == id));
     }
     if addressed.is_empty() {
