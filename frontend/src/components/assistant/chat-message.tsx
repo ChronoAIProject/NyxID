@@ -227,11 +227,11 @@ export function ChatMessageBubble({
   }
   const printable = Boolean(
     content ||
-    message.steps?.length ||
-    message.toolCalls?.length ||
-    message.images?.length ||
-    message.artifacts?.length ||
-    message.authorizationBlockers?.length,
+      message.steps?.length ||
+      message.toolCalls?.length ||
+      message.images?.length ||
+      message.artifacts?.length ||
+      message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
   const runningTool = streaming
@@ -262,7 +262,7 @@ export function ChatMessageBubble({
               conversationId={tool.conversationId}
               images={message.images}
             />
-          ))}
+        ))}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
@@ -274,8 +274,8 @@ export function ChatMessageBubble({
                   ),
               )
               .map((image) => (
-                <ToolImage key={image.id} image={image} />
-              ))}
+              <ToolImage key={image.id} image={image} />
+            ))}
           </div>
         ) : null}
         {interactiveCards
@@ -530,17 +530,17 @@ export function ChatMessageList({
   const terminalAssistant = messages.at(-1);
   const emptyTerminal = Boolean(
     session &&
-    session.status !== "streaming" &&
-    session.status !== "draft" &&
-    session.status !== "stopped" &&
-    terminalAssistant?.role === "assistant" &&
-    !terminalAssistant.content.trim() &&
-    !terminalAssistant.error &&
-    !(
-      terminalAssistant.steps?.length ||
-      terminalAssistant.toolCalls?.length ||
-      terminalAssistant.images?.length
-    ) &&
+      session.status !== "streaming" &&
+      session.status !== "draft" &&
+      session.status !== "stopped" &&
+      terminalAssistant?.role === "assistant" &&
+      !terminalAssistant.content.trim() &&
+      !terminalAssistant.error &&
+      !(
+        terminalAssistant.steps?.length ||
+        terminalAssistant.toolCalls?.length ||
+        terminalAssistant.images?.length
+      ) &&
     !(
       terminalAssistant.artifacts?.length ||
       terminalAssistant.authorizationBlockers?.length
@@ -563,8 +563,8 @@ export function ChatMessageList({
       previousConversationRef.current !== session?.conversationId;
     const newUserMessage = Boolean(
       latestUserMessageId &&
-      previousUserMessageRef.current &&
-      previousUserMessageRef.current !== latestUserMessageId,
+        previousUserMessageRef.current &&
+        previousUserMessageRef.current !== latestUserMessageId,
     );
     if (conversationChanged || newUserMessage) followingRef.current = true;
     previousConversationRef.current = session?.conversationId;
