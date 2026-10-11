@@ -210,6 +210,7 @@ pub struct ConversationResponse {
     pending_acknowledgements: u32,
     active_turn: Option<ActiveTurnResponse>,
     context_reset_at: Option<DateTime<Utc>>,
+    context_reset_reason: Option<String>,
     role: crate::models::assistant_conversation::AgentRole,
     /// The agent this thread belongs to; `None` only when it could not be
     /// resolved (legacy rows resolve to the owner's NyxBot).
@@ -295,6 +296,7 @@ impl From<AssistantConversation> for ConversationResponse {
             pending_acknowledgements: 0,
             active_turn,
             context_reset_at: row.context_reset_at,
+            context_reset_reason: row.context_reset_reason,
             role: row.role,
             agent: None,
             pending_events: row.pending_events.len(),
@@ -351,6 +353,8 @@ pub struct MessageResponse {
     text: String,
     status: String,
     error_code: Option<String>,
+    upstream_error_code: Option<String>,
+    error_detail: Option<crate::models::assistant_message::AssistantErrorDetail>,
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
     attachments: Vec<AttachmentResponse>,
@@ -373,6 +377,8 @@ impl From<AssistantMessage> for MessageResponse {
             text: row.text,
             status: row.status,
             error_code: row.error_code,
+            upstream_error_code: row.upstream_error_code,
+            error_detail: row.error_detail,
             created_at: row.created_at,
             activities: row
                 .activities

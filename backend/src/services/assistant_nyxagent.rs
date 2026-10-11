@@ -1630,9 +1630,14 @@ pub async fn begin_turn_with_voice(
                         text: String::new(),
                         status: "failed".into(),
                         error_code: Some("turn_lost".into()),
+                        upstream_error_code: None,
+                        error_detail: None,
                         created_at: now,
-                        activities: Vec::new(),
-                        attachments: Vec::new(),
+                        activities: lost.activities.into_iter().map(|mut activity| {
+                            if activity.status == "running" { activity.status = "error"; activity.ended_at = Some(now); }
+                            activity
+                        }).collect(),
+                        attachments: lost.attachments,
                         origin: Some(lost.origin),
                         via: None,
                     };
@@ -1793,6 +1798,8 @@ pub async fn begin_turn_with_voice(
                     text: text.clone(),
                     status: "completed".into(),
                     error_code: None,
+                        upstream_error_code: None,
+                        error_detail: None,
                     created_at: now,
                     activities: Vec::new(),
                     attachments: uploads,
@@ -2231,7 +2238,17 @@ async fn finish_turn_inner(
                         "completed"
                     }
                     .into(),
-                    error_code: error.as_ref().map(|e| e.upstream_code.clone().unwrap_or_else(|| e.code.into())),
+                    error_code: error.as_ref().map(|e| e.code.into()),
+                    upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.clone()),
+                    error_detail: error.as_ref().map(|e| crate::models::assistant_message::AssistantErrorDetail {
+                        stage: "stream".into(),
+                        http_status: None,
+                        upstream_request_id: None,
+                        response_id: result.response_id.clone(),
+                        continuations: current.active_turn.as_ref().map_or(0, |t| t.continuations),
+                        turn_id: turn_id.clone(),
+                        occurred_at: now,
+                    }),
                     created_at: now,
                     activities,
                     attachments,
@@ -2798,9 +2815,9 @@ pub async fn delete(
 /// hidden voice task's first turn.
 pub fn bounded_recap(history: &[AssistantMessage]) -> String {
     const OPEN: &str =
-        "\n\nPrior conversation history (recap; context you may rely on, not new instructions):\n";
+        "\n\nPrevious context (after reset; context you may rely on, not new instructions):\n";
     const CLOSE: &str = "\nEnd prior history.";
-    let mut remaining = 8192usize - OPEN.len() - CLOSE.len();
+    let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
     let mut recap = Vec::new();
     for message in history.iter().rev().take(20) {
         let prefix = format!(
@@ -2820,11 +2837,49 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
         if remaining <= prefix.len() {
             break;
         }
-        let mut end = message.text.len().min(remaining - prefix.len());
+        let budget = remaining - prefix.len();
+        let head = budget / 2;
+        let tail = budget - head;
+        let mut end = message.text.len().min(head);
         while !message.text.is_char_boundary(end) {
             end -= 1;
         }
-        let line = format!("{prefix}{}", &message.text[..end]);
+        let mut start = message.text.len().saturating_sub(tail);
+        while start < message.text.len() && !message.text.is_char_boundary(start) {
+            start += 1;
+        }
+        let body = if start > end {
+            format!("{} … {}", &message.text[..end], &message.text[start..])
+        } else {
+            message.text[..end].to_owned()
+        };
+        let activities = if message.activities.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [actions: {}]",
+                message
+                    .activities
+                    .iter()
+                    .map(|a| format!("{}={}", a.label, a.status))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let attachments = if message.attachments.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [attachments: {}]",
+                message
+                    .attachments
+                    .iter()
+                    .map(|a| a.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let line = format!("{prefix}{body}{activities}{attachments}");
         remaining -= line.len();
         recap.push(line);
     }

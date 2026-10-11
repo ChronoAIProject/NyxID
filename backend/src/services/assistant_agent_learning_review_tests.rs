@@ -1439,6 +1439,8 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
                 text: text.into(),
                 status: "completed".into(),
                 error_code: None,
+                upstream_error_code: None,
+                error_detail: None,
                 created_at: now + chrono::Duration::seconds(seq),
                 activities: Vec::new(),
                 attachments: Vec::new(),

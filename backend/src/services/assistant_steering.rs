@@ -124,6 +124,8 @@ pub async fn reserve(
                 conversation_id: id.clone(), user_id: owner.clone(), seq: row.message_count + 1,
                 turn_id: turn_id.clone(), role: "user".into(), text: text.clone(), status: "completed".into(),
                 error_code: None, created_at: now, activities: vec![], attachments: vec![], origin: row.active_turn.as_ref().map(|turn| turn.origin), via: None,
+                        upstream_error_code: None,
+                        error_detail: None,
             };
             row.message_count += 1;
             row.updated_at = now;

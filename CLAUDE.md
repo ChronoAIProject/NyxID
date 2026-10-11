@@ -634,6 +634,12 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 - FI-007 Prefer deletion; remove deprecated paths directly unless host rules explicitly require migration-period compatibility.
 <!-- consensus-rnd:foundational-invariants:end -->
 
+NyxAgent failed replies use normalized error classes with a separate sanitized
+upstream code and metadata-only diagnostics. Reclaimed turns retain activity
+and attachment checkpoints, and post-reset prompts use the bounded
+“Previous context (after reset)” recap described in
+`docs/chat/08-nyxagent-engine.md`.
+
 ### Aurinko email integration
 
 - `api-aurinko` is an owner-scoped account-token AI Service; its curated overlay supplies fifteen MCP operations. No managed OAuth until Aurinko documents compatible PKCE. Do not use application credentials as a shared mailbox token.

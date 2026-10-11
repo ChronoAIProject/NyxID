@@ -1,5 +1,22 @@
 # NyxAgent assistant engine
 
+## Turn diagnostics and context continuity
+
+Failed replies retain a normalized NyxID `error_code` and, when safe, a
+sanitized `upstream_error_code`. Their `error_detail` is metadata only: stage,
+HTTP status, upstream request id, response id, continuation count, turn id, and
+timestamp. The original upstream response, prompts, credentials, and tool
+arguments are never stored. A reclaimed orphan turn carries its activity and
+attachment checkpoint forward; running activities become `error`, so retry
+can inspect completed work before repeating anything.
+
+After a reset, the next turn receives a bounded **Previous context (after
+reset)** recap. It includes message head and tail text, failed codes, bounded
+activity labels and statuses, and attachment labels. This recap is context,
+not a new instruction. The conversation DTO exposes `context_reset_reason` so
+clients can explain failed turns, memory changes, stopped turns, and explicit
+user resets.
+
 Normative NyxID 0.24.0 contract, verified against the read-only NxyAgent clone
 at commit `58f647e4`. The retained design records are
 [nyxagent-engine-plan.md](nyxagent-engine-plan.md) and

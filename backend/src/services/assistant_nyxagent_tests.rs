@@ -272,6 +272,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             text: format!("marker{i}:{}", "界".repeat(400)),
             status: "completed".into(),
             error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -287,11 +289,11 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let base = context.instructions(&[], false);
     let prompt = context.instructions(&messages, true);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
-    assert!(prompt.contains("Prior conversation history"));
+    assert!(prompt.contains("Previous context (after reset)"));
     assert!(prompt.contains("marker29"));
     assert!(!prompt.contains("marker0:"));
     assert!(prompt.contains(SCHEDULE_PROMPT));
-    assert!(prompt.len() <= base.len() + 8192);
+    assert!(prompt.len() <= base.len() + 16384);
 }
 
 #[tokio::test]

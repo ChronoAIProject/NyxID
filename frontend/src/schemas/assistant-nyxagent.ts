@@ -96,6 +96,7 @@ export const nyxAgentConversationSchema = z.object({
     })
     .nullable(),
   context_reset_at: z.string().nullable(),
+  context_reset_reason: z.string().nullable().optional(),
   /** `orchestrator` on NyxBot's threads, `subagent` on a specialist's. */
   role: z.enum(["orchestrator", "subagent"]).default("orchestrator"),
   /** The owning agent; null only when the server could not resolve it. */
@@ -129,6 +130,16 @@ export const nyxAgentMessageSchema = z.object({
   text: z.string(),
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
+  upstream_error_code: z.string().nullable().optional(),
+  error_detail: z.object({
+    stage: z.string(),
+    http_status: z.number().int().nullable(),
+    upstream_request_id: z.string().nullable(),
+    response_id: z.string().nullable(),
+    continuations: z.number().int().nonnegative(),
+    turn_id: z.string(),
+    occurred_at: z.string(),
+  }).nullable().optional(),
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),

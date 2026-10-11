@@ -87,6 +87,14 @@ function storedError(code: string | null): string {
   if (code === "session_busy" || code === "capacity_exceeded") {
     return "The assistant is busy. Try again shortly.";
   }
+  if (code === "turn_lost") return "This turn was interrupted; check which actions completed before retrying.";
+  if (code === "assistant_unavailable") return "The assistant is temporarily unavailable. Try again shortly.";
+  if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
+  if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
+  if (code === "output_too_large") return "The assistant reached its response limit.";
+  if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";
+  if (code === "stale_response") return "The assistant context changed. Start a new turn.";
+  if (code === "context_unavailable") return "The assistant context could not be restored. Try a new turn.";
   return "The assistant could not complete this turn.";
 }
 
