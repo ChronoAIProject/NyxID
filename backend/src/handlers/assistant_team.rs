@@ -2366,6 +2366,7 @@ pub async fn update_agent(
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::update_agent(
@@ -2476,6 +2477,7 @@ pub async fn delete_agent(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     team::purge(&state.db, &owner, &id).await?;
@@ -2495,6 +2497,7 @@ pub async fn set_memory(
     Path(id): Path<String>,
     Json(body): Json<MemoryRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     engine::require_enabled(&state.db, &actor).await?;
     let note = team::remember(
@@ -2513,6 +2516,7 @@ pub async fn delete_memory(
     auth: AuthUser,
     Path((id, note_id)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     team::agent(&state.db, &owner, &id).await?;

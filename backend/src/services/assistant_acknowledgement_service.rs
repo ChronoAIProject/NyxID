@@ -234,6 +234,56 @@ pub async fn audit_access_request_denied(
         ),
     )
     .await;
+    if let Ok(agents) = super::assistant_team_service::list(db, &chat.user_id).await {
+        if let Some(home) = agents
+            .into_iter()
+            .find(|a| a.is_nyxbot())
+            .and_then(|a| a.home_conversation_id)
+        {
+            let conversations = db
+                .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                );
+            if let Ok(Some(row)) = conversations
+                .find_one_and_update(
+                    doc! {"_id": &home, "user_id": &chat.user_id},
+                    doc! {"$inc": {"message_count": 1}},
+                )
+                .await
+            {
+                let message = crate::models::assistant_message::AssistantMessage {
+                    steering: None,
+                    voice: None,
+                    execution_pending: false,
+                    id: Uuid::new_v4().to_string(),
+                    conversation_id: home,
+                    user_id: chat.user_id.clone(),
+                    seq: row.message_count + 1,
+                    turn_id: format!("access-denied-{}", Uuid::new_v4()),
+                    role: "notice".into(),
+                    text: format!(
+                        "specialist_access_denied: {} needs {} for {}",
+                        chat.agent_name,
+                        scope,
+                        target.unwrap_or("account")
+                    ),
+                    status: "completed".into(),
+                    error_code: Some("specialist_access_denied".into()),
+                    created_at: Utc::now(),
+                    activities: Vec::new(),
+                    attachments: Vec::new(),
+                    origin: None,
+                    via: None,
+                };
+                let _ = db
+                    .collection::<crate::models::assistant_message::AssistantMessage>(
+                        crate::models::assistant_message::COLLECTION_NAME,
+                    )
+                    .insert_one(message)
+                    .await;
+            }
+        }
+    }
 }
 
 /// An org permission request may use the person's NyxBot only while that
