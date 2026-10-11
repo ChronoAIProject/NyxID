@@ -160,7 +160,7 @@ export function GroupMessageRow({
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
           <div className="mt-2 flex gap-1">
-            {(["up", "down"] as const).map((next) => <button key={next} type="button" aria-label={next === "up" ? "Helpful" : "Not helpful"} aria-pressed={vote === next} onClick={() => { const selected = vote === next ? undefined : next; setVote(selected); void feedback.mutateAsync(selected ? { vote: selected } : {}).catch(() => setVote(vote)); }} className="rounded p-1 text-text-tertiary hover:bg-overlay">{next === "up" ? <ThumbsUp className="h-3.5 w-3.5" /> : <ThumbsDown className="h-3.5 w-3.5" />}</button>)}
+            {(["up", "down"] as const).map((next) => <button key={next} type="button" disabled={feedback.isPending} aria-label={next === "up" ? "Helpful" : "Not helpful"} aria-pressed={vote === next} onClick={() => { const selected = vote === next ? undefined : next; setVote(selected); void feedback.mutateAsync(selected ? { vote: selected } : {}).catch(() => setVote(vote)); }} className={`rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50 ${vote === next ? "text-nyx-secondary-400" : ""}`}>{next === "up" ? <ThumbsUp className="h-3.5 w-3.5" /> : <ThumbsDown className="h-3.5 w-3.5" />}</button>)}
           </div>
         </div>
       </div>
