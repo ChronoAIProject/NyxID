@@ -1591,7 +1591,7 @@ pub async fn webhook_action_gate(
             return Ok(None);
         }
         // Owner turns use the same single-use card path as webhook turns.
-        let summary = format!("NyxBot requests {tool} ({:?}). Review the action and its scope before allowing it.", classify_owner_action(tool, None));
+        let summary = if tool == "delete_agent_key" { "Delete agent key and revoke its credentials".to_owned() } else { format!("NyxBot requests {tool} ({:?}). Review the action and its scope before allowing it.", classify_owner_action(tool, None)) };
         if let Some(id) = args["acknowledgement_id"].as_str() {
             return Ok((!consume_action(db, chat, id, tool, args).await?).then(|| json!({"error":"acknowledgement_invalid","instructions":"This action card is missing, expired, used or does not match the call."})));
         }
