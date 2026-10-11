@@ -1,5 +1,6 @@
 import { AutomationPreferences } from "./automation-preferences";
 import { useState } from "react";
+import type { Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -83,7 +84,7 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
 function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
   const update = useUpdateNyxBotSettings();
   const form = useAppForm<NyxAgentSettingsForm>({
-    resolver: zodResolver(nyxAgentSettingsFormSchema(settings)),
+    resolver: zodResolver(nyxAgentSettingsFormSchema(settings)) as Resolver<NyxAgentSettingsForm>,
     defaultValues: formValues(settings),
   });
   const [error, setError] = useState<string>();
