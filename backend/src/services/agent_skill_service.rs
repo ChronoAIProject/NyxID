@@ -379,6 +379,7 @@ pub async fn preview_checked(
         version: version.into(),
         sha256: field(&meta, "skillHash").map_err(Read)?.into(),
         dependencies,
+        disabled: false,
     };
     validate(&Selection {
         expected_revision: 0,

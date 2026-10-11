@@ -71,9 +71,9 @@ pub async fn status(
     engine::require_enabled(&state.db, &actor).await?;
     let agent = team::agent(&state.db, &actor, &agent_id).await?;
     crate::services::org_agent_service::require_use(&state.db, &actor, &agent).await?;
-    Ok(Json(serde_json::to_value(
-        review::status(&state.db, &actor, &agent_id).await?,
-    )?))
+    Ok(Json(json!(
+        review::status(&state.db, &actor, &agent_id).await?
+    )))
 }
 
 pub async fn configure(
@@ -181,7 +181,8 @@ pub async fn validate(
     Json(body): Json<ValidateBody>,
 ) -> AppResult<Json<Value>> {
     super::login_client_context::require_first_party_human(&auth)?;
-    let text = serde_json::to_string(&body.draft)?;
+    let text = serde_json::to_string(&body.draft)
+        .map_err(|_| AppError::ValidationError("Invalid draft JSON".into()))?;
     let generated = crate::services::assistant_skill_authoring::validation::decode(&text)?;
     let bytes = crate::services::assistant_skill_authoring::validation::validate(&generated)?;
     Ok(Json(json!({"valid": true, "bytes": bytes.len()})))

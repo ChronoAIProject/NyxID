@@ -17,7 +17,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{self, Request},
 };
-use futures_util::TryStreamExt;
+use futures::TryStreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
