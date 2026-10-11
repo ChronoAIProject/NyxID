@@ -17,7 +17,7 @@ export function useAgentSkills(id: string) {
       agentSkillsSchema.parse(
         await assistantJson(`${base}/agents/${encodeURIComponent(id)}/skills`),
       ),
-    enabled: Boolean(owner),
+    enabled: Boolean(owner && id),
     retry: false,
   });
 }

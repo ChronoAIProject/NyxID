@@ -3,6 +3,7 @@ import { ArrowRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
@@ -441,6 +442,7 @@ function SkillsTab({ query, agentId }: { readonly query: string; readonly agentI
 export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
   const [tab, setTab] = useState<PluginKind>("connector");
   const [query, setQuery] = useState("");
+  const [selectedAgent, setSelectedAgent] = useState(agentId ?? "");
 
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
@@ -493,7 +495,8 @@ export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
         {tab === "connector" ? (
           <ConnectorsTab query={query} />
         ) : (
-          <SkillsTab query={query} agentId={agentId} />
+          {tab === "skill" && !selectedAgent ? <Input aria-label="Agent id for skill management" placeholder="Agent ID to manage skills" value={selectedAgent} onChange={(event) => setSelectedAgent(event.target.value)} /> : null}
+          <SkillsTab query={query} agentId={selectedAgent || undefined} />
         )}
       </div>
     </div>
