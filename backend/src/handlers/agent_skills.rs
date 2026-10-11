@@ -347,6 +347,7 @@ pub async fn set(
     Path(id): Path<String>,
     Json(selection): Json<skills::Selection>,
 ) -> AppResult<Json<skills::SkillsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     Ok(Json(
