@@ -190,6 +190,16 @@ async fn agent_skill_pin_integrity_and_exact_guid_version() {
     );
     assert!(preview(&registry, ID, "latest").await.is_err());
 }
+
+#[tokio::test]
+async fn preview_returns_bounded_metadata_and_rejects_unavailable_owner_reader() {
+    let registry = Registry::new();
+    let p = preview(&registry, ID, "1.0").await.unwrap();
+    assert!(p.description.len() <= 1024);
+    assert!(p.size_bytes <= 1024 * 1024);
+    let denied = Registry { deny: true, ..Registry::new() };
+    assert!(preview(&denied, ID, "1.0").await.is_err());
+}
 #[tokio::test]
 async fn agent_skill_invisible_cannot_be_pinned_and_removal_needs_no_ornn() {
     let f = orchestrator_fixture("agent_skill_visibility").await;
