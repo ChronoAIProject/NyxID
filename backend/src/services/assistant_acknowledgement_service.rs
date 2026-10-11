@@ -148,7 +148,7 @@ mod access_mode_tests {
         let cases = [(OwnerActionClass::Read, false), (OwnerActionClass::Change, true), (OwnerActionClass::Sensitive, true), (OwnerActionClass::Destructive, true)];
         for mode in [Autopilot, Nyxmode, AskEveryTime] {
             for (class, expected) in cases {
-                let want = match mode { Autopilot => false, Nyxmode => matches!(class, Sensitive|Destructive), AskEveryTime => expected };
+                let want = match mode { Autopilot => false, Nyxmode => matches!(class, OwnerActionClass::Sensitive|OwnerActionClass::Destructive), AskEveryTime => expected };
                 assert_eq!(owner_confirmation_required(mode, class, false), want);
                 assert!(owner_confirmation_required(mode, class, true));
             }
