@@ -747,4 +747,350 @@ mod tests {
         assert!(err.to_string().contains("managed"));
         f.state.db.drop().await.unwrap();
     }
+
+    async fn agent_skills_ornn_requires_live_person_identity_and_refuses_master_credentials() {
+        let f = orchestrator_fixture("skill_ornn_identity").await;
+        let upstream = MockServer::start().await;
+        let mut service = crate::test_utils::test_auto_connected_catalog_service();
+        service.slug = "ornn-api".into();
+        service.base_url = upstream.uri();
+        service.identity_propagation_mode = "jwt".into();
+        let collection = f
+            .state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            );
+        collection.insert_one(&service).await.unwrap();
+        Mock::given(path("/api/v1/skill-search"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data":{"items":[],"totalPages":0}})),
+            )
+            .mount(&upstream)
+            .await;
+        let reader = Reader {
+            state: &f.state,
+            person: &f.owner,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        };
+        assert!(skills::search(&reader, "private", 1).await.is_ok());
+        let requests = upstream.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.contains_key("x-nyxid-identity-token"));
+        // No failure formatter ever receives the signed token.
+        let token = requests[0]
+            .headers
+            .get("x-nyxid-identity-token")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let claims = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            token.split('.').nth(1).unwrap(),
+        )
+        .unwrap();
+        let claims: Value = serde_json::from_slice(&claims).unwrap();
+        assert!(claims["sub"].as_str() == Some(f.owner.as_str()));
+        collection
+            .update_one(
+                doc! {"_id":&service.id},
+                doc! {"$set":{"identity_propagation_mode":"none"}},
+            )
+            .await
+            .unwrap();
+        assert!(skills::search(&reader, "private", 1).await.is_err());
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        let encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(b"test-only-ornn-fixture")
+            .await
+            .unwrap();
+        collection.update_one(doc!{"_id":&service.id},doc!{"$set":{"identity_propagation_mode":"jwt","auth_method":"bearer","service_category":"internal","credential_encrypted":mongodb::bson::Binary{subtype:mongodb::bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+        assert!(skills::search(&reader, "private", 1).await.is_err());
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::GET,
+                    "/api/v1/skill-search?scope=private&mode=keyword&pageSize=1&page=1&q=private",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::ProxyError
+        ));
+        assert!(matches!(
+            reader.get("/api/v1/skill-search?scope=private&mode=keyword&pageSize=1&page=1&q=private").await,
+            Err(AppError::Forbidden(message))
+                if message == "Skill unavailable through your Ornn access; check the connection and retry"
+        ));
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        // Missing principal must never become an anonymous Ornn request.
+        collection
+            .update_one(
+                doc! {"_id":&service.id},
+                doc! {"$set":{"auth_method":"none"}},
+            )
+            .await
+            .unwrap();
+        let missing = uuid::Uuid::new_v4().to_string();
+        assert!(
+            Reader {
+                state: &f.state,
+                person: &missing,
+                thread_key: None,
+                scopes: None,
+                chat: None,
+            }
+            .get("/api/v1/skill-search")
+            .await
+            .is_err()
+        );
+        // Owner identity errors keep their own status, as before classification.
+        assert!(matches!(
+            Reader {
+                state: &f.state,
+                person: "not-a-person-id",
+                thread_key: None,
+                scopes: None,
+                chat: None,
+            }
+            .get("/api/v1/skill-search")
+            .await,
+            Err(AppError::NotFound(message)) if message == "Conversation not found"
+        ));
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        // Ornn visibility refusal is preserved without returning upstream bodies.
+        upstream.reset().await;
+        Mock::given(path("/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&upstream)
+            .await;
+        assert!(
+            skills::preview(&reader, "128393f3-d528-4ce2-b197-f1b13cb8fd5b", "1.0")
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::GET,
+                    "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b?version=1.0",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::Response { status: 404, .. }
+        ));
+        let not_visible = |result: AppResult<Vec<u8>>| {
+            matches!(result, Err(AppError::Forbidden(message))
+                if message == "Skill unavailable or not visible through your Ornn access")
+        };
+        let version = "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b?version=1.0";
+        assert!(not_visible(reader.get(version).await));
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::DELETE,
+                    "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed)
+        ));
+        assert!(matches!(
+            reader
+                .request(
+                    http::Method::DELETE,
+                    "/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b",
+                    vec![]
+                )
+                .await,
+            Err(AppError::Forbidden(message))
+                if message == "This Ornn operation is not available to agent learning"
+        ));
+        // Every non-2xx keeps the visibility refusal, including server errors
+        // and oversized problem bodies; publication still sees the status.
+        for response in [
+            ResponseTemplate::new(500),
+            ResponseTemplate::new(400).set_body_string("private detail".repeat(2000)),
+        ] {
+            upstream.reset().await;
+            Mock::given(path("/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b"))
+                .respond_with(response)
+                .mount(&upstream)
+                .await;
+            assert!(matches!(
+                reader.classified(http::Method::GET, version, vec![]).await,
+                OrnnOutcome::Response {
+                    status: 400 | 500,
+                    code: OrnnCode::Unknown
+                }
+            ));
+            assert!(not_visible(reader.get(version).await));
+        }
+        upstream.reset().await;
+        Mock::given(path("/api/v1/skills/128393f3-d528-4ce2-b197-f1b13cb8fd5b"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![b'a'; skills::MAX_ARCHIVE + 1]),
+            )
+            .mount(&upstream)
+            .await;
+        assert!(matches!(
+            reader.classified(http::Method::GET, version, vec![]).await,
+            OrnnOutcome::Interrupted
+        ));
+        assert!(matches!(
+            reader.get(version).await,
+            Err(AppError::ValidationError(message))
+                if message == "Ornn response exceeded the skill size limit or was interrupted"
+        ));
+        // Native reads retain runtime approvals; browser preview remains an
+        // explicit human read. No upstream bytes flow before the owner decides.
+        upstream.reset().await;
+        Mock::given(path("/api/v1/skill-search"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data":{"items":[],"totalPages":0}})),
+            )
+            .mount(&upstream)
+            .await;
+        let now = chrono::Utc::now();
+        f.state
+            .db
+            .collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+                crate::models::service_approval_config::COLLECTION_NAME,
+            )
+            .insert_one(
+                crate::models::service_approval_config::ServiceApprovalConfig {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    user_id: f.owner.clone(),
+                    service_id: service.id.clone(),
+                    service_name: service.name.clone(),
+                    approval_required: true,
+                    approval_mode: crate::models::service_approval_config::ApprovalMode::PerRequest,
+                    rules: vec![],
+                    default_effect: None,
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(skills::search(&reader, "human", 1).await.is_ok());
+        let before = upstream.received_requests().await.unwrap().len();
+        let state = f.state.clone();
+        let owner = f.owner.clone();
+        let key = f.chat.api_key_id.clone();
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            skills::search(
+                &Reader {
+                    state: &state,
+                    person: &owner,
+                    thread_key: Some(&key),
+                    scopes: None,
+                    chat: None,
+                },
+                "native",
+                1,
+            )
+            .await
+        }));
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = f
+                    .state
+                    .db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::approval_request::COLLECTION_NAME,
+                    )
+                    .find_one(
+                        doc! {"user_id": &f.owner, "service_id": &service.id, "status": "pending"},
+                    )
+                    .await
+                    .unwrap()
+                {
+                    break row;
+                }
+                assert!(
+                    !task.is_finished(),
+                    "Native read ended before asking for approval"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("native approval request");
+        assert_eq!(pending.get_str("requester_type").unwrap(), "api_key");
+        assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+        drop(task);
+        let mut live_chat = f.chat.clone();
+        live_chat.turn_id = Some(uuid::Uuid::new_v4().to_string());
+        let state = f.state.clone();
+        let owner = f.owner.clone();
+        let key = f.chat.api_key_id.clone();
+        let live = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            skills::search(
+                &Reader {
+                    state: &state,
+                    person: &owner,
+                    thread_key: Some(&key),
+                    scopes: None,
+                    chat: Some(std::sync::Arc::new(live_chat)),
+                },
+                "snapshot",
+                1,
+            )
+            .await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let count = f
+                    .state
+                    .db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::approval_request::COLLECTION_NAME,
+                    )
+                    .count_documents(
+                        doc! {"user_id": &f.owner, "service_id": &service.id, "status": "pending"},
+                    )
+                    .await
+                    .unwrap();
+                if count >= 2 {
+                    break;
+                }
+                assert!(
+                    !live.is_finished(),
+                    "Live agent read stopped waiting for approval"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("live agent approval request");
+        assert!(!live.is_finished());
+        drop(live);
+        assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+        collection
+            .delete_one(doc! {"_id":&service.id})
+            .await
+            .unwrap();
+        assert!(matches!(
+            reader
+                .classified(
+                    http::Method::GET,
+                    "/api/v1/skill-search?scope=private&mode=keyword&pageSize=1&page=1&q=private",
+                    vec![]
+                )
+                .await,
+            OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ServiceUnavailable)
+        ));
+        assert!(matches!(
+            reader.get("/api/v1/skill-search").await,
+            Err(AppError::Forbidden(message))
+                if message == "Ornn is unavailable; connect your Ornn access and retry"
+        ));
+        f.state.db.drop().await.unwrap();
+    }
 }
