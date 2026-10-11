@@ -1212,3 +1212,7 @@ authority are unchanged. Guest connected search/list includes only granted
 UserManaged and Platform connections and drops Internal catalog entries before
 ranking. Native `nyxid` virtual tools remain subject to their separate guest
 authorization; including that virtual catalog does not grant execution access.
+
+### User context reset semantics
+
+A human owner reset records `context_reset_reason=user_reset`. The next turn receives the current checkpoint projection without replaying the prior reset recap; completed actions remain visible for audit, while pending or failed actions must be reviewed and explicitly rerun. Guests and delegated identities cannot reset context.
