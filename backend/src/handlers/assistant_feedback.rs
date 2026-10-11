@@ -180,6 +180,7 @@ pub struct AdminQuery {
 pub struct AdminResponse {
     pub counts: Vec<serde_json::Value>,
     pub recent: Vec<AssistantMessageFeedback>,
+    pub next_cursor: Option<String>,
 }
 pub async fn admin(
     State(state): State<AppState>,
@@ -201,6 +202,14 @@ pub async fn admin(
             b.insert("$lte", bson::DateTime::from_chrono(t));
         }
     }
+    if let Some(cursor) = q.cursor.as_deref() {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(cursor) {
+            filter.insert(
+                "created_at",
+                doc! {"$lt": bson::DateTime::from_chrono(dt.with_timezone(&Utc))},
+            );
+        }
+    }
     let rows = state
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
@@ -210,8 +219,20 @@ pub async fn admin(
         .await?
         .try_collect::<Vec<_>>()
         .await?;
+    let mut buckets = std::collections::BTreeMap::<String, (i64, i64)>::new();
+    for row in &rows {
+        let day = row.created_at.format("%Y-%m-%d").to_string();
+        let e = buckets.entry(day).or_default();
+        if row.vote == "up" { e.0 += 1 } else { e.1 += 1 }
+    }
+    let counts = buckets
+        .into_iter()
+        .map(|(day, (up, down))| serde_json::json!({"day":day,"up":up,"down":down}))
+        .collect();
+    let next_cursor = rows.last().map(|r| r.created_at.to_rfc3339());
     Ok(Json(AdminResponse {
-        counts: Vec::new(),
+        counts,
         recent: rows,
+        next_cursor,
     }))
 }

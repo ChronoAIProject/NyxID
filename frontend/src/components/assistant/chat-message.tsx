@@ -31,6 +31,8 @@ import type {
 import { cn } from "@/lib/utils";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import { MachineToolCard } from "./machine-tool-card";
+import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
+import { capture } from "@/lib/telemetry";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
@@ -149,15 +151,27 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
 export function ChatMessageBubble({
   message,
   interactiveCards = true,
+  conversationId,
+  feedbackEnabled = true,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
+  readonly conversationId?: string;
+  readonly feedbackEnabled?: boolean;
 }) {
   const streaming = message.status === "streaming";
   const content =
     message.role === "assistant"
       ? sanitizeAssistantMessageContent(message.content)
       : message.content;
+  const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
+  const feedback = useAssistantFeedback("conversation", conversationId ?? "", message.id, message.feedback);
+  const setFeedback = async (next: "up" | "down") => {
+    const previous = vote; const selected = previous === next ? undefined : next; setVote(selected);
+    if (!conversationId || !feedbackEnabled) return;
+    try { await feedback.mutateAsync(selected ? { vote: selected } : {}); } catch { setVote(previous); }
+    if (selected) capture({ name: "ui.assistant_feedback_submitted", props: { message_id: message.id, vote: selected } });
+  };
   if (message.role === "user") {
     return (
       <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
@@ -185,11 +199,6 @@ export function ChatMessageBubble({
   const runningTool = streaming
     ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
     : undefined;
-  const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
-  const setFeedback = async (next: "up" | "down") => {
-    const previous = vote; const selected = previous === next ? undefined : next; setVote(selected);
-    try { window.dispatchEvent(new CustomEvent("nyxagent-feedback", { detail: { messageId: message.id, vote: selected } })); } catch { setVote(previous); }
-  };
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -269,9 +278,13 @@ export function ChatMessageBubble({
 export function ChatMessageEntry({
   message,
   interactiveCards = true,
+  conversationId,
+  feedbackEnabled = true,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
+  readonly conversationId?: string;
+  readonly feedbackEnabled?: boolean;
 }) {
   if (message.role === "system" && message.id.startsWith("nyxagent-context-reset:")) {
     return (
@@ -297,6 +310,8 @@ export function ChatMessageEntry({
         <ChatMessageBubble
           message={message}
           interactiveCards={interactiveCards}
+          conversationId={conversationId}
+          feedbackEnabled={feedbackEnabled}
         />
       </div>
     );
@@ -449,7 +464,7 @@ export function ChatMessageList({
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
           <div id={`message-${message.id}`} key={message.id}>
-            {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
+            {renderMessage?.(message) ?? <ChatMessageEntry message={message} conversationId={session?.conversationId} />}
           </div>
         ))}
         {footer}
