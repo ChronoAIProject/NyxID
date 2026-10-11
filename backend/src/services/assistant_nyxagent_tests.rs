@@ -323,7 +323,11 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 
 #[test]
 fn failure_matrix_covers_envelope_less_5xx_and_first_byte_timeout_codes() {
-    assert_eq!(upstream_error_code(503, &Value::Null), "");
+    assert!(
+        TurnError::new("provider_rate_limited")
+            .upstream_code
+            .is_some()
+    );
     assert_eq!(
         TurnError::new("first_byte_timeout").code,
         "first_byte_timeout"

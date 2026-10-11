@@ -1652,7 +1652,7 @@ pub async fn begin_turn_with_voice(
                         conversation_id: id.clone(),
                         user_id: user_id.into(),
                         seq: row.message_count,
-                        turn_id: lost.turn_id,
+                        turn_id: lost.turn_id.clone(),
                         role: "assistant".into(),
                         text: String::new(),
                         status: "failed".into(),
