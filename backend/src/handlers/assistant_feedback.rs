@@ -257,11 +257,11 @@ pub async fn admin(
         }
     }
     if let Some(cursor) = q.cursor.as_deref() {
-        let mut parts = cursor.splitn(2, '|');
-        let dt = parts
-            .next()
+        let (dt_raw, id) = cursor.split_once('|').unwrap_or(("", ""));
+        let dt = (!dt_raw.is_empty())
+            .then_some(dt_raw)
             .and_then(|v| DateTime::parse_from_rfc3339(v).ok());
-        let id = parts.next().filter(|v| !v.is_empty());
+        let id = (!id.is_empty()).then_some(id);
         let (dt, id) = match (dt, id) {
             (Some(dt), Some(id)) => (dt.with_timezone(&Utc), id),
             _ => return Err(AppError::BadRequest("feedback_cursor_invalid".into())),
