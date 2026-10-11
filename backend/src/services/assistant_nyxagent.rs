@@ -1227,6 +1227,10 @@ pub async fn messages(
 }
 
 pub async fn reset_context(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
+    let current = get(db, user_id, id).await?;
+    if live_turn(&current, Utc::now()).is_some() {
+        return Err(AppError::AssistantTurnActive);
+    }
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": id, "user_id": user_id},
@@ -2891,6 +2895,7 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
                 message
                     .activities
                     .iter()
+                    .take(10)
                     .map(|a| format!("{}={}", a.label, a.status))
                     .collect::<Vec<_>>()
                     .join(", ")

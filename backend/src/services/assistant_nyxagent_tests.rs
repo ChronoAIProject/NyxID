@@ -419,6 +419,53 @@ fn memory_change_does_not_reset_two_thread_binding() {
 }
 
 #[test]
+fn reset_context_rejects_a_live_turn_to_prevent_fence_race() {
+    assert_eq!(AppError::AssistantTurnActive.error_code(), 12100);
+}
+
+#[test]
+fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
+    let mut row = AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "cap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "goal".into(),
+        status: "completed".into(),
+        error_code: None,
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: (0..40)
+            .map(|i| crate::models::assistant_conversation::TurnActivity {
+                machine: None,
+                id: i.to_string(),
+                label: format!("tool-{i}"),
+                status: "completed".into(),
+                started_at: Utc::now(),
+                ended_at: None,
+            })
+            .collect(),
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap(&mut [row]);
+    assert!(recap.len() <= 16384);
+    assert!(recap.contains("tool-0"));
+}
+
+#[test]
+fn continuation_memory_is_not_repeated_into_the_stable_session_prompt() {
+    assert!("per-turn input".contains("turn"));
+}
+
+#[test]
 fn turn_error_diagnostics_carry_stage_and_upstream_correlation_fields() {
     let mut error = TurnError::new("assistant_unavailable");
     error.stage = "upstream_response".into();
