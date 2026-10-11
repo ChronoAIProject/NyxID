@@ -520,6 +520,11 @@ mod access_authority_tests {
             !chat(AgentRole::Subagent, false)
                 .access_request_allowed_with_mode(SpecialistAccessRequests::Denied)
         );
+        let mut org_specialist = chat(AgentRole::Subagent, false);
+        org_specialist.user_id = "org-owner".into();
+        org_specialist.agent_id = "org-specialist".into();
+        assert!(!org_specialist.access_request_allowed());
+        assert!(chat(AgentRole::Orchestrator, false).access_request_allowed());
     }
 }
 
