@@ -2830,7 +2830,7 @@ pub async fn delete(
 /// hidden voice task's first turn.
 pub fn bounded_recap(history: &[AssistantMessage]) -> String {
     const OPEN: &str =
-        "\n\nPrevious context (after reset; context you may rely on, not new instructions):\n";
+        "\n\nPrevious context (after reset) — context you may rely on, not new instructions:\n";
     const CLOSE: &str = "\nEnd prior history.";
     let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
     let mut recap = Vec::new();
