@@ -1,11 +1,11 @@
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    models::{
-        assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME},
-    },
+    models::assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME},
     mw::auth::AuthUser,
-    services::{assistant_feedback_service as feedback_service, assistant_nyxagent as engine, audit_service},
+    services::{
+        assistant_feedback_service as feedback_service, assistant_nyxagent as engine, audit_service,
+    },
 };
 use axum::{
     Json,
@@ -48,14 +48,27 @@ fn validate(input: &FeedbackInput) -> AppResult<Option<String>> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| {
-            if s.chars().count() > 1000 { return Err(AppError::BadRequest("feedback_comment_too_long".into())); }
+            if s.chars().count() > 1000 {
+                return Err(AppError::BadRequest("feedback_comment_too_long".into()));
+            }
             Ok(s.to_string())
-        }).transpose()?;
+        })
+        .transpose()?;
     Ok(comment)
 }
 async fn enforce_feedback_limit(state: &AppState, user_id: &str) -> AppResult<()> {
-    let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(state.db.clone(), "assistant_feedback", 30, 60);
-    if !limiter.check_shared(&format!("assistant-feedback:{user_id}")).await? { return Err(AppError::RateLimited); }
+    let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(
+        state.db.clone(),
+        "assistant_feedback",
+        30,
+        60,
+    );
+    if !limiter
+        .check_shared(&format!("assistant-feedback:{user_id}"))
+        .await?
+    {
+        return Err(AppError::RateLimited);
+    }
     Ok(())
 }
 async fn upsert(
@@ -71,7 +84,8 @@ async fn upsert(
     enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
-        let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id).await?
+        let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
+            .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
         (
             Some(row.turn_id),
@@ -81,7 +95,8 @@ async fn upsert(
         let gid = group_id.as_deref().unwrap();
         let access =
             crate::services::org_group_service::get(&state.db, &user_id, gid, None).await?;
-        let row = feedback_service::group_message(&state.db, gid, message_id).await?
+        let row = feedback_service::group_message(&state.db, gid, message_id)
+            .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
         (None, row.role == "agent" && access.group.id == gid)
     };
@@ -90,11 +105,21 @@ async fn upsert(
     }
     let now = Utc::now();
     let mut filter = doc! {"user_id":&user_id,"message_id":message_id};
-    if let Some(cid) = conversation_id.as_deref() { filter.insert("conversation_id", cid); }
-    if let Some(gid) = group_id.as_deref() { filter.insert("group_id", gid); }
-    let existing = state.db.collection::<AssistantMessageFeedback>(COLLECTION_NAME).find_one(filter.clone()).await?;
+    if let Some(cid) = conversation_id.as_deref() {
+        filter.insert("conversation_id", cid);
+    }
+    if let Some(gid) = group_id.as_deref() {
+        filter.insert("group_id", gid);
+    }
+    let existing = state
+        .db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find_one(filter.clone())
+        .await?;
     let mut set = doc! {"vote":&input.vote,"updated_at":bson::DateTime::from_chrono(now),"conversation_id":conversation_id.clone(),"group_id":group_id.clone(),"turn_id":turn_id.clone()};
-    if input.comment.is_some() { set.insert("comment", comment.clone()); }
+    if input.comment.is_some() {
+        set.insert("comment", comment.clone());
+    }
     let update = doc! {"$set":set,"$setOnInsert":{"_id":Uuid::new_v4().to_string(),"created_at":bson::DateTime::from_chrono(now)}};
     let row = state
         .db
@@ -104,7 +129,16 @@ async fn upsert(
         .return_document(mongodb::options::ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::Internal("feedback write failed".into()))?;
-    if existing.as_ref().map(|r| r.vote.as_str() == input.vote.as_str() && (input.comment.is_none() || r.comment == comment)).unwrap_or(false) { return Ok(Json(row.into())); }
+    if existing
+        .as_ref()
+        .map(|r| {
+            r.vote.as_str() == input.vote.as_str()
+                && (input.comment.is_none() || r.comment == comment)
+        })
+        .unwrap_or(false)
+    {
+        return Ok(Json(row.into()));
+    }
     audit_service::log_for_user(
         state.db.clone(),
         auth,
@@ -154,7 +188,9 @@ async fn withdraw(
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
         .delete_one(filter)
         .await?;
-    if result.deleted_count == 0 { return Ok(StatusCode::NO_CONTENT); }
+    if result.deleted_count == 0 {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     audit_service::log_for_user(
         state.db.clone(),
         auth,
@@ -224,10 +260,21 @@ pub async fn admin(
     }
     if let Some(cursor) = q.cursor.as_deref() {
         let mut parts = cursor.splitn(2, '|');
-        let dt = parts.next().and_then(|v| DateTime::parse_from_rfc3339(v).ok());
+        let dt = parts
+            .next()
+            .and_then(|v| DateTime::parse_from_rfc3339(v).ok());
         let id = parts.next().filter(|v| !v.is_empty());
-        let (dt, id) = match (dt, id) { (Some(dt), Some(id)) => (dt.with_timezone(&Utc), id), _ => return Err(AppError::BadRequest("feedback_cursor_invalid".into())) };
-        filter.insert("$or", vec![doc! {"created_at": {"$lt": bson::DateTime::from_chrono(dt)}}, doc! {"created_at": bson::DateTime::from_chrono(dt), "_id": {"$lt": id}}]);
+        let (dt, id) = match (dt, id) {
+            (Some(dt), Some(id)) => (dt.with_timezone(&Utc), id),
+            _ => return Err(AppError::BadRequest("feedback_cursor_invalid".into())),
+        };
+        filter.insert(
+            "$or",
+            vec![
+                doc! {"created_at": {"$lt": bson::DateTime::from_chrono(dt)}},
+                doc! {"created_at": bson::DateTime::from_chrono(dt), "_id": {"$lt": id}},
+            ],
+        );
     }
     let mut aggregate_filter = filter.clone();
     aggregate_filter.remove("$or");
@@ -241,8 +288,22 @@ pub async fn admin(
         .await?
         .try_collect::<Vec<_>>()
         .await?;
-    let recent = rows.iter().map(|r| AdminFeedbackRow { message_id: r.message_id.clone(), vote: r.vote.clone(), comment: r.comment.clone(), created_at: r.created_at.to_rfc3339(), updated_at: r.updated_at.to_rfc3339() }).collect::<Vec<_>>();
-    let next_cursor = (rows.len() == 100).then(|| rows.last().map(|r| format!("{}|{}", r.created_at.to_rfc3339(), r.id))).flatten();
+    let recent = rows
+        .iter()
+        .map(|r| AdminFeedbackRow {
+            message_id: r.message_id.clone(),
+            vote: r.vote.clone(),
+            comment: r.comment.clone(),
+            created_at: r.created_at.to_rfc3339(),
+            updated_at: r.updated_at.to_rfc3339(),
+        })
+        .collect::<Vec<_>>();
+    let next_cursor = (rows.len() == 100)
+        .then(|| {
+            rows.last()
+                .map(|r| format!("{}|{}", r.created_at.to_rfc3339(), r.id))
+        })
+        .flatten();
     Ok(Json(AdminResponse {
         counts,
         recent,
@@ -253,6 +314,35 @@ pub async fn admin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn per_user_feedback_burst_is_limited_independently() {
+        let limiter = crate::mw::rate_limit::PerKeyRateLimiter::new(2, 60);
+        assert!(
+            limiter
+                .check_shared("assistant-feedback:user-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            limiter
+                .check_shared("assistant-feedback:user-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !limiter
+                .check_shared("assistant-feedback:user-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            limiter
+                .check_shared("assistant-feedback:user-b")
+                .await
+                .unwrap()
+        );
+    }
 
     #[test]
     fn validate_accepts_votes_and_bounds_comments() {
@@ -267,7 +357,11 @@ mod tests {
 
     #[test]
     fn validate_rejects_comments_over_bound() {
-        let error = validate(&FeedbackInput { vote: "up".into(), comment: Some("x".repeat(1_001)) }).unwrap_err();
+        let error = validate(&FeedbackInput {
+            vote: "up".into(),
+            comment: Some("x".repeat(1_001)),
+        })
+        .unwrap_err();
         assert!(matches!(error, AppError::BadRequest(code) if code == "feedback_comment_too_long"));
     }
 
