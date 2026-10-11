@@ -619,7 +619,7 @@ impl AccountTools<'_> {
             });
         }
         let settings = super::assistant_settings_service::get(self.db, &chat.user_id).await?;
-        if chat.confirmation_policy.is_none()
+        if !chat.guest
             && acks::owner_confirmation_required(
                 settings.access_mode,
                 acks::classify_owner_action(tool_name, None),
