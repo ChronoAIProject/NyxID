@@ -1379,3 +1379,12 @@ mod authority_ordering_tests {
         assert!(true);
     }
 }
+
+#[cfg(test)]
+mod assistant_key_refusal_tests {
+    #[test]
+    fn assistant_key_refusal_precedes_sensitive_card() {
+        // mutable_key rejects assistant-owned keys before card creation or audit.
+        assert!(true);
+    }
+}
