@@ -1200,6 +1200,3 @@ cursor; responses use RFC3339 timestamps and never include message text.
 Stopped or failed replies are not eligible for feedback. Conversation and group
 deletion, and user deletion, purge feedback rows.
 
-## Reply feedback
-
-Completed NyxAgent replies may receive one per-user thumbs-up or thumbs-down vote. A vote can carry an optional comment (bounded to 1,000 characters); repeating a vote is idempotent and changing the vote preserves an omitted comment. `DELETE` withdraws the vote. Stopped or failed replies are ineligible. Feedback controls are rendered only on the NyxAgent conversation page, never in replay or legacy Aevatar views. Admins can review UTC daily aggregates and cursor-paged rows through `/api/v1/admin/assistant/feedback` with `from`, `to`, and `vote` filters.
