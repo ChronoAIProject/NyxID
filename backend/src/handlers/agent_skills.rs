@@ -11,6 +11,8 @@ use crate::{
         assistant_team_service as team,
     },
 };
+
+const SKILL_HISTORY_LIMIT: i64 = 50;
 use axum::{
     Json,
     body::{Body, to_bytes},
@@ -402,7 +404,7 @@ pub async fn history(
     let _ = team::agent(&state.db, &owner, &id).await?;
     let rows: Vec<crate::models::audit_log::AuditLog> = state.db.collection(crate::models::audit_log::COLLECTION_NAME)
         .find(mongodb::bson::doc! {"user_id": &owner, "event_type": "assistant_skills_updated", "event_data.agent_id": &id})
-        .sort(mongodb::bson::doc! {"created_at": -1}).limit(50).await?.try_collect().await?;
+        .sort(mongodb::bson::doc! {"created_at": -1}).limit(SKILL_HISTORY_LIMIT).await?.try_collect().await?;
     Ok(Json(
         json!({"items": rows.into_iter().map(|r| json!({"id": r.id, "created_at": r.created_at, "event_data": r.event_data})).collect::<Vec<_>>() }),
     ))
@@ -687,6 +689,11 @@ mod tests {
     };
     use mongodb::bson::doc;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    #[test]
+    fn skill_history_is_bounded_for_owner_reads() {
+        assert_eq!(SKILL_HISTORY_LIMIT, 50);
+    }
 
     #[tokio::test]
     async fn agent_skills_ornn_requires_live_person_identity_and_refuses_master_credentials() {
