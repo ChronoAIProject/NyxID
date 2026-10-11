@@ -1781,7 +1781,8 @@ async fn execute_turn(
         .map_err(|_| TurnError::new("assistant_unavailable"))?;
         binding = None;
     }
-    let recap = binding.is_none() && (context.reset || row.context_reset_reason.is_some());
+    let recap = binding.is_none()
+        && (context.reset || row.context_reset_reason.as_deref().is_some_and(|reason| reason != "user_reset"));
     if recap {
         events.notice();
     }
