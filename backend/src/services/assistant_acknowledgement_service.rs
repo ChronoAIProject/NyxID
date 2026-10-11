@@ -234,7 +234,7 @@ pub async fn audit_access_request_denied(
         ),
     )
     .await;
-    if let Ok(agents) = super::assistant_team_service::agents(db, &chat.user_id).await {
+    if let Ok(agents) = super::assistant_team_service::agents(db, &chat.user_id, false).await {
         if let Some(home) = agents
             .into_iter()
             .find(|a| a.is_nyxbot())
