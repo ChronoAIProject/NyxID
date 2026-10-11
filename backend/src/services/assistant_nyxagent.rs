@@ -2970,6 +2970,10 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
         format!("{OPEN}{}{CLOSE}", recap.concat())
     }
 }
+
+pub fn retry_duplicate_action(completed: &[crate::models::assistant_conversation::TurnActivity], label: &str) -> bool {
+    completed.iter().any(|activity| activity.status == "completed" && activity.label == label)
+}
 pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instructions: &str) -> Value {
     let mut body = json!({
         "model": model,

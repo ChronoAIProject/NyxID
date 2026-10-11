@@ -360,6 +360,33 @@ async fn retried_turn_does_not_re_run_completed_actions() {
 }
 
 #[tokio::test]
+async fn context_checkpoint_matches_turn_source_and_reset_reason_is_visible() {
+    let (state, _calls, server) = setup(None, Duration::ZERO).await;
+    let response = turns(State(state.clone()), test_auth_user(OWNER), turn_request(None)).await.unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 100_000).await.unwrap();
+    let row = settled(&state).await;
+    let (turn_row, turn_messages) = engine::checkpoint_for_turn(&state.db, OWNER, &row.id).await.unwrap();
+    let (route_row, route_messages) = engine::context_checkpoint(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(turn_row.id, route_row.id);
+    assert_eq!(turn_messages, route_messages);
+    engine::reset_context(&state.db, OWNER, &row.id).await.unwrap();
+    let reset = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(reset.context_reset_reason.as_deref(), Some("user_reset"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn stream_failure_persists_stream_diagnostic_stage() {
+    let (state, _calls, server) = setup_options(None, Duration::ZERO, vec!["stream_failure"], false).await;
+    let response = turns(State(state.clone()), test_auth_user(OWNER), turn_request(None)).await.unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 100_000).await.unwrap();
+    let row = settled(&state).await;
+    let failed = engine::messages(&state.db, OWNER, &row.id, 10, None).await.unwrap().pop().unwrap();
+    assert_eq!(failed.error_detail.as_ref().map(|d| d.stage.as_str()), Some("stream"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn browser_disconnect_does_not_cancel_detached_turn_and_headers_are_server_owned() {
     let (state, calls, server) = setup(None, Duration::from_millis(150)).await;
     let response = turns(
