@@ -193,7 +193,9 @@ async fn withdraw(
         state.db.clone(),
         auth,
         "assistant_feedback_withdrawn",
-        Some(serde_json::json!({"message_id":message_id,"group":group})),
+        Some(
+            serde_json::json!({"message_id":message_id,"group":group,"conversation_id": if group { serde_json::Value::Null } else { serde_json::Value::String(scope.clone().unwrap_or_default()) },"group_id": if group { serde_json::Value::String(scope.clone().unwrap_or_default()) } else { serde_json::Value::Null }}),
+        ),
     );
     Ok(StatusCode::NO_CONTENT)
 }
