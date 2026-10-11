@@ -87,13 +87,6 @@ async fn base(name: &str) -> (crate::AppState, String) {
         .insert_one(test_user(&owner, UserType::Person))
         .await
         .unwrap();
-    db.collection(crate::models::assistant_settings::COLLECTION_NAME)
-        .insert_one(crate::models::assistant_settings::AssistantSettings {
-            access_mode: crate::models::assistant_settings::AccessMode::Autopilot,
-            ..crate::models::assistant_settings::AssistantSettings::defaults(&owner)
-        })
-        .await
-        .unwrap();
     (test_app_state(db), owner)
 }
 
@@ -1024,6 +1017,7 @@ async fn native_inventory(full: bool) {
             &f.owner,
             super::assistant_settings_service::Update {
                 skip_destructive_confirmation: Some(true),
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
                 ..Default::default()
             },
         )
