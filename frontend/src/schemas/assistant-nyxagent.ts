@@ -248,6 +248,7 @@ export const voicePreferencesSchema = z.object({
   notify_on_completion: z.boolean(),
 });
 export const nyxAgentSettingsSchema = z.object({
+  access_mode: z.enum(["autopilot", "nyxmode", "ask_every_time"]).default("nyxmode"),
   voice: voicePreferencesSchema.nullish(),
   timezone: z.string().nullable().optional(),
   schedule_minimum_minutes: z
@@ -286,6 +287,7 @@ export type NyxAgentSettingsUpdate = Partial<
     | "trigger_runs_per_hour"
     | "trigger_runs_per_day"
     | "skip_destructive_confirmation"
+    | "access_mode"
     | "max_auto_continuations"
     | "max_live_subagents"
     | "max_concurrent_subagent_turns"
@@ -309,6 +311,7 @@ export function nyxAgentSettingsFormSchema(limits: {
       .min(min, `Must be at least ${String(min)}`)
       .max(max, `Must be at most ${String(max)}`);
   return z.object({
+    access_mode: z.enum(["autopilot", "nyxmode", "ask_every_time"]),
     max_auto_continuations: whole(0, 32),
     confirm_destructive: z.boolean(),
     max_live_subagents: whole(0, limits.max_live_subagents_limit),

@@ -21,6 +21,7 @@ import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroupMessages } from "@/hooks/use-nyxbot-groups";
@@ -495,7 +496,7 @@ export function NyxAgentGroupPage({
   return (
     <AssistantShell
       title={group?.name ?? "Group"}
-      headerActions={<NyxBotSettingsButton />}
+      headerActions={<div className="flex items-center gap-2"><Badge variant="secondary" aria-label="Access mode">NyxMode</Badge><NyxBotSettingsButton /></div>}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"

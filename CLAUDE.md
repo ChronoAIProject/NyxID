@@ -708,3 +708,8 @@ codes and guidance only. Production-image verification tests must exercise real
 TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions.
 
 Specialist requests are sandboxed: only the owner's NyxBot may request or grant access. Specialists report missing access to NyxBot rather than creating cards or connection links.
+NyxBot owner settings include an enforced `access_mode` (`nyxmode`, `autopilot`,
+or `ask_every_time`) and optional specialist override. The backend acknowledgement
+service owns classification and approval; clients cannot bypass policy floors.
+NyxAgent model selection is owner-authenticated, validated against live models,
+and changing an existing thread resets its upstream context.

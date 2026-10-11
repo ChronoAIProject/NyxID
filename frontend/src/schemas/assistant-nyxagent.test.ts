@@ -271,6 +271,7 @@ describe("NyxBot team, settings and channel schemas", () => {
   it("validates settings form values against the server limits", () => {
     const schema = nyxAgentSettingsFormSchema(limits);
     const valid = {
+      access_mode: "nyxmode" as const,
       confirm_destructive: true,
       max_live_subagents: 0,
       max_concurrent_subagent_turns: 1,
@@ -291,6 +292,14 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(schema.safeParse({ ...valid, max_concurrent_subagent_turns: 9 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_live_subagents: 2.5 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_live_subagents: Number.NaN }).success).toBe(false);
+  });
+
+  it("accepts each persisted access mode", () => {
+    const schema = nyxAgentSettingsFormSchema(limits);
+    const base = { confirm_destructive: true, max_live_subagents: 0, max_concurrent_subagent_turns: 1, max_group_handoffs: 0, max_group_handoffs_per_hour: 0, max_auto_continuations: 8 };
+    for (const access_mode of ["autopilot", "nyxmode", "ask_every_time"] as const) {
+      expect(schema.parse({ ...base, access_mode }).access_mode).toBe(access_mode);
+    }
   });
 
   it("treats missing and future channel follow readiness as unavailable", () => {

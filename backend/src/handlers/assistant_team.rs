@@ -1854,24 +1854,21 @@ async fn dispatch_settings(
     Ok(match name {
         "update_settings" => {
             let before = settings::get(&state.db, &chat.user_id).await?;
-            let maximum = args["max_auto_continuations"]
-                .as_i64()
-                .and_then(|v| i32::try_from(v).ok())
-                .ok_or_else(|| {
-                    AppError::ValidationError(
-                        "max_auto_continuations must be an integer from 0 to 32".into(),
-                    )
-                })?;
+            let maximum = args["max_auto_continuations"].as_i64().and_then(|v| i32::try_from(v).ok()).unwrap_or(before.max_auto_continuations);
             let after = settings::update(
                 &state.db,
                 &chat.user_id,
                 settings::Update {
                     max_auto_continuations: Some(maximum),
+                    access_mode: args["access_mode"].as_str().and_then(|v| serde_json::from_value(serde_json::Value::String(v.into())).ok()),
                     ..Default::default()
                 },
             )
             .await?;
             settings::audit(&state.db, &chat.user_id, &before, &after).await;
+            if before.access_mode != after.access_mode {
+                let _ = crate::services::audit_service::log_actor_event(state.db.clone(), &crate::services::audit_service::AuditActor { user_id: owner.into(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None }, "assistant_access_mode_changed", Some(json!({"old": before.access_mode, "new": after.access_mode, "source": "tool"}))).await;
+            }
             (
                 serde_json::to_value(SettingsResponse::from(after))
                     .map_err(|_| AppError::Internal("Settings response failed".into()))?,
@@ -2358,6 +2355,8 @@ pub struct UpdateAgentRequest {
     /// Empty clears it.
     #[serde(default)]
     persona: Option<String>,
+    #[serde(default)]
+    access_mode_override: Option<Option<crate::models::assistant_settings::AccessMode>>,
 }
 
 pub async fn update_agent(
@@ -2381,6 +2380,10 @@ pub async fn update_agent(
         },
     )
     .await?;
+    if body.access_mode_override.is_some() {
+        state.db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc! {"_id": &agent.id, "user_id": &owner}, mongodb::bson::doc! {"$set": {"access_mode_override": mongodb::bson::to_bson(&body.access_mode_override).map_err(|_| AppError::Internal("access mode serialization failed".into()))?}}).await?;
+    }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
         "persona": agent.persona})))
@@ -2538,6 +2541,7 @@ pub struct SettingsResponse {
     schedule_minimum_minutes: i32,
     timezone: Option<String>,
     skip_destructive_confirmation: bool,
+    access_mode: crate::models::assistant_settings::AccessMode,
     max_live_subagents: i32,
     max_concurrent_subagent_turns: i32,
     max_live_subagents_limit: i32,
@@ -2559,6 +2563,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             trigger_runs_per_hour: row.trigger_runs_per_hour,
             trigger_runs_per_day: row.trigger_runs_per_day,
             skip_destructive_confirmation: row.skip_destructive_confirmation,
+            access_mode: row.access_mode,
             max_live_subagents: row.max_live_subagents,
             max_concurrent_subagent_turns: row.max_concurrent_subagent_turns,
             max_live_subagents_limit: crate::models::assistant_settings::MAX_LIVE_SUBAGENTS_LIMIT,
@@ -2595,6 +2600,7 @@ pub struct SettingsRequest {
     schedule_minimum_minutes: Option<i32>,
     timezone: Option<String>,
     skip_destructive_confirmation: Option<bool>,
+    access_mode: Option<crate::models::assistant_settings::AccessMode>,
     max_live_subagents: Option<i32>,
     max_concurrent_subagent_turns: Option<i32>,
     #[serde(default)]
@@ -2628,6 +2634,7 @@ pub async fn update_settings(
             trigger_runs_per_hour: body.trigger_runs_per_hour,
             trigger_runs_per_day: body.trigger_runs_per_day,
             skip_destructive_confirmation: body.skip_destructive_confirmation,
+            access_mode: body.access_mode,
             max_live_subagents: body.max_live_subagents,
             max_concurrent_subagent_turns: body.max_concurrent_subagent_turns,
             max_group_handoffs: body.max_group_handoffs,
@@ -2637,6 +2644,14 @@ pub async fn update_settings(
     )
     .await?;
     settings::audit(&state.db, &owner, &before, &after).await;
+    if before.access_mode != after.access_mode {
+        let _ = crate::services::audit_service::log_actor_event(
+            state.db.clone(),
+            &crate::services::audit_service::AuditActor { user_id: owner.clone(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None },
+            "assistant_access_mode_changed",
+            Some(serde_json::json!({"old": before.access_mode, "new": after.access_mode, "owner": owner})),
+        ).await;
+    }
     Ok(Json(after.into()))
 }
 

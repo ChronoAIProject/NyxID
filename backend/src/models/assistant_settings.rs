@@ -3,6 +3,16 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "assistant_settings";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessMode {
+    Autopilot,
+    #[default]
+    Nyxmode,
+    AskEveryTime,
+}
+
+
 pub const DEFAULT_MAX_LIVE_SUBAGENTS: i32 = 8;
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS: i32 = 3;
 /// Hard ceilings that bound what an owner can configure.
@@ -38,6 +48,9 @@ pub struct AssistantSettings {
     /// confirmation card before they run.
     #[serde(default)]
     pub skip_destructive_confirmation: bool,
+    /// Owner-level action approval policy. Missing legacy rows are migrated on read.
+    #[serde(default)]
+    pub access_mode: AccessMode,
     #[serde(default = "default_live")]
     pub max_live_subagents: i32,
     #[serde(default = "default_auto_continuations")]
@@ -97,6 +110,7 @@ impl AssistantSettings {
         Self {
             user_id: user_id.into(),
             skip_destructive_confirmation: false,
+            access_mode: AccessMode::Nyxmode,
             max_live_subagents: DEFAULT_MAX_LIVE_SUBAGENTS,
             max_auto_continuations: default_auto_continuations(),
             max_concurrent_subagent_turns: DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS,

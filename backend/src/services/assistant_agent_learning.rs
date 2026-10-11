@@ -1332,6 +1332,7 @@ mod tests {
             saved_login_ids: Vec::new(),
             created_by: "learning-test-owner".into(),
             model: "test".into(),
+            access_mode_override: None,
             home_conversation_id: None,
             memory: Vec::new(),
             display_name: None,

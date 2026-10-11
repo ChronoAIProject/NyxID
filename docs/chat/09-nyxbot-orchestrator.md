@@ -1086,3 +1086,13 @@ a trusted contract and legacy event behavior remain unchanged.
 ### Specialist access boundary
 
 Specialist threads are sandboxed. Only the owner's NyxBot may request or grant access; specialists report missing access to NyxBot. Card and hosted connection-link creation from specialist chat keys is refused with `access_request_denied`.
+# Access modes
+
+NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
+`nyxmode` (default) confirms sensitive and destructive actions, `ask_every_time`
+confirms every changing action, and `autopilot` bypasses routine cards. Policy
+floors such as service approvals, machine confirmation, webhook policy and guest
+rules always remain enforced. The legacy `skip_destructive_confirmation` field is
+kept synchronized for one rolling release; rows without `access_mode` migrate
+from its value (`true` means `autopilot`). Specialists may override the owner
+mode with `access_mode_override`.
