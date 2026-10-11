@@ -574,6 +574,32 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
     );
 }
 
+#[tokio::test]
+async fn feedback_admin_route_rejects_non_admin() {
+    let f = fixture("feedback-admin-acl", false).await;
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"is_admin": false, "role_ids": bson::Bson::Array(vec![])}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/assistant/feedback",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
