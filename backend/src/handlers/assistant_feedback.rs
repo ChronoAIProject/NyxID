@@ -12,7 +12,6 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -104,7 +103,7 @@ async fn upsert(
         return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
     }
     let now = Utc::now();
-    let mut filter = doc! {"user_id":&user_id,"message_id":message_id};
+    let filter = doc! {"user_id":&user_id,"message_id":message_id};
     let existing = state
         .db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
