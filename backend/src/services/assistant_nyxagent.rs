@@ -297,6 +297,8 @@ pub fn channel_note(row: &AssistantConversation) -> String {
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
     #[serde(default)]
+    pub retry_of: Option<String>,
+    #[serde(default)]
     pub attachment_ids: Vec<String>,
     pub conversation_id: Option<String>,
     /// New threads only: the agent to talk to; the owner's NyxBot by default.
@@ -529,6 +531,7 @@ pub fn event_text_limit(event: &AgentEvent) -> usize {
 
 pub const MAX_PENDING_EVENTS: usize = 20;
 impl std::fmt::Debug for TurnRequest {
+            retry_of: None,
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnRequest")
             .field("conversation_id", &self.conversation_id)

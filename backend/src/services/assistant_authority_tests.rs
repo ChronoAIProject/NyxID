@@ -125,6 +125,7 @@ pub(crate) async fn new_orchestrator(
         &state.db,
         owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -175,6 +176,7 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.db,
         &owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
@@ -461,6 +463,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
@@ -554,6 +557,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1303,6 +1307,7 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
@@ -1370,6 +1375,7 @@ async fn assert_assistant_key_boundaries(f: &Fixture) {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1664,6 +1670,7 @@ async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_can
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,

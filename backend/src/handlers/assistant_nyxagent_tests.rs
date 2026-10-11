@@ -570,6 +570,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -835,6 +836,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -886,6 +888,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1025,6 +1028,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1074,6 +1078,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1273,6 +1278,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1362,6 +1368,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,

@@ -284,6 +284,7 @@ async fn assistant_operation_scope_transaction_sync_revision_regrant_rotation_an
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             agent_id: Some(f.chat.agent_id.clone()),
             conversation_id: None,
             text: "Another thread".into(),
