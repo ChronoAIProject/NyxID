@@ -252,7 +252,8 @@ is not woken by those direct chats.
 
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
-`notice`). A user message goes to the members it `@mentions`, else to the lead
+`notice`). A user message goes to the members it `@mentions`, then to the group's
+sticky last-recipient set (filtered to live members), else to the lead
 (NyxBot when it is a member, else the first member). A member's reply that
 `@mentions` others hands the work to them, bounded by the owner's settings:
 `max_group_handoffs` per new request (default 6, 0–24; 0 turns hand-offs off)
