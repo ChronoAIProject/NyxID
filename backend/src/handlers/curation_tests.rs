@@ -497,6 +497,59 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn feedback_rejects_user_failed_and_stopped_replies() {
+    let f = fixture("feedback-ineligible", false).await;
+    for (id, role, status) in [
+        ("user", "user", "completed"),
+        ("failed", "assistant", "failed"),
+        ("stopped", "assistant", "failed"),
+    ] {
+        f.state
+            .db
+            .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+            .insert_one(AssistantMessage {
+                steering: None,
+                voice: None,
+                execution_pending: false,
+                id: id.into(),
+                conversation_id: format!("conv-{id}"),
+                user_id: f.owner.clone(),
+                seq: 1,
+                turn_id: id.into(),
+                role: role.into(),
+                text: "reply".into(),
+                status: status.into(),
+                error_code: (status == "failed").then_some(if id == "stopped" {
+                    "cancelled".into()
+                } else {
+                    "failed".into()
+                }),
+                created_at: Utc::now(),
+                activities: vec![],
+                attachments: vec![],
+                origin: None,
+                via: None,
+            })
+            .await
+            .unwrap();
+        let path =
+            format!("/api/v1/assistant/nyxagent/conversations/conv-{id}/messages/{id}/feedback");
+        assert_eq!(
+            request(
+                &f.state,
+                "PUT",
+                &path,
+                &f.human_token,
+                Some(json!({"vote":"up"}))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
