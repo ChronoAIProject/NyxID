@@ -454,6 +454,86 @@ async fn context_checkpoint_pending_includes_running_activity() {
 }
 
 #[tokio::test]
+async fn recap_and_context_endpoint_share_goal_and_pending_projection() {
+    let db = connect_transaction_test_database("nyxa_checkpoint_parity").await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = engine::begin_turn(
+        &db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: None,
+            agent_id: None,
+            text: "goal".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    engine::activity_started(&db, OWNER, &row.id, "mcp.pending")
+        .await
+        .unwrap();
+    let checkpoint = engine::checkpoint_summary(&db, OWNER, &row.id)
+        .await
+        .unwrap();
+    let recap = engine::bounded_recap(&checkpoint.messages);
+    assert!(recap.contains("goal"));
+    assert!(
+        checkpoint
+            .pending_actions
+            .iter()
+            .any(|item| item.contains("mcp.pending"))
+    );
+}
+
+#[tokio::test]
+async fn user_reset_changes_the_next_turn_recap() {
+    let db = connect_transaction_test_database("nyxa_reset_recap").await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = engine::begin_turn(
+        &db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: None,
+            agent_id: None,
+            text: "before reset".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let before = engine::bounded_recap(
+        &engine::messages(&db, OWNER, &row.id, 20, None)
+            .await
+            .unwrap(),
+    );
+    engine::reset_context(&db, OWNER, &row.id).await.unwrap();
+    let after = engine::bounded_recap(
+        &engine::messages(&db, OWNER, &row.id, 20, None)
+            .await
+            .unwrap(),
+    );
+    assert_ne!(before, after);
+}
+
+#[tokio::test]
 async fn stream_failure_persists_stream_diagnostic_stage() {
     let (state, _calls, server) =
         setup_options(None, Duration::ZERO, vec!["stream_failure"], false).await;
