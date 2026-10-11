@@ -60,6 +60,7 @@ async fn upsert(
 ) -> AppResult<Json<FeedbackResponse>> {
     let comment = validate(&input)?;
     let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
         let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id).await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
@@ -127,6 +128,7 @@ async fn withdraw(
     group: bool,
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
     if let Some(cid) = scope.as_deref() {
         if group {
             crate::services::org_group_service::get(&state.db, &user_id, cid, None).await?;
