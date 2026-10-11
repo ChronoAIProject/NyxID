@@ -24,6 +24,16 @@ mod recovery;
 fn input(agent: &str) -> Value {
     json!({"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
+
+#[test]
+fn improve_draft_input_preserves_base_skill_for_prefill() {
+    let input = serde_json::json!({
+        "agent": "agent-1", "name": "Improve me", "description": "desc",
+        "skill_md": "# Skill", "base_skill": {"skill_id": "skill-1", "version": "1.2.3"}
+    });
+    let parsed = super::parse_input(&input).expect("valid improve draft input");
+    assert!(parsed.base_skill.is_some());
+}
 async fn fixture(name: &str) -> Fixture {
     let f = orchestrator_fixture(name).await;
     review::migrate_publication_targets(&f.state, false)
