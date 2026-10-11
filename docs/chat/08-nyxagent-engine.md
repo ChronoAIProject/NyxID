@@ -1194,3 +1194,8 @@ and the equivalent `/groups/{id}/messages/{message_id}/feedback` accept `{vote:
 the operation is idempotent and response history includes the current feedback.
 Votes contain identifiers and optional bounded comment only. Admins can inspect
 aggregate/recent metadata at `GET /api/v1/admin/assistant/feedback`.
+DELETE withdraws an existing vote and is idempotent when none exists. The
+endpoint accepts RFC3339 `from`/`to` bounds, `vote`, and a `(created_at,_id)`
+cursor; responses use RFC3339 timestamps and never include message text.
+Stopped or failed replies are not eligible for feedback. Conversation and group
+deletion, and user deletion, purge feedback rows.

@@ -344,6 +344,7 @@ All API routes under `/api/v1`:
 - `/assistant/nyxagent/*` -- human-only, default-on NyxAgent conversations/history/rename/delete, turn SSE, Stop, acknowledgement decisions, idempotent reply feedback (`PUT/DELETE /conversations/{id}/messages/{message_id}/feedback` and group equivalent), owner-only tool images, agents, settings, channel links, live change stream, and cached profile discovery; `PATCH /conversations/{id}/access-mode` answers 410. All routes enforce the engine flag and acting-person ownership
 - `/nyxbot/*` -- NyxBot as the Agent Event Gateway's `nyxbot` provider (`agent-card`, `bindings/{binding_id}`, `…/conversations/{conversation_id}`, `…/events/{event_id}`, `responses`) authenticated inside each handler by the channel's gateway agent key, plus `relay/{channel_id}` for NyxID's signed relay callbacks (direct platforms); outside JWT middleware
 - `/admin/assistant/profile-routes` -- admin GET/PUT of NyxBot role-to-profile routes (stored and validated; inactive)
+- `/admin/assistant/feedback` -- admin-only feedback aggregate and cursor-paged recent metadata (`from`, `to`, `vote`, `cursor`)
 - `/assistant/actions` -- public static assistant action manifest for Aevatar startup discovery
 - `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
