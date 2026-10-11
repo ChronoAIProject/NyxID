@@ -373,6 +373,8 @@ async fn polling_backoff_and_error_threshold_release_lease_and_audit_failure() {
             .await
             .unwrap();
         assert_eq!(current.poll_error_count, count);
+        assert_eq!(current.diagnostics.consecutive_errors, count);
+        assert!(current.diagnostics.failure_reason.is_some());
         assert!(current.poll_lease_until.is_none());
         assert_eq!(current.poll_cursor, bot.poll_cursor);
         assert_eq!(current.status, if count == 5 { "failed" } else { "active" });
@@ -387,6 +389,14 @@ async fn polling_backoff_and_error_threshold_release_lease_and_audit_failure() {
         .unwrap();
     assert!(!format!("{audit:?}").contains("UPSTREAM-SECRET"));
     assert!(audit.contains_key("seq"));
+    assert_eq!(
+        audit
+            .get_document("event_data")
+            .unwrap()
+            .get_str("recommended_action")
+            .unwrap(),
+        "reconnect"
+    );
 }
 
 #[tokio::test]
