@@ -635,7 +635,7 @@ function NyxAgentThreadPage() {
         {selectedId && !chat.isStreaming ? (
           <WaitingNote items={chat.waiting} agentName={agentName} />
         ) : null}
-        {selectedId ? <WorkingContextPanel conversationId={selectedId} /> : null}
+        {selectedId ? <WorkingContextPanel conversationId={selectedId} onManageMemory={() => setDetailsAgentId(headerAgent?.id ?? "nyxbot")} /> : null}
       </div>
     </div>
   ) : null;
