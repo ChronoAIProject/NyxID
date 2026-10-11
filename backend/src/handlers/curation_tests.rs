@@ -359,6 +359,58 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     assert_eq!(row.comment.as_deref(), Some("keep"));
 }
 
+#[tokio::test]
+async fn feedback_withdraw_is_idempotent_after_first_delete() {
+    let f = fixture("feedback-s3-withdraw", false).await;
+    let message_id = "s3-reply";
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: "s3-conv".into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "s3-turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        })
+        .await
+        .unwrap();
+    let path =
+        format!("/api/v1/assistant/nyxagent/conversations/s3-conv/messages/{message_id}/feedback");
+    request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert!(
+        request(&f.state, "DELETE", &path, &f.human_token, None)
+            .await
+            .0
+            .is_success()
+    );
+    assert!(
+        request(&f.state, "DELETE", &path, &f.human_token, None)
+            .await
+            .0
+            .is_success()
+    );
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
