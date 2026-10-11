@@ -188,8 +188,8 @@ export function GroupMessageRow({
           {message.activities
             ?.filter((activity) => activity.machine)
             .map((activity) => (
-              <MachineToolCard key={activity.id} receipt={activity.machine!} />
-            ))}
+            <MachineToolCard key={activity.id} receipt={activity.machine!} />
+          ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
           <div className="mt-2 flex gap-1">
             {(["up", "down"] as const).map((next) => (
@@ -533,21 +533,21 @@ export function GroupPendingActions({
                 </>
               ) : action.confirm_phrase ? (
                 <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={sending}
-                    onClick={() => void onAnswer(`no ${code}`)}
-                  >
-                    Cancel
-                  </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={sending}
+                onClick={() => void onAnswer(`no ${code}`)}
+              >
+                Cancel
+              </Button>
                   <Button
                     size="sm"
                     disabled={sending}
                     onClick={() => void onAnswer(action.confirm_phrase!)}
                   >
-                    Confirm
-                  </Button>
+                Confirm
+              </Button>
                 </>
               ) : null}
             </div>
@@ -578,8 +578,8 @@ export function NyxAgentGroupPage({
   // Group payloads name agents by handle; their display names live on the agent list.
   const group =
     transcript.data && !transcript.error
-      ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
-      : undefined;
+    ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
+    : undefined;
   const messages = (
     transcript.error ? [] : (transcript.data?.messages ?? [])
   ).map((message) =>
@@ -604,8 +604,8 @@ export function NyxAgentGroupPage({
   function goTo(search: { c?: string } = {}) {
     void navigateWithBuildUpdate(() =>
       navigate({
-        to: "/assistant" as never,
-        search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
+      to: "/assistant" as never,
+      search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
       }),
     );
   }
