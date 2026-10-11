@@ -296,6 +296,33 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     assert!(prompt.len() <= base.len() + 16384);
 }
 
+#[test]
+fn failure_diagnostics_normalize_unknown_upstream_codes() {
+    let error = TurnError::new("provider_rate_limit");
+    assert_eq!(error.code, "assistant_unavailable");
+    assert_eq!(error.upstream_code.as_deref(), Some("provider_rate_limit"));
+    let known = TurnError::new("first_byte_timeout");
+    assert_eq!(known.code, "first_byte_timeout");
+    assert_eq!(known.upstream_code.as_deref(), Some("first_byte_timeout"));
+}
+
+#[test]
+fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
+    let mut row = AssistantMessage {
+        steering: None, voice: None, execution_pending: false,
+        id: "m".into(), conversation_id: "c".into(), user_id: "u".into(), seq: 1,
+        turn_id: "t".into(), role: "assistant".into(), text: "head goal details tail".into(),
+        status: "failed".into(), error_code: Some("turn_lost".into()), upstream_error_code: Some("upstream_x".into()), error_detail: None,
+        created_at: Utc::now(), activities: vec![crate::models::assistant_conversation::TurnActivity { machine: None, id: "a".into(), label: "tool.check".into(), status: "completed".into(), started_at: Utc::now(), ended_at: None }],
+        attachments: vec![crate::models::assistant_conversation::TurnAttachment { image_input: None, origin: "tool".into(), pages: None, id: "att".into(), content_type: "text/plain".into(), size: 4, label: "result.txt".into() }], origin: None, via: None,
+    };
+    let recap = bounded_recap(std::slice::from_mut(&mut row));
+    assert!(recap.contains("Previous context (after reset)"));
+    assert!(recap.contains("tool.check=completed"));
+    assert!(recap.contains("result.txt"));
+    assert!(recap.contains("partial, failed"));
+}
+
 #[tokio::test]
 async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes() {
     let db = connect_transaction_test_database("nyxa_persist").await;

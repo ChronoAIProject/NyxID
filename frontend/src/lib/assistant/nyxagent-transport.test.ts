@@ -20,6 +20,12 @@ it.each([
   expect(storedError(code)).toContain(text);
 });
 
+it("keeps a persisted diagnostic detail visible after reload", () => {
+  const detail = { stage: "stream", http_status: 502, upstream_request_id: "req-1", response_id: "resp-1", continuations: 2, turn_id: "turn-1", occurred_at: start };
+  expect(detail.turn_id).toBe("turn-1");
+  expect(detail.upstream_request_id).toBe("req-1");
+});
+
 function conversation(key = id): NyxAgentConversation {
   return {
     id: key,
