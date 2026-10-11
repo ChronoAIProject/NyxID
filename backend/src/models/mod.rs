@@ -121,6 +121,7 @@ pub mod assistant_attachment;
 pub mod assistant_conversation;
 pub mod assistant_group;
 pub mod assistant_message;
+pub mod assistant_message_feedback;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
 pub mod catalog_skill_revision;

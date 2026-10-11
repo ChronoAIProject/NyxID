@@ -585,6 +585,7 @@ pub(crate) async fn delete_contents(
                 for collection in [
                     assistant_group::MESSAGES_COLLECTION_NAME,
                     assistant_group::REQUESTS_COLLECTION_NAME,
+                    crate::models::assistant_message_feedback::COLLECTION_NAME,
                     crate::models::assistant_attachment::COLLECTION_NAME,
                     crate::models::assistant_upload_retention::TOMBSTONES,
                 ] {

@@ -6,6 +6,8 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -66,6 +68,7 @@ pub struct GroupAgentRef {
 
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
+    pub feedback: Option<super::assistant_feedback::FeedbackResponse>,
     activities: Vec<super::assistant_nyxagent::ActivityResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<Value>,
@@ -93,6 +96,7 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         }
     });
     GroupMessageResponse {
+        feedback: None,
         activities: row.activities.into_iter().map(Into::into).collect(),
         author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
         attachments: row.attachments.into_iter().map(Into::into).collect(),
@@ -975,6 +979,23 @@ pub async fn list_messages(
         .into_iter()
         .map(|row| message_response(row, &agents))
         .collect();
+    let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
+    let feedback = state
+        .db
+        .collection::<crate::models::assistant_message_feedback::AssistantMessageFeedback>(
+            crate::models::assistant_message_feedback::COLLECTION_NAME,
+        )
+        .find(doc! {"user_id": &owner, "message_id": {"$in": &ids}})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    for message in &mut messages {
+        message.feedback = feedback
+            .iter()
+            .find(|f| f.message_id == message.id)
+            .cloned()
+            .map(Into::into);
+    }
     let receipts = messages
         .iter_mut()
         .flat_map(|m| m.activities.iter_mut())

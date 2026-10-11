@@ -15,6 +15,8 @@ import {
   Sparkles,
   Wrench,
   X,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
@@ -29,6 +31,8 @@ import type {
 import { cn } from "@/lib/utils";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import { MachineToolCard } from "./machine-tool-card";
+import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
+import { capture } from "@/lib/telemetry";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
@@ -148,16 +152,30 @@ export function ChatMessageBubble({
   message,
   interactiveCards = true,
   onRetry,
+  conversationId,
+  feedbackEnabled = true,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
   readonly onRetry?: () => void;
+  readonly conversationId?: string;
+  readonly feedbackEnabled?: boolean;
 }) {
   const streaming = message.status === "streaming";
   const content =
     message.role === "assistant"
       ? sanitizeAssistantMessageContent(message.content)
       : message.content;
+  const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
+  const [commentOpen, setCommentOpen] = useState(false);
+  const [comment, setComment] = useState(message.feedback?.comment ?? "");
+  const feedback = useAssistantFeedback("conversation", conversationId ?? "", message.id);
+  const setFeedback = async (next: "up" | "down") => {
+    const previous = vote; const selected = previous === next ? undefined : next; setVote(selected);
+    if (!conversationId || !feedbackEnabled) return;
+    try { await feedback.mutateAsync(selected ? { vote: selected } : {}); } catch { setVote(previous); return; }
+    if (selected) capture({ name: "ui.assistant_feedback_submitted", props: { message_id: message.id, vote: selected } });
+  };
   if (message.role === "user") {
     return (
       <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
@@ -261,6 +279,19 @@ export function ChatMessageBubble({
             <span>{message.error}</span>
           </div>
         ) : null}
+        {feedbackEnabled && conversationId && !streaming && message.status === "complete" && message.id ? (
+          <div role="group" className="mt-2 flex items-center gap-1" aria-label="Reply feedback">
+            <button type="button" aria-label="Helpful" aria-pressed={vote === "up"} onClick={() => void setFeedback("up")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "up" && "text-success") }><ThumbsUp className="h-3.5 w-3.5" /></button>
+            <button type="button" aria-label="Not helpful" aria-pressed={vote === "down"} onClick={() => void setFeedback("down")} className={cn("rounded p-1 text-text-tertiary hover:bg-overlay", vote === "down" && "text-destructive") }><ThumbsDown className="h-3.5 w-3.5" /></button>
+            <button type="button" aria-label="Add feedback comment" onClick={() => setCommentOpen((open) => !open)} className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay">Comment</button>
+          </div>
+        ) : null}
+        {feedbackEnabled && conversationId && commentOpen && !streaming ? (
+          <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
+            <textarea aria-label="Optional feedback comment" value={comment} maxLength={1000} onChange={(event) => setComment(event.target.value)} className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none" placeholder="Optional comment" />
+            <button type="button" className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10" onClick={() => { if (conversationId && vote) void feedback.mutateAsync({ vote, comment }); setCommentOpen(false); }}>Send</button>
+          </div>
+        ) : null}
       </div>
     </article>
   );
@@ -269,9 +300,13 @@ export function ChatMessageBubble({
 export function ChatMessageEntry({
   message,
   interactiveCards = true,
+  conversationId,
+  feedbackEnabled = true,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
+  readonly conversationId?: string;
+  readonly feedbackEnabled?: boolean;
 }) {
   if (message.role === "system" && message.id.startsWith("nyxagent-context-reset:")) {
     return (
@@ -297,6 +332,8 @@ export function ChatMessageEntry({
         <ChatMessageBubble
           message={message}
           interactiveCards={interactiveCards}
+          conversationId={conversationId}
+          feedbackEnabled={feedbackEnabled}
         />
       </div>
     );
@@ -449,7 +486,7 @@ export function ChatMessageList({
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
           <div id={`message-${message.id}`} key={message.id}>
-            {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
+            {renderMessage?.(message) ?? <ChatMessageEntry message={message} conversationId={session?.conversationId} />}
           </div>
         ))}
         {footer}

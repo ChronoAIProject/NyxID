@@ -16,7 +16,21 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
+  it("hides feedback in replay and without a persisted conversation", () => {
+    const { rerender } = render(<ChatMessageBubble message={BASE} conversationId="conversation-1" feedbackEnabled={false} />);
+    expect(screen.queryByRole("button", { name: "Helpful" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add feedback comment" })).not.toBeInTheDocument();
+    rerender(<ChatMessageBubble message={BASE} />);
+    expect(screen.queryByRole("group", { name: "Reply feedback" })).not.toBeInTheDocument();
+  });
   afterEach(() => vi.useRealTimers());
+
+  it("opens the optional feedback comment popover without submitting", () => {
+    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
+    expect(screen.getByRole("textbox", { name: "Optional feedback comment" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Send" })).toBeVisible();
+  });
 
   it("renders an inline context reset as a system note without assistant controls", () => {
     const content = "Conversation context was reset; the assistant was given a recap of this chat.";

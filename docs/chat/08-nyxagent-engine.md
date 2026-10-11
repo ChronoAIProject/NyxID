@@ -1224,3 +1224,12 @@ unavailable, the UI marks it unavailable and asks the owner to choose another.
 NyxAgent model ids are server-validated against the live `GET /assistant/nyxagent/models` list. The conversation model endpoint rejects changes during an active turn (`turn_active`), clears the provider session and instruction binding, and records a `model_changed` context reset. Invalid or upstream-unavailable choices return `model_unavailable` with the actionable message “Choose another model in the selector.” A specialist inherits the workspace default unless its profile supplies a validated model override; unavailable entries remain disabled in selectors.
 
 The API uses `model_unavailable` (HTTP 400) when a model is absent or rejected; clients should choose another model in the selector. Changing a conversation model during an active turn returns `turn_active` (HTTP 409). Access-mode policy floors remain enforced for service proxy approval policies, `machine_confirm`, webhook confirmation policy, and guest rules.
+# Reply feedback
+
+Human NyxAgent clients may submit or withdraw one thumbs-up/down vote per
+assistant reply. `PUT /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/feedback`
+and the equivalent `/groups/{id}/messages/{message_id}/feedback` accept `{vote:
+"up"|"down", comment?: string}`. Only completed assistant replies are eligible;
+the operation is idempotent and response history includes the current feedback.
+Votes contain identifiers and optional bounded comment only. Admins can inspect
+aggregate/recent metadata at `GET /api/v1/admin/assistant/feedback`.

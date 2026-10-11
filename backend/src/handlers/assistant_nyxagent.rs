@@ -11,7 +11,7 @@ use axum::{
     },
 };
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -343,6 +343,7 @@ impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscript
 }
 #[derive(Serialize)]
 pub struct MessageResponse {
+    pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
     steering: Option<steering::SteeringResponse>,
     voice: Option<VoiceTranscriptResponse>,
     execution_pending: bool,
@@ -364,6 +365,7 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            feedback: None,
             steering: row
                 .steering
                 .as_deref()
@@ -577,6 +579,23 @@ pub async fn history(
         .filter(|ack| ack.status == "pending")
         .count() as u32;
     let mut messages: Vec<MessageResponse> = rows.into_iter().map(Into::into).collect();
+    let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
+    let feedback = state
+        .db
+        .collection::<crate::models::assistant_message_feedback::AssistantMessageFeedback>(
+            crate::models::assistant_message_feedback::COLLECTION_NAME,
+        )
+        .find(doc! {"user_id": &user_id, "message_id": {"$in": &ids}})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    for message in &mut messages {
+        message.feedback = feedback
+            .iter()
+            .find(|f| f.message_id == message.id)
+            .cloned()
+            .map(Into::into);
+    }
     let mut receipts: Vec<_> = messages
         .iter_mut()
         .flat_map(|m| m.activities.iter_mut())

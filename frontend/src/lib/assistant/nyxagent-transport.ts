@@ -449,6 +449,7 @@ export class NyxAgentTransport {
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       return {
         id: message.id,
+        feedback: message.feedback ?? undefined,
         role: message.role,
         content: message.text,
         timestamp: Date.parse(message.created_at),
@@ -483,6 +484,7 @@ export class NyxAgentTransport {
         return {
           id: message.id,
           role: settledMessages.get(message.id)?.role ?? message.role,
+          feedback: settledMessages.get(message.id)?.feedback ?? undefined,
           steering: settledMessages.get(message.id)?.steering,
           via: settledMessages.get(message.id)?.via,
           turnId: settledMessages.get(message.id)?.turn_id,

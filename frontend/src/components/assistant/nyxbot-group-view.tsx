@@ -1,5 +1,7 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { MachineToolCard } from "./machine-tool-card";
+import { ThumbsDown, ThumbsUp } from "lucide-react";
+import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import {
   Fragment,
   useEffect,
@@ -88,6 +90,8 @@ export function GroupMessageRow({
   readonly names: readonly string[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
+  const feedback = useAssistantFeedback("group", groupId, message.id);
+  const [vote, setVote] = useState<"up" | "down" | undefined>(message.feedback?.vote);
   if (message.role === "notice") {
     return (
       <div className="min-w-0 px-8">
@@ -158,6 +162,9 @@ export function GroupMessageRow({
             <MachineToolCard key={activity.id} receipt={activity.machine!} />
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
+          <div className="mt-2 flex gap-1">
+            {(["up", "down"] as const).map((next) => <button key={next} type="button" aria-label={next === "up" ? "Helpful" : "Not helpful"} aria-pressed={vote === next} onClick={() => { const selected = vote === next ? undefined : next; setVote(selected); void feedback.mutateAsync(selected ? { vote: selected } : {}).catch(() => setVote(vote)); }} className="rounded p-1 text-text-tertiary hover:bg-overlay">{next === "up" ? <ThumbsUp className="h-3.5 w-3.5" /> : <ThumbsDown className="h-3.5 w-3.5" />}</button>)}
+          </div>
         </div>
       </div>
     </article>
