@@ -70,7 +70,7 @@ function AttachedSkill({
           <Switch
             checked={!skill.disabled}
             disabled={disabled}
-            aria-label={`${skill.disabled ? "Enable" : "Disable"} ${skill.name}`}
+            aria-label={`Use ${skill.name}`}
             onCheckedChange={toggle}
           />
           {skill.disabled ? "Disabled" : "Enabled"}

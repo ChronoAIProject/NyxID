@@ -72,7 +72,7 @@ it("removes immediately with the observed revision", () => {
 });
 it("toggles a pin and sends disabled true in the PUT body", () => {
   render(<AgentSkills agentId="agent" />);
-  fireEvent.click(screen.getByRole("switch", { name: "Disable Research" }));
+  fireEvent.click(screen.getByRole("switch", { name: "Use Research" }));
   expect(mocks.save).toHaveBeenCalledWith({ expected_revision: 4, skills: [{ ...pin, disabled: true }] }, expect.anything());
 });
 it("searches visible Ornn skills on submit", () => {
