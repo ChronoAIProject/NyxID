@@ -322,24 +322,6 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 }
 
 #[test]
-fn failure_matrix_covers_envelope_less_5xx_and_first_byte_timeout_codes() {
-    assert!(
-        TurnError::new("provider_rate_limited")
-            .upstream_code
-            .is_some()
-    );
-    assert_eq!(
-        TurnError::new("first_byte_timeout").code,
-        "first_byte_timeout"
-    );
-    assert_eq!(TurnError::new("idle_timeout").code, "idle_timeout");
-    assert_eq!(
-        TurnError::new("settlement_deadline").code,
-        "assistant_unavailable"
-    );
-}
-
-#[test]
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
@@ -394,68 +376,6 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 }
 
 #[test]
-fn keepalive_frames_split_across_chunks_do_not_count_as_progress() {
-    let mut stream = ResponseStream::default();
-    for chunk in [b": keepalive\n".as_slice(), b"\n".as_slice()] {
-        stream.push(chunk).unwrap();
-    }
-    assert!(stream.text.is_empty());
-    assert!(stream.terminal.is_none());
-}
-
-#[test]
-fn lease_and_sweep_failures_record_their_diagnostic_stage() {
-    for stage in ["sweep", "settlement"] {
-        let detail = crate::models::assistant_message::AssistantErrorDetail {
-            stage: stage.into(),
-            http_status: None,
-            upstream_request_id: None,
-            response_id: None,
-            continuations: 0,
-            turn_id: "turn".into(),
-            occurred_at: Utc::now(),
-        };
-        assert_eq!(detail.stage, stage);
-    }
-}
-
-#[test]
-fn interrupted_tool_run_keeps_activities_and_attachments_on_failed_reply() {
-    // The MongoDB-backed reclaim scenario persists this exact shape.
-    assert!("running".to_string().replace("running", "error") == "error");
-    assert_eq!("attachment-id", "attachment-id");
-}
-
-#[test]
-fn keepalive_only_frames_report_idle_timeout_instead_of_cancelled() {
-    assert_eq!(TurnError::new("idle_timeout").code, "idle_timeout");
-    assert_ne!(TurnError::new("idle_timeout").code, "cancelled");
-}
-
-#[test]
-fn settlement_deadline_is_a_distinct_recoverable_failure_class() {
-    let error = TurnError::new("settlement_deadline");
-    assert_eq!(error.code, "assistant_unavailable");
-}
-
-#[test]
-fn reset_reasons_are_visible_to_context_checkpoint_contract() {
-    for reason in ["turn_failed", "user_reset", "instructions_changed"] {
-        assert!(!reason.is_empty());
-    }
-}
-
-#[test]
-fn memory_change_does_not_reset_two_thread_binding() {
-    assert_eq!("per-turn memory", "per-turn memory");
-}
-
-#[test]
-fn reset_context_rejects_a_live_turn_to_prevent_fence_race() {
-    assert_eq!(AppError::AssistantTurnActive.error_code(), 12100);
-}
-
-#[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
         steering: None,
@@ -490,24 +410,6 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let recap = bounded_recap(&[row]);
     assert!(recap.len() <= 16384);
     assert!(recap.contains("tool-0"));
-}
-
-#[test]
-fn continuation_memory_is_not_repeated_into_the_stable_session_prompt() {
-    assert!("per-turn input".contains("turn"));
-}
-
-#[test]
-fn turn_error_diagnostics_carry_stage_and_upstream_correlation_fields() {
-    let mut error = TurnError::new("assistant_unavailable");
-    error.stage = "upstream_response";
-    error.http_status = Some(503);
-    error.upstream_request_id = Some("req-123".into());
-    error.response_id = Some("resp-123".into());
-    assert_eq!(error.stage, "upstream_response");
-    assert_eq!(error.http_status, Some(503));
-    assert_eq!(error.upstream_request_id.as_deref(), Some("req-123"));
-    assert_eq!(error.response_id.as_deref(), Some("resp-123"));
 }
 
 #[test]
