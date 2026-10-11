@@ -17,8 +17,10 @@ function requestFailure(cause: unknown): string {
 }
 
 function diagnostics(cause: unknown): Array<{ rule: string; field: string; line?: number; remediation?: string }> {
-  const value = cause as { diagnostics?: unknown } | null;
-  return Array.isArray(value?.diagnostics) ? value.diagnostics.filter((item): item is { rule: string; field: string; line?: number; remediation?: string } => Boolean(item && typeof item === "object" && "rule" in item && "field" in item)) : [];
+  const value = cause as { errorResponse?: { details?: unknown }; diagnostics?: unknown } | null;
+  const details = value?.errorResponse?.details ?? value?.diagnostics;
+  const candidates = Array.isArray(details) ? details : details ? [details] : [];
+  return candidates.filter((item): item is { rule: string; field: string; line?: number; remediation?: string } => Boolean(item && typeof item === "object" && "rule" in item && "field" in item)).map((item) => ({ ...item, remediation: item.remediation ?? `Fix ${item.field}` }));
 }
 
 export function AgentLearningReview({

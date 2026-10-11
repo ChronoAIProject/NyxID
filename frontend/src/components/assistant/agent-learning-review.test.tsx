@@ -123,7 +123,7 @@ describe("AgentLearningReview", () => {
   it("renders validation diagnostics at their field and line", () => {
     mocks.feature.mockReturnValue(true);
     const error = Object.assign(new Error("validation failed"), {
-      diagnostics: [{ rule: "frontmatter.required", field: "name", line: 3, remediation: "Set a name" }],
+      errorResponse: { details: { rule: "frontmatter.required", field: "name", line: 3 } },
     });
     mocks.review.mockReturnValue({
       data: { proposals: [] },
