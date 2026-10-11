@@ -16,6 +16,29 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
+  it("shows feedback only in the NyxAgent page message-list composition", () => {
+    const session = {
+      conversationId: "nyxagent-page",
+      status: "complete" as const,
+      messages: [BASE],
+      isStreaming: false,
+    } as ChatSessionState;
+    const { rerender } = render(
+      <ChatMessageList session={session} bottomInset={0} feedbackEnabled />,
+    );
+    expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
+
+    rerender(
+      <ChatMessageList
+        session={{ ...session, conversationId: "aevatar-page" }}
+        bottomInset={0}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Helpful" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides feedback in replay and without a persisted conversation", () => {
     const { rerender } = render(<ChatMessageBubble message={BASE} conversationId="conversation-1" feedbackEnabled={false} />);
     expect(screen.queryByRole("button", { name: "Helpful" })).not.toBeInTheDocument();
