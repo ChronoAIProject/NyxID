@@ -51,4 +51,11 @@ describe("useAssistantFeedback", () => {
     ).rejects.toThrow("offline");
     expect(result.current.isPending).toBe(false);
   });
+  it("exposes mutation state for optimistic cache owners", () => {
+    const { result } = renderHook(() =>
+      useAssistantFeedback("group", "g", "m"),
+    );
+    expect(result.current.isPending).toBe(false);
+    expect(result.current.mutateAsync).toEqual(expect.any(Function));
+  });
 });
