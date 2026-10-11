@@ -8,6 +8,6 @@ describe("WorkingContextPanel", () => {
     render(<WorkingContextPanel conversationId="nyxa-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" />);
     fireEvent.click(screen.getByText("Working context"));
     expect(await screen.findByText("Goal: Ship it")).toBeTruthy();
-    expect(screen.getByText("Manage memory notes")).toHaveAttribute("href", "/assistant?panel=memory");
+    expect(screen.getByRole("button", { name: "Manage memory notes" })).toBeInTheDocument();
   });
 });
