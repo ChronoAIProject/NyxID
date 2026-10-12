@@ -14,6 +14,7 @@ pub struct FeedbackReplyContext {
     pub via: Option<String>,
     pub turn_id: Option<String>,
     pub reply_seq: Option<i64>,
+    pub reply_created_at: Option<DateTime<Utc>>,
     pub latency_ms: Option<i64>,
     pub tool_calls: u32,
     pub tool_errors: u32,
