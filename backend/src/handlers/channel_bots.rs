@@ -284,8 +284,34 @@ pub struct VerifyBotResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ChannelBotErrorResponse {
+    pub code: String,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelBotSubscriptionResponse {
+    pub registered: bool,
+    pub checked_at: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelBotDiagnosticsResponse {
+    pub last_inbound_at: Option<String>,
+    pub last_inbound_source: Option<String>,
+    pub last_outbound_at: Option<String>,
+    pub last_outbound_error: Option<ChannelBotErrorResponse>,
+    pub last_webhook_at: Option<String>,
+    pub last_webhook_error: Option<ChannelBotErrorResponse>,
+    pub subscription_state: Option<ChannelBotSubscriptionResponse>,
+    pub consecutive_errors: u32,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
-    pub diagnostics: crate::models::channel_bot::ChannelBotDiagnostics,
+    pub diagnostics: ChannelBotDiagnosticsResponse,
     pub mode: &'static str,
     pub status: String,
     pub webhook_registered: bool,
@@ -332,6 +358,33 @@ pub async fn admin_health(
     Ok(Json(health_for(&bot, state.config.billing_enabled)))
 }
 
+fn diagnostics_response(
+    d: &crate::models::channel_bot::ChannelBotDiagnostics,
+) -> ChannelBotDiagnosticsResponse {
+    let error = |e: &crate::models::channel_bot::ChannelBotError| ChannelBotErrorResponse {
+        code: e.code.clone(),
+        at: e.at.to_rfc3339(),
+    };
+    ChannelBotDiagnosticsResponse {
+        last_inbound_at: d.last_inbound_at.map(|v| v.to_rfc3339()),
+        last_inbound_source: d.last_inbound_source.clone(),
+        last_outbound_at: d.last_outbound_at.map(|v| v.to_rfc3339()),
+        last_outbound_error: d.last_outbound_error.as_ref().map(error),
+        last_webhook_at: d.last_webhook_at.map(|v| v.to_rfc3339()),
+        last_webhook_error: d.last_webhook_error.as_ref().map(error),
+        subscription_state: d
+            .subscription_state
+            .as_ref()
+            .map(|v| ChannelBotSubscriptionResponse {
+                registered: v.registered,
+                checked_at: v.checked_at.to_rfc3339(),
+                last_error: v.last_error.clone(),
+            }),
+        consecutive_errors: d.consecutive_errors,
+        failure_reason: d.failure_reason.clone(),
+    }
+}
+
 pub(crate) fn health_for(
     bot: &crate::models::channel_bot::ChannelBot,
     billing_enabled: bool,
@@ -373,7 +426,7 @@ pub(crate) fn health_for(
         ("verify", "Verify the live X subscription and credentials.")
     };
     ChannelBotHealthResponse {
-        diagnostics: bot.diagnostics.clone(),
+        diagnostics: diagnostics_response(&bot.diagnostics),
         mode,
         status: bot.status.clone(),
         webhook_registered: bot.webhook_registered,
