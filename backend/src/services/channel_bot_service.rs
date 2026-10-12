@@ -1738,6 +1738,29 @@ pub async fn record_subscription_state(
     Ok(())
 }
 
+/// Record an unsuccessful post-write read-back without changing the durable
+/// fact that the provider write succeeded.
+pub async fn record_subscription_check_failure(
+    db: &mongodb::Database,
+    bot_id: &str,
+) -> AppResult<()> {
+    let code = super::channel_bot_health::codes::SUBSCRIPTION_CHECK_FAILED;
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": bot_id },
+            doc! { "$set": {
+                "diagnostics.subscription_state": {
+                    "registered": false,
+                    "checked_at": mongodb::bson::DateTime::now(),
+                    "last_error": code,
+                },
+                "diagnostics.failure_reason": code,
+            } },
+        )
+        .await?;
+    Ok(())
+}
+
 /// Best-effort record of one outbound send. Never fails the send path: the
 /// platform outcome is already final when this runs.
 pub async fn record_outbound_outcome(
