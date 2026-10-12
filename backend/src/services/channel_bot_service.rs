@@ -1751,6 +1751,8 @@ pub async fn list_all_filtered(
     db: &mongodb::Database,
     platform: Option<&str>,
     status: Option<&str>,
+    limit: i64,
+    offset: i64,
 ) -> AppResult<Vec<ChannelBot>> {
     let mut filter = doc! {};
     if let Some(platform) = platform {
@@ -1765,6 +1767,8 @@ pub async fn list_all_filtered(
     Ok(db
         .collection(COLLECTION_NAME)
         .find(filter)
+        .skip(offset as u64)
+        .limit(limit)
         .await?
         .try_collect()
         .await?)

@@ -312,6 +312,11 @@ pub struct ChannelBotDiagnosticsResponse {
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
     pub diagnostics: ChannelBotDiagnosticsResponse,
+    pub id: String,
+    pub platform: String,
+    pub label: String,
+    pub platform_bot_username: String,
+    pub user_id: String,
     pub mode: &'static str,
     pub status: String,
     pub webhook_registered: bool,
@@ -327,6 +332,8 @@ pub struct ChannelBotHealthResponse {
 pub struct AdminChannelBotQuery {
     pub platform: Option<String>,
     pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 pub async fn admin_list(
@@ -339,6 +346,8 @@ pub async fn admin_list(
         &state.db,
         query.platform.as_deref(),
         query.status.as_deref(),
+        query.limit.unwrap_or(100).clamp(1, 500),
+        query.offset.unwrap_or(0).max(0),
     )
     .await?;
     Ok(Json(
@@ -426,6 +435,11 @@ pub(crate) fn health_for(
         ("verify", "Verify the live X subscription and credentials.")
     };
     ChannelBotHealthResponse {
+        id: bot.id.clone(),
+        platform: bot.platform.clone(),
+        label: bot.label.clone(),
+        platform_bot_username: bot.platform_bot_username.clone(),
+        user_id: bot.user_id.clone(),
         diagnostics: diagnostics_response(&bot.diagnostics),
         mode,
         status: bot.status.clone(),
