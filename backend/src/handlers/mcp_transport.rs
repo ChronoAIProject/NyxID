@@ -205,8 +205,9 @@ const MAX_INLINE_TOOL_IMAGE_BYTES: usize = 1024 * 1024;
 /// MCP content for a service tool response. The text note always comes first,
 /// because some clients (NyxAgent) hand the whole result to the model as one
 /// truncated string. Assistant chat keys get the image attached to the live
-/// turn and the note only: NyxAgent cannot pass pixels to its model, so base64
-/// would only crowd out the note. Other MCP callers also get an image block.
+/// turn and the note only: NyxID supplies pixels through a capability-gated
+/// continuation, so base64 would only crowd out the note. Other MCP callers
+/// also get an image block.
 async fn service_tool_content(
     state: &AppState,
     auth: &McpAuthContext,
@@ -262,8 +263,9 @@ async fn service_tool_content(
             Ok(Some(_)) => note.push_str(
                 " Delivered: NyxID already displays this image to the user in the chat \
                 under your reply. Tell the user it is shown below. Do not say it could not \
-                be displayed, was sent as base64, or was truncated. You cannot view its \
-                pixels, so do not describe its contents.",
+                be displayed, was sent as base64, or was truncated. NyxID shows the image to you \
+                after this response when this agent can view images. Do not describe its contents \
+                before you have seen it.",
             ),
             Ok(None) => note.push_str(
                 " It could not be attached to the chat: no turn is running or this turn \

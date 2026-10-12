@@ -1,6 +1,7 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
+import { ReviewCardTarget } from "./review-card-target";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
 import { NyxBotSettingsButton } from "./nyxbot-settings-button";
@@ -561,6 +562,7 @@ function NyxAgentThreadPage() {
   const headerAgent = selectedId ? threadAgent : draftAgent;
   const chat = useNyxAgentAssistantChat({
     selectedConversationId: selectedId,
+    reviewCardId: search.card,
     onConversationAdopted: adopt,
     threadsAgentId: selectedAgent?.id,
     draftAgent,
@@ -804,6 +806,7 @@ function NyxAgentThreadPage() {
                 );
                 if (!acknowledgement) return undefined;
                 return (
+                  <ReviewCardTarget selected={search.card === acknowledgement.id}>
                   <NyxAgentAcknowledgementCard
                     acknowledgement={acknowledgement}
                     deciding={Boolean(chat.decidingAcknowledgement)}
@@ -812,9 +815,11 @@ function NyxAgentThreadPage() {
                       setFocusRequest((value) => value + 1);
                     }}
                   />
+                  </ReviewCardTarget>
                 );
               }}
               projectionVersion={[
+                `card:${search.card ?? ""}`,
                 ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}

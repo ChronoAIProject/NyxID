@@ -1994,6 +1994,38 @@ See [Telegram New](TELEGRAM_NEW.md) for the state machine, administrator steps, 
 
 ---
 
+## Assistant images and skill review
+
+Tool-returned images remain encrypted assistant attachments. The NyxAgent
+worker sends retained images from the active turn in at most two optional
+continuation rounds when the deployment advertises image input. The content
+route checks the live turn, conversation key, owner, retention and organization
+access before returning pixels. Image-round failure preserves the completed
+answer; budget and time continuations keep their existing text-only input.
+See [Uploads](chat/10-uploads.md) and [NyxAgent engine](chat/08-nyxagent-engine.md).
+
+Skill permission decisions use an outbox embedded in
+`assistant_acknowledgements`. The owner decision and its notification marker
+commit together. `assistant_skill_notifications` fences a stable destination
+and event identity, rotates due retries, and retains inaccessible decisions
+with bounded authority backoff. NyxBot consumes the marker in the transaction
+that admits a turn containing that notification. Allowing a skill request is advisory; attaching the
+skill still requires the separate owner action card.
+
+`assistant_authored_draft_claims` stores a fingerprint generation and the
+original proposal, conversation, key and turn identities.
+`assistant_skill_authoring_claims` serializes identical drafts across threads,
+recovers interrupted preparation under its original live authority, and fences
+card creation against stale generations. Package preparation stays outside
+MongoDB transactions. Claims contain identifiers rather than proposal bodies,
+have owner/agent lookup indexes, and are removed on owner or agent deletion.
+Specialist destruction also disables learning and cancels outstanding runs
+transactionally; late analysis cannot persist a proposal or advance its cursor.
+See [Agent learning](AGENT_LEARNING.md) and [Agent skills](AGENT_SKILLS.md),
+including the required coordinated backend rollout for the outbox and claims.
+
+---
+
 ## Deployment Architecture
 
 ### Development

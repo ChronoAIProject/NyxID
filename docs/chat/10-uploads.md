@@ -2,8 +2,10 @@
 
 Normative contract for human uploads to NyxAgent conversations and owner-posted
 group messages. This extends [08](08-nyxagent-engine.md) and
-[09](09-nyxbot-orchestrator.md). Tool images remain owner-only; their default
-retention is the conversation lifetime.
+[09](09-nyxbot-orchestrator.md). Tool images are owner-readable and may also be fetched by the bound thread key
+during their producing live turn, including that same guest turn; see
+[Tool images](08-nyxagent-engine.md#tool-images). Their default retention is the
+conversation lifetime. User-upload selection and access rules are unchanged.
 
 ## Admission and storage
 
@@ -125,8 +127,10 @@ Documents are read on demand, not pasted wholesale into prompts.
 NyxAgent advertises an additive `input_image` capability with explicit limits.
 NyxID sends images only when that capability is present, using an attachment URL
 fetched with the same thread Agent Key. A separate key-authenticated content route
-accepts only that thread's bound user images; it never widens the owner-only
-browser attachment route or permits tool-image retrieval by an agent.
+accepts that thread's bound user images and tool images produced in its current
+live, non-stopped turn. Owner, conversation, turn, credential and retention fences
+apply to tool images, including guest turns. The browser attachment route retains
+its existing human access policy.
 
 NyxAgent restricts remote images to its configured NyxID origin and the attachment
 content path, forbids redirects and credentials in URLs, uses the request's own

@@ -8361,6 +8361,33 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
 
+## Assistant skill review and image input
+
+`GET /api/v1/assistant/nyxagent/conversations/{id}` accepts an optional `card`
+UUID alongside the existing `limit` and `before_seq` pagination parameters.
+It includes that acknowledgement in the history response even when the card is
+outside the normal recent-card window. The caller must have access to the
+conversation, and the selected card must belong to that same authorized
+conversation. Omitting `card` preserves the existing history request behavior.
+
+Authored skill tool results and proposal listings include `review_url`, an
+absolute link to `/assistant?c={conversation_id}&card={acknowledgement_id}`.
+Proposal listings also expose the associated card state. Group pending-action
+responses carry an optional review link so the reviewing owner can open the
+complete file review. Authored review links replace chat confirmation phrases:
+typed channel replies cannot approve publication. The link identifies a review
+surface and grants no additional authority. See [Agent learning](AGENT_LEARNING.md)
+for the full draft, approval and explicit expired-card renewal contracts.
+
+`GET /api/v1/assistant-attachments/{id}/content` accepts a live conversation
+Agent Key for model image input. Alongside user-uploaded image selection, it can
+serve retained tool-returned raster images from that key's active turn. It
+rechecks conversation, owner, key, Stop, organization access and retention;
+an unrelated key or turn cannot retrieve the pixels. Capability negotiation
+controls optional model image rounds, so older NyxAgent deployments retain
+text-only behavior. See [Uploads](chat/10-uploads.md) for content limits and
+fallback behavior.
+
 ## Tools
 
 See [TOOLS.md](TOOLS.md) for the model, publication boundary, roles and CLI walkthrough.
