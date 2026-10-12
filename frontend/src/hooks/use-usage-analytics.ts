@@ -1,5 +1,5 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
-import { api, ApiError } from "@/lib/api-client";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api-client";
 import { analyticsPath, filterError } from "@/lib/usage-analytics";
 import {
   analyticsResponseSchema,
@@ -8,6 +8,9 @@ import {
   type AnalyticsResult,
 } from "@/schemas/usage-analytics";
 import { useAuthStore } from "@/stores/auth-store";
+
+/** Matches the backend's per-request id cap on `/admin/usage/identities`. */
+const IDENTITY_LABEL_BATCH = 100;
 
 export interface FilterOption {
   id: string;
@@ -54,44 +57,9 @@ export function useAnalyticsOptions(
           }));
         return { options, total: options.length };
       }
-      const types = kind === "owners" ? ["org", "person"] : ["person"];
-      const results = await Promise.all([
-        ...types.map(async (type) => {
-          const result = await api.get<{
-            users: { id: string; display_name: string | null; email: string }[];
-            total: number;
-          }>(
-            `/admin/users?${new URLSearchParams({ page: "1", per_page: "50", user_type: type, search })}`,
-          );
-          return {
-            options: result.users.map((user) => ({
-              id: user.id,
-              label: user.display_name || user.email,
-              detail: type === "org" ? "Organization" : user.email,
-            })),
-            total: result.total,
-          };
-        }),
-        api
-          .get<{
-            service_accounts: { id: string; name: string }[];
-            total: number;
-          }>(
-            `/admin/service-accounts?${new URLSearchParams({ page: "1", per_page: "50", search })}`,
-          )
-          .then((result) => ({
-            options: result.service_accounts.map((account) => ({
-              id: account.id,
-              label: account.name,
-              detail: "Service account",
-            })),
-            total: result.total,
-          })),
-      ]);
-      return {
-        options: results.flatMap((result) => result.options),
-        total: results.reduce((sum, result) => sum + result.total, 0),
-      };
+      return api.get<{ options: FilterOption[]; total: number }>(
+        `/admin/usage/identities?${new URLSearchParams({ kind, search })}`,
+      );
     },
     enabled,
     staleTime: 5 * 60_000,
@@ -134,29 +102,30 @@ export function useAnalyticsLabels(
     filters.services.length > 0,
     sample,
   );
-  const ids = [...new Set([...filters.actors, ...filters.owners])];
-  const identities = useQueries({
-    queries: ids.map((id) => ({
-      queryKey: ["analytics-identity", userId, id],
-      queryFn: async () => {
-        try {
-          const user = await api.get<{
-            display_name: string | null;
-            email: string;
-          }>(`/admin/users/${id}`);
-          return user.display_name || user.email;
-        } catch (error) {
-          if (!(error instanceof ApiError) || error.status !== 404) throw error;
-          const account = await api.get<{ name: string }>(
-            `/admin/service-accounts/${id}`,
-          );
-          return account.name;
-        }
-      },
-      enabled: !sample,
-      staleTime: 60_000,
-      retry: false,
-    })),
+  const ids = [...new Set([...filters.actors, ...filters.owners])].sort();
+  const identities = useQuery({
+    queryKey: ["analytics-identities", userId, ids],
+    queryFn: async () => {
+      const chunks: string[][] = [];
+      for (let i = 0; i < ids.length; i += IDENTITY_LABEL_BATCH) {
+        chunks.push(ids.slice(i, i + IDENTITY_LABEL_BATCH));
+      }
+      const results = await Promise.all(
+        chunks.map((chunk) =>
+          api.get<{ options: FilterOption[] }>(
+            `/admin/usage/identities?${new URLSearchParams({ ids: chunk.join(",") })}`,
+          ),
+        ),
+      );
+      return Object.fromEntries(
+        results.flatMap((result) =>
+          result.options.map((option) => [option.id, option.label]),
+        ),
+      );
+    },
+    enabled: !sample && ids.length > 0,
+    staleTime: 60_000,
+    retry: false,
   });
   const labels: Record<keyof SampleOptions, Record<string, string>> = {
     services: {},
@@ -169,7 +138,7 @@ export function useAnalyticsLabels(
   }
   for (const kind of ["actors", "owners"] as const) {
     for (const id of filters[kind]) {
-      const identity = identities[ids.indexOf(id)]?.data;
+      const identity = identities.data?.[id];
       labels[kind][id] =
         sample?.[kind].find((option) => option.id === id)?.label ??
         identity ??

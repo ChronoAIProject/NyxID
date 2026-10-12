@@ -43,7 +43,7 @@ import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
 import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
-import { canAdminWrite, hasAdminRead, isBillingAvailable } from "@/types/api";
+import { canAdminWrite, canReadAdminUsage, hasAdminRead, isBillingAvailable } from "@/types/api";
 
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
@@ -71,6 +71,8 @@ export const DEVELOPER_NAV = [
   { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
   { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
+
+const ADMIN_USAGE_PATH = "/admin/usage";
 
 export const ADMIN_NAV = [
   { to: "/admin/users", icon: Users, label: "Users" },
@@ -111,9 +113,16 @@ export function getVisibleMainNav(
   );
 }
 
-function getVisibleAdminNav(
-  user: Parameters<typeof canAdminWrite>[0],
+/// Admin nav entries the user may open. Usage-only role holders (no admin
+/// read access) see just the Usage page.
+export function getVisibleAdminNav(
+  user: Parameters<typeof canReadAdminUsage>[0],
 ): readonly NavItemDef[] {
+  if (!hasAdminRead(user)) {
+    return canReadAdminUsage(user)
+      ? ADMIN_NAV.filter((item) => item.to === ADMIN_USAGE_PATH)
+      : [];
+  }
   return ADMIN_NAV.filter(
     (item) =>
       ![

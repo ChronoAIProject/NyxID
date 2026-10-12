@@ -56,6 +56,11 @@ export interface UserCapabilities {
   /** Admin, or Operator with the Credits Manager role. Older backends omit it. */
   readonly manage_credit_grants?: boolean;
   /**
+   * Admin, Operator, or a role carrying `nyxid:admin:usage:read` (e.g. the
+   * seeded Usage Viewer role). Older backends omit it.
+   */
+  readonly read_admin_usage?: boolean;
+  /**
    * Feature-flag keys enabled for this user in the personal (non-org) context,
    * resolved server-side. Powers `useFeature(flag)` with no org. Optional so
    * older backends that omit it fail closed.
@@ -115,6 +120,18 @@ export function canManageCreditGrants(
     | undefined,
 ): boolean {
   return canAdminWrite(user) || user?.capabilities?.manage_credit_grants === true;
+}
+
+/// True if the user may open the admin Usage page: everyone with admin read
+/// access, plus users the backend reports as holding the usage-read
+/// permission through a custom role.
+export function canReadAdminUsage(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return hasAdminRead(user) || user?.capabilities?.read_admin_usage === true;
 }
 
 export interface ApiKey {

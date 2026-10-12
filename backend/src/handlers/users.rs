@@ -189,6 +189,9 @@ pub struct UserCapabilitiesResponse {
     /// Whether the caller may create providers and catalog services
     /// (Admin, or Operator with the Catalog Manager role).
     pub manage_catalog: bool,
+    /// Whether the caller may read platform-wide admin usage (Admin,
+    /// Operator, or a role carrying `nyxid:admin:usage:read`).
+    pub read_admin_usage: bool,
     /// Feature-flag keys enabled for this user on personal (non-org)
     /// surfaces, resolved server-side with specificity precedence:
     /// default -> global -> matching org -> user. Org-scoped pages
@@ -298,6 +301,8 @@ pub async fn get_me(
         role_service::can_manage_credit_grants(&state.db, &user_model, platform_role).await?;
     let manage_catalog =
         role_service::can_manage_catalog(&state.db, &user_model, platform_role).await?;
+    let read_admin_usage =
+        role_service::can_read_admin_usage(&state.db, &user_model, platform_role).await?;
     // Personal-surface feature-flag resolution: org-aware specificity, so an
     // org override can override the global baseline for its members
     // (sidebar, /assistant guard).
@@ -338,6 +343,7 @@ pub async fn get_me(
                     .any(|key| key == crate::services::feature_flag_service::BILLING_FLAG_KEY),
             manage_credit_grants,
             manage_catalog,
+            read_admin_usage,
             enabled_features,
         },
     }))
@@ -1113,6 +1119,7 @@ mod tests {
                 billing_available: true,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                read_admin_usage: false,
                 enabled_features: vec![],
             },
         };
@@ -1166,6 +1173,7 @@ mod tests {
                 billing_available: false,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                read_admin_usage: false,
                 enabled_features: vec![],
             },
         };
@@ -1210,6 +1218,7 @@ mod tests {
                 billing_available: false,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                read_admin_usage: false,
                 enabled_features: vec![],
             },
         };
@@ -1394,6 +1403,7 @@ mod tests {
                 billing_available: false,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                read_admin_usage: false,
                 enabled_features: vec![],
             },
         };

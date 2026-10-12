@@ -1053,6 +1053,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_usage::get_analytics),
         )
         .route(
+            "/usage/identities",
+            get(handlers::admin_usage::get_identities),
+        )
+        .route(
             "/usage/workspace",
             get(handlers::admin_usage::get_workspace).put(handlers::admin_usage::save_workspace),
         )

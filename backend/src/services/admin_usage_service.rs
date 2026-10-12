@@ -15,6 +15,7 @@ use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::COLLECTION_NAME;
 
 pub mod analytics;
+pub mod identities;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 const TOKEN_FIELDS: &[&str] = &[
@@ -187,6 +188,22 @@ pub struct AdminUsageResponse {
     /// Window/user-scoped options, independent of the selected service.
     pub services: Vec<UsageServiceIdentity>,
     pub selected_user: Option<UsageIdentity>,
+}
+
+impl AdminUsageResponse {
+    /// For readers limited to usage data: keep the `user` filter's identity
+    /// details only when that identity is in this report or is the caller, so
+    /// probing arbitrary ids reveals nothing beyond what the report shows.
+    pub fn limit_selected_user_to_report(&mut self, caller_id: &str) {
+        if let Some(user) = &mut self.selected_user
+            && self.ranking_total == 0
+            && user.id != caller_id
+        {
+            user.display_name = "Unknown user".into();
+            user.email = None;
+            user.user_type = "unknown".into();
+        }
+    }
 }
 
 pub struct UsageParams {

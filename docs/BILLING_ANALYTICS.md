@@ -172,7 +172,10 @@ incomplete restored range must be completed before queries or autosaves resume.
 Valid drafts with a matching revision recover automatically. Browser storage
 failures are visible. Admins can save settings; operators can explore
 usage but cannot write workspace settings, following the existing admin-write
-policy. Regular users cannot access the admin analytics API.
+policy. Other users can read the admin usage APIs (not save workspaces) only
+through a role carrying `nyxid:admin:usage:read`, such as the seeded Usage
+Viewer role; see `docs/BILLING_UI_GLOSSARY.md#admin-usage` for what they can
+see.
 
 ## Insight controls and valid data
 
@@ -307,6 +310,7 @@ axis. Standard-width panels follow their layout's grid; full-width panels span i
 | --- | --- |
 | `GET /api/v1/admin/usage` | Existing List report, including the same optional `services`, `actors`, and `owners` multi-selection filters. |
 | `GET /api/v1/admin/usage/analytics` | Query a bounded usage snapshot; returns totals, UTC buckets, globally ranked slices and series, units, and freshness. |
+| `GET /api/v1/admin/usage/identities` | Actor/owner picker options (`kind=actors` or `kind=owners`, `search`) or labels for saved filters (`ids`, at most 100); returns id, label and detail only. Usage-only readers are limited to identities recorded in the usage rollups (new usage appears after the next rollup sweep). |
 | `GET /api/v1/admin/usage/workspace` | Read the authenticated user's private workspace and revision. |
 | `PUT /api/v1/admin/usage/workspace` | Validate and conditionally save the authenticated admin's workspace. |
 

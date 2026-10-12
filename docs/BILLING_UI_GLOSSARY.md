@@ -384,8 +384,35 @@ the person has no chargeable wallet.
 
 ### Admin usage
 
-`/admin/usage` (API: `GET /api/v1/admin/usage`) is available to platform admins
-and read-only operators. It reports all credential classes, including free BYOK,
+`/admin/usage` (API: `GET /api/v1/admin/usage`) is available to platform admins,
+read-only operators, and any user holding `nyxid:admin:usage:read` through a
+direct or group role (the seeded **Usage Viewer** role carries it). Usage-only
+role holders see just the Usage page in the admin navigation and command
+palette; Admins and Operators keep their existing admin navigation. Saving a
+workspace stays admin-only.
+
+Usage-only readers never see identities beyond the usage data:
+
+- The actor/owner filter pickers and saved-filter labels use
+  `GET /api/v1/admin/usage/identities`, which returns only id, label and detail
+  (email, "Organization" or "Service account"). Admins and Operators search the
+  whole directory. Usage-only readers get only identities recorded as an actor
+  or owner in the usage rollups, which hold only the report's eligible usage.
+  Usage reaches the rollups when the rollup worker folds it (sweeps run at
+  least every minute; charged usage folds once settled), so a brand-new
+  identity can show in the report, from the raw tail, before the pickers find
+  it. The rollup worker does not run when `BILLING_RECONCILE_INTERVAL_SECS=0`;
+  usage-only readers' pickers then find no new identities, while the report
+  and Admin/Operator pickers are unaffected.
+- The List report's `selected_user` keeps its name and email only when the
+  filtered identity appears in that report (or is the caller); otherwise it
+  reads "Unknown user", the same as an unknown id.
+
+If a deployment already has a custom role with slug `usage_viewer`, startup
+leaves it untouched and does not seed the system role (a warning is logged);
+grant `nyxid:admin:usage:read` to a role directly instead.
+
+The report covers all credential classes, including free BYOK,
 agent overrides, node credentials and no-auth traffic. **`BILLING_ENABLED` must
 be on when traffic occurs** for meters to exist; turning it on does not backfill
 past usage. No Lago connection or per-user billing rollout is required to read it.

@@ -50,9 +50,7 @@ describe("admin usage FilterBar picker", () => {
       .mockImplementation(async (path) =>
         path === "/services"
           ? { services: [{ id: "svc-1", name: "Service One", slug: "one" }] }
-          : path.startsWith("/admin/service-accounts?")
-            ? { service_accounts: [], total: 0 }
-            : { users: [], total: 0 },
+          : { options: [], total: 0 },
       );
     try {
       render(
@@ -60,16 +58,13 @@ describe("admin usage FilterBar picker", () => {
           <FilterBar filters={EMPTY_FILTERS} onChange={vi.fn()} />
         </QueryClientProvider>,
       );
-      await waitFor(() => expect(get).toHaveBeenCalledTimes(6));
+      await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
       expect(get).toHaveBeenCalledWith("/services");
       expect(get).toHaveBeenCalledWith(
-        "/admin/users?page=1&per_page=50&user_type=org&search=",
+        "/admin/usage/identities?kind=actors&search=",
       );
       expect(get).toHaveBeenCalledWith(
-        "/admin/users?page=1&per_page=50&user_type=person&search=",
-      );
-      expect(get).toHaveBeenCalledWith(
-        "/admin/service-accounts?page=1&per_page=50&search=",
+        "/admin/usage/identities?kind=owners&search=",
       );
       await userEvent.click(
         screen.getByRole("button", { name: "Filter services" }),
@@ -77,7 +72,7 @@ describe("admin usage FilterBar picker", () => {
       expect(
         await picker().findByRole("button", { name: /Service One/ }),
       ).toBeVisible();
-      expect(get).toHaveBeenCalledTimes(6);
+      expect(get).toHaveBeenCalledTimes(3);
     } finally {
       get.mockRestore();
     }

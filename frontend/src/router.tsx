@@ -35,7 +35,7 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { CreditsDeniedHost } from "@/components/billing/credits-denied-host";
 import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite, hasAdminRead } from "@/types/api";
+import { canAdminWrite, canReadAdminUsage, hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
@@ -960,16 +960,24 @@ const orgJoinRoute = createRoute({
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: () => {
+  beforeLoad: ({ location }) => {
     const { user, isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
       throw redirect({ to: "/login" });
     }
     // Admin layout is reachable by both `admin` (read+write) and `operator`
     // (read-only). Per-action write controls inside admin pages are gated
-    // separately so operators see admin data but cannot mutate it.
-    if (!isLoading && !hasAdminRead(user)) {
+    // separately so operators see admin data but cannot mutate it. Holders of
+    // the usage-read role permission reach only the Usage page.
+    if (isLoading || hasAdminRead(user)) return;
+    const usagePath =
+      location.pathname === "/admin/usage" ||
+      location.pathname === "/admin/analytics";
+    if (!canReadAdminUsage(user)) {
       throw redirect({ to: "/dashboard" });
+    }
+    if (!usagePath) {
+      throw redirect({ to: "/admin/usage" });
     }
   },
   component: () => <Outlet />,

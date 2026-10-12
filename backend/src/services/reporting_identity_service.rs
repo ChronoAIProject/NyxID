@@ -24,7 +24,7 @@ impl ReportingIdentity {
     }
 }
 
-fn nonempty_field(row: &Document, field: &str) -> Option<String> {
+pub(crate) fn nonempty_field(row: &Document, field: &str) -> Option<String> {
     row.get_str(field)
         .ok()
         .filter(|value| !value.trim().is_empty())

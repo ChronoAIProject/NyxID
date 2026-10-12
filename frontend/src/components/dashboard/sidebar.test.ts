@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getVisibleMainNav } from "./sidebar";
+import { getVisibleAdminNav, getVisibleMainNav } from "./sidebar";
 
 describe("getVisibleMainNav", () => {
   it("hides Billing when the backend capability is missing or false", () => {
@@ -28,4 +28,30 @@ it("keeps NyxBot workspace features out of Studio navigation", () => {
     expect(items.map((item) => item.label)).not.toContain(label);
   }
   expect(items.map((item) => item.to)).toContain("/nodes");
+});
+
+describe("getVisibleAdminNav", () => {
+  it("shows only Usage to usage readers without admin read access", () => {
+    expect(
+      getVisibleAdminNav({
+        is_admin: false,
+        role: "user",
+        capabilities: { read_admin_usage: true },
+      }).map((item) => item.to),
+    ).toEqual(["/admin/usage"]);
+  });
+
+  it("hides admin nav from plain users", () => {
+    expect(getVisibleAdminNav({ is_admin: false, role: "user" })).toEqual([]);
+    expect(getVisibleAdminNav(null)).toEqual([]);
+  });
+
+  it("keeps the full read-only set for operators", () => {
+    const routes = getVisibleAdminNav({ is_admin: false, role: "operator" }).map(
+      (item) => item.to,
+    );
+    expect(routes).toContain("/admin/users");
+    expect(routes).toContain("/admin/usage");
+    expect(routes).not.toContain("/admin/platform-credentials");
+  });
 });

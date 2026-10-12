@@ -6872,6 +6872,52 @@ curl -X DELETE http://localhost:3001/api/v1/admin/users/user-uuid-here/roles/rol
 
 ---
 
+### Admin Usage
+
+Platform-wide usage reports live under `/api/v1/admin/usage`
+(`GET /admin/usage`, `GET /admin/usage/analytics`,
+`GET /admin/usage/identities`, and `GET`/`PUT /admin/usage/workspace`). The
+full query and response contract is in
+[BILLING_ANALYTICS.md](BILLING_ANALYTICS.md#api-and-reporting-semantics).
+
+**Auth:** Admin or Operator, or any user holding the
+`nyxid:admin:usage:read` permission through a direct or group role. The seeded
+system role **Usage Viewer** (`usage_viewer`) carries it; assign it with
+`POST /api/v1/admin/users/{user_id}/roles/{role_id}` or add the permission to a
+custom role. Holders get read-only access: `PUT /admin/usage/workspace` stays
+admin-only. `GET /api/v1/users/me` reports the result as
+`capabilities.read_admin_usage`.
+
+#### GET /api/v1/admin/usage/identities
+
+Options for the Usage page's actor/owner filters, or labels for saved filter
+ids. Returns only `id`, `label` and optional `detail` (email, `Organization` or
+`Service account`).
+
+| Parameter | Type   | Description                                                             |
+|-----------|--------|-------------------------------------------------------------------------|
+| `kind`    | string | `actors` (people and service accounts) or `owners` (also organizations) |
+| `search`  | string | Case-insensitive substring                                              |
+| `ids`     | string | Comma-separated ids (at most 100) to label instead of searching         |
+
+Admins and Operators search the whole directory. Callers with only the usage
+permission see only identities recorded in the usage rollups, and the List
+report redacts its `selected_user` unless that identity appears in the report.
+
+```json
+{
+  "options": [
+    { "id": "550e8400-e29b-41d4-a716-446655440000", "label": "Jane Doe", "detail": "jane@example.com" }
+  ],
+  "total": 1
+}
+```
+
+**Errors:** `400` invalid `kind` or more than 100 `ids`; `403` without usage
+access; `503` (`12200`) when the lookup times out.
+
+---
+
 ### Admin Groups
 
 All admin group endpoints require the authenticated user to have `is_admin = true`.

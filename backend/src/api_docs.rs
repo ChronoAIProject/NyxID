@@ -24,6 +24,7 @@
         crate::handlers::admin_ownership::transfer,
         crate::handlers::admin_usage::get_usage,
         crate::handlers::admin_usage::get_analytics,
+        crate::handlers::admin_usage::get_identities,
         crate::handlers::admin_usage::get_workspace,
         crate::handlers::admin_usage::save_workspace,
         crate::handlers::options::get_options,
