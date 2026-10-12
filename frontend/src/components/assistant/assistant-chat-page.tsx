@@ -541,11 +541,9 @@ function NyxAgentThreadPage() {
     draftAgent,
   });
   const retryFailedMessage = useCallback((messageId: string) => {
-    const messages = chat.session?.messages ?? [];
-    const index = messages.findIndex((message) => message.id === messageId);
-    const previous = index >= 0 ? [...messages.slice(0, index)].reverse().find((message) => message.role === "user") : undefined;
-    if (previous) void chat.send(previous.content);
-  }, [chat]);
+    void messageId;
+    if (selectedId) void chat.retry(selectedId);
+  }, [chat, selectedId]);
   useLayoutEffect(() => {
     const element = composerRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;

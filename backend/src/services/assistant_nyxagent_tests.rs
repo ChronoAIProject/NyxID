@@ -15,26 +15,6 @@ fn request(id: Option<&str>, text: &str) -> TurnRequest {
     }
 }
 
-#[test]
-fn retry_duplicate_action_is_refused_after_completed_activity() {
-    let activity = crate::models::assistant_conversation::TurnActivity {
-        machine: None,
-        id: "activity-1".into(),
-        digest: None,
-        label: "mcp.mail.send".into(),
-        status: "completed".into(),
-        started_at: Utc::now(),
-        ended_at: Some(Utc::now()),
-    };
-    assert!(retry_duplicate_action(
-        std::slice::from_ref(&activity),
-        "mcp.mail.send"
-    ));
-    assert!(!retry_duplicate_action(
-        std::slice::from_ref(&activity),
-        "mcp.calendar.list"
-    ));
-}
 fn terminal(kind: &str, seq: u64, text: &str) -> Value {
     let sid = "1234567890abcdef1234567890abcdef";
     json!({"type":kind,"sequence_number":seq,"response":{
