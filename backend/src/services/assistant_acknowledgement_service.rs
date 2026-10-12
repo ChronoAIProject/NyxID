@@ -140,58 +140,50 @@ pub fn owner_confirmation_required(
 }
 
 pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionClass {
-    let lower = tool.to_ascii_lowercase();
-    if method.is_some_and(|m| matches!(m, "DELETE" | "PUT" | "PATCH"))
-        || [
-            "delete",
-            "destroy",
-            "revoke",
-            "disconnect",
-            "forget",
-            "machine_",
-            "set_guest_access",
-            "grant_subagent",
-            "spawn_subagent",
-            "create_schedule",
-            "enable",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-    {
-        return if [
-            "delete",
-            "destroy",
-            "revoke",
-            "disconnect",
-            "forget",
-            "machine_",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-        {
-            OwnerActionClass::Destructive
-        } else {
-            OwnerActionClass::Sensitive
-        };
-    }
-    if [
+    let name = tool.strip_prefix("nyxid__").unwrap_or(tool);
+    let destructive = [
+        "delete_agent_key",
+        "unbind_agent_key_credential",
+        "delete_channel_bot",
+        "delete_channel_route",
+        "delete_service",
+        "delete_node",
+        "destroy_subagent",
+        "revoke_subagent",
+        "disconnect_channel_bot",
+        "forget",
+        "machine_exec",
+        "machine_update",
+    ];
+    let sensitive = [
+        "bind_agent_key_credential",
+        "set_approval_mode",
+        "update_agent_key",
+        "update_channel_bot",
+        "set_channel_route",
+        "set_guest_access",
+        "grant_subagent",
+        "spawn_subagent",
         "update_settings",
-        "set_agent_model",
-        "bind_agent_key",
         "connect_channel_bot",
-        "mint",
-        "credential",
-        "link",
-    ]
-    .iter()
-    .any(|p| lower.contains(p))
+        "set_agent_model",
+        "create_schedule",
+        "enable_schedule",
+        "mint_link",
+    ];
+    if method.is_some_and(|m| m.eq_ignore_ascii_case("DELETE")) || destructive.contains(&name) {
+        return OwnerActionClass::Destructive;
+    }
+    if sensitive.contains(&name)
+        || method.is_some_and(|m| matches!(m.to_ascii_uppercase().as_str(), "PUT" | "PATCH"))
     {
         return OwnerActionClass::Sensitive;
     }
-    if method.is_some_and(|m| matches!(m, "POST")) {
-        return OwnerActionClass::Change;
+    if method.is_some_and(|m| m.eq_ignore_ascii_case("POST")) {
+        OwnerActionClass::Change
+    } else {
+        OwnerActionClass::Read
     }
-    OwnerActionClass::Read
 }
 
 #[cfg(test)]
