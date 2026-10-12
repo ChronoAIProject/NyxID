@@ -1827,6 +1827,7 @@ async fn specialist_operation_scope_card_request_denied_audited_and_routed() {
     use super::assistant_settings_service as settings;
     use crate::models::assistant_settings::SpecialistAccessRequests;
     let f = fixture("strict_operation_scope_card").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
     let service = connected(
         &f.state.db,
         &f.owner,
@@ -1903,7 +1904,7 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    let args = serde_json::json!({"skills":[{"slug":"strict-skill","version":"1"}]});
+    let args = serde_json::json!({"skills":[{"skill_id":"strict-skill","version":"1"}]});
     let err = super::assistant_acknowledgement_service::request_tracked(
         &f.state.db,
         &f.chat,
