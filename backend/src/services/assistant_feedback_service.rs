@@ -14,6 +14,7 @@ pub struct AdminCount {
     pub down: i64,
 }
 pub struct AdminRow {
+    pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
     pub message_id: String,
     pub vote: String,
     pub comment: Option<String>,
@@ -37,6 +38,7 @@ pub async fn admin_recent(
     Ok(rows
         .into_iter()
         .map(|r| AdminRow {
+            context: r.context,
             message_id: r.message_id,
             vote: r.vote,
             comment: r.comment,

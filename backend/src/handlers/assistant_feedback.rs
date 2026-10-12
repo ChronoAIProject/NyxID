@@ -272,6 +272,7 @@ pub struct AdminResponse {
 }
 #[derive(Serialize)]
 pub struct AdminFeedbackRow {
+    pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
     pub message_id: String,
     pub vote: String,
     pub comment: Option<String>,
@@ -325,6 +326,7 @@ pub async fn admin(
     let recent = rows
         .iter()
         .map(|r| AdminFeedbackRow {
+            context: r.context.clone(),
             message_id: r.message_id.clone(),
             vote: r.vote.clone(),
             comment: r.comment.clone(),
