@@ -5877,7 +5877,7 @@ mod tests {
         )
         .await;
         assert!(matches!(partial, Err(AppError::ValidationError(_))));
-        update_provider(
+        let Json(foreign) = update_provider(
             State(state.clone()),
             manager(),
             Path(foreign.id.clone()),
@@ -5888,6 +5888,7 @@ mod tests {
         )
         .await
         .expect("first client on a provider without one");
+        assert!(foreign.has_client_id && foreign.has_client_secret);
         assert!(forbidden(
             update_provider(
                 State(state.clone()),
@@ -5954,9 +5955,10 @@ mod tests {
                 Json(serde_json::from_value(value).unwrap()),
             )
         };
-        update(serde_json::json!({ "description": "Zoho Mail (US)" }))
+        let Json(edited) = update(serde_json::json!({ "description": "Zoho Mail (US)" }))
             .await
             .expect("descriptive edit");
+        assert_eq!(edited.description.as_deref(), Some("Zoho Mail (US)"));
         assert!(forbidden(
             update(serde_json::json!({ "forward_access_token": true })).await
         ));
