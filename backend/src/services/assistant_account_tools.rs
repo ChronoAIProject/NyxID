@@ -794,6 +794,15 @@ impl AccountTools<'_> {
                     key.key_prefix
                 )
             }
+            "bind_agent_key_credential" => {
+                let key = self.mutable_key(user, text(args, "api_key_id")).await?;
+                format!(
+                    "Bind credential '{}' to agent key '{}' ({})",
+                    text(args, "binding_id"),
+                    short(&key.name),
+                    key.key_prefix
+                )
+            }
             "unbind_agent_key_credential" => {
                 let key = self.mutable_key(user, text(args, "api_key_id")).await?;
                 agent_binding_service::get_binding(
