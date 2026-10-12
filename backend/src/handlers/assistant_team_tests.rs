@@ -697,6 +697,14 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
     )
     .await;
     assert!(!error, "{value}");
+    let audit = state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_acknowledgement_decided","event_data.conversation_id":&home.id})
+        .await.unwrap().expect("decision audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("approver_user_id").unwrap(), OWNER);
+    assert!(data.get("approver_api_key_id").is_some());
+    assert_eq!(data.get_str("approver_kind").unwrap(), "nyxbot_or_key");
+    assert_eq!(data.get_str("decision").unwrap(), "allow");
     let agent = team::specialist(&state.db, OWNER, "mailer").await.unwrap();
     assert_eq!(agent.memory.len(), 1);
     assert!(
