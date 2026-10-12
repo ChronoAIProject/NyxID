@@ -424,6 +424,8 @@ async fn append_addressed(
     Ok(message)
 }
 
+/// Test helper: an unaddressed message with uploads.
+#[cfg(test)]
 pub async fn append_with_uploads(
     db: &Database,
     owner: &str,

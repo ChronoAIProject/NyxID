@@ -727,10 +727,10 @@ mod s9_denial_tests {
         );
         // A live agent with the same request is not refused (positive control).
         let (live, _) = f.create().await;
-        crate::handlers::agent_skills::set(
+        let Json(saved) = crate::handlers::agent_skills::set(
             State(f.state.clone()),
             crate::test_utils::test_auth_user(&f.admin),
-            Path(live.id),
+            Path(live.id.clone()),
             Json(crate::services::agent_skill_service::Selection {
                 expected_revision: 0,
                 skills: vec![],
@@ -738,6 +738,7 @@ mod s9_denial_tests {
         )
         .await
         .unwrap();
+        assert_eq!(saved.agent_id, live.id);
     }
 
     #[tokio::test]
@@ -845,7 +846,8 @@ mod s9_denial_tests {
                 "skills": [{"id": "s", "name": "Checklist", "version": "1.0", "disabled": true}]}),
             ),
         )
-        .await;
+        .await
+        .unwrap();
         let Json(history) = crate::handlers::agent_skills::history(
             State(f.state.clone()),
             crate::test_utils::test_auth_user(&f.viewer),

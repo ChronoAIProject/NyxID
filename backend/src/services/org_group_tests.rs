@@ -61,7 +61,7 @@ async fn enqueue(
         Some(&id),
         uploads,
         Some(request),
-        &[agent.id.clone()],
+        std::slice::from_ref(&agent.id),
     )
     .await
     .unwrap();
