@@ -619,7 +619,13 @@ impl AccountTools<'_> {
             });
         }
         let settings = super::assistant_settings_service::get(self.db, &chat.user_id).await?;
-        if !chat.guest
+        if acks::owner_gate_required(
+            self.db,
+            chat,
+            acks::classify_owner_action(tool_name, None),
+            false,
+        )
+        .await?
             && matches!(
                 acks::classify_owner_action(tool_name, None),
                 acks::OwnerActionClass::Sensitive | acks::OwnerActionClass::Destructive
