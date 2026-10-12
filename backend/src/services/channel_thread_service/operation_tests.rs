@@ -442,6 +442,21 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
         loaded.diagnostics.last_outbound_error.unwrap().code,
         "10005"
     );
+    // The stored BSON is a string, so every reader (not only the lenient
+    // model deserializer) can load the row.
+    let raw = db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id": "bot"})
+        .await
+        .unwrap()
+        .unwrap();
+    let error = raw
+        .get_document("diagnostics")
+        .unwrap()
+        .get_document("last_outbound_error")
+        .unwrap();
+    assert_eq!(error.get_str("code").unwrap(), "10005");
+    assert_eq!(error.get_str("reason").unwrap(), "provider_error");
     let owner_rows = crate::services::channel_bot_service::list_bots(&db, "owner")
         .await
         .unwrap();

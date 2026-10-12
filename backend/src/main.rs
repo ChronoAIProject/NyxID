@@ -810,6 +810,14 @@ async fn server_main() {
             encryption_keys.clone(),
         ),
     );
+    services::channel_bot_health::install_failure_notifier(
+        services::channel_bot_health::ChannelBotFailureNotifier::new(
+            Arc::new(config.clone()),
+            http_client.clone(),
+            fcm_auth.clone(),
+            apns_auth.clone(),
+        ),
+    );
     let connection_expiry_notifier = Arc::new(
         services::connection_expiry_service::ConnectionExpiryNotifier::new(
             Arc::new(config.clone()),

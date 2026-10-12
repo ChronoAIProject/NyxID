@@ -1500,30 +1500,118 @@ async fn platform_dispatcher_routes_two_bots_drops_unknown_and_preserves_dedup()
     assert_eq!(byo.status, "pending_webhook");
 }
 
-#[tokio::test]
-async fn health_is_owner_only_and_not_found_shaped_for_others() {
-    let (state, auth, _server) = fixture().await;
-    let bot_id = uuid::Uuid::new_v4().to_string();
-    let owner = auth.user_id.to_string();
-    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
-        "_id": &bot_id, "user_id": &owner, "platform": "whatsapp", "label": "health",
+fn bot_doc(id: &str, owner: &str, platform: &str, status: &str) -> bson::Document {
+    doc! {
+        "_id": id, "user_id": owner, "platform": platform, "label": id,
         "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
-        "platform_bot_id": "p", "platform_bot_username": "health", "webhook_registered": true,
-        "webhook_secret_hash": "h", "status": "active", "is_active": true,
+        "platform_bot_id": "10", "platform_bot_username": id, "webhook_registered": true,
+        "webhook_secret_hash": "h", "status": status, "is_active": true,
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
-    }).unwrap()).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn health_follows_owner_and_org_access_controls() {
+    let (state, auth, _server) = fixture().await;
+    let owner = auth.user_id.to_string();
+    let personal = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .insert_one(bot_doc(&personal, &owner, "whatsapp", "active"))
+        .await
+        .unwrap();
     let response =
-        super::channel_bots::health(State(state.clone()), auth.clone(), Path(bot_id.clone()))
+        super::channel_bots::health(State(state.clone()), auth.clone(), Path(personal.clone()))
             .await
             .unwrap();
     assert_eq!(response.0.mode, "webhook");
-    assert_eq!(response.0.recommended_action, "verify");
-    let other = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
-    let error = super::channel_bots::health(State(state), other, Path(bot_id))
+    assert_eq!(response.0.recommended_action, "none");
+    assert!(response.0.can_write);
+    let stranger = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let error = super::channel_bots::health(State(state.clone()), stranger, Path(personal))
         .await
         .unwrap_err();
     assert!(matches!(
         error,
+        crate::errors::AppError::ChannelBotNotFound(_)
+    ));
+
+    // An org-owned X bot: viewers read health but cannot act; admins can.
+    let org = uuid::Uuid::new_v4().to_string();
+    let viewer = uuid::Uuid::new_v4().to_string();
+    let admin = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &org,
+            crate::models::user::UserType::Org,
+        ))
+        .await
+        .unwrap();
+    for (member, role) in [
+        (&viewer, crate::models::org_membership::OrgRole::Viewer),
+        (&admin, crate::models::org_membership::OrgRole::Admin),
+    ] {
+        state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                member,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        state
+            .db
+            .collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_membership(&org, member, role, None))
+            .await
+            .unwrap();
+    }
+    let org_bot = uuid::Uuid::new_v4().to_string();
+    let mut row = bot_doc(&org_bot, &org, "x", "active");
+    row.insert("diagnostics", doc! {"failure_reason": "subscription_missing",
+        "subscription_state": {"registered": false, "checked_at": bson::DateTime::now(), "last_error": "subscription_missing"}});
+    state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .insert_one(row)
+        .await
+        .unwrap();
+    let viewer_auth = crate::test_utils::test_auth_user(&viewer);
+    let seen = super::channel_bots::health(
+        State(state.clone()),
+        viewer_auth.clone(),
+        Path(org_bot.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(seen.0.recommended_action, "resubscribe");
+    assert!(!seen.0.can_write, "viewers see advice without the action");
+    let denied =
+        super::channel_bots::resubscribe(State(state.clone()), viewer_auth, Path(org_bot.clone()))
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(denied, crate::errors::AppError::OrgRoleInsufficient(_)),
+        "{denied:?}"
+    );
+    let admin_view = super::channel_bots::health(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(&admin),
+        Path(org_bot.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(admin_view.0.can_write);
+    let stranger = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+    let hidden = super::channel_bots::resubscribe(State(state), stranger, Path(org_bot))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        hidden,
         crate::errors::AppError::ChannelBotNotFound(_)
     ));
 }
@@ -1532,30 +1620,58 @@ async fn health_is_owner_only_and_not_found_shaped_for_others() {
 async fn admin_channel_bot_list_filters_platform_and_status_and_requires_admin() {
     let (state, auth, _server) = fixture().await;
     let owner = auth.user_id.to_string();
+    // Real X bots are stored as "x"; each pair differs in exactly one field.
     for (id, platform, status) in [
-        ("x-health", "twitter", "failed"),
-        ("other", "telegram", "active"),
+        ("x-failed", "x", "failed"),
+        ("x-active", "x", "active"),
+        ("tg-failed", "telegram", "failed"),
     ] {
-        state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
-            "_id": id, "user_id": &owner, "platform": platform, "label": id,
-            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
-            "platform_bot_id": "p", "platform_bot_username": id, "webhook_registered": false,
-            "webhook_secret_hash": "h", "status": status, "is_active": true,
-            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
-        }).unwrap()).await.unwrap();
+        state
+            .db
+            .collection::<bson::Document>(BOTS)
+            .insert_one(bot_doc(id, &owner, platform, status))
+            .await
+            .unwrap();
     }
-    let listed = super::channel_bots::admin_list(
-        State(state.clone()),
-        auth,
-        axum::extract::Query(super::channel_bots::AdminChannelBotQuery {
-            platform: Some("x".into()),
-            status: Some("failed".into()),
-            ..Default::default()
-        }),
-    )
-    .await
-    .unwrap();
-    assert_eq!(listed.0.len(), 1);
+    let list = |platform: Option<&str>, status: Option<&str>, limit, offset| {
+        let state = state.clone();
+        let auth = auth.clone();
+        let query = super::channel_bots::AdminChannelBotQuery {
+            platform: platform.map(str::to_string),
+            status: status.map(str::to_string),
+            limit,
+            offset,
+        };
+        async move {
+            super::channel_bots::admin_list(State(state), auth, axum::extract::Query(query))
+                .await
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        list(Some("x"), Some("failed"), None, None).await,
+        ["x-failed"]
+    );
+    assert_eq!(
+        list(Some("x"), None, None, None).await,
+        ["x-active", "x-failed"]
+    );
+    assert_eq!(
+        list(None, Some("failed"), None, None).await,
+        ["tg-failed", "x-failed"]
+    );
+    assert!(list(Some("twitter"), None, None, None).await.is_empty());
+    // Ordered by id, so pages are stable.
+    assert_eq!(list(None, None, Some(1), Some(1)).await, ["x-active"]);
+    assert_eq!(
+        list(None, None, Some(2), Some(1)).await,
+        ["x-active", "x-failed"]
+    );
+
     let non_admin_id = uuid::Uuid::new_v4().to_string();
     state
         .db
@@ -1568,12 +1684,16 @@ async fn admin_channel_bot_list_filters_platform_and_status_and_requires_admin()
         .unwrap();
     let non_admin = crate::test_utils::test_auth_user(&non_admin_id);
     let error = super::channel_bots::admin_list(
-        State(state),
-        non_admin,
+        State(state.clone()),
+        non_admin.clone(),
         axum::extract::Query(super::channel_bots::AdminChannelBotQuery::default()),
     )
     .await
     .unwrap_err();
+    assert!(matches!(error, crate::errors::AppError::Forbidden(_)));
+    let error = super::channel_bots::admin_webhook_rejections(State(state), non_admin)
+        .await
+        .unwrap_err();
     assert!(matches!(error, crate::errors::AppError::Forbidden(_)));
 }
 
@@ -1582,14 +1702,17 @@ async fn admin_health_requires_admin() {
     let (state, auth, _server) = fixture().await;
     let bot_id = "admin-health";
     let owner = auth.user_id.to_string();
-    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
-        "_id": bot_id, "user_id": &owner, "platform": "twitter", "label": "health",
-        "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": true, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
-    }).unwrap()).await.unwrap();
+    state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .insert_one(bot_doc(bot_id, &owner, "x", "active"))
+        .await
+        .unwrap();
     let ok = super::channel_bots::admin_health(State(state.clone()), auth, Path(bot_id.into()))
         .await
         .unwrap();
     assert_eq!(ok.0.mode, "webhook");
+    assert!(!ok.0.can_write);
     let other_id = uuid::Uuid::new_v4().to_string();
     state
         .db
@@ -1605,55 +1728,4 @@ async fn admin_health_requires_admin() {
         .await
         .unwrap_err();
     assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
-}
-
-#[tokio::test]
-async fn resubscribe_requires_owner_write_and_reconfigures_subscription() {
-    let (state, auth, _server) = fixture().await;
-    let bot_id = "resubscribe-health";
-    let owner = auth.user_id.to_string();
-    state.db.collection::<ChannelBot>(BOTS).insert_one(bson::from_document::<ChannelBot>(doc! {
-        "_id": bot_id, "user_id": &owner, "platform": "twitter", "label": "x", "credential_source": "connection", "connection_id": "missing", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
-    }).unwrap()).await.unwrap();
-    let other = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
-    let err = super::channel_bots::resubscribe(State(state.clone()), other, Path(bot_id.into()))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        crate::errors::AppError::ChannelBotNotFound(_)
-    ));
-    let owner_result =
-        super::channel_bots::resubscribe(State(state), auth, Path(bot_id.into())).await;
-    assert!(owner_result.is_err());
-}
-
-#[test]
-fn verify_reports_live_subscription_state_and_recommended_action() {
-    let mut bot: ChannelBot = bson::from_document::<ChannelBot>(doc! {"_id": "verify-state", "user_id": "u", "platform": "twitter", "label": "x", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": true, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() }).unwrap();
-    bot.diagnostics.subscription_state =
-        Some(crate::models::channel_bot::ChannelBotSubscriptionState {
-            registered: true,
-            checked_at: chrono::Utc::now(),
-            last_error: None,
-        });
-    let registered = super::channel_bots::health_for(&bot, false);
-    assert_eq!(registered.recommended_action, "verify");
-    assert!(
-        registered
-            .diagnostics
-            .subscription_state
-            .as_ref()
-            .unwrap()
-            .registered
-    );
-    bot.webhook_registered = false;
-    bot.diagnostics.subscription_state =
-        Some(crate::models::channel_bot::ChannelBotSubscriptionState {
-            registered: false,
-            checked_at: chrono::Utc::now(),
-            last_error: Some("missing".into()),
-        });
-    let missing = super::channel_bots::health_for(&bot, false);
-    assert_eq!(missing.recommended_action, "resubscribe");
 }

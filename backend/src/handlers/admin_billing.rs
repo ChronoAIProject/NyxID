@@ -1,4 +1,10 @@
-use crate::models::platform_settings::BillingSettings;
+//! Central admin billing surface: environment mirror, global defaults,
+//! cached rates, and every billed service's effective prices with sources.
+//! Reads are admin/operator; writes are admin-only.
+
+use crate::services::billing::config::{
+    self, BillingConfigSource, EffectiveServiceBilling, GlobalBillingPatch, ResolverEnv,
+};
 use crate::{
     AppState,
     errors::AppResult,
@@ -12,10 +18,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
-pub struct GlobalBillingDefaultsResponse {
-    pub default_lane: Option<String>,
-    pub default_overdraft_cap_credits: Option<i64>,
-    pub source: &'static str,
+pub struct OverdraftCapResponse {
+    /// Applied to newly provisioned wallets, top-up provisioning and backfill.
+    pub effective: i64,
+    pub source: BillingConfigSource,
+    /// Stored global value; `None` falls back to the environment default.
+    pub global: Option<i64>,
+    pub env: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,8 +32,9 @@ pub struct BillingConfigResponse {
     pub billing_enabled: bool,
     pub lago_configured: bool,
     pub resale_enabled: bool,
-    pub global: Option<GlobalBillingDefaultsResponse>,
-    pub precedence: [&'static str; 4],
+    pub default_overdraft_cap_credits: OverdraftCapResponse,
+    pub max_default_overdraft_cap_credits: i64,
+    /// Read-only deployment values. Secrets are presence flags only.
     pub environment: Vec<ConfigValue>,
 }
 
@@ -32,190 +42,184 @@ pub struct BillingConfigResponse {
 pub struct ConfigValue {
     pub key: &'static str,
     pub value: Option<String>,
-    pub source: &'static str,
+    pub source: BillingConfigSource,
     pub secret_set: Option<bool>,
 }
 
+fn env_value(key: &'static str, value: Option<String>) -> ConfigValue {
+    ConfigValue {
+        key,
+        value,
+        source: BillingConfigSource::Env,
+        secret_set: None,
+    }
+}
+
+fn env_secret(key: &'static str, set: bool) -> ConfigValue {
+    ConfigValue {
+        key,
+        value: None,
+        source: BillingConfigSource::Env,
+        secret_set: Some(set),
+    }
+}
+
+fn config_response(
+    state: &AppState,
+    global: Option<&crate::models::platform_settings::BillingSettings>,
+) -> BillingConfigResponse {
+    let c = &state.config;
+    let env_cap = c.billing_default_overdraft_cap_credits;
+    let (effective, source) = config::effective_overdraft_cap(global, env_cap);
+    BillingConfigResponse {
+        billing_enabled: state.billing.billing_enabled(),
+        lago_configured: state.billing.lago_configured(),
+        resale_enabled: state.billing.resale_enabled(),
+        default_overdraft_cap_credits: OverdraftCapResponse {
+            effective,
+            source,
+            global: global.and_then(|g| g.default_overdraft_cap_credits),
+            env: env_cap,
+        },
+        max_default_overdraft_cap_credits: config::MAX_DEFAULT_OVERDRAFT_CAP_CREDITS,
+        environment: vec![
+            env_value("BILLING_ENABLED", Some(c.billing_enabled.to_string())),
+            env_value(
+                "BILLING_RESALE_ENABLED",
+                Some(c.billing_resale_enabled.to_string()),
+            ),
+            env_value("LAGO_API_URL", c.lago_api_url.clone()),
+            env_value("LAGO_PLAN_CODE", Some(c.lago_plan_code.clone())),
+            env_value(
+                "LAGO_PAYMENT_PROVIDER_CODE",
+                c.lago_payment_provider_code.clone(),
+            ),
+            env_value(
+                "BILLING_RECONCILE_INTERVAL_SECS",
+                Some(c.billing_reconcile_interval_secs.to_string()),
+            ),
+            env_value(
+                "BILLING_RATE_CACHE_TTL_SECS",
+                Some(c.billing_rate_cache_ttl_secs.to_string()),
+            ),
+            env_value(
+                "BILLING_RESERVATION_ABANDON_SECS",
+                Some(c.billing_reservation_abandon_secs.to_string()),
+            ),
+            env_value(
+                "BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS",
+                Some(env_cap.to_string()),
+            ),
+            env_value(
+                "BILLING_FAIL_CLOSED",
+                Some(c.billing_fail_closed.to_string()),
+            ),
+            env_value(
+                "BILLING_EXACT_CUTOVER_DRAINED",
+                Some(c.billing_exact_cutover_drained.to_string()),
+            ),
+            env_secret("LAGO_API_KEY", c.lago_api_key.is_some()),
+            env_secret("LAGO_WEBHOOK_SECRET", c.lago_webhook_secret.is_some()),
+            env_secret(
+                "BILLING_LEDGER_HMAC_KEY",
+                c.billing_ledger_hmac_key.is_some(),
+            ),
+        ],
+    }
+}
+
+/// GET /api/v1/admin/billing/config
 pub async fn get_config(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<BillingConfigResponse>> {
     require_admin_or_operator(&state, &auth, "admin.billing.config").await?;
-    let global = crate::services::billing::config::load_settings(&state.db).await?;
-    Ok(Json(BillingConfigResponse {
-        billing_enabled: state.billing.billing_enabled(),
-        lago_configured: state.billing.lago_configured(),
-        resale_enabled: state.billing.resale_enabled(),
-        global: global.map(|settings| GlobalBillingDefaultsResponse {
-            default_lane: settings.default_lane,
-            default_overdraft_cap_credits: settings.default_overdraft_cap_credits,
-            source: "global",
-        }),
-        precedence: ["env", "global", "service", "legacy/free"],
-        environment: vec![
-            ConfigValue {
-                key: "LAGO_API_URL",
-                value: state.config.lago_api_url.clone(),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "LAGO_PLAN_CODE",
-                value: Some(state.config.lago_plan_code.clone()),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "LAGO_PAYMENT_PROVIDER_CODE",
-                value: state.config.lago_payment_provider_code.clone(),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "BILLING_RECONCILE_INTERVAL_SECS",
-                value: Some(state.config.billing_reconcile_interval_secs.to_string()),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "BILLING_RATE_CACHE_TTL_SECS",
-                value: Some(state.config.billing_rate_cache_ttl_secs.to_string()),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "BILLING_RESERVATION_ABANDON_SECS",
-                value: Some(state.config.billing_reservation_abandon_secs.to_string()),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS",
-                value: Some(
-                    state
-                        .config
-                        .billing_default_overdraft_cap_credits
-                        .to_string(),
-                ),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "BILLING_FAIL_CLOSED",
-                value: Some(state.config.billing_fail_closed.to_string()),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "BILLING_EXACT_CUTOVER_DRAINED",
-                value: Some(state.config.billing_exact_cutover_drained.to_string()),
-                source: "env",
-                secret_set: None,
-            },
-            ConfigValue {
-                key: "LAGO_API_KEY",
-                value: None,
-                source: "env",
-                secret_set: Some(state.config.lago_api_key.is_some()),
-            },
-            ConfigValue {
-                key: "LAGO_WEBHOOK_SECRET",
-                value: None,
-                source: "env",
-                secret_set: Some(state.config.lago_webhook_secret.is_some()),
-            },
-            ConfigValue {
-                key: "BILLING_LEDGER_HMAC_KEY",
-                value: None,
-                source: "env",
-                secret_set: Some(std::env::var_os("BILLING_LEDGER_HMAC_KEY").is_some()),
-            },
-        ],
-    }))
+    let global = config::load_settings(&state.db).await?;
+    Ok(Json(config_response(&state, global.as_ref())))
 }
 
+/// Per-field patch: an absent field keeps its value, `null` clears it to the
+/// environment default, a number sets it.
 #[derive(Debug, Deserialize)]
-pub struct UpdateConfigRequest {
-    pub billing: Option<BillingSettings>,
+#[serde(deny_unknown_fields)]
+pub struct UpdateBillingConfigRequest {
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub default_overdraft_cap_credits: Option<Option<i64>>,
 }
 
+/// PUT /api/v1/admin/billing/config
 pub async fn put_config(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(input): Json<UpdateConfigRequest>,
+    Json(input): Json<UpdateBillingConfigRequest>,
 ) -> AppResult<Json<BillingConfigResponse>> {
     require_admin(&state, &auth).await?;
-    if input.billing.is_none() {
-        return Err(crate::errors::AppError::ValidationError(
-            "billing object is required; use null fields to clear values".into(),
-        ));
-    }
-    if input
-        .billing
-        .as_ref()
-        .and_then(|b| b.default_lane.as_deref())
-        .is_some_and(|lane| !matches!(lane, "byok" | "platform_key"))
-    {
-        return Err(crate::errors::AppError::ValidationError(
-            "default_lane must be byok or platform_key".into(),
-        ));
-    }
-    if input
-        .billing
-        .as_ref()
-        .and_then(|b| b.default_overdraft_cap_credits)
-        .is_some_and(|v| !(0..=i64::MAX / 1_000).contains(&v))
-    {
-        return Err(crate::errors::AppError::ValidationError(
-            "default overdraft cap must be non-negative".into(),
-        ));
-    }
-    crate::services::billing::config::save_settings_and_audit(
+    let patch = GlobalBillingPatch {
+        default_overdraft_cap_credits: input.default_overdraft_cap_credits,
+    };
+    let saved = config::update_global_defaults(
         &state.db,
-        input.billing.clone(),
+        &patch,
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
         state.audit_chain_hmac_key.as_slice(),
     )
     .await?;
-    get_config(State(state), auth).await
+    Ok(Json(config_response(&state, Some(&saved))))
 }
 
 #[derive(Debug, Serialize)]
 pub struct BillingRateResponse {
     pub id: String,
-    pub metric: String,
+    pub lago_metric_code: String,
     pub model: Option<String>,
-    pub credits_per_unit_micros: i64,
+    /// Exact decimal credits per unit.
+    pub credits_per_unit: String,
     pub synced_at: chrono::DateTime<chrono::Utc>,
-    pub retired_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub stale_after: chrono::DateTime<chrono::Utc>,
     pub stale: bool,
+    pub retired_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+fn rate_ttl_secs(state: &AppState) -> AppResult<i64> {
+    i64::try_from(state.config.billing_rate_cache_ttl_secs).map_err(|_| {
+        crate::errors::AppError::Internal("billing rate cache TTL is too large".into())
+    })
+}
+
+/// GET /api/v1/admin/billing/rates
 pub async fn get_rates(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<Vec<BillingRateResponse>>> {
     require_admin_or_operator(&state, &auth, "admin.billing.rates").await?;
-    let ttl_secs = i64::try_from(state.config.billing_rate_cache_ttl_secs).map_err(|_| {
-        crate::errors::AppError::ValidationError("billing rate cache TTL is too large".into())
-    })?;
-    let ttl = chrono::Duration::seconds(ttl_secs);
-    let rows = crate::services::billing::config::load_rates(&state.db).await?;
-    let mut rows = rows;
-    rows.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| BillingRateResponse {
+    let ttl = chrono::Duration::seconds(rate_ttl_secs(&state)?);
+    let now = chrono::Utc::now();
+    let rows = config::load_rates(&state.db).await?;
+    rows.into_iter()
+        .map(|r| {
+            let pico = crate::services::billing::amounts::rate_pico(
+                r.credits_per_unit_pico,
+                r.credits_per_unit_micros,
+            );
+            let credits = crate::models::credits::Credits::from_pico(pico).map_err(|_| {
+                crate::errors::AppError::Internal("cached rate is out of range".into())
+            })?;
+            Ok(BillingRateResponse {
                 id: r.id,
-                metric: r.lago_metric_code,
+                lago_metric_code: r.lago_metric_code,
                 model: r.model,
-                credits_per_unit_micros: r.credits_per_unit_micros,
+                credits_per_unit: credits.to_string(),
                 synced_at: r.synced_at,
+                stale_after: r.synced_at + ttl,
+                stale: r.synced_at + ttl < now,
                 retired_at: r.retired_at,
-                stale: r.synced_at + ttl < chrono::Utc::now(),
             })
-            .collect(),
-    ))
+        })
+        .collect::<AppResult<Vec<_>>>()
+        .map(Json)
 }
 
 #[derive(Debug, Serialize)]
@@ -223,108 +227,96 @@ pub struct BillingServiceResponse {
     pub id: String,
     pub slug: String,
     pub name: String,
-    pub has_billing: bool,
-    pub effective_source: &'static str,
-    pub effective_metric: String,
-    pub allowance_metrics: Vec<String>,
-    pub sync_status: Option<String>,
-    pub sync_error: Option<String>,
-    pub primary_source: &'static str,
-    pub component_sources: Vec<String>,
+    pub is_active: bool,
+    /// Unit used by allowances and catalog summaries.
+    pub effective_metric: crate::models::service_billing::BillingMetric,
+    pub allowance_metrics: Vec<crate::models::service_billing::BillingMetric>,
+    pub effective: EffectiveServiceBilling,
 }
 
+fn service_rows(
+    state: &AppState,
+    services: &[crate::models::downstream_service::DownstreamService],
+    rates: &std::collections::HashMap<String, crate::models::billing_rate_cache::BillingRateCache>,
+) -> AppResult<Vec<BillingServiceResponse>> {
+    let env = ResolverEnv {
+        billing_enabled: state.billing.billing_enabled(),
+        resale_enabled: state.billing.resale_enabled(),
+        rate_ttl_secs: rate_ttl_secs(state)?,
+        now: chrono::Utc::now(),
+        rates,
+    };
+    Ok(services
+        .iter()
+        .map(|s| BillingServiceResponse {
+            id: s.id.clone(),
+            slug: s.slug.clone(),
+            name: s.name.clone(),
+            is_active: s.is_active,
+            effective_metric:
+                crate::services::billing::metric_resolution::effective_platform_metric(s),
+            allowance_metrics: crate::services::billing::metric_resolution::allowance_metrics(s),
+            effective: config::resolve_service_billing(&env, s),
+        })
+        .collect())
+}
+
+async fn service_row(state: &AppState, id: &str) -> AppResult<BillingServiceResponse> {
+    let service = config::load_service(&state.db, id)
+        .await?
+        .ok_or_else(|| crate::errors::AppError::NotFound("service not found".into()))?;
+    let services = [service];
+    let rates = config::load_rates_for(&state.db, &services).await?;
+    Ok(service_rows(state, &services, &rates)?.remove(0))
+}
+
+/// GET /api/v1/admin/billing/overview
 pub async fn get_overview(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<Vec<BillingServiceResponse>>> {
     require_admin_or_operator(&state, &auth, "admin.billing.overview").await?;
-    let rows = crate::services::billing::config::load_services(&state.db).await?;
-    let global = crate::services::billing::config::load_settings(&state.db).await?;
-    Ok(Json(
-        rows.into_iter()
-            .filter(|s| s.billing.is_some())
-            .map(|s| {
-                let effective = crate::services::billing::config::effective_config(
-                    s.billing.as_ref(),
-                    global.as_ref(),
-                    None,
-                    Some(state.config.billing_default_overdraft_cap_credits),
-                );
-                let source = match effective.lane_source {
-                    crate::services::billing::config::BillingConfigSource::Env => "env",
-                    crate::services::billing::config::BillingConfigSource::Global => "global",
-                    crate::services::billing::config::BillingConfigSource::Service => "service",
-                    crate::services::billing::config::BillingConfigSource::Legacy => "legacy",
-                    crate::services::billing::config::BillingConfigSource::Free => "free",
-                };
-                BillingServiceResponse {
-                    id: s.id.clone(),
-                    slug: s.slug.clone(),
-                    name: s.name.clone(),
-                    has_billing: true,
-                    effective_source: source,
-                    effective_metric:
-                        crate::services::billing::metric_resolution::effective_platform_metric(&s)
-                            .slug()
-                            .to_string(),
-                    allowance_metrics:
-                        crate::services::billing::metric_resolution::allowance_metrics(&s)
-                            .into_iter()
-                            .map(|m| m.slug().to_string())
-                            .collect(),
-                    sync_status: s
-                        .billing
-                        .as_ref()
-                        .and_then(|b| b.byok_pricing.as_ref().or(b.platform_key_pricing.as_ref()))
-                        .map(|p| format!("{:?}", p.sync_status).to_lowercase()),
-                    sync_error: s
-                        .billing
-                        .as_ref()
-                        .and_then(|b| b.byok_pricing.as_ref().or(b.platform_key_pricing.as_ref()))
-                        .and_then(|p| p.sync_error.clone()),
-                    primary_source: source,
-                    component_sources: s
-                        .billing
-                        .as_ref()
-                        .map(|b| {
-                            b.byok_pricing
-                                .as_ref()
-                                .or(b.platform_key_pricing.as_ref())
-                                .map(|_| {
-                                    crate::services::billing::config::effective_component_sources(b)
-                                        .into_iter()
-                                        .map(|c| format!("{:?}", c.source).to_lowercase())
-                                        .collect()
-                                })
-                                .unwrap_or_default()
-                        })
-                        .unwrap_or_default(),
-                }
-            })
-            .collect(),
-    ))
+    let services = config::load_billed_services(&state.db).await?;
+    let rates = config::load_rates_for(&state.db, &services).await?;
+    Ok(Json(service_rows(&state, &services, &rates)?))
 }
 
+/// GET /api/v1/admin/billing/services/{id}
+pub async fn get_service(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<BillingServiceResponse>> {
+    require_admin_or_operator(&state, &auth, "admin.billing.service").await?;
+    Ok(Json(service_row(&state, &id).await?))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResyncResponse {
+    pub synced: bool,
+    pub service: BillingServiceResponse,
+}
+
+/// POST /api/v1/admin/billing/services/{id}/resync
 pub async fn resync_service(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> AppResult<Json<bool>> {
+) -> AppResult<Json<ResyncResponse>> {
     require_admin(&state, &auth).await?;
-    let service = crate::services::billing::config::load_service(&state.db, &id)
-        .await?
-        .ok_or(crate::errors::AppError::NotFound(
-            "service not found".into(),
-        ))?;
-    let synced = state.billing.sync_service_price(&service).await?;
-    crate::services::billing::config::record_resync_audit(
+    let outcome = config::resync_service(
         &state.db,
+        &state.billing,
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
         &id,
-        synced,
     )
     .await?;
-    Ok(Json(synced))
+    let services = [outcome.service];
+    let rates = config::load_rates_for(&state.db, &services).await?;
+    Ok(Json(ResyncResponse {
+        synced: outcome.synced,
+        service: service_rows(&state, &services, &rates)?.remove(0),
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -333,61 +325,25 @@ pub(crate) struct BillingOnlyRequest {
     billing: crate::handlers::services::BillingUpdate,
 }
 
+/// PUT /api/v1/admin/billing/services/{id}
+///
+/// Billing-only writes share `PUT /services/{id}`'s write path and audit.
 pub async fn update_service_billing(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: crate::telemetry::TelemetryContext,
     Path(service_id): Path<String>,
     Json(body): Json<BillingOnlyRequest>,
-) -> AppResult<Json<crate::handlers::services::ServiceResponse>> {
+) -> AppResult<Json<BillingServiceResponse>> {
     require_admin(&state, &auth_user).await?;
-    let body = crate::handlers::services::UpdateServiceRequest {
-        billing: Some(body.billing),
-        service_category: None,
-        offering_kind: None,
-        topics: None,
-        supplier: None,
-        import_source: None,
-        destination_targets: None,
-        name: None,
-        description: None,
-        base_url: None,
-        is_active: None,
-        visibility: None,
-        openapi_spec_url: None,
-        asyncapi_spec_url: None,
-        identity_propagation_mode: None,
-        identity_include_user_id: None,
-        identity_include_email: None,
-        identity_include_name: None,
-        identity_jwt_audience: None,
-        forward_access_token: None,
-        inject_delegation_token: None,
-        delegation_token_scope: None,
-        ssh_config: None,
-        homepage_url: None,
-        repository_url: None,
-        issues_url: None,
-        capabilities: None,
-        inference: None,
-        platform_key: None,
-        credential: None,
-        auth_notes: None,
-        known_limitations: None,
-        required_permissions: None,
-        examples_url: None,
-        recommended_skills: None,
-        recommended_skill_refs: None,
-        clear_skill_refs: false,
-        skills_request_id: None,
-        skills_revision: None,
-        developer_app_ids: None,
-        custom_user_agent: None,
-        default_request_headers: None,
-        token_exchange_config: None,
-        ws_frame_injections: None,
-        anonymous_endpoints: None,
-        proxy_operation_policy: None,
-    };
-    crate::handlers::services::update_service_inner(state, auth_user, tele, service_id, body).await
+    let body = crate::handlers::services::UpdateServiceRequest::billing_only(body.billing);
+    let _service = crate::handlers::services::update_service_inner(
+        state.clone(),
+        auth_user,
+        tele,
+        service_id.clone(),
+        body,
+    )
+    .await?;
+    Ok(Json(service_row(&state, &service_id).await?))
 }

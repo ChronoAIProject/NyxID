@@ -15,6 +15,8 @@ import {
   INVITE_CODES_TAB_DEFAULT,
   ADMIN_CREDITS_TABS,
   ADMIN_CREDITS_TAB_DEFAULT,
+  ADMIN_BILLING_TABS,
+  ADMIN_BILLING_TAB_DEFAULT,
   AI_SETUP_SKILL_TABS,
   parseTab,
 } from "./url-tabs";
@@ -101,6 +103,11 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
     grants: "Credit grants",
     allowances: "Free allowances",
     schedules: "Schedules",
+  }),
+  "/admin/billing": tabSection(ADMIN_BILLING_TABS, ADMIN_BILLING_TAB_DEFAULT, {
+    overview: "Services",
+    rates: "Rate cache",
+    settings: "Settings",
   }),
 };
 

@@ -42,6 +42,7 @@ pub mod chain_verify_service;
 pub mod channel_adapters;
 pub mod channel_admission_service;
 pub mod channel_billing_service;
+pub mod channel_bot_health;
 pub mod channel_bot_service;
 pub mod channel_connect_link_service;
 pub mod channel_connection_webhook_service;

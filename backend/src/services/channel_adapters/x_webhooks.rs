@@ -449,6 +449,52 @@ pub(super) async fn setup(
     Ok(())
 }
 
+/// Read-only live check: NyxID's callback is a valid X webhook and every
+/// selected event of this bot's account is subscribed to it with its tag.
+pub(super) async fn status(
+    adapter: &XAdapter,
+    http: &reqwest::Client,
+    platform: &PlatformVerifySecrets,
+    bot: &ChannelBot,
+    webhook_url: &str,
+) -> AppResult<crate::services::channel_platform::LiveWebhookStatus> {
+    use crate::services::channel_bot_health::codes;
+    use crate::services::channel_platform::LiveWebhookStatus;
+    let app = app_token(platform)?;
+    let credentials = BotCredentials::from(app);
+    let api = base(adapter, &credentials);
+    let webhooks = response_json(
+        send(
+            http.get(format!("{api}/2/webhooks"))
+                .bearer_auth(app)
+                .query(&[("webhook_config.fields", "id,url,valid")]),
+        )
+        .await?,
+    )
+    .await?;
+    let Some(webhook) = list_data(&webhooks)?
+        .iter()
+        .find(|row| row["url"] == webhook_url && row["valid"] == true)
+    else {
+        return Ok(LiveWebhookStatus::missing(codes::WEBHOOK_MISSING));
+    };
+    let tag = format!("nyxid:{}", bot.id);
+    let rows = subscriptions(adapter, http, app).await?;
+    let subscribed = selected_events(bot).iter().all(|event| {
+        rows.iter().any(|row| {
+            row["tag"] == tag
+                && row["event_type"] == event_name(*event)
+                && row["filter"]["user_id"] == bot.platform_bot_id.as_str()
+                && row["webhook_id"] == webhook["id"]
+        })
+    });
+    Ok(if subscribed {
+        LiveWebhookStatus::registered()
+    } else {
+        LiveWebhookStatus::missing(codes::SUBSCRIPTION_MISSING)
+    })
+}
+
 pub(super) async fn remove(
     adapter: &XAdapter,
     http: &reqwest::Client,

@@ -925,6 +925,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let admin_routes = Router::new()
         .route("/channel-bots", get(handlers::channel_bots::admin_list))
         .route(
+            "/channel-bots/webhook-rejections",
+            get(handlers::channel_bots::admin_webhook_rejections),
+        )
+        .route(
             "/channel-bots/{id}/health",
             get(handlers::channel_bots::admin_health),
         )
@@ -1085,7 +1089,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/billing/services/{id}",
-            put(handlers::admin_billing::update_service_billing),
+            get(handlers::admin_billing::get_service)
+                .put(handlers::admin_billing::update_service_billing),
         )
         .route(
             "/credits/grants",

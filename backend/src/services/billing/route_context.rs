@@ -218,6 +218,11 @@ impl BillingRouteContext {
         !self.operation_prices.is_empty()
     }
 
+    /// Synced operation prices of the selected lane: `(operation, Lago metric code)`.
+    pub(crate) fn operation_prices(&self) -> &[(String, String)] {
+        &self.operation_prices
+    }
+
     /// Replaces the primary request rate with the operation's synced price.
     /// Unpriced, pending and failed operations keep the primary rate.
     pub fn with_operation(mut self, operation: Option<&str>) -> Self {

@@ -75,10 +75,10 @@ pub async fn send_reply(
                 break;
             }
             Err(error) => {
-                let _ = crate::services::channel_bot_service::record_outbound_error(
+                crate::services::channel_bot_service::record_outbound_outcome(
                     db,
                     &bot.id,
-                    error.error_code(),
+                    Some(&error),
                 )
                 .await;
                 result.error = Some(error);
@@ -87,7 +87,7 @@ pub async fn send_reply(
         };
         // Preserve known acceptance even if recording fails. Never retry sends.
         result.message_ids.push(id.clone());
-        let _ = crate::services::channel_bot_service::record_outbound_success(db, &bot.id).await;
+        crate::services::channel_bot_service::record_outbound_outcome(db, &bot.id, None).await;
         let mut facts = target.facts.clone();
         facts.message_id = id.clone();
         facts.parent_message_id = Some(target.facts.message_id.clone());
