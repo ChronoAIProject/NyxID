@@ -336,6 +336,7 @@ pub async fn get(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<skills::SkillsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     Ok(Json(team::agent(&state.db, &owner, &id).await?.into()))
@@ -373,6 +374,7 @@ pub async fn preview_attached(
     auth: AuthUser,
     Path((id, skill_id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
@@ -399,6 +401,7 @@ pub async fn history(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     let _ = team::agent(&state.db, &owner, &id).await?;

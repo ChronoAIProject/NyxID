@@ -612,6 +612,16 @@ pub async fn set(
 ) -> AppResult<SkillsResponse> {
     validate(selection)?;
     let agent = super::assistant_team_service::maintained_agent(db, owner, id).await?;
+    if selection.skills.iter().any(|pin| pin.disabled)
+        && !crate::services::feature_flag_service::resolve_personal_features(db, owner)
+            .await?
+            .iter()
+            .any(|key| key == crate::services::feature_flag_service::SKILL_PIN_DISABLE_FLAG_KEY)
+    {
+        return Err(AppError::Forbidden(
+            "Skill pin disabling is not enabled for this rollout".into(),
+        ));
+    }
     if agent.destroyed_at.is_some() {
         return Err(inaccessible());
     }
