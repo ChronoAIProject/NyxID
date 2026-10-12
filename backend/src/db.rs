@@ -140,6 +140,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Transactional conversation and group purges delete by parent id.
+    for key in ["conversation_id", "group_id"] {
+        db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {key: 1})
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .sparse(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
 
     Box::pin(ensure_service_indexes(db)).await?;
     backfill_downstream_service_types(db).await?;

@@ -1,7 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Metadata-only snapshot of the reply a vote is about (addendum A1). Every
+/// field defaults, so rows written before a field existed, or partial rows,
+/// still deserialize. Never holds reply, prompt, comment or tool-argument text.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FeedbackReplyContext {
     pub surface: Option<String>,
     pub agent_id: Option<String>,
@@ -14,6 +18,7 @@ pub struct FeedbackReplyContext {
     pub via: Option<String>,
     pub turn_id: Option<String>,
     pub reply_seq: Option<i64>,
+    #[serde(with = "super::bson_datetime::optional")]
     pub reply_created_at: Option<DateTime<Utc>>,
     pub latency_ms: Option<i64>,
     pub tool_calls: u32,
