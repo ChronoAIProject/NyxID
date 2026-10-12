@@ -125,6 +125,17 @@ fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Respons
     response
 }
 
+/// The session named by `Mcp-Session-Id` is unknown, expired, or not the
+/// caller's. Streamable HTTP requires HTTP 404 here: MCP clients (Claude Code,
+/// Codex) answer it by starting a new session with the credential they already
+/// hold, while any other status surfaces as a failed call and leaves the
+/// client stuck on the dead session.
+fn session_not_found(id: Option<serde_json::Value>) -> Response {
+    let mut response = rpc_error(id, -32002, "Invalid or expired session");
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
+}
+
 /// MCP tool result (success or error are conveyed via `isError`, not JSON-RPC error).
 fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Response {
     rpc_success(
@@ -967,7 +978,7 @@ async fn validate_session(
             rpc_error(request_id.clone(), -32603, "Internal error")
         })?;
     if !valid {
-        return Err(rpc_error(request_id, -32002, "Invalid or expired session"));
+        return Err(session_not_found(request_id));
     }
     let touched = state
         .mcp_sessions
@@ -978,7 +989,7 @@ async fn validate_session(
             rpc_error(request_id.clone(), -32603, "Internal error")
         })?;
     if !touched {
-        return Err(rpc_error(request_id, -32002, "Invalid or expired session"));
+        return Err(session_not_found(request_id));
     }
     Ok(())
 }
@@ -1192,7 +1203,7 @@ pub async fn mcp_post(
                 match state.mcp_sessions.touch(&sid).await {
                     Ok(true) => {}
                     Ok(false) => {
-                        return rpc_error(request.id, -32002, "Invalid or expired session");
+                        return session_not_found(request.id);
                     }
                     Err(error) => {
                         tracing::error!(%error, "Failed to persist MCP session activity");
@@ -5799,6 +5810,40 @@ mod tests {
     fn rpc_error_returns_valid_json_rpc_error() {
         let response = rpc_error(Some(serde_json::json!(1)), -32600, "Invalid Request");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_not_found_is_http_404_with_the_existing_rpc_body() {
+        let response = session_not_found(Some(serde_json::json!(7)));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["id"], 7);
+        assert_eq!(body["error"]["code"], -32002);
+        assert_eq!(body["error"]["message"], "Invalid or expired session");
+    }
+
+    #[tokio::test]
+    async fn unknown_or_foreign_session_is_reported_as_http_404() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let missing = validate_session(&state, "no-such-session", "user-1", None)
+            .await
+            .expect_err("unknown session");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let sid = state
+            .mcp_sessions
+            .create_with_proxy_access("user-2", true, false)
+            .await
+            .unwrap()
+            .expect("session created");
+        let foreign = validate_session(&state, &sid, "user-1", None)
+            .await
+            .expect_err("another user's session");
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert!(validate_session(&state, &sid, "user-2", None).await.is_ok());
     }
 
     #[test]

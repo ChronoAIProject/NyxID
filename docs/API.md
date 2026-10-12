@@ -741,8 +741,10 @@ telemetry nor persistent browser storage.
 
 First-party access JWTs carry `sid`. Protected requests and refresh validate the
 bound session's liveness, so issuer revocation invalidates both existing and
-refreshed access tokens and cascades to MCP sessions. Legacy first-party tokens
-without `sid` retain their existing compatibility behavior.
+refreshed access tokens and cascades to the user's session-fallback MCP sessions
+(the only ones that authenticate without a bearer). MCP sessions of OAuth clients
+such as Claude and Codex present their own bearer on every request and survive.
+Legacy first-party tokens without `sid` retain their existing compatibility behavior.
 
 ---
 
