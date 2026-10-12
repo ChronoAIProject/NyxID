@@ -759,6 +759,9 @@ pub struct AcknowledgementResponse {
     decider: String,
     decided_by: Option<String>,
     reason: Option<String>,
+    /// Action cards: risk class, the access mode that asked and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation: Option<crate::models::assistant_acknowledgement::ActionConfirmation>,
     service_slug: Option<String>,
     service_name: Option<String>,
     tool_name: Option<String>,
@@ -782,6 +785,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             decider: row.decider,
             decided_by: row.decided_by,
             reason: row.reason,
+            confirmation: row.confirmation,
             service_slug: row.service_slug,
             service_name: row.service_name,
             tool_name: row.tool_name,
@@ -882,7 +886,15 @@ pub async fn change_model(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let row = engine::change_model(&state.db, &owner, &id, &body.model).await?;
+    require_available_model(&state, &auth, &body.model).await?;
+    let (before, row) = engine::change_model(&state.db, &owner, &id, &body.model).await?;
+    engine::audit_model_change(
+        &state.db,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        &row,
+        &before,
+    )
+    .await;
     Ok(Json(ConversationResponse::from(row)))
 }
 pub async fn rename(
@@ -1033,20 +1045,22 @@ pub struct ModelResponse {
 }
 type ModelCache = HashMap<String, (Instant, Vec<ModelResponse>)>;
 static MODELS: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-pub async fn models(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    request: Request<Body>,
-) -> AppResult<Json<Vec<ModelResponse>>> {
+
+/// The models NyxAgent currently offers this owner, or `None` when its list
+/// cannot be read. Cached per owner for a minute: availability follows the
+/// owner's assistant credential, so owners never share an entry.
+pub(crate) async fn live_models(
+    state: &AppState,
+    auth: &AuthUser,
+    policy: Option<BillingRoutePolicy>,
+) -> Option<Vec<ModelResponse>> {
     let user_id = auth.user_id.to_string();
-    engine::require_enabled(&state.db, &user_id).await?;
-    let cache_key = state.db.name().to_owned();
+    let cache_key = format!("{}:{user_id}", state.db.name());
     if let Some((time, models)) = MODELS.lock().await.get(&cache_key)
         && time.elapsed() < Duration::from_secs(60)
     {
-        return Ok(Json(models.clone()));
+        return Some(models.clone());
     }
-    let policy = request.extensions().get::<BillingRoutePolicy>().copied();
     let loaded: AppResult<Vec<ModelResponse>> = async {
         let credential = credentials::load_existing(&state.db, &state.encryption_keys, &user_id)
             .await?
@@ -1054,8 +1068,8 @@ pub async fn models(
         let response = tokio::time::timeout(
             Duration::from_secs(10),
             proxy(
-                &state,
-                &auth,
+                state,
+                auth,
                 &credential,
                 "GET",
                 "v1/models",
@@ -1082,14 +1096,17 @@ pub async fn models(
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|row| row["id"].as_str())
-            .filter(|id| engine::valid_model(id))
+            .filter(|row| row["id"].as_str().is_some_and(engine::valid_model))
             .take(50)
-            .map(|id| ModelResponse {
-                id: id.into(),
-                label: id.trim_start_matches("nyxagent/").into(),
-                available: true,
-                description: None,
+            .map(|row| {
+                let id = row["id"].as_str().unwrap_or_default();
+                ModelResponse {
+                    id: id.into(),
+                    label: id.trim_start_matches("nyxagent/").into(),
+                    // NyxAgent may list a profile it cannot serve right now.
+                    available: row["available"].as_bool() != Some(false),
+                    description: None,
+                }
             })
             .collect();
         if rows.is_empty() {
@@ -1098,20 +1115,52 @@ pub async fn models(
         Ok(rows)
     }
     .await;
-    let Ok(rows) = loaded else {
-        return Ok(Json(vec![ModelResponse {
-            id: engine::DEFAULT_MODEL.into(),
-            label: "chat".into(),
-            available: true,
-            description: None,
-        }]));
-    };
+    let rows = loaded.ok()?;
     let mut cache = MODELS.lock().await;
     if cache.len() >= 64 {
         cache.retain(|_, (time, _)| time.elapsed() < Duration::from_secs(60));
     }
     cache.insert(cache_key, (Instant::now(), rows.clone()));
-    Ok(Json(rows))
+    Some(rows)
+}
+
+/// Validate a model selection against the live list. When NyxAgent's list is
+/// unreachable a well-formed model is accepted; a turn that NyxAgent then
+/// refuses reports `model_unavailable` with the same guidance.
+pub(crate) async fn require_available_model(
+    state: &AppState,
+    auth: &AuthUser,
+    model: &str,
+) -> AppResult<()> {
+    if !engine::valid_model(model) {
+        return Err(AppError::AssistantModelUnavailable);
+    }
+    match live_models(state, auth, None).await {
+        Some(rows) if !rows.iter().any(|row| row.id == model && row.available) => {
+            Err(AppError::AssistantModelUnavailable)
+        }
+        _ => Ok(()),
+    }
+}
+
+pub async fn models(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    request: Request<Body>,
+) -> AppResult<Json<Vec<ModelResponse>>> {
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    let policy = request.extensions().get::<BillingRoutePolicy>().copied();
+    Ok(Json(
+        live_models(&state, &auth, policy).await.unwrap_or_else(|| {
+            vec![ModelResponse {
+                id: engine::DEFAULT_MODEL.into(),
+                label: "chat".into(),
+                available: true,
+                description: None,
+            }]
+        }),
+    ))
 }
 
 // Fresh request: no caller query, Authorization, Cookie, debug capture, or other

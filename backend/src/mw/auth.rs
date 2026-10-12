@@ -173,11 +173,23 @@ impl AuthUser {
     /// Conversation-key route restrictions are part of the live-turn rollout.
     /// Keep the flag check here so disabling the flag restores the historical
     /// API-key route behavior immediately; ordinary keys take the no-read path.
+    /// Assistant management routes (agents, grants, skills, settings,
+    /// channels, groups) are refused to conversation keys regardless of the
+    /// flag: an agent must never widen its own or a peer's authority through
+    /// the REST API.
     pub async fn ensure_conversation_key_route_if_enabled(
         &self,
         db: &mongodb::Database,
         path: &str,
     ) -> AppResult<()> {
+        if self.assistant_turn_fence.is_some()
+            && path
+                .strip_prefix("/api/v1")
+                .unwrap_or(path)
+                .starts_with("/assistant/")
+        {
+            return self.ensure_conversation_key_route(path);
+        }
         if self.assistant_turn_fence.is_none()
             || !crate::services::feature_flag_service::personal_flag_enabled(
                 db,

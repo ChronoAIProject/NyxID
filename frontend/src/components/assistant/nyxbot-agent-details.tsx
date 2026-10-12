@@ -60,11 +60,20 @@ import {
   useForgetNyxBotMemory,
   useRememberNyxBotMemory,
   useNyxBotAgent,
+  useNyxBotSettings,
   useSetNyxBotAgentGrants,
   useUpdateNyxBotAgent,
 } from "@/hooks/use-nyxbot-agents";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
-import { AGENT_STATUS_LABEL, agentHandle, agentTitle } from "@/lib/assistant/nyxbot-labels";
+import {
+  ACCESS_MODE_DESCRIPTION,
+  ACCESS_MODE_LABEL,
+  AGENT_STATUS_LABEL,
+  agentHandle,
+  agentTitle,
+  effectiveAccessMode,
+} from "@/lib/assistant/nyxbot-labels";
+import { ModelSelect } from "@/components/assistant/nyxbot-access-controls";
 import { formatDateTime } from "@/lib/utils";
 import {
   ASSISTANT_AGENT_DISPLAY_NAME_MAX,
@@ -73,6 +82,7 @@ import {
   ASSISTANT_AGENT_PERSONA_MAX,
   assistantAgentGrantsSchema,
   assistantAgentProfileSchema,
+  nyxAgentAccessModeSchema,
   type AssistantAgent,
   type AssistantAgentGrants,
   type AssistantAgentMemoryNote,
@@ -108,6 +118,26 @@ function Section({
 }
 
 /**
+ * Who can widen a specialist's access, and why the agent itself cannot. Org
+ * agents are maintained by the organization: only its maintainers approve.
+ */
+export function accessAuthorityCopy(
+  agent: AssistantAgent,
+  requestMode: "denied" | "routed_to_nyxbot" | undefined,
+): string {
+  const sandbox = "This specialist is sandboxed: it cannot grant access to itself or to other agents.";
+  if (agent.owner_kind === "org") {
+    const org = agent.owner_name ?? "the organization";
+    return agent.can_maintain === false
+      ? `${sandbox} Only a maintainer of ${org} (an Admin or Member) can approve or grant its access; you can view it but not change it.`
+      : `${sandbox} Maintainers of ${org}, including you, approve and grant its access here; your personal NyxBot cannot approve it on the organization's behalf.`;
+  }
+  return requestMode === "routed_to_nyxbot"
+    ? `${sandbox} Its access requests go to NyxBot, which approves or denies them; you can also grant access below.`
+    : `${sandbox} Its access requests are denied and it reports the need to NyxBot instead; you can still grant access below or ask NyxBot to.`;
+}
+
+/**
  * Everything about one agent: its role, grants, memory, channel bots and
  * lifecycle. Opened from the thread header.
  */
@@ -126,6 +156,7 @@ export function AgentDetailsSheet({
 }) {
   const detail = useNyxBotAgent(agentId, open);
   const agent = detail.data?.agent;
+  const requestMode = useNyxBotSettings(open).data?.specialist_access_requests;
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
@@ -182,14 +213,14 @@ export function AgentDetailsSheet({
               />
               {agent.kind === "specialist" ? (
                 <>
-                  <Section title="Access authority" description="This specialist is sandboxed and cannot grant access itself. In denied mode, requests stop here; routed mode sends them to NyxBot for approval." />
+                  <Section title="Access authority" description={accessAuthorityCopy(agent, requestMode)} />
                   <GrantsForm
                     key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
                     agent={agent}
                   />
                 </>
               ) : (
-                <Section title="Access" description="NyxBot runs with full access to your connected services and account. Machine capabilities are assigned separately. Destructive actions follow your confirmation setting.">
+                <Section title="Access" description="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first.">
                   <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
                 </Section>
               )}
@@ -222,8 +253,12 @@ export function AgentDetailsSheet({
   );
 }
 
+/** The access-mode select's value for "follow the workspace mode". */
+const INHERIT = "inherit";
+
 function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   const update = useUpdateNyxBotAgent();
+  const workspaceMode = useNyxBotSettings().data?.access_mode;
   const nyxbot = agent.kind === "nyxbot";
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentProfile>({
@@ -309,16 +344,62 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
-          {nyxbot ? (
-            <>
-              <FormField control={form.control} name="model" render={({ field }) => (
-                <FormItem><FormLabel>Default model</FormLabel><FormControl><Input disabled={readOnly} placeholder="provider/model" {...field} /></FormControl><FormDescription className="text-11">Unavailable models are rejected by the server.</FormDescription><FormMessage /></FormItem>
-              )} />
-              <FormField control={form.control} name="access_mode_override" render={({ field }) => (
-                <FormItem><FormLabel>Access mode override</FormLabel><FormControl><select disabled={readOnly} className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={field.value ?? ""} onChange={(e) => field.onChange(e.target.value || null)}><option value="">Inherit workspace</option><option value="autopilot">Autopilot</option><option value="nyxmode">NyxMode</option><option value="ask_every_time">Ask Every Time</option></select></FormControl><FormMessage /></FormItem>
-              )} />
-            </>
-          ) : null}
+          <FormField
+            control={form.control}
+            name="model"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Model</FormLabel>
+                <ModelSelect
+                  label="Agent model"
+                  value={field.value || undefined}
+                  disabled={readOnly}
+                  onChange={field.onChange}
+                />
+                <FormDescription className="text-11">
+                  Used by this agent's new threads. Each thread can switch from its header.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="access_mode_override"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Access mode</FormLabel>
+                <Select
+                  value={field.value ?? INHERIT}
+                  disabled={readOnly}
+                  onValueChange={(value) =>
+                    field.onChange(value === INHERIT ? null : nyxAgentAccessModeSchema.parse(value))
+                  }
+                >
+                  <FormControl>
+                    <SelectTrigger aria-label="Agent access mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value={INHERIT}>
+                      Workspace setting
+                      {workspaceMode ? ` (${ACCESS_MODE_LABEL[workspaceMode]})` : ""}
+                    </SelectItem>
+                    {nyxAgentAccessModeSchema.options.map((option) => (
+                      <SelectItem key={option} value={option}>
+                        {ACCESS_MODE_LABEL[option]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormDescription className="text-11">
+                  {ACCESS_MODE_DESCRIPTION[effectiveAccessMode(workspaceMode, field.value)]}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
           <FormField
             control={form.control}
             name="description"

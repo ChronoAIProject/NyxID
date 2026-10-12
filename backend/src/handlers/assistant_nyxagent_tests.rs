@@ -1282,7 +1282,12 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .await
         .unwrap();
     assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
-    assert!(!MODELS.lock().await.contains_key(state.db.name()));
+    assert!(
+        !MODELS
+            .lock()
+            .await
+            .contains_key(&format!("{}:{OWNER}", state.db.name()))
+    );
     engine::begin_turn(
         &state.db,
         OWNER,
@@ -1317,7 +1322,12 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
     let _ = models(State(state.clone()), test_auth_user(OWNER), request())
         .await
         .unwrap();
-    assert!(!MODELS.lock().await.contains_key(state.db.name()));
+    assert!(
+        !MODELS
+            .lock()
+            .await
+            .contains_key(&format!("{}:{OWNER}", state.db.name()))
+    );
     for _ in 0..2 {
         let Json(rows) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
@@ -1645,6 +1655,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
         requester_agent_id: None,
+        confirmation: None,
         authored_skill: None,
         voice_request_id: None,
         continuation_receipt_id: None,
@@ -3111,4 +3122,124 @@ async fn upstream_cancelled_image_round_keeps_completed_text() {
     assert_eq!(calls.lock().await.len(), 2);
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+/// The model selector validates against NyxAgent's live list, refuses busy
+/// threads, resets the context on a real change and audits who changed it.
+#[tokio::test]
+async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let upstream = MockServer::start().await;
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(
+            doc! {"slug": engine::SERVICE_SLUG},
+            doc! {"$set": {"base_url": upstream.uri()}},
+        )
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"id": "nyxagent/chat"}, {"id": "nyxagent/research"},
+            {"id": "nyxagent/retired", "available": false},
+        ]})))
+        .mount(&upstream)
+        .await;
+    let row = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: None,
+            text: "pick a model".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let change = |model: &str| {
+        change_model(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(row.id.clone()),
+            Json(ModelRequest {
+                model: model.into(),
+            }),
+        )
+    };
+    // A running turn keeps its model.
+    assert!(matches!(
+        change("nyxagent/research").await,
+        Err(AppError::AssistantTurnActive)
+    ));
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"active_turn": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    for refused in ["nyxagent/retired", "nyxagent/unknown", "openai/gpt-4"] {
+        let error = change(refused).await.err().expect(refused);
+        assert!(
+            matches!(error, AppError::AssistantModelUnavailable),
+            "{refused}"
+        );
+        assert_eq!(error.error_code(), 12103);
+    }
+    let Json(updated) = change("nyxagent/research").await.unwrap();
+    assert_eq!(updated.model, "nyxagent/research");
+    let stored = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(stored.model, "nyxagent/research");
+    assert_eq!(
+        stored.context_reset_reason.as_deref(),
+        Some("model_changed")
+    );
+    assert!(stored.nyxagent_session_id.is_none());
+    let logs = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let audit = logs
+        .find_one(doc! {"event_type": "assistant_model_changed"})
+        .await
+        .unwrap()
+        .expect("model audit");
+    assert_eq!(audit.get_str("user_id").unwrap(), OWNER);
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("conversation_id").unwrap(), row.id);
+    assert_eq!(data.get_str("old").unwrap(), engine::DEFAULT_MODEL);
+    assert_eq!(data.get_str("new").unwrap(), "nyxagent/research");
+    // Reselecting the current model is a no-op: no reset and no audit.
+    let _ = change("nyxagent/research").await.unwrap();
+    assert_eq!(
+        logs.count_documents(doc! {"event_type": "assistant_model_changed"})
+            .await
+            .unwrap(),
+        1
+    );
+    // The list the selector shows marks the retired model unavailable.
+    let mut request = Request::new(Body::empty());
+    request.extensions_mut().insert(BillingRoutePolicy::Metered(
+        crate::services::billing::BillingIngress::Proxy,
+    ));
+    let Json(rows) = models(State(state.clone()), test_auth_user(OWNER), request)
+        .await
+        .unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row.id == "nyxagent/retired" && !row.available)
+    );
+    server.abort();
 }

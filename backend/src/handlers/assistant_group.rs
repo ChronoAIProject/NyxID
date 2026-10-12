@@ -776,6 +776,7 @@ pub(crate) async fn org_pending_actions(
 // ----- HTTP -----
 
 pub async fn list_groups(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let mut rows = Vec::new();
@@ -872,6 +873,7 @@ pub async fn update_group(
     Path(id): Path<String>,
     Json(body): Json<UpdateGroupRequest>,
 ) -> AppResult<Json<GroupResponse>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
@@ -956,6 +958,7 @@ pub async fn list_messages(
     Path(id): Path<String>,
     Query(query): Query<MessagesQuery>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let limit = query.limit.unwrap_or(50);

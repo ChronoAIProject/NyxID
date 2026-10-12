@@ -2073,3 +2073,23 @@ fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
     let note = events_text(&[event]);
     assert!(note.ends_with("Attach it now."));
 }
+
+#[test]
+fn upstream_model_rejections_report_model_unavailable_with_guidance() {
+    for code in [
+        "model_not_found",
+        "model_unavailable",
+        "unknown_model",
+        "invalid_model",
+    ] {
+        let error = super::TurnError::new(code);
+        assert_eq!(error.code, "model_unavailable", "{code}");
+        assert!(error.message.contains("model selector"), "{code}");
+        assert_eq!(error.upstream_code.as_deref(), Some(code));
+    }
+    assert!(
+        super::TurnError::new("model_not_configured")
+            .message
+            .contains("model selector")
+    );
+}

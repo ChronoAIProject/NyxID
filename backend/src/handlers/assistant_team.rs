@@ -915,6 +915,97 @@ pub(crate) async fn target_agent(
     }
 }
 
+/// The owner-facing description of a native team tool call for its action
+/// card: what it does and the identifiers it names, bounded and free of
+/// message text, instructions or other model-written prose.
+fn action_summary(name: &str, args: &Value) -> String {
+    let what = match name {
+        "spawn_subagent" => "Create a specialist",
+        "grant_subagent" => "Grant a specialist more access",
+        "revoke_subagent" => "Remove access from a specialist",
+        "destroy_subagent" => "Destroy a specialist",
+        "update_subagent" => "Change an agent's profile",
+        "message_subagent" => "Give a specialist work",
+        "set_guest_access" => "Change what guests may do with a specialist's services",
+        "decide_permission" if text_arg(args, "decision") == "allow" => {
+            "Approve a specialist's permission request"
+        }
+        "decide_permission" => "Deny a specialist's permission request",
+        "create_schedule" => "Create a scheduled automation",
+        "update_schedule" => "Change a scheduled automation",
+        "delete_schedule" => "Delete a scheduled automation",
+        "run_schedule_now" => "Run a scheduled automation now",
+        "create_group" => "Create a group chat",
+        "update_group" => "Change a group chat",
+        "delete_group" => "Delete a group chat",
+        "post_to_group" => "Post to a group chat",
+        "post_to_chat" => "Post to a channel chat",
+        "update_settings" => "Change NyxBot settings",
+        "connect_channel_bot" => "Connect a channel bot",
+        "link_channel_bot" => "Change which agent a channel bot reaches",
+        "disconnect_channel_bot" => "Disconnect a channel bot",
+        "update_channel_chat" => "Change who may talk in a channel chat",
+        "update_channel_access" => "Change who may chat privately with a channel bot",
+        "stop_following_thread" => "Stop following a channel thread",
+        "machine_pair" => "Pair a machine",
+        "remember" => "Save a memory note",
+        "forget" => "Delete a memory note",
+        "settings_link" | "channel_bot_setup_link" | "machine_setup_link" => {
+            "Create a NyxID settings link"
+        }
+        _ => "Run a NyxBot action",
+    };
+    let mut details = Vec::new();
+    for field in [
+        "subagent",
+        "agent",
+        "name",
+        "request_id",
+        "bot",
+        "channel_agent_id",
+        "group_id",
+        "id",
+        "note_id",
+        "area",
+        "decision",
+        "model",
+    ] {
+        if let Some(value) = args[field].as_str() {
+            details.push(format!(
+                "{field} {}",
+                crate::services::assistant_nyxagent::identifier(value)
+            ));
+        }
+    }
+    for field in ["services", "machines", "logins"] {
+        let items: Vec<String> = args[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(16)
+            .map(crate::services::assistant_nyxagent::identifier)
+            .collect();
+        if !items.is_empty() {
+            details.push(format!("{field} {}", items.join(", ")));
+        }
+    }
+    if args["account_read"].as_bool() == Some(true) {
+        details.push("account read access".into());
+    }
+    if let Some(access) = args["access"].as_str() {
+        details.push(format!(
+            "guest access {}",
+            crate::services::assistant_nyxagent::identifier(access)
+        ));
+    }
+    if details.is_empty() {
+        what.into()
+    } else {
+        format!("{what}: {}", details.join("; "))
+    }
+}
+
 /// Dispatch one native NyxBot tool. Returns the MCP result value and whether
 /// it is an error result. Team and channel tools need a NyxBot thread key;
 /// memory tools belong to every agent.
@@ -983,9 +1074,10 @@ pub(crate) async fn execute_tool(
             )
             .await?;
         }
-        // Machine updates always consume their own owner card, bound to the
-        // resolved version and inspected Docker identity. It is at least as
-        // strict as either webhook policy; do not consume a second digest.
+        // These tools run their own owner-card lifecycle bound to the exact
+        // widening they make (operations, skills, machine capabilities and
+        // updates, permission decisions) or are specialists' own permission
+        // requests; never consume a second digest for them.
         if !matches!(
             name,
             "set_agent_operations"
@@ -994,24 +1086,23 @@ pub(crate) async fn execute_tool(
                 | "decide_permission"
                 | "machine_update"
                 | "machine_capabilities"
-        ) && let Some(refusal) = acks::webhook_action_gate(
-            &state.db,
-            chat,
-            tool_name,
-            args,
-            assistant_team_tools::read_only(name),
-            assistant_team_tools::destructive(name)
-                // Participant edits can purge hidden threads and credentials;
-                // last-person leave also deletes the shared transcript. Retain
-                // the destructive automation gate without changing personal
-                // group name/agent edits or performing extra lookup reads.
-                || (name == "update_group"
-                    && (args["leave"].as_bool() == Some(true)
-                        || args.get("participant_user_ids").is_some())),
-        )
-        .await?
-        {
-            return Ok((refusal, true));
+                | "request_agent_operations"
+                | "request_agent_skills"
+        ) {
+            let facts = acks::ActionFacts::of(acks::classify_owner_action(tool_name, args));
+            if let Some(need) = acks::confirmation_needed(&state.db, chat, facts, false).await?
+                && let Some(refusal) = acks::confirm_action(
+                    &state.db,
+                    chat,
+                    tool_name,
+                    args,
+                    &need,
+                    &action_summary(name, args),
+                )
+                .await?
+            {
+                return Ok((refusal, true));
+            }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
         dispatch(state, chat, name, args).await
@@ -1627,7 +1718,17 @@ async fn dispatch_agent_settings(
                         .into(),
                 ));
             }
-            let agent = team::update_agent(
+            // A model change follows the owner's access mode like any other
+            // sensitive change: execute_tool has already required the card.
+            if let Some(model) = args["model"].as_str() {
+                super::assistant_nyxagent::require_available_model(
+                    state,
+                    &owner_auth(owner)?,
+                    model,
+                )
+                .await?;
+            }
+            let mut agent = team::update_agent(
                 db,
                 owner,
                 &agent.id,
@@ -1639,8 +1740,26 @@ async fn dispatch_agent_settings(
                 },
             )
             .await?;
+            if let Some(model) = args["model"].as_str() {
+                agent = team::set_agent_policy(
+                    db,
+                    &crate::services::audit_service::AuditActor {
+                        user_id: owner.into(),
+                        ip_address: None,
+                        user_agent: None,
+                        api_key_id: Some(chat.api_key_id.clone()),
+                        api_key_name: None,
+                    },
+                    &agent.id,
+                    team::AgentPolicy {
+                        model: Some(model),
+                        access_mode_override: None,
+                    },
+                )
+                .await?;
+            }
             (
-                json!({"agent": agent.name, "id": agent.id,
+                json!({"agent": agent.name, "id": agent.id, "model": agent.model,
                     "display_name": agent.display_name, "persona": agent.persona}),
                 false,
             )
@@ -1672,15 +1791,28 @@ async fn dispatch_permission_decisions(
             } else {
                 false
             };
-            if !confirmed && acks::webhook_confirmation_required(chat, false, false) {
-                return operation_owner_card(
+            if !confirmed
+                && let Some(need) = acks::confirmation_needed(
+                    db,
+                    chat,
+                    acks::ActionFacts::of(acks::classify_owner_action(
+                        "nyxid__decide_permission",
+                        args,
+                    )),
+                    false,
+                )
+                .await?
+                && let Some(refusal) = acks::confirm_action(
                     db,
                     chat,
                     "nyxid__decide_permission",
                     args,
-                    &format!("Confirm specialist permission decision {request_id}."),
+                    &need,
+                    &action_summary("decide_permission", args),
                 )
-                .await;
+                .await?
+            {
+                return Ok((refusal, true));
             }
             let row = match Box::pin(acks::decide_as(
                 db,
@@ -2009,22 +2141,18 @@ async fn dispatch_settings(
                 .as_i64()
                 .and_then(|v| i32::try_from(v).ok())
                 .unwrap_or(before.max_auto_continuations);
+            // The access mode is changed only by the owner in NyxID; NyxBot
+            // never relaxes its own approvals.
             let after = settings::update(
                 &state.db,
                 &chat.user_id,
                 settings::Update {
                     max_auto_continuations: Some(maximum),
-                    access_mode: args["access_mode"].as_str().and_then(|v| {
-                        serde_json::from_value(serde_json::Value::String(v.into())).ok()
-                    }),
                     ..Default::default()
                 },
             )
             .await?;
             settings::audit(&state.db, &chat.user_id, &before, &after).await;
-            if before.access_mode != after.access_mode {
-                let _ = crate::services::audit_service::log_actor_event(state.db.clone(), &crate::services::audit_service::AuditActor { user_id: owner.into(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None }, "assistant_access_mode_changed", Some(json!({"old": before.access_mode, "new": after.access_mode, "source": "tool"}))).await;
-            }
             (
                 serde_json::to_value(SettingsResponse::from(after))
                     .map_err(|_| AppError::Internal("Settings response failed".into()))?,
@@ -2511,8 +2639,21 @@ pub struct UpdateAgentRequest {
     /// Empty clears it.
     #[serde(default)]
     persona: Option<String>,
+    /// NyxAgent model for the agent's new threads, from the live list.
     #[serde(default)]
+    model: Option<String>,
+    /// The agent's own access mode; `null` clears it (follow the workspace).
+    #[serde(default, deserialize_with = "present")]
     access_mode_override: Option<Option<crate::models::assistant_settings::AccessMode>>,
+}
+
+/// Distinguish an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 pub async fn update_agent(
@@ -2524,7 +2665,10 @@ pub async fn update_agent(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let agent = team::update_agent(
+    if let Some(model) = body.model.as_deref() {
+        super::assistant_nyxagent::require_available_model(&state, &auth, model).await?;
+    }
+    let mut agent = team::update_agent(
         &state.db,
         &owner,
         &id,
@@ -2536,13 +2680,22 @@ pub async fn update_agent(
         },
     )
     .await?;
-    if body.access_mode_override.is_some() {
-        state.db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
-            .update_one(mongodb::bson::doc! {"_id": &agent.id, "user_id": &owner}, mongodb::bson::doc! {"$set": {"access_mode_override": mongodb::bson::to_bson(&body.access_mode_override).map_err(|_| AppError::Internal("access mode serialization failed".into()))?}}).await?;
+    if body.model.is_some() || body.access_mode_override.is_some() {
+        agent = team::set_agent_policy(
+            &state.db,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            &agent.id,
+            team::AgentPolicy {
+                model: body.model.as_deref(),
+                access_mode_override: body.access_mode_override,
+            },
+        )
+        .await?;
     }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
-        "persona": agent.persona})))
+        "persona": agent.persona, "model": agent.model,
+        "access_mode_override": agent.access_mode_override})))
 }
 
 #[derive(Deserialize)]
@@ -2800,14 +2953,14 @@ pub async fn update_settings(
     )
     .await?;
     settings::audit(&state.db, &owner, &before, &after).await;
-    if before.access_mode != after.access_mode {
-        let _ = crate::services::audit_service::log_actor_event(
-            state.db.clone(),
-            &crate::services::audit_service::AuditActor { user_id: owner.clone(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None },
-            "assistant_access_mode_changed",
-            Some(serde_json::json!({"old": before.access_mode, "new": after.access_mode, "owner": owner})),
-        ).await;
-    }
+    settings::audit_access_mode(
+        &state.db,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        None,
+        Some(before.access_mode),
+        Some(after.access_mode),
+    )
+    .await;
     Ok(Json(after.into()))
 }
 

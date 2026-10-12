@@ -146,7 +146,7 @@ credential shapes.
 
 ## 8. Permission requests (specialist → NyxBot)
 
-By default (`specialist_access_requests: Denied`), a personal specialist's ungranted service or account call returns `access_request_denied`, records requester/target/scope/decision audit metadata, and creates no acknowledgement. The owner may opt into `routed_to_nyxbot`; only then does this section's acknowledgement flow apply: the call creates an acknowledgement with `decider: orchestrator` and a bounded excerpt of the message that started the work.
+By default (`specialist_access_requests: denied`), a personal specialist's ungranted service or account call returns `access_request_denied`, records requester/target/scope/decision audit metadata, and creates no acknowledgement. The owner may opt into `routed_to_nyxbot`; only then does this section's acknowledgement flow apply: the call creates an acknowledgement with `decider: orchestrator` and a bounded excerpt of the message that started the work.
 NyxID queues a `permission_requested` event on the NyxBot thread that assigned
 the work, or NyxBot's home thread, and wakes it. NyxBot decides with
 `decide_permission` from any of its threads (or the owner decides on the card in

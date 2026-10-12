@@ -5,6 +5,7 @@ import type {
   AssistantAgentCreate,
   AssistantAgentGrantsRequest,
   AssistantAgentList,
+  AssistantAgentUpdate,
   NyxAgentChannelChatSettings,
   NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
@@ -24,6 +25,7 @@ export const nyxBotQueryKeys = {
       : (["assistant", "nyxagent", userId, "threads", agentId] as const),
   settings: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "settings"] as const,
+  models: (userId: string | undefined) => ["assistant", "nyxagent", userId, "models"] as const,
   /** Prefix of the channel list and every channel's chats. */
   channels: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "channels"] as const,
@@ -92,18 +94,8 @@ export function useCreateNyxBotAgent() {
 }
 
 export function useUpdateNyxBotAgent() {
-  return useAgentsMutation(
-    ({
-      id,
-      ...body
-    }: {
-      id: string;
-      name?: string;
-      description?: string;
-      display_name?: string;
-      persona?: string;
-    }) =>
-      nyxBotApi.updateAgent(id, body),
+  return useAgentsMutation(({ id, ...body }: AssistantAgentUpdate & { id: string }) =>
+    nyxBotApi.updateAgent(id, body),
   );
 }
 
@@ -274,4 +266,32 @@ export function useNyxBotChannelThreads(channelId: string, chatId: string, state
 export function useStopNyxBotChannelThread() {
   return useAgentsMutation(({ channelId, chatId, threadId }: { channelId: string; chatId: string; threadId: string }) =>
     nyxBotApi.stopChannelThread(channelId, chatId, threadId), true);
+}
+
+/** The models NyxAgent offers this owner. */
+export function useNyxAgentModels(enabled = true) {
+  const userId = useAuthStore((state) => state.user?.id);
+  return useQuery({
+    queryKey: nyxBotQueryKeys.models(userId),
+    queryFn: () => nyxBotApi.models(),
+    enabled: enabled && Boolean(userId),
+    retry: false,
+    staleTime: 60_000,
+  });
+}
+
+/** Select a thread's model; refreshes the thread and its agent's thread list. */
+export function useChangeNyxAgentModel() {
+  const userId = useAuthStore((state) => state.user?.id);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ conversationId, model }: { conversationId: string; model: string }) =>
+      nyxBotApi.changeModel(conversationId, model),
+    onSettled: async (_data, _error, { conversationId }) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.history(userId, conversationId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+      ]);
+    },
+  });
 }

@@ -4022,3 +4022,245 @@ async fn s9_specialist_guest_disabled_pin_denial() {
     assert_eq!(owner_result["revision"], 1);
     f.state.db.drop().await.unwrap();
 }
+
+async fn set_access_mode(f: &Fixture, mode: crate::models::assistant_settings::AccessMode) {
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(mode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Owner turns (no webhook policy) are gated by the access mode from the
+/// operation's HTTP/catalog effects, at the shared service gate both the
+/// typed and universal call paths use.
+#[tokio::test]
+async fn owner_access_mode_gates_service_operations_by_effect() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = orchestrator_fixture("owner_mode_service_gate").await;
+    let service_id = connected(&f.state.db, &f.owner, "mode-target", "http://127.0.0.1:9").await;
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().confirmation_policy.is_none());
+    let mut services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let service = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service_id)
+        .unwrap();
+    let endpoint = service.endpoints.remove(0);
+    let (service, endpoint) = (&*service, &endpoint);
+    let tool = "mode-target__proxy";
+    let gate = |method: &'static str| {
+        let args = json!({"method": method, "path": "/items/1"});
+        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
+        let (f, auth) = (&f, &auth);
+        async move {
+            webhook_service_gate(
+                &f.state, auth, service, endpoint, &prepared, tool, &args, None,
+            )
+            .await
+            .is_some()
+        }
+    };
+    let matrix = [
+        (AccessMode::Autopilot, [false, false, false, false]),
+        (AccessMode::Nyxmode, [false, false, false, true]),
+        (AccessMode::AskEveryTime, [false, true, true, true]),
+    ];
+    for (mode, expected) in matrix {
+        set_access_mode(&f, mode).await;
+        for (method, asks) in ["GET", "POST", "PATCH", "DELETE"].into_iter().zip(expected) {
+            assert_eq!(gate(method).await, asks, "{mode:?} {method}");
+        }
+    }
+    let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let delete = rows
+        .iter()
+        .find(|row| row.summary.starts_with("DELETE"))
+        .expect("delete card");
+    let confirmation = delete.confirmation.as_ref().unwrap();
+    assert_eq!(confirmation.risk, "destructive");
+    assert_eq!(confirmation.reason, "access_mode");
+    assert!(
+        delete.summary.ends_with("on mode-target"),
+        "{}",
+        delete.summary
+    );
+    // Owner chats are offered the card id on every tool; it never reaches the service.
+    let schema = webhook_tool_schema(&auth, &json!({"type": "object", "properties": {}}));
+    assert_eq!(schema["properties"]["acknowledgement_id"]["type"], "string");
+    let args = json!({"method": "POST", "acknowledgement_id": "x"});
+    assert!(
+        webhook_execution_arguments(&auth, &args)
+            .get("acknowledgement_id")
+            .is_none()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+/// Meta tools are classified by name at dispatch: SSH commands are
+/// destructive (NyxMode asks), while Autopilot proceeds to the tool itself.
+#[tokio::test]
+async fn owner_access_mode_gates_meta_tools_at_dispatch() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = orchestrator_fixture("owner_mode_meta_gate").await;
+    let auth = authenticate(&f).await;
+    let args = json!({"service": "no-such-host", "command": "uptime"});
+    let text = |response: Response| async move {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        body["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    set_access_mode(&f, AccessMode::Nyxmode).await;
+    let carded = text(direct_call(&f, &auth, "nyx__ssh_exec", args.clone()).await).await;
+    let card: Value = serde_json::from_str(&carded).unwrap();
+    assert_eq!(card["error"], "acknowledgement_required");
+    let row = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(row.tool_name.as_deref(), Some("nyx__ssh_exec"));
+    assert_eq!(row.confirmation.as_ref().unwrap().risk, "destructive");
+    assert!(
+        !row.summary.contains("uptime"),
+        "commands never enter a card"
+    );
+    // Discovery never asks, even in Ask Every Time.
+    set_access_mode(&f, AccessMode::AskEveryTime).await;
+    let listed =
+        text(direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await).await;
+    assert!(!listed.contains("acknowledgement_required"), "{listed}");
+    set_access_mode(&f, AccessMode::Autopilot).await;
+    let ran = text(direct_call(&f, &auth, "nyx__ssh_exec", args).await).await;
+    assert!(!ran.contains("acknowledgement_required"), "{ran}");
+    assert_eq!(
+        acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+/// A specialist's own conversation key cannot reach assistant management
+/// routes, even with the live-turn rollout flag off: grants, skills,
+/// settings, channels, agent profile and destroy all refuse it.
+#[tokio::test]
+async fn specialist_conversation_key_cannot_call_assistant_management_routes() {
+    use tower::ServiceExt;
+    let f = fixture("specialist_management_routes").await;
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+    let router = private.with_state(f.state.clone());
+    let agent = f.chat.agent_id.clone();
+    let send = |method: &str, path: String, body: Value| {
+        let router = router.clone();
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("x-api-key", credential.raw_key.as_str())
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+    let base = "/api/v1/assistant/nyxagent";
+    for (method, path, body) in [
+        (
+            "PUT",
+            format!("{base}/agents/{agent}/grants"),
+            json!({"services": [], "account_read": true}),
+        ),
+        (
+            "PUT",
+            format!("{base}/agents/{agent}/skills"),
+            json!({"expected_revision": 0, "skills": []}),
+        ),
+        (
+            "PATCH",
+            format!("{base}/agents/{agent}"),
+            json!({"access_mode_override": "autopilot"}),
+        ),
+        ("POST", format!("{base}/agents/{agent}/destroy"), json!({})),
+        (
+            "PUT",
+            format!("{base}/settings"),
+            json!({"access_mode": "autopilot", "specialist_access_requests": "routed_to_nyxbot"}),
+        ),
+        (
+            "POST",
+            format!("{base}/channels"),
+            json!({"bot_id": uuid::Uuid::new_v4().to_string(), "agent_id": agent}),
+        ),
+        (
+            "PATCH",
+            format!("{base}/channels/{}", uuid::Uuid::new_v4()),
+            json!({"agent_id": agent}),
+        ),
+    ] {
+        let (status, body) = send(method, path.clone(), body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "{method} {path}: {body}"
+        );
+        assert_eq!(
+            body["message"], "Forbidden: Conversation keys cannot access human management routes",
+            "{method} {path}"
+        );
+    }
+    // Nothing changed.
+    let settings = crate::services::assistant_settings_service::get(&f.state.db, &f.owner)
+        .await
+        .unwrap();
+    assert_ne!(
+        settings.access_mode,
+        crate::models::assistant_settings::AccessMode::Autopilot
+    );
+    let row = crate::services::assistant_team_service::agent(&f.state.db, &f.owner, &agent)
+        .await
+        .unwrap();
+    assert!(row.destroyed_at.is_none() && !row.grants.account_read);
+    assert!(row.access_mode_override.is_none());
+    // Positive control: with the flag off, the same key still reaches a
+    // non-assistant route exactly as before.
+    let (status, body) = send("GET", "/api/v1/users/me".into(), Value::Null).await;
+    assert_ne!(
+        body["message"], "Forbidden: Conversation keys cannot access human management routes",
+        "{status}"
+    );
+    f.state.db.drop().await.unwrap();
+}

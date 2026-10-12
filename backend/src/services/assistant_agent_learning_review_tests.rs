@@ -1666,6 +1666,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
         )
         .insert_one(AssistantAcknowledgement {
             requester_agent_id: None,
+            confirmation: None,
             authored_skill: None,
             machine_context: None,
             id: card.clone(),
@@ -2042,6 +2043,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
         )
         .insert_one(AssistantAcknowledgement {
             requester_agent_id: None,
+            confirmation: None,
             authored_skill: None,
             machine_context: None,
             id: card.clone(),

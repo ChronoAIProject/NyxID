@@ -2332,3 +2332,159 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
     })
     .await;
 }
+
+/// An organization's specialist is sandboxed like a personal one: under the
+/// default (denied) policy its request is refused and audited without a card,
+/// whoever's thread it runs in; routed mode then raises NyxBot's card.
+#[tokio::test]
+async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allowed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = Fixture::new("org_specialist_strict_denial").await;
+    let (agent, _) = f.create().await;
+    let set = |mode: SpecialistAccessRequests| {
+        super::assistant_settings_service::update(
+            &f.state.db,
+            &f.member,
+            super::assistant_settings_service::Update {
+                specialist_access_requests: Some(mode),
+                ..Default::default()
+            },
+        )
+    };
+    set(SpecialistAccessRequests::Denied).await.unwrap();
+    let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+        .await
+        .unwrap();
+    let access = org_agents::resolve_key_access(&f.state.db, &f.member, Some(&f.org))
+        .await
+        .unwrap();
+    let chat = acks::for_key_with_access(
+        &f.state.db,
+        &f.member,
+        Some(&thread.credential_api_key_id),
+        access.as_ref(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let service = f.service(&f.org, "org-wiki").await;
+    let (value, card) = acks::service_gate(&f.state.db, &chat, &service, "org-wiki", "Wiki", false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value, acks::access_request_denied());
+    assert!(card.is_none());
+    let cards = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    assert_eq!(
+        cards
+            .count_documents(doc! {"conversation_id": &thread.id})
+            .await
+            .unwrap(),
+        0
+    );
+    let audit = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(
+            doc! {"event_type": "assistant_access_request_denied", "event_data.target": &service},
+        )
+        .await
+        .unwrap()
+        .expect("org denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("requester_agent").unwrap(), agent.id);
+    assert_eq!(audit.get_str("user_id").unwrap(), f.member);
+    set(SpecialistAccessRequests::RoutedToNyxbot).await.unwrap();
+    let (value, card) = acks::service_gate(&f.state.db, &chat, &service, "org-wiki", "Wiki", false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value["error"], "acknowledgement_required");
+    assert_eq!(card.unwrap().decider, "orchestrator");
+}
+
+/// The sandbox holds for every kind of specialist turn: owner, event and
+/// channel turns are denied under the default policy, and guest turns never
+/// raise a request in either policy.
+#[tokio::test]
+async fn specialist_access_requests_are_denied_for_every_turn_kind() {
+    use crate::models::{
+        assistant_conversation::TurnOrigin, assistant_settings::SpecialistAccessRequests,
+    };
+    let f = Fixture::new("specialist_turn_kind_matrix").await;
+    let (agent, _) = f.create().await;
+    let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+        .await
+        .unwrap();
+    let service = f.service(&f.org, "org-docs").await;
+    let conversations = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    for policy in [
+        SpecialistAccessRequests::Denied,
+        SpecialistAccessRequests::RoutedToNyxbot,
+    ] {
+        super::assistant_settings_service::update(
+            &f.state.db,
+            &f.member,
+            super::assistant_settings_service::Update {
+                specialist_access_requests: Some(policy),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for (origin, guest) in [
+            (TurnOrigin::User, false),
+            (TurnOrigin::Event, false),
+            (TurnOrigin::Channel, false),
+            (TurnOrigin::Channel, true),
+        ] {
+            conversations
+                .update_one(
+                    doc! {"_id": &thread.id},
+                    doc! {"$set": {"guest_turn": guest,
+                    "active_turn": {"turn_id": uuid::Uuid::new_v4().to_string(),
+                        "origin": bson::to_bson(&origin).unwrap(),
+                        "started_at": bson::DateTime::now(), "stop_requested": false}}},
+                )
+                .await
+                .unwrap();
+            let access = org_agents::resolve_key_access(&f.state.db, &f.member, Some(&f.org))
+                .await
+                .unwrap();
+            let chat = acks::for_key_with_access(
+                &f.state.db,
+                &f.member,
+                Some(&thread.credential_api_key_id),
+                access.as_ref(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(chat.guest, guest);
+            let (value, card) =
+                acks::service_gate(&f.state.db, &chat, &service, "org-docs", "Docs", false)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let expected = match (guest, policy) {
+                (true, _) => "owner_only",
+                (false, SpecialistAccessRequests::Denied) => "access_request_denied",
+                (false, SpecialistAccessRequests::RoutedToNyxbot) => "acknowledgement_required",
+            };
+            assert_eq!(
+                value["error"], expected,
+                "{origin:?} guest={guest} {policy:?}"
+            );
+            if guest || policy == SpecialistAccessRequests::Denied {
+                assert!(card.is_none(), "{origin:?} guest={guest} {policy:?}");
+            }
+        }
+    }
+}

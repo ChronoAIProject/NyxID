@@ -2005,16 +2005,33 @@ async fn dispatch_tools_call(
             .as_ref()
             .filter(|chat| !chat.guest)
     {
-        match crate::services::assistant_acknowledgement_service::webhook_action_gate(
-            &state.db,
-            chat,
-            tool_name,
-            &arguments,
-            false,
-            matches!(tool_name, "nyx__ssh_exec" | "nyx__oracle_ask"),
-        )
-        .await
-        {
+        use crate::services::assistant_acknowledgement_service as acks;
+        let class = acks::classify_owner_action(tool_name, &arguments);
+        // Webhook automations keep treating oracle prompts (data leaving for
+        // an external model) as destructive, as before access modes.
+        let facts = acks::ActionFacts {
+            class,
+            read_only: false,
+            destructive: class == acks::OwnerActionClass::Destructive
+                || tool_name == "nyx__oracle_ask",
+        };
+        let gate = async {
+            match acks::confirmation_needed(&state.db, chat, facts, false).await? {
+                Some(need) => {
+                    acks::confirm_action(
+                        &state.db,
+                        chat,
+                        tool_name,
+                        &arguments,
+                        &need,
+                        &meta_action_summary(tool_name, &arguments),
+                    )
+                    .await
+                }
+                None => Ok(None),
+            }
+        };
+        match Box::pin(gate).await {
             Ok(Some(refusal)) => {
                 return tool_result(request.id.clone(), &refusal.to_string(), true);
             }
@@ -2833,10 +2850,7 @@ fn webhook_execution_arguments(
     args: &serde_json::Value,
 ) -> serde_json::Value {
     let mut result = args.clone();
-    if auth
-        .chat
-        .as_ref()
-        .is_some_and(|chat| chat.confirmation_policy.is_some())
+    if auth.chat.is_some()
         && let Some(object) = result.as_object_mut()
     {
         object.remove("acknowledgement_id");
@@ -2846,11 +2860,11 @@ fn webhook_execution_arguments(
 
 fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> serde_json::Value {
     let mut schema = schema.clone();
-    if auth
-        .chat
-        .as_ref()
-        .is_some_and(|chat| chat.confirmation_policy.is_some())
+    // Any owner chat may be asked for an action card (access mode or webhook
+    // policy); guests never confirm cards.
+    if auth.chat.as_ref().is_some_and(|chat| !chat.guest)
         && let Some(properties) = schema["properties"].as_object_mut()
+        && !properties.contains_key("acknowledgement_id")
     {
         properties.insert("acknowledgement_id".into(), serde_json::json!({
             "type": "string",
@@ -2860,6 +2874,30 @@ fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> ser
     schema
 }
 
+/// The owner-facing description of a meta tool call for its action card.
+/// Identifiers only; prompts, commands and credentials never enter a card.
+fn meta_action_summary(tool: &str, args: &serde_json::Value) -> String {
+    let what = match tool {
+        "nyx__ssh_exec" => "Run a command over SSH",
+        "nyx__oracle_ask" => "Send a prompt to an oracle pool",
+        "nyx__oracle_attach" => "Import a ChatGPT conversation into an oracle pool",
+        "nyx__oracle_extract" => "Extract a web page with an oracle pool",
+        "nyx__connect_service" => "Connect a service",
+        _ => "Run a NyxID tool",
+    };
+    let target = ["service_id", "service", "pool"]
+        .iter()
+        .find_map(|field| args[*field].as_str())
+        .map(crate::services::assistant_nyxagent::identifier);
+    match target {
+        Some(target) => format!("{what} ({target})"),
+        None => what.to_owned(),
+    }
+}
+
+/// Apply the owner's access mode and any webhook automation policy to one
+/// service operation, classified by its catalog/HTTP effects. (Named for the
+/// webhook policy it first enforced; it now carries both.)
 #[allow(clippy::too_many_arguments)]
 async fn webhook_service_gate(
     state: &AppState,
@@ -2871,10 +2909,9 @@ async fn webhook_service_gate(
     args: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
-    let chat = auth
-        .chat
-        .as_ref()
-        .filter(|chat| chat.confirmation_policy.is_some())?;
+    use crate::services::assistant_acknowledgement_service as acks;
+    // Guest calls are limited by the owner's per-service guest access instead.
+    let chat = auth.chat.as_ref().filter(|chat| !chat.guest)?;
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
@@ -2882,15 +2919,26 @@ async fn webhook_service_gate(
         .unwrap_or_default();
     let effects = mcp_service::operation_effects(prepared.method(), metadata);
     // Method overrides have unknown effects; they must never bypass a card.
-    let result = crate::services::assistant_acknowledgement_service::webhook_action_gate(
-        &state.db,
-        chat,
-        tool,
-        args,
-        effects.reads && !prepared.carries_method_override(),
-        effects.destructive || prepared.carries_method_override(),
-    )
-    .await;
+    let read_only = effects.reads && !prepared.carries_method_override();
+    let destructive = effects.destructive || prepared.carries_method_override();
+    let facts = acks::ActionFacts {
+        class: acks::service_action_class(read_only, destructive),
+        read_only,
+        destructive,
+    };
+    let summary = format!(
+        "{} {} on {}",
+        prepared.method(),
+        crate::services::assistant_nyxagent::identifier(&endpoint.name),
+        crate::services::assistant_nyxagent::identifier(&service.service_slug),
+    );
+    let result = async {
+        match acks::confirmation_needed(&state.db, chat, facts, false).await? {
+            Some(need) => acks::confirm_action(&state.db, chat, tool, args, &need, &summary).await,
+            None => Ok(None),
+        }
+    };
+    let result = Box::pin(result).await;
     match result {
         Ok(None) => None,
         Ok(Some(refusal)) => Some(tool_result(request_id, &refusal.to_string(), true)),
@@ -3690,7 +3738,11 @@ async fn handle_meta_connect(
         crate::services::assistant_acknowledgement_service::audit_access_request_denied(
             &state.db,
             chat,
-            arguments.get("service_id").and_then(|v| v.as_str()),
+            // Model-supplied text never enters the audit row: only a UUID.
+            arguments
+                .get("service_id")
+                .and_then(|v| v.as_str())
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok()),
             "connect_service",
         )
         .await;

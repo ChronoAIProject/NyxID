@@ -1257,17 +1257,29 @@ ranking. Native `nyxid` virtual tools remain subject to their separate guest
 authorization; including that virtual catalog does not grant execution access.
 # NyxBot model selection
 
-NyxBot profiles expose a validated model identifier (currently `nyxagent/chat`
-and live models returned by the owner-scoped `/assistant/nyxagent/models` route).
-Changing a thread model clears its upstream binding and causes a recap on the
-next turn; active turns cannot be changed. If a provider reports a model as
-unavailable, the UI marks it unavailable and asks the owner to choose another.
+`GET /assistant/nyxagent/models` returns NyxAgent's live model list for the
+calling owner (cached per owner for a minute; `available: false` marks a listed
+model NyxAgent cannot serve). When the list cannot be read it returns the
+default model only. Thread headers select a thread's model with
+`PATCH /assistant/nyxagent/conversations/{id}/model`; agent details select the
+model for an agent's new threads with `PATCH /assistant/nyxagent/agents/{id}`
+(`model`), and NyxBot can change an agent's model with `nyxid__update_subagent`
+`model`, which the owner's access mode treats as a sensitive change.
 
-### Model selection
+- Validation: a selection must be a well-formed `nyxagent/...` id and, when the
+  live list is readable, a listed available model; otherwise the request fails
+  with `model_unavailable` (HTTP 400, code 12103, "Choose another model in the
+  model selector"). When the list is unreadable a well-formed id is accepted and
+  a turn NyxAgent refuses settles with `model_unavailable` and the same guidance.
+- A thread with any turn fence (running, or awaiting the stale-heartbeat sweep)
+  refuses with `turn_active` (HTTP 409); a destroyed agent's read-only thread
+  refuses with a conflict. Reselecting the current model changes nothing.
+- A real change clears the upstream session and instruction binding, records a
+  `model_changed` context reset and audits `assistant_model_changed` with the
+  acting person (scope `conversation` or `agent`, old and new model).
+- Model selection is human-only on these routes (conversation keys are refused);
+  only agent maintainers may change an agent's model.
 
-NyxAgent model ids are server-validated against the live `GET /assistant/nyxagent/models` list. The conversation model endpoint rejects changes during an active turn (`turn_active`), clears the provider session and instruction binding, and records a `model_changed` context reset. Invalid or upstream-unavailable choices return `model_unavailable` with the actionable message “Choose another model in the selector.” A specialist inherits the workspace default unless its profile supplies a validated model override; unavailable entries remain disabled in selectors.
-
-The API uses `model_unavailable` (HTTP 400) when a model is absent or rejected; clients should choose another model in the selector. Changing a conversation model during an active turn returns `turn_active` (HTTP 409). Access-mode policy floors remain enforced for service proxy approval policies, `machine_confirm`, webhook confirmation policy, and guest rules.
 ### User context reset semantics
 
 A human owner reset records `context_reset_reason=user_reset`. The next turn receives the current checkpoint projection without replaying the prior reset recap; completed actions remain visible for audit, while pending or failed actions must be reviewed and explicitly rerun. Guests and delegated identities cannot reset context.

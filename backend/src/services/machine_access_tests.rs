@@ -1929,7 +1929,8 @@ async fn specialist_machine_login_request_is_denied_audited_and_routed_when_allo
         .await
         .unwrap();
         assert_eq!(routed["error"], "acknowledgement_required");
-        assert_eq!(routed["decider"], "user");
+        // Machine and saved-login grants are permission requests: NyxBot decides.
+        assert_eq!(routed["decider"], "orchestrator");
         let id = routed["acknowledgement_id"].as_str().unwrap();
         assert!(
             cards
@@ -2003,6 +2004,8 @@ async fn specialist_machine_capability_card_is_denied_audited_and_routed_when_al
     .await
     .unwrap();
     assert!(pending);
-    assert_eq!(routed["decider"], "orchestrator");
+    // Capability changes are owner action cards, never NyxBot decisions.
+    assert_eq!(routed["kind"], "action");
+    assert_eq!(routed["decider"], "user");
     assert!(routed["acknowledgement_id"].is_string());
 }

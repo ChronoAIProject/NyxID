@@ -226,6 +226,8 @@ pub mod service_insights_activity;
 pub mod service_insights_billing;
 
 #[cfg(test)]
+mod assistant_access_mode_tests;
+#[cfg(test)]
 pub(crate) mod assistant_authority_tests;
 pub mod usage_workspace_service;
 

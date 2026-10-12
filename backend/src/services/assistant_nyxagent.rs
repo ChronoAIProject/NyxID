@@ -2041,25 +2041,61 @@ pub async fn clear_binding(
     Ok(())
 }
 
+/// Select the model for one conversation. Returns the previous model and the
+/// updated row. A thread with any turn fence (running, or awaiting the
+/// stale-heartbeat sweep) keeps its model, and so does a destroyed agent's
+/// read-only thread. A real change resets the live context so the next turn
+/// starts on the new model; selecting the current model changes nothing.
 pub async fn change_model(
     db: &Database,
     user_id: &str,
     id: &str,
     model: &str,
-) -> AppResult<AssistantConversation> {
+) -> AppResult<(String, AssistantConversation)> {
     if !valid_model(model) {
-        return Err(AppError::ValidationError(
-            "model_unavailable: choose another model in the selector".into(),
-        ));
+        return Err(AppError::AssistantModelUnavailable);
     }
     let current = get(db, user_id, id).await?;
     if current.active_turn.is_some() {
         return Err(AppError::AssistantTurnActive);
     }
-    db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
+    if super::assistant_team_service::agent_for_conversation(db, &current)
+        .await?
+        .destroyed_at
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "That agent was destroyed; its threads are read-only".into(),
+        ));
+    }
+    if current.model == model {
+        return Ok((current.model.clone(), current));
+    }
+    let updated = db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
         doc! {"_id": id, "user_id": user_id, "active_turn": bson::Bson::Null},
         doc! {"$set": {"model": model, "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::now(), "context_reset_reason": "model_changed"}},
-    ).return_document(ReturnDocument::After).await?.ok_or(AppError::AssistantTurnActive)
+    ).return_document(ReturnDocument::After).await?.ok_or(AppError::AssistantTurnActive)?;
+    Ok((current.model, updated))
+}
+
+/// Audit a model selection: who chose which model for which thread or agent.
+pub async fn audit_model_change(
+    db: &Database,
+    actor: &super::audit_service::AuditActor,
+    row: &AssistantConversation,
+    previous: &str,
+) {
+    if previous == row.model {
+        return;
+    }
+    let _ = super::audit_service::log_actor_event(
+        db.clone(),
+        actor,
+        "assistant_model_changed",
+        Some(json!({"scope": "conversation", "conversation_id": row.id,
+            "agent_id": row.agent_id, "old": previous, "new": row.model})),
+    )
+    .await;
 }
 
 pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
@@ -3204,7 +3240,11 @@ impl TurnError {
             ),
             "model_not_configured" => (
                 "model_not_configured",
-                "This assistant profile is unavailable.",
+                "This assistant profile is unavailable. Choose another model in the model selector.",
+            ),
+            "model_not_found" | "model_unavailable" | "unknown_model" | "invalid_model" => (
+                "model_unavailable",
+                "The selected model is unavailable. Choose another model in the model selector.",
             ),
             "nyxid_error" => (
                 "nyxid_error",

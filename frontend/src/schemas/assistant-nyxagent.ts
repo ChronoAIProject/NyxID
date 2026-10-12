@@ -148,6 +148,27 @@ export const nyxAgentMessageSchema = z.object({
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
 });
+/** How NyxBot asks before acting: never, for sensitive/destructive actions, or for every change. */
+export const nyxAgentAccessModeSchema = z.enum(["autopilot", "nyxmode", "ask_every_time"]);
+export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
+
+/** Why an action card was raised: its risk, the access mode that asked, and which policy. */
+export const nyxAgentActionConfirmationSchema = z.object({
+  risk: z.enum(["read", "change", "sensitive", "destructive"]),
+  access_mode: nyxAgentAccessModeSchema.nullish(),
+  reason: z.enum(["access_mode", "webhook", "policy"]),
+});
+export type NyxAgentActionConfirmation = z.infer<typeof nyxAgentActionConfirmationSchema>;
+
+/** One NyxAgent model offered for selection. */
+export const nyxAgentModelSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  available: z.boolean(),
+  description: z.string().nullish(),
+});
+export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
+
 export const nyxAgentAcknowledgementSchema = z.object({
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
@@ -161,6 +182,7 @@ export const nyxAgentAcknowledgementSchema = z.object({
   decider: z.enum(["user", "orchestrator"]).default("user"),
   decided_by: z.enum(["user", "orchestrator"]).nullable().default(null),
   reason: z.string().nullable().default(null),
+  confirmation: nyxAgentActionConfirmationSchema.nullish(),
   service_slug: z.string().nullable(),
   service_name: z.string().nullable(),
   tool_name: z.string().nullable(),
@@ -260,7 +282,7 @@ export const voicePreferencesSchema = z.object({
   notify_on_completion: z.boolean(),
 });
 export const nyxAgentSettingsSchema = z.object({
-  access_mode: z.enum(["autopilot", "nyxmode", "ask_every_time"]).default("nyxmode"),
+  access_mode: nyxAgentAccessModeSchema.default("nyxmode"),
   voice: voicePreferencesSchema.nullish(),
   timezone: z.string().nullable().optional(),
   schedule_minimum_minutes: z
@@ -309,7 +331,7 @@ export type NyxAgentSettingsUpdate = Partial<
   >
 >;
 
-/** The settings form. Confirmation is presented positively, the API stores the opt-out. */
+/** The settings form. The access mode replaces the legacy destructive-action switch. */
 export function nyxAgentSettingsFormSchema(limits: {
   readonly max_live_subagents_limit: number;
   readonly max_concurrent_subagent_turns_limit: number;
@@ -323,9 +345,8 @@ export function nyxAgentSettingsFormSchema(limits: {
       .min(min, `Must be at least ${String(min)}`)
       .max(max, `Must be at most ${String(max)}`);
   return z.object({
-    access_mode: z.enum(["autopilot", "nyxmode", "ask_every_time"]),
+    access_mode: nyxAgentAccessModeSchema,
     max_auto_continuations: whole(0, 32),
-    confirm_destructive: z.boolean(),
     max_live_subagents: whole(0, limits.max_live_subagents_limit),
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),
     max_group_handoffs: whole(0, limits.max_group_handoffs_limit),
@@ -371,7 +392,7 @@ export const assistantAgentSchema = z.object({
   persona: z.string().nullable().default(null),
   description: z.string().default(""),
   model: z.string().optional(),
-  access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
+  access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
@@ -502,7 +523,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         description: z.string().trim().max(2048, "Keep the notes under 2048 characters"),
         persona: agentPersona,
         model: z.string().optional(),
-        access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
+        access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
       })
     : z.object({
         name: agentName,
@@ -510,9 +531,18 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         description: agentDescription,
         persona: agentPersona,
         model: z.string().optional(),
-        access_mode_override: z.enum(["autopilot", "nyxmode", "ask_every_time"]).nullable().optional(),
+        access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
       });
 }
+/** A PATCH to an agent: only the fields that changed. `null` clears the override. */
+export type AssistantAgentUpdate = {
+  name?: string;
+  description?: string;
+  display_name?: string;
+  persona?: string;
+  model?: string;
+  access_mode_override?: NyxAgentAccessMode | null;
+};
 export type AssistantAgentProfile = {
   name: string;
   display_name: string;
