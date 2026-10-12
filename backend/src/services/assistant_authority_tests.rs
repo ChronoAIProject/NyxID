@@ -1595,23 +1595,16 @@ async fn orchestrator_keys_are_full_and_rotation_and_replacement_preserve_role_a
         "https://api.github.com",
     )
     .await;
-    let refusal = service_gate(
-        &sub.state.db,
-        &sub.chat,
-        &service,
-        "github",
-        "GitHub",
-        false,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    acks::decide(
+    super::assistant_team_service::set_grants(
         &sub.state.db,
         &sub.owner,
-        &sub.row.id,
-        refusal["acknowledgement_id"].as_str().unwrap(),
-        true,
+        &sub.chat.agent_id,
+        super::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            },
+        ),
     )
     .await
     .unwrap();
@@ -1932,7 +1925,7 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    let args = serde_json::json!({"expected_revision":0,"skills":[{"source":"ornn","skill_id":"strict-skill","name":"strict-skill","version":"1.0.0","sha256":"0000000000000000000000000000000000000000000000000000000000000000","dependencies":[]}]});
+    let args = serde_json::json!({"expected_revision":0,"skills":[{"source":"ornn","skill_id":"00000000-0000-0000-0000-000000000001","name":"strict-skill","version":"1.0","sha256":"0000000000000000000000000000000000000000000000000000000000000000","dependencies":[]}]});
     let err = super::assistant_acknowledgement_service::request_tracked(
         &f.state.db,
         &f.chat,
