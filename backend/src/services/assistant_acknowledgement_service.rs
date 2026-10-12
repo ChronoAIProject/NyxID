@@ -182,6 +182,10 @@ pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionCla
         "mint",
         "credential",
         "link",
+        "set_approval_mode",
+        "update_agent_key",
+        "update_channel_bot",
+        "set_channel_route",
     ]
     .iter()
     .any(|p| lower.contains(p))
