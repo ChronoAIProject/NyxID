@@ -238,6 +238,9 @@ mod tests {
 
     #[test]
     fn source_enum_serializes_real_values() {
-        assert_eq!(serde_json::to_string(&BillingConfigSource::Env).unwrap(), ""env"");
+        assert_eq!(
+            serde_json::to_string(&BillingConfigSource::Env).unwrap(),
+            "\"env\""
+        );
     }
 }
