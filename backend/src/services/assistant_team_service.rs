@@ -1502,6 +1502,17 @@ pub async fn set_grants(
     agent_id: &str,
     change: GrantChange,
 ) -> AppResult<AssistantAgent> {
+    set_grants_as(db, owner, owner, None, agent_id, change).await
+}
+
+pub async fn set_grants_as(
+    db: &Database,
+    owner: &str,
+    approver_user_id: &str,
+    approver_api_key_id: Option<&str>,
+    agent_id: &str,
+    change: GrantChange,
+) -> AppResult<AssistantAgent> {
     let mut session = db.client().start_session().await?;
     let db_owned = db.clone();
     let owner_owned = owner.to_owned();
@@ -1527,8 +1538,9 @@ pub async fn set_grants(
         "assistant_agent_grants_changed",
         serde_json::json!({
             "agent_id": &agent.id, "owner_id": &agent.user_id,
-            "approver_user_id": owner,
-            "approver_kind": "owner",
+            "approver_user_id": approver_user_id,
+            "approver_api_key_id": approver_api_key_id,
+            "approver_kind": if approver_api_key_id.is_some() {"nyxbot_or_key"} else {"owner"},
             "service_ids": &agent.grants.service_ids,
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,

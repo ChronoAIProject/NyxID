@@ -12,6 +12,8 @@ pub struct AssistantAcknowledgement {
     pub conversation_id: String,
     pub user_id: String,
     pub api_key_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_agent_id: Option<String>,
     pub kind: String,
     pub service_id: Option<String>,
     pub service_slug: Option<String>,

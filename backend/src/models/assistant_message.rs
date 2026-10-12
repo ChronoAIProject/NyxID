@@ -5,6 +5,7 @@ pub const COLLECTION_NAME: &str = "assistant_messages";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    specialist_id: None,
     /// Guidance delivered to an existing response, never a new instruction turn.
     #[serde(default)]
     pub steering: Option<Box<Steering>>,

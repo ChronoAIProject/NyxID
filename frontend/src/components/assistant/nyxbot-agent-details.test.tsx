@@ -393,5 +393,5 @@ it("explains the specialist sandbox and NyxBot approval authority", async () => 
   agent = agentRow({ owner_kind: "person", can_maintain: true, can_use: true });
   renderSheet();
   expect((await screen.findAllByText(/specialist is sandboxed/i)).length).toBeGreaterThan(0);
-  expect(screen.getAllByText(/NyxBot reviews and approves/i).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/routed mode sends them to NyxBot/i).length).toBeGreaterThan(0);
 });
