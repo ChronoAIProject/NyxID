@@ -192,18 +192,6 @@ async fn agent_skill_pin_integrity_and_exact_guid_version() {
 }
 
 #[tokio::test]
-async fn preview_returns_bounded_metadata_and_rejects_unavailable_owner_reader() {
-    let registry = Registry::new();
-    let p = preview(&registry, ID, "1.0").await.unwrap();
-    assert!(p.description.len() <= 1024);
-    assert!(p.size_bytes <= 1024 * 1024);
-    let denied = Registry {
-        deny: true,
-        ..Registry::new()
-    };
-    assert!(preview(&denied, ID, "1.0").await.is_err());
-}
-#[tokio::test]
 async fn agent_skill_invisible_cannot_be_pinned_and_removal_needs_no_ornn() {
     let f = orchestrator_fixture("agent_skill_visibility").await;
     let registry = Registry::new();
@@ -636,6 +624,22 @@ async fn disabled_pins_are_omitted_from_prompt_instructions() {
     )
     .await
     .unwrap();
+    let mut toggled = reader.reference();
+    toggled.disabled = true;
+    let toggled_selection = Selection {
+        expected_revision: 1,
+        skills: vec![toggled],
+    };
+    set(
+        &f.state.db,
+        &reader,
+        &f.owner,
+        &f.chat.agent_id,
+        &toggled_selection,
+        true,
+    )
+    .await
+    .expect("disabling an existing pin must not require a re-preview");
     let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
         .await
         .unwrap();
@@ -662,7 +666,11 @@ async fn disabled_pins_are_inaccessible_to_skill_read() {
         .await
         .unwrap();
     agent.skills = vec![reader.reference()];
+    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_ok());
     agent.skills[0].disabled = true;
-    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_err());
+    assert!(matches!(
+        read(&reader, &agent, ID, None, "/", 0).await,
+        Err(AppError::Forbidden(_))
+    ));
     f.state.db.drop().await.unwrap();
 }

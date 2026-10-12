@@ -3078,6 +3078,23 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
     )
     .await;
     assert_eq!(read["content"], "Pinned guidance only");
+    f.state
+        .db
+        .collection::<crate::models::assistant_agent::AssistantAgent>(
+            crate::models::assistant_agent::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &f.chat.agent_id },
+            doc! { "$set": { "skills.0.disabled": true } },
+        )
+        .await
+        .unwrap();
+    let disabled_read = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill":id})).await,
+        true,
+    )
+    .await;
+    assert_eq!(disabled_read["error"], "forbidden");
     let other = result(
         direct_call(&f, &auth, "nyxid__skill_read", json!({"skill":id})).await,
         true,
@@ -3959,4 +3976,39 @@ async fn specialist_channel_bot_tools_are_denied_audited_and_routed() {
         let routed = result(call(&f, &specialist, tool, json!({})).await, true).await;
         assert!(routed["error"] != "access_request_denied", "{tool}");
     }
+}
+
+#[tokio::test]
+async fn s9_specialist_guest_disabled_pin_denial() {
+    let f = fixture("s9_mcp_disabled_pin").await;
+    let specialist = authenticate(&f).await;
+    let args = json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[{"source":"ornn","skill_id":uuid::Uuid::new_v4().to_string(),"name":"disabled","version":"1.0","sha256":"a".repeat(64),"dependencies":[],"disabled":true}]}});
+    let refusal = result(
+        call(&f, &specialist, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(refusal["error"], "owner_only");
+    let mut guest = authenticate(&f).await;
+    guest.chat.as_mut().unwrap().guest = true;
+    let guest_refusal = result(
+        direct_call(&f, &guest, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(guest_refusal["error"], "owner_only");
+    let owner = authenticate_id(&f, &f.nyxbot_thread).await;
+    let owner_result = result(
+        call(
+            &f,
+            &owner,
+            "nyxid__set_agent_skills",
+            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[]}}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(owner_result["revision"], 1);
+    f.state.db.drop().await.unwrap();
 }

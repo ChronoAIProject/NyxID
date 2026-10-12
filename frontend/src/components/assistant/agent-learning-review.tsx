@@ -17,8 +17,10 @@ function requestFailure(cause: unknown): string {
 }
 
 function diagnostics(cause: unknown): Array<{ rule: string; field: string; line?: number; remediation?: string }> {
-  const value = cause as { diagnostics?: unknown } | null;
-  return Array.isArray(value?.diagnostics) ? value.diagnostics.filter((item): item is { rule: string; field: string; line?: number; remediation?: string } => Boolean(item && typeof item === "object" && "rule" in item && "field" in item)) : [];
+  const value = cause as { errorResponse?: { details?: unknown }; diagnostics?: unknown } | null;
+  const details = value?.errorResponse?.details ?? value?.diagnostics;
+  const candidates = Array.isArray(details) ? details : details ? [details] : [];
+  return candidates.filter((item): item is { rule: string; field: string; line?: number; remediation?: string } => Boolean(item && typeof item === "object" && "rule" in item && "field" in item)).map((item) => ({ ...item, remediation: item.remediation ?? `Fix ${item.field}` }));
 }
 
 export function AgentLearningReview({
@@ -71,7 +73,7 @@ export function AgentLearningReview({
       ) : null}
       {review.status.data?.publication_blocked ? (
         <p role="alert" className="text-12 text-warning">
-          Publishing is unavailable for this organization: owner binding is required.
+          Publishing is unavailable for this organization because it has no owner binding. Organization members may consent to learning, but only the bound owner can publish private Ornn skills. Contact an organization owner to publish.
         </p>
       ) : null}
       {review.status.data?.org_owned && !readOnly ? (
@@ -84,7 +86,7 @@ export function AgentLearningReview({
           I consent to learning proposals for this organization
         </label>
       ) : null}
-      {[review.run.error, review.configure.error, review.consent?.error, review.edit.error, review.approve.error, review.reject.error]
+      {[review.run.error, review.configure.error, review.consent?.error, review.edit.error, review.reject.error]
         .filter(Boolean)
         .map((error, index) => (
           <div key={index} role="alert" className="text-12 text-destructive">
@@ -172,6 +174,9 @@ export function AgentLearningReview({
               {proposal.evidence_count} evidence items ·{" "}
               {proposal.body_bytes.toLocaleString()} bytes
             </p>
+            {proposal.published_version ? (
+              <p className="text-11 text-success">Published version: {proposal.published_version}</p>
+            ) : null}
             {proposal.failure_code ? (
               <p role="alert" className="text-11 text-destructive">
                 {publicationFailureText(proposal.failure_code, proposal.status)}
@@ -234,10 +239,10 @@ export function AgentLearningReview({
                   onChange={(event) => setDraftDescriptions((current) => ({ ...current, [proposal.id]: event.target.value }))}
                 />
                 {(draftFiles[proposal.id] ?? draft.files).map((file, index) => (
-                  <div key={`${proposal.id}-${index}`} className="space-y-1 rounded border border-border/50 p-2">
+                  <div key={`${proposal.id}-${file.path}`} className="space-y-1 rounded border border-border/50 p-2">
                     <Input aria-label={`File ${index + 1} path`} value={file.path} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, path: event.target.value } : f) }))} />
                     <Textarea aria-label={`File ${index + 1} content`} value={file.content} readOnly={readOnly} onChange={(event) => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).map((f, i) => i === index ? { ...f, content: event.target.value } : f) }))} />
-                    {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).filter((_, i) => i !== index) }))}>Remove file</Button> : null}
+                    {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: (current[proposal.id] ?? draft.files).filter((_, i) => i !== index) }))}>{`Remove file ${file.path}`}</Button> : null}
                   </div>
                 ))}
                 {!readOnly ? <Button size="sm" variant="ghost" onClick={() => setDraftFiles((current) => ({ ...current, [proposal.id]: [...(current[proposal.id] ?? draft.files), { path: "", content: "" }] }))}>Add file</Button> : null}

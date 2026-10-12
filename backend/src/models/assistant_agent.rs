@@ -156,7 +156,7 @@ pub struct AssistantAgent {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentSkillMetadata {
     pub description: String,
     pub size_bytes: usize,

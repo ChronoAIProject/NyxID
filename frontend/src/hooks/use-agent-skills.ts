@@ -17,7 +17,7 @@ export function useAgentSkills(id: string) {
       agentSkillsSchema.parse(
         await assistantJson(`${base}/agents/${encodeURIComponent(id)}/skills`),
       ),
-    enabled: Boolean(owner),
+    enabled: Boolean(owner && id),
     retry: false,
   });
 }
@@ -78,4 +78,12 @@ export function useSkillPreview(id: string | undefined, version: string) {
     enabled: Boolean(owner && id && version),
     retry: false,
   });
+}
+export function useAttachedSkillPreview(agentId: string, skillId: string) {
+  const owner = useAuthStore((s) => s.user?.id);
+  return useQuery({ queryKey: ["attached-skill-preview", owner, agentId, skillId], queryFn: () => assistantJson(`${base}/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/preview`), enabled: Boolean(owner && agentId && skillId), retry: false });
+}
+export function useAgentSkillHistory(agentId: string) {
+  const owner = useAuthStore((s) => s.user?.id);
+  return useQuery({ queryKey: ["agent-skill-history", owner, agentId], queryFn: () => assistantJson(`${base}/agents/${encodeURIComponent(agentId)}/skills/history`), enabled: Boolean(owner && agentId), retry: false });
 }

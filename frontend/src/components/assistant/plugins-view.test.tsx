@@ -556,4 +556,11 @@ describe("PluginsView", () => {
     await user.click(screen.getByRole("tab", { name: "Skills" }));
     expect(screen.getByRole("tab", { name: "Skills" })).toBeInTheDocument();
   });
+
+  it("selects an agent for real skill attach and surfaces the management target", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("tab", { name: "Skills" }));
+    expect(screen.getByRole("textbox", { name: "Agent id for skill management" })).toBeInTheDocument();
+  });
 });

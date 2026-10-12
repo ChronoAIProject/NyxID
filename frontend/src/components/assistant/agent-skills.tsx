@@ -16,6 +16,8 @@ import {
   useSkillSearch,
   useSkillVersions,
   useSkillPreview,
+  useAttachedSkillPreview,
+  useAgentSkillHistory,
 } from "@/hooks/use-agent-skills";
 import type { AgentSkill } from "@/schemas/agent-skills";
 
@@ -68,7 +70,7 @@ function AttachedSkill({
           <Switch
             checked={!skill.disabled}
             disabled={disabled}
-            aria-label={`${skill.disabled ? "Enable" : "Disable"} ${skill.name}`}
+            aria-label={`Use ${skill.name}`}
             onCheckedChange={toggle}
           />
           {skill.disabled ? "Disabled" : "Enabled"}
@@ -86,6 +88,8 @@ export function AgentSkills({
   readonly readOnly?: boolean;
 }) {
   const current = useAgentSkills(agentId);
+  const attachedPreview = useAttachedSkillPreview(agentId, current.data?.skills[0]?.skill_id ?? "");
+  const history = useAgentSkillHistory(agentId);
   const write = useSetAgentSkills(agentId);
   const [input, setInput] = useState("");
   const [query, setQuery] = useState<string | null>(null);
@@ -123,6 +127,9 @@ export function AgentSkills({
     JSON.stringify(preview.data.reference) === JSON.stringify(replacement);
   return (
     <section aria-label="Skills" className="space-y-3">
+      {history.data?.items?.length ? <div aria-label="Skill history"><p className="text-12 font-medium">Skill history</p>{history.data.items.map((row: { id: string; event_data?: { action?: string } }) => <p key={row.id} className="text-11 text-muted-foreground">{row.event_data?.action ?? "skills updated"}</p>)}</div> : null}
+      {attachedPreview.data ? <p role="status">Attached preview: {attachedPreview.data.description}</p> : null}
+      {attachedPreview.error ? <p role="alert" className="text-11 text-destructive">Attached preview unavailable. Try again.</p> : null}
       <div className="space-y-1">
         <h3 className="text-13 font-semibold">Skills</h3>
         <p className="text-12 text-muted-foreground">

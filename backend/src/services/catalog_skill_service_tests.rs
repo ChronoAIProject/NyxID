@@ -318,6 +318,47 @@ async fn curation_exact_refs_and_explicit_names_transition() {
 }
 
 #[tokio::test]
+async fn catalog_write_rejects_disabled_recommended_refs_without_writing() {
+    let (db, _, actor, services) = fixture("disabled_catalog_ref", 10).await;
+    let before = db
+        .collection::<Document>(SERVICES)
+        .find_one(doc! {"_id": &services[0].id})
+        .await
+        .unwrap()
+        .unwrap();
+    let input = SkillUpdate {
+        recommended_skill_refs: Some(vec![SkillReference {
+            source: "ornn".into(),
+            skill_id: Uuid::new_v4().to_string(),
+            name: "disabled".into(),
+            version: "1.0".into(),
+            sha256: "a".repeat(64),
+            dependencies: vec![],
+            disabled: true,
+        }]),
+        ..Default::default()
+    };
+    let err = write(
+        &db,
+        &services[0].id,
+        &actor,
+        &input,
+        0,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::BadRequest(_)));
+    let after = db
+        .collection::<Document>(SERVICES)
+        .find_one(doc! {"_id": &services[0].id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
 async fn curation_noop_and_replay_do_not_spend_exhausted_budget() {
     let (db, sa, actor, services) = fixture("curation_noop", 1).await;
     let request = Uuid::new_v4().to_string();

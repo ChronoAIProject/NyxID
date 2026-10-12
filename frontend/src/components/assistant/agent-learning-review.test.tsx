@@ -106,7 +106,7 @@ describe("AgentLearningReview", () => {
     mocks.feature.mockReturnValue(true);
     mocks.review.mockReturnValue({
       data: { proposals: [] },
-      status: { data: { enabled: true, org_owned: true, opted_in: false, publication_blocked: true } },
+      status: { data: { enabled: true, org_owned: true, opted_in: false, publication_blocked: "owner_binding_unavailable" } },
       consent: { mutate: mocks.consent, isPending: false },
       configure: { mutate: mocks.configure, isPending: false },
       approve: { mutateAsync: mocks.approve, isPending: false },
@@ -115,7 +115,7 @@ describe("AgentLearningReview", () => {
       run: { mutate: mocks.run, isPending: false },
     });
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.getByText(/owner binding is required/)).toBeInTheDocument();
+    expect(screen.getByText(/no owner binding.*only the bound owner can publish/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: /consent to learning/i }));
     expect(mocks.consent).toHaveBeenCalledWith(true);
   });
@@ -123,7 +123,7 @@ describe("AgentLearningReview", () => {
   it("renders validation diagnostics at their field and line", () => {
     mocks.feature.mockReturnValue(true);
     const error = Object.assign(new Error("validation failed"), {
-      diagnostics: [{ rule: "frontmatter.required", field: "name", line: 3, remediation: "Set a name" }],
+      errorResponse: { details: { rule: "frontmatter.required", field: "name", line: 3 } },
     });
     mocks.review.mockReturnValue({
       data: { proposals: [] },
@@ -136,7 +136,18 @@ describe("AgentLearningReview", () => {
       consent: { mutate: mocks.consent, isPending: false },
     });
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.getByText(/name:3 \(frontmatter.required\): Set a name/)).toBeInTheDocument();
+    expect(screen.getByText(/name:3 \(frontmatter.required\): Fix name/)).toBeInTheDocument();
+  });
+
+  it("renders the published version on status rows", () => {
+    mocks.feature.mockReturnValue(true);
+    mocks.review.mockReturnValue({
+      data: { proposals: [{ ...proposal, status: "published_unpinned", published_version: "1.2.0" }] },
+      status: { data: { enabled: true } },
+      configure: { mutate: mocks.configure, isPending: false }, approve: { mutateAsync: mocks.approve, isPending: false }, edit: { mutate: mocks.edit, isPending: false }, reject: { mutateAsync: mocks.reject, isPending: false }, run: { mutate: mocks.run, isPending: false }, consent: { mutate: mocks.consent, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText("Published version: 1.2.0")).toBeInTheDocument();
   });
 
   it("keeps authored proposals visible without the invalid approval button", () => {

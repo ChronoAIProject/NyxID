@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   search: vi.fn(),
   versions: vi.fn(),
   preview: vi.fn(),
+  attachedPreview: vi.fn(),
+  history: vi.fn(),
 }));
 vi.mock("@/hooks/use-agent-skills", () => ({
   useAgentSkills: mocks.current,
@@ -15,6 +17,8 @@ vi.mock("@/hooks/use-agent-skills", () => ({
   useSkillSearch: mocks.search,
   useSkillVersions: mocks.versions,
   useSkillPreview: mocks.preview,
+  useAttachedSkillPreview: mocks.attachedPreview,
+  useAgentSkillHistory: mocks.history,
 }));
 const pin = {
   source: "ornn",
@@ -35,6 +39,8 @@ beforeEach(() => {
       },
     },
   });
+  mocks.attachedPreview.mockReturnValue({ data: { description: "Attached guidance" } });
+  mocks.history.mockReturnValue({ data: { items: [{ id: "h1", event_data: { action: "disabled" } }] } });
   mocks.search.mockReturnValue({ data: undefined });
   mocks.versions.mockReturnValue({
     data: {
@@ -63,6 +69,11 @@ it("removes immediately with the observed revision", () => {
     { expected_revision: 4, skills: [] },
     expect.anything(),
   );
+});
+it("toggles a pin and sends disabled true in the PUT body", () => {
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("switch", { name: "Use Research" }));
+  expect(mocks.save).toHaveBeenCalledWith({ expected_revision: 4, skills: [{ ...pin, disabled: true }] }, expect.anything());
 });
 it("searches visible Ornn skills on submit", () => {
   render(<AgentSkills agentId="agent" />);
@@ -163,4 +174,13 @@ it("refuses a seventeenth attachment while retaining removal", () => {
   fireEvent.click(screen.getByRole("button", { name: "Extra skill" }));
   expect(screen.getByRole("button", { name: "Attach skill" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Remove Skill 0" })).toBeEnabled();
+});
+
+it("renders attached preview content, bounded history rows, and bounded preview errors", () => {
+  const view = render(<AgentSkills agentId="agent" />);
+  expect(screen.getByText("Attached preview: Attached guidance")).toBeInTheDocument();
+  expect(screen.getByText("disabled")).toBeInTheDocument();
+  mocks.attachedPreview.mockReturnValue({ error: new Error("preview unavailable"), data: undefined });
+  view.rerender(<AgentSkills agentId="agent" />);
+  expect(screen.getByRole("alert")).toHaveTextContent("Attached preview unavailable. Try again.");
 });

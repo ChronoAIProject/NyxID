@@ -58,6 +58,8 @@ export const authoredSkillPreviewSchema = z.object({
   version: z.string(),
   files: z.array(z.object({ path: z.string(), content: z.string() })),
   failure_code: z.string().nullish(),
+  published_version: z.string().nullish(),
+  published_skill_id: z.string().nullish(),
   lease_live: z.boolean().nullish(),
   base_scripts_not_copied: z.boolean().nullish(),
 });

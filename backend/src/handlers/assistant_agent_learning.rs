@@ -41,10 +41,20 @@ pub struct EditBody {
     draft: Value,
 }
 
+fn normalize_edit_draft(revision: Option<i64>, mut draft: Value) -> Value {
+    if revision.is_none() {
+        if let Some(object) = draft.as_object_mut() {
+            object.remove("revision");
+        }
+    }
+    draft
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateBody {
-    draft: Value,
+    pub revision: Option<i64>,
+    pub draft: Value,
 }
 
 /// Other query parameters are ignored, as before the card parameter existed.
@@ -162,25 +172,21 @@ pub async fn edit(
         .revision
         .or_else(|| body.draft.get("revision").and_then(Value::as_i64))
         .unwrap_or(0);
-    review::edit(
-        &state,
-        &owner,
-        &agent_id,
-        &proposal_id,
-        revision,
-        &body.draft,
-    )
-    .await?;
+    let draft = normalize_edit_draft(body.revision, body.draft);
+    review::edit(&state, &owner, &agent_id, &proposal_id, revision, &draft).await?;
     Ok(Json(json!({"status": "updated"})))
 }
 
 pub async fn validate(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     auth: AuthUser,
-    Path((_agent_id, _proposal_id)): Path<(String, String)>,
+    Path((agent_id, _proposal_id)): Path<(String, String)>,
     Json(body): Json<ValidateBody>,
 ) -> AppResult<Json<Value>> {
     super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let _agent = team::agent(&state.db, &owner, &agent_id).await?;
     let text = serde_json::to_string(&body.draft)
         .map_err(|_| AppError::ValidationError("Invalid draft JSON".into()))?;
     let generated = crate::services::assistant_skill_authoring::validation::decode(&text)?;
@@ -577,36 +583,246 @@ pub async fn admin_release_target(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{EditBody, ValidateBody};
+mod route_tests {
+    use super::*;
+    use crate::services::{assistant_authority_tests::orchestrator_fixture, feature_flag_service};
+    use axum::Json;
+    use axum::extract::{Path, State};
     use serde_json::json;
 
-    #[test]
-    fn edit_accepts_top_level_revision() {
-        let body: EditBody = serde_json::from_value(json!({
-            "revision": 7,
-            "draft": {"name": "n"}
-        }))
-        .expect("top-level revision is part of the public form");
-        assert_eq!(body.revision, Some(7));
+    #[tokio::test]
+    async fn validate_route_returns_not_found_for_other_owner() {
+        let f = orchestrator_fixture("learning_validate_owner_route").await;
+        let other = uuid::Uuid::new_v4().to_string();
+        feature_flag_service::set_platform_override(
+            &f.state.db,
+            feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
+            &feature_flag_service::FlagTarget::User(other.clone()),
+            true,
+            &other,
+        )
+        .await
+        .unwrap();
+        let err = validate(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&other),
+            Path((f.chat.agent_id.clone(), "proposal".into())),
+            Json(ValidateBody {
+                revision: None,
+                draft: json!({"name":"candidate"}),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::errors::AppError::NotFound(message) if message == "Agent not found")
+        );
+        f.state.db.drop().await.unwrap();
     }
 
-    #[test]
-    fn edit_accepts_legacy_nested_revision() {
-        let body: EditBody = serde_json::from_value(json!({
-            "draft": {"revision": 4, "name": "n"}
-        }))
-        .expect("legacy nested form remains readable");
-        assert_eq!(body.revision, None);
-        assert_eq!(body.draft["revision"], 4);
+    #[tokio::test]
+    async fn validate_route_returns_engine_error_when_disabled() {
+        let f = orchestrator_fixture("learning_validate_engine_route").await;
+        let err = validate(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            Path((f.chat.agent_id.clone(), "proposal".into())),
+            Json(ValidateBody {
+                revision: None,
+                draft: json!({"name":"candidate"}),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::errors::AppError::NotFound(message) if message.contains("Assistant route"))
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod s9_denial_tests {
+    use super::*;
+    use crate::services::{
+        assistant_authority_tests::orchestrator_fixture, assistant_team_service as team,
+        feature_flag_service,
+    };
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    use serde_json::json;
+
+    async fn enable(db: &mongodb::Database, user: &str) {
+        feature_flag_service::set_platform_override(
+            db,
+            feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
+            &feature_flag_service::FlagTarget::User(user.into()),
+            true,
+            user,
+        )
+        .await
+        .unwrap();
     }
 
-    #[test]
-    fn validate_body_is_dry_run_input_only() {
-        let body: ValidateBody = serde_json::from_value(json!({
-            "draft": {"name": "candidate", "skill_md": "# Skill"}
-        }))
-        .expect("validation accepts a draft payload");
-        assert_eq!(body.draft["name"], "candidate");
+    #[tokio::test]
+    async fn destroyed_agent_put_skills_is_refused() {
+        let f = orchestrator_fixture("s9_destroyed_put").await;
+        enable(&f.state.db, &f.owner).await;
+        team::destroy(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+        let err = crate::handlers::agent_skills::set(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            Path(f.chat.agent_id.clone()),
+            Json(crate::services::agent_skill_service::Selection {
+                expected_revision: 0,
+                skills: vec![],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Agent is destroyed");
+    }
+
+    #[tokio::test]
+    async fn other_owner_preview_history_validate_are_not_found() {
+        let f = orchestrator_fixture("s9_other_owner").await;
+        let other = uuid::Uuid::new_v4().to_string();
+        enable(&f.state.db, &other).await;
+        let auth = crate::test_utils::test_auth_user(&other);
+        let preview = crate::handlers::agent_skills::preview_attached(
+            State(f.state.clone()),
+            auth.clone(),
+            Path((f.chat.agent_id.clone(), "skill".into())),
+        )
+        .await
+        .unwrap_err();
+        let history = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            auth.clone(),
+            Path(f.chat.agent_id.clone()),
+        )
+        .await
+        .unwrap_err();
+        let validate_err = validate(
+            State(f.state.clone()),
+            auth,
+            Path((f.chat.agent_id.clone(), "p".into())),
+            Json(ValidateBody {
+                revision: None,
+                draft: json!({"name":"x"}),
+            }),
+        )
+        .await
+        .unwrap_err();
+        for err in [preview, history, validate_err] {
+            assert!(
+                matches!(err, crate::errors::AppError::NotFound(message) if message == "Agent not found")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn viewer_put_refused_but_preview_history_are_owner_scoped() {
+        let f = orchestrator_fixture("s9_viewer_routes").await;
+        let viewer = uuid::Uuid::new_v4().to_string();
+        enable(&f.state.db, &f.owner).await;
+        enable(&f.state.db, &viewer).await;
+        let auth = crate::test_utils::test_auth_user(&viewer);
+        let preview = crate::handlers::agent_skills::preview_attached(
+            State(f.state.clone()),
+            auth.clone(),
+            Path((f.chat.agent_id.clone(), "missing".into())),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(preview.to_string(), "Attached skill not found");
+        let history = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            auth,
+            Path(f.chat.agent_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(history.0.get("items").is_some());
+    }
+
+    #[tokio::test]
+    async fn viewer_membership_denies_skill_write_but_allows_reads() {
+        let f = orchestrator_fixture("s9_viewer_membership").await;
+        let org = uuid::Uuid::new_v4().to_string();
+        let viewer = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                crate::test_utils::test_user(&org, crate::models::user::UserType::Org),
+                crate::test_utils::test_user(&viewer, crate::models::user::UserType::Person),
+            ])
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &viewer,
+                crate::models::org_membership::OrgRole::Viewer,
+                None,
+            ))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                mongodb::bson::doc! {"_id": &f.chat.agent_id},
+                mongodb::bson::doc! {"$set":{"user_id":&org}},
+            )
+            .await
+            .unwrap();
+        enable(&f.state.db, &viewer).await;
+        let auth = crate::test_utils::test_auth_user(&viewer);
+        let put = crate::handlers::agent_skills::set(
+            State(f.state.clone()),
+            auth.clone(),
+            Path(f.chat.agent_id.clone()),
+            Json(crate::services::agent_skill_service::Selection {
+                expected_revision: 0,
+                skills: vec![],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(put.to_string(), "Agent skill changes require owner access");
+        let history = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            auth,
+            Path(f.chat.agent_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(history.0.get("items").is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_key_is_refused_on_new_skill_routes() {
+        let f = orchestrator_fixture("s9_agent_key").await;
+        let mut auth = f.auth.clone();
+        auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        let err = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            auth,
+            Path(f.chat.agent_id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "This route requires a first-party human session"
+        );
     }
 }
