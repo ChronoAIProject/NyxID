@@ -78,6 +78,12 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
             if client_required_at_creation(&body) {
+                if client_id_env.is_some()
+                    && client_secret_env.is_none()
+                    && body["provider_type"] != "device_code"
+                {
+                    bail!("--client-id-env needs --client-secret-env");
+                }
                 if client_id_env.is_none() {
                     require_terminal(
                         "A managed (credential_mode admin) provider needs its OAuth client at creation; pass --client-id-env and --client-secret-env",
@@ -326,6 +332,9 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                         continue;
                     }
                     let slug = text(desired, "slug");
+                    if clients.contains_key(&slug) {
+                        continue;
+                    }
                     let current = find_provider(&mut api, &slug)
                         .await?
                         .ok_or_else(|| anyhow!("Provider {slug} was not created"))?;
