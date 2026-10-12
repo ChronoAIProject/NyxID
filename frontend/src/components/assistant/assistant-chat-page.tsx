@@ -1,4 +1,5 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
+import { AccessModeSwitcher, ThreadModelSelect } from "@/components/assistant/nyxbot-access-controls";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
@@ -627,6 +628,23 @@ function NyxAgentThreadPage() {
           destroyed={destroyed}
           channelPlatform={channelPlatform}
           onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
+          controls={
+            <>
+              <AccessModeSwitcher
+                agentOverride={
+                  agents.data?.agents.find((row) => row.id === headerAgent.id)
+                    ?.access_mode_override
+                }
+              />
+              {selectedId && conversation ? (
+                <ThreadModelSelect
+                  conversationId={selectedId}
+                  model={conversation.model}
+                  disabled={destroyed || chat.isStreaming}
+                />
+              ) : null}
+            </>
+          }
         />
         {headerAgent.kind === "nyxbot" ? (
           <TeamStrip agents={agents.data?.agents ?? []} onOpenConversation={go} />
