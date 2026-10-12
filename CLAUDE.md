@@ -711,3 +711,4 @@ TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions
 Assistant reply feedback is a human-only NyxAgent conversation feature: `PUT`/`DELETE` feedback routes require the engine flag and participant ownership, while `/admin/assistant/feedback` is admin/operator-only. Controls are hidden for replay, legacy Aevatar, stopped, and failed replies; comments are optional and bounded.
 
 Feedback writes are scoped to the current parent conversation or group and are purged by parent deletion; concurrent first votes are resolved by the unique user/message index.
+ Feedback changes emit metadata-only `nyxid::assistant_feedback` structured logs; comment and reply text are excluded.

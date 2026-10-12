@@ -1200,3 +1200,5 @@ cursor; responses use RFC3339 timestamps and never include message text.
 Stopped or failed replies are not eligible for feedback. Conversation and group
 deletion, and user deletion, purge feedback rows.
 
+
+A1 feedback rows may include a metadata-only reply context snapshot (agent/model/status, tool counts and labels, latency, and reply flags). The `nyxid::assistant_feedback` structured events (`submitted`, `changed`, `comment_updated`, `withdrawn`) contain identifiers and metadata only; comment, prompt, and reply text are never logged.
