@@ -225,12 +225,12 @@ describe("Assistant uploads composer", () => {
         <UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />,
       );
       expect(screen.getByLabelText("Choose attachments")).not.toHaveAttribute("accept");
-      choose(new File(["<svg/>"], "drawing.svg", { type: "image/svg+xml" }));
+      choose(new File([new Uint8Array([0xff, 0xfe, 0xfd])], "drawing.txt", { type: "text/plain" }));
       expect(await screen.findByRole("alert")).toHaveTextContent("Format not supported. Please try again.");
       fireEvent.change(screen.getByRole("textbox"), { target: { value: "hello" } });
       expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
       expect(base.onSend).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "Remove drawing.svg" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove drawing.txt" }));
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
     } finally {

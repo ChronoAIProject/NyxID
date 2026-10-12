@@ -572,6 +572,7 @@ export function NyxAgentGroupPage({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recipientAgentIds, setRecipientAgentIds] = useState<string[]>([]);
   const [excludedRecipientIds, setExcludedRecipientIds] = useState<string[]>([]);
+  const [recipientsEdited, setRecipientsEdited] = useState(false);
   // Group payloads name agents by handle; their display names live on the agent list.
   const group =
     transcript.data && !transcript.error
@@ -757,7 +758,7 @@ export function NyxAgentGroupPage({
             onSend={async (text, uploads) => {
               try {
                 await transcript.post.mutateAsync(
-                  uploads ? { text, attachmentIds: uploads.attachmentIds, recipientAgentIds } : { text, attachmentIds: [], recipientAgentIds },
+                  uploads ? { text, attachmentIds: uploads.attachmentIds, ...(recipientsEdited ? { recipientAgentIds } : {}) } : { text, attachmentIds: [], ...(recipientsEdited ? { recipientAgentIds } : {}) },
                 );
               } catch (error) {
                 toast.error(
@@ -772,9 +773,9 @@ export function NyxAgentGroupPage({
             recipients={group ? <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Message recipients">
               {recipientAgentIds.map((id) => {
                 const member = group.members.find((row) => row.id === id);
-                return member ? <Button key={id} type="button" size="sm" variant="secondary" className="rounded-full" aria-label={`Remove recipient ${member.name}`} onClick={() => { setRecipientAgentIds((current) => current.filter((value) => value !== id)); setExcludedRecipientIds((current) => current.includes(id) ? current : [...current, id]); }}>@{member.name} ×</Button> : null;
+                return member ? <Button key={id} type="button" size="sm" variant="secondary" className="rounded-full" aria-label={`Remove recipient ${member.name}`} onClick={() => { setRecipientsEdited(true); setRecipientAgentIds((current) => current.filter((value) => value !== id)); setExcludedRecipientIds((current) => current.includes(id) ? current : [...current, id]); }}>@{member.name} ×</Button> : null;
               })}
-              <select aria-label="Add recipient" className="h-8 rounded-lg border bg-card px-2 text-12" value="" onChange={(event) => { if (event.target.value) setRecipientAgentIds((current) => current.includes(event.target.value) ? current : [...current, event.target.value]); }}>
+              <select aria-label="Add recipient" className="h-8 rounded-lg border bg-card px-2 text-12" value="" onChange={(event) => { if (event.target.value) { setRecipientsEdited(true); setRecipientAgentIds((current) => current.includes(event.target.value) ? current : [...current, event.target.value]); } }}>
                 <option value="">+ add</option>
                 {group.members.filter((member) => !recipientAgentIds.includes(member.id)).map((member) => <option key={member.id} value={member.id}>@{member.name}</option>)}
               </select>

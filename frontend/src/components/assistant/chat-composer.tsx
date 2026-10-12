@@ -550,6 +550,7 @@ function DraftedChatComposer({
     }
     syncComposerLayout(nextContent);
     setContent(nextContent);
+    onContentChange?.(nextContent);
   }
 
   /** Re-read the mention under the caret after typing or moving the caret. */

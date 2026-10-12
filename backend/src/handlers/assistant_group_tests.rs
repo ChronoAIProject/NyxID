@@ -281,10 +281,14 @@ async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recip
     )
     .await
     .unwrap();
-    post(&state, OWNER, &group.id, "@researcher approve this", None)
+    post(&state, OWNER, &group.id, "@NyxBot hello", None)
         .await
         .unwrap();
     settled(&state, &group.id, 3).await;
+    post(&state, OWNER, &group.id, "@researcher approve this", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 5).await;
     let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
         .await
         .unwrap()
@@ -344,9 +348,8 @@ async fn nyxbot_post_to_group_is_never_sticky() {
         .await
         .unwrap();
     settled(&state, &group.id, 5).await;
-    let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
+    let thread = team::home_thread(&state.db, &state.encryption_keys, &nyxbot)
         .await
-        .unwrap()
         .unwrap();
     let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
         .await
@@ -359,7 +362,7 @@ async fn nyxbot_post_to_group_is_never_sticky() {
         &json!({"group": group.id, "text": "NyxBot update"}),
     )
     .await;
-    assert!(!error, "{value}");
+    assert!(error, "{value}");
     settled(&state, &group.id, 4).await;
     post(&state, OWNER, &group.id, "bare follow-up", None)
         .await
