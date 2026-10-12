@@ -436,6 +436,9 @@ export function AgentLearningReview({
                           description:
                             draftDescriptions[proposal.id] ?? draft.description,
                           skill_md: drafts[proposal.id],
+                          kind: draft.kind,
+                          base_skill:
+                            draftBases[proposal.id] ?? draft.base_skill,
                           rationale:
                             draftRationales[proposal.id] ?? draft.rationale,
                           files: draftFiles[proposal.id] ?? draft.files,
