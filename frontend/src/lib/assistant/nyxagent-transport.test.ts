@@ -36,8 +36,9 @@ it("keeps a persisted diagnostic detail visible after reload", () => {
   expect(parsed.error_detail?.upstream_request_id).toBe("req-1");
 });
 
-it.each([["turn_failed", "completed actions"], ["stopped", "stopped turn finished"], ["credential_replaced", "key was replaced"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
-  expect(contextResetCopy(reason)).toContain(text);
+it.each([["turn_failed", CONTEXT_RESET_NOTICE], ["stopped", "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it."], ["credential_replaced", "key was replaced"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
+  expect(contextResetCopy(reason)).toBe(text);
+  expect(contextResetCopy(reason)).not.toContain("decided cards were preserved");
 });
 
 function conversation(key = id): NyxAgentConversation {
