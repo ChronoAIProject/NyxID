@@ -65,3 +65,11 @@ it("handles retention expiry between history and the image download", async () =
   render(<ToolImage image={{ id: "expired", endpoint: "/private/expired", label: "old image", contentType: "image/png" }} />);
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("expired per retention policy"));
 });
+
+it.each([undefined, "sent", "unavailable"] as const)("renders tool image delivery=%s without upload advice", async (imageInput) => {
+  render(<ToolImage image={{ id: "camera", endpoint: "/private/camera", contentType: "image/png", label: "camera snapshot", origin: "tool", imageInput }} />);
+  await screen.findByAltText("Image from camera snapshot");
+  expect(screen.queryByText(/try a smaller image/)).not.toBeInTheDocument();
+  if (imageInput === "unavailable") expect(screen.getByRole("status")).toHaveTextContent("The agent couldn't view this image.");
+  else expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});

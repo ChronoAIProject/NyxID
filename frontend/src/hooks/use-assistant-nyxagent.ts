@@ -69,7 +69,7 @@ export function continuationText(acknowledgement: NyxAgentAcknowledgement): stri
         acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
       }. Continue.`;
     case "skills":
-      return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot must still attach it through the owner confirmation flow.`;
+      return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and ask you to confirm attaching it on a separate card. Do not request the skill again.`;
     case "operations":
       return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
     case "account":
@@ -90,8 +90,10 @@ export function useNyxAgentAssistantChat({
   enabled = true,
   threadsAgentId,
   draftAgent,
+  reviewCardId,
 }: {
   readonly selectedConversationId?: string;
+  readonly reviewCardId?: string;
   readonly onConversationAdopted: (id: string) => void;
   readonly enabled?: boolean;
   /** List this agent's threads (for the sidebar and landing). */
@@ -119,7 +121,7 @@ export function useNyxAgentAssistantChat({
   const live = useNyxAgentLiveConnected();
   const threadsKey = nyxBotQueryKeys.threads(userId);
   const agentsKey = nyxBotQueryKeys.agents(userId);
-  const historyKey = nyxBotQueryKeys.history(userId, selectedConversationId);
+  const historyKey = [...nyxBotQueryKeys.history(userId, selectedConversationId), reviewCardId ?? null];
   const threads = useQuery({
     queryKey: nyxBotQueryKeys.threads(userId, threadsAgentId),
     queryFn: () => nyxAgentTransport.list(threadsAgentId),
@@ -135,7 +137,7 @@ export function useNyxAgentAssistantChat({
     queryKey: historyKey,
     queryFn: async () => {
       const previous = queryClient.getQueryData<NyxAgentHistory>(historyKey);
-      const page = await nyxAgentTransport.history(selectedConversationId!);
+      const page = await nyxAgentTransport.history(selectedConversationId!, undefined, reviewCardId ?? null);
       if (
         (previous?.conversation.active_turn && !page.conversation.active_turn) ||
         previous?.conversation.pending_acknowledgements !==

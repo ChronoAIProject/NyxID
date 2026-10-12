@@ -59,18 +59,25 @@ pub async fn card_authority(
     actor: &str,
     card: &AssistantAcknowledgement,
 ) -> AppResult<ChatAuthority> {
+    source_authority(db, actor, &card.api_key_id, &card.conversation_id).await
+}
+
+async fn source_authority(
+    db: &Database,
+    actor: &str,
+    key: &str,
+    conversation: &str,
+) -> AppResult<ChatAuthority> {
     let live = db
         .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
-        .find_one(
-            doc! {"_id":&card.api_key_id,"user_id":actor,"is_active":true,
-            "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
-        )
+        .find_one(doc! {"_id":key,"user_id":actor,"is_active":true,
+        "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]})
         .await?
         .is_some();
     let chat = if live {
-        acks::for_key(db, actor, Some(&card.api_key_id))
+        acks::for_key(db, actor, Some(key))
             .await?
-            .filter(|chat| chat.conversation_id == card.conversation_id)
+            .filter(|chat| chat.conversation_id == conversation)
     } else {
         None
     }
@@ -215,18 +222,110 @@ pub async fn create(
         rationale: String::new(),
         safety_notes: String::new(),
     };
-    // Tool retries within the same turn reuse the encrypted proposal and card.
-    submit(state, chat, &agent, body, reader, |fingerprint| {
-        let turn = chat
-            .turn_id
-            .as_deref()
-            .ok_or_else(|| AppError::Forbidden("Draft from an active owner turn".into()))?;
-        Ok(format!(
-            "skill-draft:{}:{turn}:{fingerprint}",
-            chat.conversation_id
-        ))
-    })
-    .await
+    let encoded = validate_body(&body)?;
+    review::validate_proposal_base(&state.db, &agent, &body, ProposalSource::Authored).await?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(state.audit_chain_hmac_key.as_slice())
+        .expect("HMAC key");
+    mac.update(b"nyxid-authored-skill-v1\0");
+    mac.update(agent.id.as_bytes());
+    mac.update(&encoded);
+    let fingerprint = hex::encode(mac.finalize().into_bytes());
+    let now = Utc::now();
+    let candidate = AssistantAgentLearningProposal {
+        source: ProposalSource::Authored,
+        id: Uuid::new_v4().to_string(),
+        agent_id: agent.id.clone(),
+        owner_id: agent.user_id.clone(),
+        run_id: String::new(),
+        status: "pending".into(),
+        revision: 0,
+        config_revision: 0,
+        agent_skills_revision: agent.skills_revision,
+        fingerprint,
+        input_digest: String::new(),
+        model_contract: "authored-skill-v1".into(),
+        publication: None,
+        failure_code: None,
+        evidence: Vec::new(),
+        body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+        body_bytes: encoded.len() as i64,
+        created_at: now,
+        updated_at: now,
+    };
+    let reservation = claims::reserve(state, chat, &candidate).await?;
+    if let Some(card) = &reservation.card {
+        return Ok(reused_result(
+            state,
+            card,
+            &reservation.proposal.id,
+            &agent.id,
+        ));
+    }
+    let id = &reservation.proposal.id;
+    let binding = review::approval_binding_typed(
+        state,
+        &chat.user_id,
+        &agent.id,
+        id,
+        reservation.proposal.revision,
+        agent.skills_revision,
+        reader,
+    )
+    .await;
+    let binding = match binding {
+        Ok(binding) => binding,
+        Err(failure) => {
+            // Keep the reserved proposal retryable: another caller may be
+            // preparing the same generation, or this worker may be retried.
+            if body.base_skill.is_some()
+                && matches!(
+                    failure.code,
+                    Some(
+                        review::PublicationFailureCode::OrnnUnavailable
+                            | review::PublicationFailureCode::NyxidRefused
+                    )
+                )
+            {
+                return Err(AppError::Conflict("source_skill_unavailable: NyxID could not read the source skill from Ornn. Approve any pending Ornn request, then draft again.".into()));
+            }
+            return Err(failure.error);
+        }
+    };
+    let card = claims::finalize(state, &reservation, &binding).await?;
+    Ok(reused_result(state, &card, id, &agent.id))
+}
+
+#[path = "assistant_skill_authoring_claims.rs"]
+mod claims;
+
+fn reused_result(
+    state: &AppState,
+    card: &AssistantAcknowledgement,
+    proposal: &str,
+    agent: &str,
+) -> Value {
+    let mut result = draft_result(state, card, proposal, agent);
+    if card.status == "expired" || card.expires_at <= Utc::now() {
+        result["status"] = "expired".into();
+        result["instructions"] = "This draft already has an expired review card in the NyxID app. Send review_url as a full URL; the owner can press Request a new confirmation there and review all files. A chat reply never approves publication.".into();
+    } else if card.status == "allowed" {
+        result["status"] = "waiting_publication".into();
+        result["instructions"] = "The owner already allowed this exact draft. Publication is pending on the existing review card; send review_url as a full URL to inspect its status. Do not create another draft or confirmation, renew it, or dispatch publication again.".into();
+    }
+    result
+}
+
+fn draft_result(
+    state: &AppState,
+    card: &AssistantAcknowledgement,
+    proposal: &str,
+    agent: &str,
+) -> Value {
+    let mut result = acks::refusal_with_frontend(card, &state.config.frontend_url);
+    result["proposal_id"] = proposal.into();
+    result["agent_id"] = agent.into();
+    result["source"] = "authored".into();
+    result
 }
 
 /// The owner's "Edit" of an attached skill in the app: an authored improve
@@ -305,7 +404,7 @@ pub async fn create_improve_draft(
         "skill-improve:{}:{}:{}",
         agent.id, pin.skill_id, pin.version
     );
-    submit(state, chat, &agent, body, reader, |fingerprint| {
+    submit_owner_draft(state, chat, &agent, body, reader, |fingerprint| {
         Ok(format!("{seed}:{fingerprint}"))
     })
     .await
@@ -320,8 +419,9 @@ fn without_frontmatter(text: &str) -> &str {
 }
 
 /// Validate, store (idempotently, keyed by `seed(fingerprint)`) and raise the
-/// owner review card for an authored draft.
-async fn submit(
+/// owner review card for a draft the owner starts in the app. Unlike NyxBot
+/// drafts (`claims`), there is no initiating turn to bind a claim to.
+async fn submit_owner_draft(
     state: &AppState,
     chat: &ChatAuthority,
     agent: &crate::models::assistant_agent::AssistantAgent,
@@ -432,12 +532,7 @@ async fn submit(
         },
     )
     .await?;
-    let mut result = acks::refusal(&card);
-    result["proposal_id"] = id.into();
-    result["agent_id"] = agent.id.into();
-    result["source"] = "authored".into();
-    result["instructions"] = "End your turn. The owner reviews all files on this card; NyxID publishes and pins after approval without a tool retry. Never confirm publication yourself.".into();
-    Ok(result)
+    Ok(draft_result(state, &card, &id, &agent.id))
 }
 
 const CARD_SUMMARY: &str = "Review the complete skill draft, publish it privately to Ornn and attach its exact version to this agent.";
@@ -515,9 +610,7 @@ pub async fn raise_review_card(
         },
     )
     .await?;
-    let mut result = acks::refusal(&card);
-    result["proposal_id"] = proposal_id.into();
-    Ok(result)
+    Ok(draft_result(state, &card, proposal_id, &agent.id))
 }
 
 #[cfg(test)]

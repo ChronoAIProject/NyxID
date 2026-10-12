@@ -519,7 +519,7 @@ fn resumes_publication(
 }
 
 pub(super) async fn gate(db: &Database, actor: &str) -> AppResult<()> {
-    if !feature_flag_service::personal_flag_enabled(db, actor, learning::FLAG_KEY).await? {
+    if !super::assistant_skill_authoring::enabled(db, actor).await? {
         return Err(AppError::ValidationError(
             "Automatic agent learning is not enabled yet".into(),
         ));
@@ -616,6 +616,10 @@ pub struct ProposalItem {
     /// Authored proposals are confirmed on their conversation card; this is the
     /// conversation of the newest one, so the panel can link to it.
     pub card_conversation_id: Option<String>,
+    pub acknowledgement_id: Option<String>,
+    pub card_status: Option<String>,
+    pub card_expires_at: Option<chrono::DateTime<Utc>>,
+    pub review_url: Option<String>,
 }
 
 async fn load(
@@ -956,7 +960,7 @@ pub async fn list(
             let _ = invalidate_stale(&state.db, &row).await;
             continue;
         }
-        let card_conversation_id = if row.source == ProposalSource::Authored {
+        let card = if row.source == ProposalSource::Authored {
             state
                 .db
                 .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
@@ -967,7 +971,6 @@ pub async fn list(
                 )
                 .sort(doc! {"created_at":-1})
                 .await?
-                .map(|card| card.conversation_id)
         } else {
             None
         };
@@ -1021,7 +1024,25 @@ pub async fn list(
             published_skill_id: row.publication.as_ref().and_then(|p| p.skill_id.clone()),
             published_version: row.publication.as_ref().map(|p| p.version.clone()),
             evidence_available,
-            card_conversation_id,
+            card_conversation_id: card.as_ref().map(|c| c.conversation_id.clone()),
+            acknowledgement_id: card.as_ref().map(|c| c.id.clone()),
+            card_status: card.as_ref().map(|c| {
+                if (c.status == "pending" || (c.status == "allowed" && c.kind == "action"))
+                    && c.expires_at <= Utc::now()
+                {
+                    "expired".into()
+                } else {
+                    c.status.clone()
+                }
+            }),
+            card_expires_at: card.as_ref().map(|c| c.expires_at),
+            review_url: card.as_ref().map(|c| {
+                super::assistant_links::AssistantPage::ReviewCard {
+                    conversation: &c.conversation_id,
+                    card: &c.id,
+                }
+                .url(&state.config.frontend_url)
+            }),
         });
     }
     Ok(result)
