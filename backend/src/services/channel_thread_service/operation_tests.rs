@@ -438,9 +438,13 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
     let loaded = crate::services::channel_bot_service::get_bot(&db, "bot")
         .await
         .unwrap();
+    // Telegram's 403 on the tail chunk is a recipient refusal.
+    let refusal = crate::errors::AppError::ChannelConversationNotReachable(String::new())
+        .error_code()
+        .to_string();
     assert_eq!(
         loaded.diagnostics.last_outbound_error.unwrap().code,
-        "10005"
+        refusal
     );
     // The stored BSON is a string, so every reader (not only the lenient
     // model deserializer) can load the row.
@@ -455,8 +459,8 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
         .unwrap()
         .get_document("last_outbound_error")
         .unwrap();
-    assert_eq!(error.get_str("code").unwrap(), "10005");
-    assert_eq!(error.get_str("reason").unwrap(), "provider_error");
+    assert_eq!(error.get_str("code").unwrap(), refusal);
+    assert_eq!(error.get_str("reason").unwrap(), "recipient_unreachable");
     let owner_rows = crate::services::channel_bot_service::list_bots(&db, "owner")
         .await
         .unwrap();
