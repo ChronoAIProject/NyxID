@@ -49,7 +49,7 @@ pub async fn get_config(
         global: global.map(|settings| GlobalBillingDefaultsResponse {
             default_lane: settings.default_lane,
             default_overdraft_cap_credits: settings.default_overdraft_cap_credits,
-            source: "db",
+            source: "global",
         }),
         precedence: ["env", "global", "service", "legacy/free"],
         environment: vec![
