@@ -176,6 +176,9 @@ describe("Studio breadcrumbs", () => {
     ["/admin/credits", "grants", "Credit grants"],
     ["/admin/credits", "allowances", "Free allowances"],
     ["/admin/credits", "schedules", "Schedules"],
+    ["/admin/billing", "overview", "Services"],
+    ["/admin/billing", "rates", "Rate cache"],
+    ["/admin/billing", "settings", "Settings"],
   ])("shows the selected subsection at %s?tab=%s", (path, tab, label) => {
     const crumbs = buildStudioBreadcrumbs(path, {}, { tab });
     expect(crumbs.at(-1)).toEqual({ label });

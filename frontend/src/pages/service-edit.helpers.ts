@@ -243,6 +243,27 @@ function laneValues(lane: LanePricingView | null | undefined) {
     : null;
 }
 
+/** Saved lane prices in form shape. */
+export function serviceLaneValues(
+  service: Pick<DownstreamService, "billing">,
+) {
+  return {
+    byok_pricing: laneValues(service.billing?.byok_pricing),
+    platform_key_pricing: laneValues(service.billing?.platform_key_pricing),
+  };
+}
+
+/** Only the lanes that changed; `null` clears a lane. */
+export function serviceLanePatch(
+  service: Pick<DownstreamService, "billing">,
+  data: Pick<UpdateServiceFormData, "byok_pricing" | "platform_key_pricing">,
+) {
+  return changedFields(serviceLaneValues(service), {
+    byok_pricing: laneValues(data.byok_pricing),
+    platform_key_pricing: laneValues(data.platform_key_pricing),
+  });
+}
+
 export function serviceFormPatch(
   data: UpdateServiceFormData,
   service: DownstreamService,
@@ -252,16 +273,7 @@ export function serviceFormPatch(
   const after = serviceFormPayload(data, service);
   const patch = changedFields(before, after);
   if (patch.billing) {
-    const lanes = changedFields(
-      {
-        byok_pricing: values.byok_pricing,
-        platform_key_pricing: values.platform_key_pricing,
-      },
-      {
-        byok_pricing: laneValues(data.byok_pricing),
-        platform_key_pricing: laneValues(data.platform_key_pricing),
-      },
-    );
+    const lanes = serviceLanePatch(service, data);
     const legacyChanged = [
       "platform_billable",
       "platform_metric",

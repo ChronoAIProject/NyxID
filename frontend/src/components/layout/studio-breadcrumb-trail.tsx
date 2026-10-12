@@ -26,7 +26,7 @@ function StudioBreadcrumbLink({
     case "/admin/credits":
       return <Link {...props} to="/admin/credits" search={{ tab }} />;
     case "/admin/billing":
-      return <Link {...props} to="/admin/billing" />;
+      return <Link {...props} to="/admin/billing" search={{ tab }} />;
     case "/admin/invite-codes":
       return (
         <Link
