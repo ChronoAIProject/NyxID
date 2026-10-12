@@ -227,10 +227,6 @@ pub async fn audit_access_request_denied(
     target: Option<&str>,
     scope: &str,
 ) {
-    let sample = format!("{}:{}:{}", chat.agent_id, chat.conversation_id, scope);
-    if !crate::telemetry::should_sample_event("assistant_access_request_denied", &sample, 100) {
-        return;
-    }
     let _ = audit_service::log_actor_event(
         db.clone(),
         &audit_service::AuditActor {
@@ -260,7 +256,7 @@ pub async fn audit_access_request_denied(
         let cutoff = Utc::now() - chrono::Duration::hours(1);
         let already_notified = messages
             .count_documents(doc! {
-                "user_id": &chat.user_id,
+                "conversation_id": &home,
                 "role": "event",
                 "error_code": "specialist_access_denied",
                 "specialist_id": &chat.agent_id,
