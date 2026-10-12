@@ -67,15 +67,15 @@ pub async fn require_catalog_writer(
 }
 
 /// Gate for writes to a catalog row or its operations, applied after the
-/// creator check. Public rows need catalog authority, so a creator who loses
-/// the Catalog Manager role loses write access; private rows keep the plain
-/// creator rule.
+/// creator check. Rows a Catalog Manager created need catalog authority, so a
+/// creator who loses the role loses write access. Every other row keeps the
+/// plain creator rule unchanged and returns `None`.
 pub async fn require_public_row_writer(
     state: &AppState,
     auth_user: &AuthUser,
     service: &DownstreamService,
 ) -> AppResult<Option<CatalogAuthority>> {
-    if service.visibility == "private" {
+    if !service.catalog_manager_created || service.visibility == "private" {
         return Ok(None);
     }
     require_catalog_writer(state, auth_user).await.map(Some)

@@ -48,19 +48,21 @@ Only an Admin may:
 - set or change a service's shared credential, platform key, billing,
   inference, identity propagation, token forwarding or delegation, token
   exchange, default headers, WebSocket frame injection, anonymous (no-auth)
-  endpoint rules on public rows, including through the
-  `/services/{id}/anonymous-endpoints` routes, operation policy, developer
-  apps, visibility, category, skills, or tool twins.
+  endpoint rules (including through the `/services/{id}/anonymous-endpoints`
+  routes), operation policy, developer apps, visibility, category, skills, or
+  tool twins.
 
 A Catalog Manager owns the providers they create, including the right to
 change the token URL or clear the client. Admins should therefore not place
 a platform-owned OAuth client on a manager-owned provider; create an
 Admin-owned provider instead.
 
-A non-admin may change a public catalog row, or its operation endpoints, only
-while they hold the role, so revoking it also revokes write access to rows
-they created. Private rows keep
-the existing creator rule. Provider and link audit events record
+A row a Catalog Manager creates is marked `catalog_manager_created`. On
+marked rows a non-admin may change the row or its operation endpoints only
+while holding the role, so revoking it also revokes write access, and
+anonymous rules stay Admin-only. Every other row, including all rows that
+existed before this role, keeps the existing creator rule unchanged. Provider
+and link audit events record
 `"authority": "admin" | "catalog_manager"`; provider updates also record
 whether a client was set, never its value.
 

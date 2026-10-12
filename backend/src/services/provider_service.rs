@@ -6365,6 +6365,7 @@ pub async fn seed_default_services(
             requires_user_credential: seed.requires_user_credential,
             is_active: true,
             created_by: "system".to_string(),
+            catalog_manager_created: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,

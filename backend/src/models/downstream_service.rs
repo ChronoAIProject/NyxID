@@ -376,6 +376,11 @@ pub struct DownstreamService {
 
     pub is_active: bool,
     pub created_by: String,
+    /// Set when a Catalog Manager (not an Admin) created this row. Only these
+    /// rows bind their non-admin creator to the Catalog Manager limits; every
+    /// other row keeps the plain creator rule.
+    #[serde(default)]
+    pub catalog_manager_created: bool,
     /// Current catalog owner after an administrative transfer. Legacy rows use
     /// `created_by`; creator attribution is never rewritten by a transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -603,6 +608,7 @@ pub mod test_helpers {
             requires_user_credential: false,
             is_active: true,
             created_by: "test".to_string(),
+            catalog_manager_created: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -714,6 +720,7 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            catalog_manager_created: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -808,6 +815,7 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            catalog_manager_created: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,

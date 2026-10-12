@@ -615,9 +615,6 @@ mod tests {
         let mut route_service = dummy_service();
         route_service.id = uuid::Uuid::new_v4().to_string();
         route_service.created_by = owner_id.clone();
-        // A private row keeps the plain creator rule, so the lookup below is
-        // what refuses the foreign endpoint.
-        route_service.visibility = "private".to_string();
         db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&route_service)
             .await

@@ -1036,6 +1036,7 @@ mod tests {
             requires_user_credential: true,
             visibility: "public".to_string(),
             created_by: user_id.to_string(),
+            catalog_manager_created: false,
             ..dummy_service()
         }
     }

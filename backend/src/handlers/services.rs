@@ -1629,6 +1629,8 @@ async fn create_service_inner(
         requires_user_credential,
         is_active: true,
         created_by: user_id_str.clone(),
+        catalog_manager_created: authority
+            == super::catalog_authority::CatalogAuthority::CatalogManager,
         identity_propagation_mode: "none".to_string(),
         identity_include_user_id: false,
         identity_include_email: false,
