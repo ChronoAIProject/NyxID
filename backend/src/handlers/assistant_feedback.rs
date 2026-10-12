@@ -154,6 +154,14 @@ async fn upsert(
     {
         return Ok(Json(row.into()));
     }
+    let event = if existing.is_none() {
+        "submitted"
+    } else if existing.as_ref().map(|r| r.vote.as_str()) != Some(input.vote.as_str()) {
+        "changed"
+    } else {
+        "comment_updated"
+    };
+    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), "assistant feedback state changed");
     audit_service::log_for_user(
         state.db.clone(),
         auth,
@@ -215,6 +223,7 @@ async fn withdraw(
     if !deleted {
         return Ok(StatusCode::NO_CONTENT);
     }
+    tracing::info!(target: "nyxid::assistant_feedback", event = "withdrawn", user_id = %user_id, message_id = %message_id, "assistant feedback state changed");
     audit_service::log_for_user(
         state.db.clone(),
         auth,
