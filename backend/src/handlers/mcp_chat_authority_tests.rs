@@ -3853,22 +3853,29 @@ async fn specialist_service_card_request_denied_audited_and_routed() {
     .unwrap();
     assert_eq!(denied["error"], "access_request_denied");
     assert!(card.is_none());
-    assert!(
-        f.state
-            .db
-            .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-            .find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"service"})
-            .await
-            .unwrap()
-            .expect("service denial audit");
+    let audit = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(
+            doc! {"event_type":"assistant_access_request_denied","event_data.scope":"service"},
+        )
+        .await
+        .unwrap()
+        .expect("service denial audit");
     let audit_data = audit.get_document("event_data").unwrap();
-    assert_eq!(audit_data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(
+        audit_data.get_str("requester_agent").unwrap(),
+        f.chat.agent_id
+    );
     assert_eq!(audit_data.get_str("thread").unwrap(), f.row.id);
-    assert_eq!(audit_data.get_str("key").unwrap(), f.row.credential_api_key_id);
+    assert_eq!(
+        audit_data.get_str("key").unwrap(),
+        f.row.credential_api_key_id
+    );
     assert_eq!(audit_data.get_str("target").unwrap(), service);
     assert_eq!(audit_data.get_str("scope").unwrap(), "service");
-    assert_eq!(audit_data.get_str("decision").unwrap(), "denied")
-    );
+    assert_eq!(audit_data.get_str("decision").unwrap(), "denied");
     settings::update(
         &f.state.db,
         &f.owner,
