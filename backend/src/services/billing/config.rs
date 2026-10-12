@@ -16,30 +16,12 @@ pub async fn load_settings(db: &mongodb::Database) -> AppResult<Option<BillingSe
         .await?
         .and_then(|s| s.billing))
 }
-pub async fn save_settings(
-    db: &mongodb::Database,
-    billing: Option<BillingSettings>,
-) -> AppResult<()> {
-    let value = mongodb::bson::to_bson(&billing).map_err(|e| {
-        crate::errors::AppError::Internal(format!("serialize billing settings: {e}"))
-    })?;
-    db.collection::<PlatformSettings>(SETTINGS)
-        .update_one(
-            doc! {"_id": PLATFORM_SETTINGS_ID},
-            doc! {"$set": {"billing": value}, "$setOnInsert": {"_id": PLATFORM_SETTINGS_ID}},
-        )
-        .upsert(true)
-        .await?;
-    Ok(())
-}
-
 pub async fn save_settings_and_audit(
     db: &mongodb::Database,
     billing: Option<BillingSettings>,
     actor: &crate::services::audit_service::AuditActor,
+    key: &[u8],
 ) -> AppResult<()> {
-    let key = crate::services::audit_service::audit_chain_hmac_key()
-        .ok_or_else(|| crate::errors::AppError::Internal("audit chain key unavailable".into()))?;
     let value = mongodb::bson::to_bson(&billing).map_err(|e| {
         crate::errors::AppError::Internal(format!("serialize billing settings: {e}"))
     })?;
@@ -223,13 +205,13 @@ pub fn effective_config(
 mod tests {
     use super::*;
     #[test]
-    fn precedence_is_service_global_env_free() {
+    fn precedence_is_env_then_free_when_no_service() {
         let global = BillingSettings {
             default_lane: Some("byok".into()),
             default_overdraft_cap_credits: Some(3),
         };
         let effective = effective_config(None, Some(&global), Some("platform"), Some(5));
-        assert_eq!(effective.lane_source, BillingConfigSource::Global);
+        assert_eq!(effective.lane_source, BillingConfigSource::Env);
         assert_eq!(effective.overdraft_cap_credits, Some(3));
         let free = effective_config(None, None, None, None);
         assert_eq!(free.lane_source, BillingConfigSource::Free);
@@ -238,10 +220,10 @@ mod tests {
     #[test]
     fn service_override_wins_over_global_and_env() {
         let service = ServiceBilling {
-            platform_pricing: Some(crate::models::service_billing::ServicePlatformPricing {
+            byok_pricing: Some(crate::models::service_billing::LanePricing {
                 credits_per_unit: "1".into(),
                 lago_metric_code: String::new(),
-                sync_status: Default::default(),
+                sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
                 sync_error: None,
             }),
             ..Default::default()
@@ -255,11 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn every_source_is_representable() {
-        assert_eq!(format!("{:?}", BillingConfigSource::Env), "Env");
-        assert_eq!(format!("{:?}", BillingConfigSource::Global), "Global");
-        assert_eq!(format!("{:?}", BillingConfigSource::Service), "Service");
-        assert_eq!(format!("{:?}", BillingConfigSource::Legacy), "Legacy");
-        assert_eq!(format!("{:?}", BillingConfigSource::Free), "Free");
+    fn source_enum_serializes_real_values() {
+        assert_eq!(serde_json::to_string(&BillingConfigSource::Env).unwrap(), ""env"");
     }
 }

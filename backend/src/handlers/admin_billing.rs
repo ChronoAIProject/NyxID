@@ -148,6 +148,7 @@ pub async fn put_config(
         &state.db,
         input.billing.clone(),
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        state.audit_chain_hmac_key.as_slice(),
     )
     .await?;
     get_config(State(state), auth).await

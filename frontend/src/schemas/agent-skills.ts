@@ -77,22 +77,29 @@ export const learningProposalSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   failure_code: z.string().nullish(),
+  published_version: z.string().nullish(),
   // Older servers omit it; their listed proposals always had current evidence.
   evidence_available: z.boolean().default(true),
   card_conversation_id: z.string().nullish(),
-  draft: z.object({
-    schema_version: z.number().default(1),
-    kind: z.enum(["new", "improve", "none"]).default("new"),
-    name: z.string(),
-    description: z.string(),
-    skill_md: z.string(),
-    rationale: z.string(),
-    safety_notes: z.string(),
-    files: z.array(z.object({ path: z.string(), content: z.string() })).default([]),
-    base_skill: z.unknown().optional(),
-  }).nullish(),
+  draft: z
+    .object({
+      schema_version: z.number().default(1),
+      kind: z.enum(["new", "improve", "none"]).default("new"),
+      name: z.string(),
+      description: z.string(),
+      skill_md: z.string(),
+      rationale: z.string(),
+      safety_notes: z.string(),
+      files: z
+        .array(z.object({ path: z.string(), content: z.string() }))
+        .default([]),
+      base_skill: z.unknown().optional(),
+    })
+    .nullish(),
 });
-export const learningProposalsSchema = z.object({ proposals: learningProposalSchema.array() });
+export const learningProposalsSchema = z.object({
+  proposals: learningProposalSchema.array(),
+});
 export const learningStatusSchema = z.object({
   available: z.boolean().optional(),
   can_maintain: z.boolean().optional(),
@@ -109,7 +116,20 @@ export const learningStatusSchema = z.object({
 });
 export const learningApprovalSchema = z.object({
   status: z.string(),
-  acknowledgement: z
-    .object({ acknowledgement_id: z.string() })
-    .optional(),
+  acknowledgement: z.object({ acknowledgement_id: z.string() }).optional(),
+});
+
+export const attachedSkillPreviewSchema = skillPreviewSchema.extend({
+  disabled: z.boolean().default(false),
+});
+export const agentSkillHistorySchema = z.object({
+  items: z
+    .array(
+      z.object({
+        id: z.string(),
+        created_at: z.string(),
+        event_data: z.record(z.string(), z.unknown()),
+      }),
+    )
+    .default([]),
 });

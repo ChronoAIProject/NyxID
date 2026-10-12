@@ -792,7 +792,7 @@ export class NyxAgentTransport {
     const failed = [...messages].reverse().find((message) => message.role === "assistant" && message.status === "failed");
     const user = failed && [...messages].reverse().find((message) => message.role === "user" && message.seq < failed.seq && !message.execution_pending);
     if (!user) throw new Error("No failed turn is available to retry.");
-    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true, retryOf: failed?.turnId });
+    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true, retryOf: failed?.turn_id });
   }
 }
 

@@ -127,7 +127,7 @@ mod tests {
             Some(json!({})),
         )
         .await;
-        assert!(status.is_success() || status == StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let count = f
             .state
             .db
@@ -135,7 +135,7 @@ mod tests {
             .count_documents(doc! {})
             .await
             .unwrap();
-        assert!(count >= 0);
+        let _cache_count = count;
     }
 
     #[tokio::test]
@@ -234,6 +234,7 @@ mod tests {
                 default_overdraft_cap_credits: Some(99),
             }),
             &actor,
+            f.state.audit_chain_hmac_key.as_slice(),
         )
         .await;
         if result.is_err() {
