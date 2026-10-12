@@ -1085,7 +1085,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/billing/services/{id}",
-            put(handlers::services::update_service),
+            put(handlers::admin_billing::update_service_billing),
         )
         .route(
             "/credits/grants",

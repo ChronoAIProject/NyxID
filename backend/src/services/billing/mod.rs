@@ -323,12 +323,16 @@ impl BillingService {
                 "Lago client is not configured".to_string(),
             )
         })?;
+        let cap = crate::services::billing::config::load_settings(&self.db)
+            .await?
+            .and_then(|s| s.default_overdraft_cap_credits)
+            .unwrap_or(self.config.billing_default_overdraft_cap_credits);
         provisioning::ensure_owner_wallet(
             &self.db,
             lago,
             owner_id,
             &self.config.lago_plan_code,
-            self.config.billing_default_overdraft_cap_credits,
+            cap,
         )
         .await
     }
@@ -344,12 +348,16 @@ impl BillingService {
                 "Lago client is not configured".to_string(),
             )
         })?;
+        let cap = crate::services::billing::config::load_settings(&self.db)
+            .await?
+            .and_then(|s| s.default_overdraft_cap_credits)
+            .unwrap_or(self.config.billing_default_overdraft_cap_credits);
         provisioning::create_topup_checkout(
             &self.db,
             lago,
             owner_id,
             &self.config.lago_plan_code,
-            self.config.billing_default_overdraft_cap_credits,
+            cap,
             amount_credits,
             idempotency_key,
         )

@@ -503,3 +503,7 @@ Billing configuration has an explicit, inspectable precedence order:
 3. A service's `ServiceBilling` is the highest-precedence scoped override.
 
 Every effective value reports its source (`env`, `global`, `service`, `legacy`, or `free`). The central admin billing surface exposes the effective source, cached rates and sync state. This configuration surface does not alter money arithmetic, reservations, settlement, or reconciliation.
+
+## Billing configuration precedence
+
+The admin billing configuration mirror exposes deployment values with `source: env`, database defaults with `source: db`, and compiled defaults with `source: default`; secret values are represented only by presence flags. Service pricing is resolved per credential lane: a synced BYOK or platform-key primary wins for that lane, unsynced primaries use the legacy metric (or free when no legacy price exists), and synced components contribute independently. With no configured lane, legacy platform pricing applies; otherwise the effective result is free. The admin routes are `GET/PUT /admin/billing/config`, `GET /admin/billing/overview`, `GET /admin/billing/rates`, `POST /admin/billing/services/{id}/resync`, and billing-scoped `PUT /admin/billing/services/{id}`. Upgrade all replicas before setting database billing defaults; old replicas continue using environment defaults.

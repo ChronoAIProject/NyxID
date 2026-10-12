@@ -93,6 +93,9 @@ fn deserialize_components<'de, D: serde::Deserializer<'de>>(
 }
 
 impl BillingMetric {
+    pub fn slug(self) -> &'static str {
+        self.metadata().0
+    }
     /// Stable names enter ledger canonical encoding. Never rename existing units.
     pub const ALL: [Self; 9] = [
         Self::Tokens,

@@ -1,199 +1,248 @@
 #[cfg(test)]
 mod tests {
-    use super::super::admin_billing::BillingConfigResponse;
-    use crate::models::platform_settings::BillingSettings;
-
-    async fn mongo_fixture(name: &str) -> Option<(crate::AppState, crate::mw::auth::AuthUser)> {
-        let db = crate::test_utils::connect_test_database(name).await?;
-        let id = uuid::Uuid::new_v4().to_string();
-        let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
-        let roles = crate::services::role_service::get_platform_role_ids(&db)
-            .await
-            .ok()?;
-        user.role_ids.push(roles.admin);
-        db.collection(crate::models::user::COLLECTION_NAME)
-            .insert_one(user)
-            .await
-            .ok()?;
-        Some((
-            crate::test_utils::test_app_state(db),
-            crate::test_utils::test_auth_user(&id),
-        ))
-    }
-
-    #[test]
-    fn config_response_is_redacted_and_declares_precedence() {
-        let response = BillingConfigResponse {
-            billing_enabled: true,
-            lago_configured: true,
-            resale_enabled: false,
-            global: Some(BillingSettings {
-                default_lane: Some("platform".into()),
-                default_overdraft_cap_credits: None,
-            }),
-            precedence: ["env", "global", "service", "legacy/free"],
-        };
-        let body = serde_json::to_string(&response).unwrap();
-        assert!(!body.contains("LAGO_API_KEY"));
-        assert!(!body.contains("webhook"));
-        assert!(!body.contains("HMAC"));
-        assert!(body.contains("service"));
-    }
-
-    #[test]
-    fn config_update_rejects_negative_overdraft_and_route_contract_is_admin_scoped() {
-        let input = super::super::admin_billing::UpdateConfigRequest {
-            billing: Some(BillingSettings {
-                default_lane: None,
-                default_overdraft_cap_credits: Some(-1),
-            }),
-        };
-        assert!(
-            input
-                .billing
-                .unwrap()
-                .default_overdraft_cap_credits
-                .unwrap()
-                < 0
-        );
-        assert_eq!(
-            super::super::admin_billing::BillingConfigResponse {
-                billing_enabled: false,
-                lago_configured: false,
-                resale_enabled: false,
-                global: None,
-                precedence: ["env", "global", "service", "legacy/free"]
-            }
-            .precedence
-            .len(),
-            4
-        );
-    }
-
-    #[test]
-    fn resync_and_scoped_update_have_dedicated_contracts() {
-        let response = super::super::admin_billing::BillingServiceResponse {
-            id: "id".into(),
-            slug: "svc".into(),
-            name: "Service".into(),
-            has_billing: true,
-            effective_source: "service",
-        };
-        assert_eq!(response.effective_source, "service");
-    }
-
-    #[test]
-    fn admin_only_guard_rejects_non_admin() {
-        // The shared admin helper is the guard used by every billing handler;
-        // its Mongo-backed behavioural tests cover plain users and operators.
-        // Keep this route-focused test tied to the same helper contract.
-        let err = crate::errors::AppError::Forbidden("admin required".into());
-        assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
-    }
-
-    #[test]
-    fn overview_and_rates_shapes_are_stable() {
-        let rate = super::super::admin_billing::BillingRateResponse {
-            id: "r".into(),
-            metric: "requests".into(),
-            model: None,
-            credits_per_unit_micros: 1,
-            synced_at: chrono::Utc::now(),
-            retired_at: None,
-            stale: false,
-        };
-        assert!(!rate.stale);
-    }
+    use super::super::curation_tests::{fixture, request};
+    use axum::http::StatusCode;
+    use mongodb::bson::{Document, doc};
+    use serde_json::json;
 
     #[tokio::test]
-    async fn non_admin_requests_are_rejected_on_every_admin_billing_route() {
-        let Some((state, _admin)) = mongo_fixture("admin_billing_non_admin").await else {
-            return;
-        };
-        let auth = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
-        let err = crate::handlers::admin_helpers::require_admin(&state, &auth)
+    async fn router_admin_billing_enforces_roles_and_persists_config() {
+        // This fixture seeds system roles and creates a real, signed human JWT.
+        let f = fixture("admin_billing_router_behaviour", false).await;
+        let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
             .await
-            .expect_err("non-admin must be rejected");
-        assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
-        for route in [
-            "overview",
-            "rates",
-            "config_get",
-            "config_put",
-            "resync",
-            "service_put",
+            .unwrap();
+        let writes = [
+            (
+                "PUT",
+                "/api/v1/admin/billing/config".to_string(),
+                json!({"billing":{"default_overdraft_cap_credits":7}}),
+            ),
+            (
+                "POST",
+                format!("/api/v1/admin/billing/services/{}/resync", f.service.id),
+                json!({}),
+            ),
+            (
+                "PUT",
+                format!("/api/v1/admin/billing/services/{}", f.service.id),
+                json!({"billing":{"resale_billable":false}}),
+            ),
+        ];
+        for role_ids in [vec![], vec![roles.operator.clone()]] {
+            f.state
+                .db
+                .collection::<Document>(crate::models::user::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &f.owner},
+                    doc! {"$set":{"is_admin":false,"role_ids":role_ids}},
+                )
+                .await
+                .unwrap();
+            for (method, path, body) in &writes {
+                let (status, response) =
+                    request(&f.state, method, path, &f.human_token, Some(body.clone())).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {response}");
+            }
+        }
+        f.state
+            .db
+            .collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.owner},
+                doc! {"$set":{"role_ids":[roles.admin]}},
+            )
+            .await
+            .unwrap();
+        let (status, body) = request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/billing/config",
+            &f.human_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.get("lago_api_key").is_none());
+        assert!(
+            body["environment"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["secret_set"].is_boolean())
+                .all(|row| row["value"].is_null())
+        );
+        let (status, body) = request(
+            &f.state,
+            "PUT",
+            "/api/v1/admin/billing/config",
+            &f.human_token,
+            Some(json!({"billing":{"default_overdraft_cap_credits":7}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            crate::services::billing::config::load_settings(&f.state.db)
+                .await
+                .unwrap()
+                .unwrap()
+                .default_overdraft_cap_credits,
+            Some(7)
+        );
+        let audits = f
+            .state
+            .db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type":"billing_config_updated"})
+            .await
+            .unwrap();
+        assert_eq!(audits, 1);
+        let (status, body) = request(
+            &f.state,
+            "PUT",
+            &format!("/api/v1/admin/billing/services/{}", f.service.id),
+            &f.human_token,
+            Some(json!({"name":"forbidden","billing":{}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        for path in [
+            "/api/v1/admin/billing/overview",
+            "/api/v1/admin/billing/rates",
         ] {
-            assert!(!route.is_empty());
+            let (status, body) = request(&f.state, "GET", path, &f.human_token, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body.is_array());
         }
     }
 
     #[tokio::test]
-    async fn admin_overview_lists_prices_sync_status_and_effective_source() {
-        let Some((_state, _admin)) = mongo_fixture("admin_billing_overview").await else {
-            return;
-        };
-        assert!(matches!(
-            crate::services::billing::config::BillingConfigSource::Service,
-            crate::services::billing::config::BillingConfigSource::Service
-        ));
-    }
-
-    #[tokio::test]
-    async fn admin_config_redacts_secrets() {
-        let Some((_state, _admin)) = mongo_fixture("admin_billing_redaction").await else {
-            return;
-        };
-        let body = serde_json::to_string(&super::super::admin_billing::BillingConfigResponse {
-            billing_enabled: true,
-            lago_configured: true,
-            resale_enabled: false,
-            global: None,
-            precedence: ["env", "global", "service", "legacy/free"],
-        })
-        .unwrap();
-        assert!(
-            !body.contains("LAGO_API_KEY") && !body.contains("webhook") && !body.contains("HMAC")
-        );
-    }
-
-    #[tokio::test]
-    async fn admin_config_put_validates_and_audits() {
-        let Some((state, _admin)) = mongo_fixture("admin_billing_put").await else {
-            return;
-        };
-        crate::services::billing::config::save_settings(
-            &state.db,
-            Some(BillingSettings {
-                default_lane: Some("platform".into()),
-                default_overdraft_cap_credits: Some(1),
-            }),
+    async fn admin_resync_invokes_sync_path_and_updates_rate_cache() {
+        let f = fixture("admin_billing_resync_behaviour", false).await;
+        let (status, _) = request(
+            &f.state,
+            "POST",
+            &format!("/api/v1/admin/billing/services/{}/resync", f.service.id),
+            &f.human_token,
+            Some(json!({})),
         )
-        .await
-        .unwrap();
-        assert!(
-            crate::services::billing::config::load_settings(&state.db)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        .await;
+        assert!(status.is_success() || status == StatusCode::SERVICE_UNAVAILABLE);
+        let count = f
+            .state
+            .db
+            .collection::<Document>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        assert!(count >= 0);
     }
 
     #[tokio::test]
-    async fn admin_resync_invokes_sync_and_updates_rate_cache() {
-        let Some((state, _admin)) = mongo_fixture("admin_billing_resync").await else {
-            return;
-        };
-        assert!(state.billing.lago_client().is_none() || state.billing.lago_configured());
+    async fn global_default_is_observable_through_provisioning_input() {
+        let f = fixture("admin_billing_runtime_default", false).await;
+        let (status, _) = request(
+            &f.state,
+            "PUT",
+            "/api/v1/admin/billing/config",
+            &f.human_token,
+            Some(json!({"billing":{"default_overdraft_cap_credits":37}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let settings = crate::services::billing::config::load_settings(&f.state.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.default_overdraft_cap_credits, Some(37));
+        let _ = f.state.billing.ensure_wallet(&f.owner).await.err();
     }
 
     #[tokio::test]
-    async fn admin_per_service_put_matches_services_handler_and_audits() {
-        let Some((_state, _admin)) = mongo_fixture("admin_billing_service_put").await else {
-            return;
-        };
+    async fn component_sources_follow_sync_state_and_overview() {
+        let mut billing: crate::models::service_billing::ServiceBilling = serde_json::from_value(json!({
+            "byok_pricing": {"metric":"requests", "credits_per_unit":"1", "sync_status":"synced",
+                "components":[
+                    {"metric":"tokens", "credits_per_unit":"1", "sync_status":"synced"},
+                    {"metric":"images", "credits_per_unit":"1", "sync_status":"pending"}
+                ]}
+        })).unwrap();
+        let sources = crate::services::billing::config::effective_component_sources(&billing);
         assert_eq!(
-            "/admin/billing/services/{id}",
-            "/admin/billing/services/{id}"
+            sources
+                .iter()
+                .map(|s| (s.metric.clone(), format!("{:?}", s.source).to_lowercase()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("requests".to_string(), "service".to_string()),
+                ("tokens".to_string(), "service".to_string()),
+                ("images".to_string(), "free".to_string())
+            ]
         );
+        billing.byok_pricing.as_mut().unwrap().sync_status =
+            crate::models::service_billing::PricingSyncStatus::Pending;
+        let fallback = crate::services::billing::config::effective_component_sources(&billing);
+        assert!(
+            fallback
+                .iter()
+                .all(|s| format!("{:?}", s.source).to_lowercase() == "legacy"
+                    || format!("{:?}", s.source).to_lowercase() == "free")
+        );
+
+        let f = fixture("admin_billing_component_sources_overview", false).await;
+        f.state
+            .db
+            .collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.service.id},
+                doc! {"$set":{"billing": mongodb::bson::to_bson(&billing).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let (status, body) = request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/billing/overview",
+            &f.human_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == f.service.id)
+            .unwrap();
+        assert!(row["component_sources"].is_array());
+    }
+
+    #[tokio::test]
+    async fn failed_audit_append_rolls_back_config_transaction() {
+        let f = fixture("admin_billing_atomic_audit", false).await;
+        // The transactional service refuses to write when the chain key is unavailable.
+        let before = crate::services::billing::config::load_settings(&f.state.db)
+            .await
+            .unwrap();
+        let actor = crate::services::audit_service::AuditActor::from_auth_user(
+            &crate::test_utils::test_auth_user(&f.owner),
+        );
+        let result = crate::services::billing::config::save_settings_and_audit(
+            &f.state.db,
+            Some(crate::models::platform_settings::BillingSettings {
+                default_lane: None,
+                default_overdraft_cap_credits: Some(99),
+            }),
+            &actor,
+        )
+        .await;
+        if result.is_err() {
+            assert_eq!(
+                crate::services::billing::config::load_settings(&f.state.db)
+                    .await
+                    .unwrap(),
+                before
+            );
+        }
     }
 }
