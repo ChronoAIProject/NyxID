@@ -53,7 +53,8 @@ fn normalize_edit_draft(revision: Option<i64>, mut draft: Value) -> Value {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateBody {
-    draft: Value,
+    pub revision: Option<i64>,
+    pub draft: Value,
 }
 
 /// Other query parameters are ignored, as before the card parameter existed.

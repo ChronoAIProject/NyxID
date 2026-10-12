@@ -178,7 +178,7 @@ pub trait OrnnReader: Sync {
 
 pub use crate::models::assistant_agent::SkillSelection as Selection;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct SkillsResponse {
     pub agent_id: String,
     pub revision: i64,
