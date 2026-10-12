@@ -2692,6 +2692,9 @@ pub const MAX_ACTIVITY_LABEL_CHARS: usize = 120;
 
 /// Record a tool call started with the chat's key during the live turn. The
 /// label is an identifier only. Returns the activity ID when a turn is live.
+/// Production callers record the digest through `activity_started_with_digest`;
+/// this wrapper is kept for the activity tests.
+#[cfg(test)]
 pub async fn activity_started(
     db: &Database,
     user_id: &str,
