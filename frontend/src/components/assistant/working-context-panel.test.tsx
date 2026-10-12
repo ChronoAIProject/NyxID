@@ -44,6 +44,8 @@ describe("WorkingContextPanel", () => {
     renderPanel({ onManageMemory });
     fireEvent.click(screen.getByText("Working context"));
     expect(await screen.findByText("Goal: Ship it")).toBeInTheDocument();
+    expect(screen.getByText(/Last checkpoint: failed \(idle_timeout\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Last successful checkpoint:/)).toHaveTextContent("Last successful checkpoint: 1/1/2026");
     expect(screen.getByText("Completed since then: mail__send")).toBeInTheDocument();
     expect(screen.getByText("Failed or interrupted: drive__upload")).toBeInTheDocument();
     expect(screen.getByText("Running now: None")).toBeInTheDocument();
