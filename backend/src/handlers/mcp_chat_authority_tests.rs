@@ -3902,9 +3902,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
 }
 
 #[tokio::test]
-async fn specialist_channel_bot_tools_are_denied_audited_and_routed() {
-    use crate::models::assistant_settings::SpecialistAccessRequests;
-    use crate::services::assistant_settings_service as settings;
+async fn specialist_channel_bot_tools_remain_orchestrator_only() {
     let f = fixture("strict_channel_bot_tools").await;
     let specialist = authenticate(&f).await;
     for tool in [
@@ -3912,38 +3910,16 @@ async fn specialist_channel_bot_tools_are_denied_audited_and_routed() {
         "nyxid__connect_channel_bot",
         "nyxid__link_channel_bot",
     ] {
-        settings::update(
-            &f.state.db,
-            &f.owner,
-            settings::Update {
-                specialist_access_requests: Some(SpecialistAccessRequests::Denied),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
         let denied = result(call(&f, &specialist, tool, json!({})).await, true).await;
-        assert_eq!(denied["error"], "access_request_denied", "{tool}");
-        assert!(
+        assert_eq!(denied["error"], "orchestrator_only", "{tool}");
+        assert_eq!(
             f.state
                 .db
                 .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                .find_one(doc! {"event_type":"assistant_access_request_denied"})
+                .count_documents(doc! {"event_type":"assistant_access_request_denied"})
                 .await
-                .unwrap()
-                .is_some()
+                .unwrap(),
+            0
         );
-        settings::update(
-            &f.state.db,
-            &f.owner,
-            settings::Update {
-                specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        let routed = result(call(&f, &specialist, tool, json!({})).await, true).await;
-        assert!(routed["error"] != "access_request_denied", "{tool}");
     }
 }
