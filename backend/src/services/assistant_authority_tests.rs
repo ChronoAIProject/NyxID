@@ -1871,3 +1871,83 @@ async fn specialist_operation_scope_card_request_denied_audited_and_routed() {
         .is_ok()
     );
 }
+
+#[tokio::test]
+async fn specialist_skill_card_request_denied_audited_and_routed() {
+    use super::assistant_settings_service as settings;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = fixture("strict_skill_card").await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let args = serde_json::json!({"skills":[{"slug":"strict-skill","version":"1"}]});
+    let err = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "skills",
+            service: None,
+            tool: Some("nyxid__request_agent_skills"),
+            arguments: Some(&args),
+            summary: "Request skill",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("access_request_denied"));
+    let audit = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"skills"})
+        .await
+        .unwrap()
+        .expect("skill denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(data.get_str("decision").unwrap(), "denied");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        super::assistant_acknowledgement_service::request_tracked(
+            &f.state.db,
+            &f.chat,
+            super::assistant_acknowledgement_service::Request {
+                kind: "skills",
+                service: None,
+                tool: Some("nyxid__request_agent_skills"),
+                arguments: Some(&args),
+                summary: "Request skill",
+                platform: false
+            }
+        )
+        .await
+        .is_ok()
+    );
+}
