@@ -310,6 +310,17 @@ impl BillingService {
         reconcile::BillingReconciler::new(self.db.clone(), self.lago.clone(), self.config.clone())
     }
 
+    /// Overdraft cap for newly provisioned wallets: the global admin default,
+    /// else `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS`.
+    async fn default_overdraft_cap(&self) -> AppResult<i64> {
+        let global = config::load_settings(&self.db).await?;
+        Ok(config::effective_overdraft_cap(
+            global.as_ref(),
+            self.config.billing_default_overdraft_cap_credits,
+        )
+        .0)
+    }
+
     pub async fn get_wallet(&self, owner_id: &str) -> AppResult<Option<BillingWallet>> {
         provisioning::get_wallet(&self.db, owner_id).await
     }
@@ -323,16 +334,16 @@ impl BillingService {
                 "Lago client is not configured".to_string(),
             )
         })?;
+        // Existing wallets return before the settings read, but never before the
+        // exact-accounting cutover fence that `ensure_owner_wallet` applies.
+        exact_migration::require_ready(&self.db).await?;
         if let Some(wallet) = provisioning::get_wallet(&self.db, owner_id).await? {
             return Ok(provisioning::ProvisionedWallet {
                 wallet,
                 created: false,
             });
         }
-        let cap = crate::services::billing::config::load_settings(&self.db)
-            .await?
-            .and_then(|s| s.default_overdraft_cap_credits)
-            .unwrap_or(self.config.billing_default_overdraft_cap_credits);
+        let cap = self.default_overdraft_cap().await?;
         provisioning::ensure_owner_wallet(
             &self.db,
             lago,
@@ -354,10 +365,7 @@ impl BillingService {
                 "Lago client is not configured".to_string(),
             )
         })?;
-        let cap = crate::services::billing::config::load_settings(&self.db)
-            .await?
-            .and_then(|s| s.default_overdraft_cap_credits)
-            .unwrap_or(self.config.billing_default_overdraft_cap_credits);
+        let cap = self.default_overdraft_cap().await?;
         provisioning::create_topup_checkout(
             &self.db,
             lago,
@@ -378,10 +386,7 @@ impl BillingService {
                 "Lago client is not configured".to_string(),
             )
         })?;
-        let cap = crate::services::billing::config::load_settings(&self.db)
-            .await?
-            .and_then(|settings| settings.default_overdraft_cap_credits)
-            .unwrap_or(self.config.billing_default_overdraft_cap_credits);
+        let cap = self.default_overdraft_cap().await?;
         provisioning::backfill_existing_owner_wallets(
             &self.db,
             lago,
@@ -2091,6 +2096,122 @@ mod tests {
                 raw: serde_json::json!({}),
             }])
         }
+    }
+
+    #[tokio::test]
+    async fn existing_wallet_lookup_stays_behind_the_exact_cutover_fence() {
+        let Some(db) = connect_test_database("billing_wallet_cutover_fence").await else {
+            return;
+        };
+        // A pending cutover: no completed exact-v2 marker yet.
+        db.collection::<mongodb::bson::Document>("billing_migrations")
+            .delete_many(doc! {})
+            .await
+            .expect("clear markers");
+        insert_wallet(&db, "owner-fenced").await;
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        let service = BillingService::new_with_lago(
+            db.clone(),
+            Arc::new(config),
+            Arc::new(FakeLago::default()),
+        );
+        let error = service
+            .ensure_wallet("owner-fenced")
+            .await
+            .expect_err("pending cutover must refuse wallet access");
+        assert!(
+            matches!(
+                error,
+                crate::errors::AppError::BillingProviderUnavailable(_)
+            ),
+            "{error:?}"
+        );
+        db.collection::<mongodb::bson::Document>("billing_migrations")
+            .insert_one(doc! { "_id": "exact-v2", "completed_at": mongodb::bson::DateTime::now() })
+            .await
+            .expect("complete cutover");
+        let existing = service.ensure_wallet("owner-fenced").await.expect("ready");
+        assert!(!existing.created);
+        assert_eq!(existing.wallet.id, "wallet-owner-fenced");
+    }
+
+    #[tokio::test]
+    async fn new_wallets_receive_the_global_overdraft_cap_then_the_env_default() {
+        let Some(db) = connect_test_database("billing_global_overdraft_cap").await else {
+            return;
+        };
+        role_service::seed_system_roles(&db)
+            .await
+            .expect("seed roles");
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        config.billing_default_overdraft_cap_credits = 5;
+        let lago = Arc::new(FakeLago::default());
+        let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        let actor = crate::services::audit_service::AuditActor::from_auth_user(
+            &crate::test_utils::test_auth_user("admin-1"),
+        );
+        super::config::update_global_defaults(
+            &db,
+            &super::config::GlobalBillingPatch {
+                default_overdraft_cap_credits: Some(Some(37)),
+            },
+            &actor,
+            b"test-key",
+        )
+        .await
+        .expect("set global cap");
+        let first = crate::services::auth_service::register_user(
+            &db,
+            "cap-global@example.com",
+            "password123",
+            Some("Cap Global"),
+            None,
+            true,
+        )
+        .await
+        .expect("create owner");
+        let provisioned = service
+            .ensure_wallet(&first.user_id)
+            .await
+            .expect("provision");
+        assert!(provisioned.created);
+        assert_eq!(
+            provisioned.wallet.overdraft_cap_credits,
+            crate::models::credits::Credits::from_whole(37)
+        );
+        assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 1);
+
+        // Clearing the global value falls back to BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS.
+        super::config::update_global_defaults(
+            &db,
+            &super::config::GlobalBillingPatch {
+                default_overdraft_cap_credits: Some(None),
+            },
+            &actor,
+            b"test-key",
+        )
+        .await
+        .expect("clear global cap");
+        let second = crate::services::auth_service::register_user(
+            &db,
+            "cap-env@example.com",
+            "password123",
+            Some("Cap Env"),
+            None,
+            true,
+        )
+        .await
+        .expect("create owner");
+        let provisioned = service
+            .ensure_wallet(&second.user_id)
+            .await
+            .expect("provision");
+        assert_eq!(
+            provisioned.wallet.overdraft_cap_credits,
+            crate::models::credits::Credits::from_whole(5)
+        );
     }
 
     async fn insert_wallet(db: &mongodb::Database, owner_id: &str) {
