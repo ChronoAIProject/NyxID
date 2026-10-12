@@ -1,6 +1,7 @@
 //! Group chats (Grok-Bot style): the owner plus several of their agents in
-//! one transcript. A user message goes to the members it @mentions, else to
-//! the lead; members hand work to each other by @mentioning them in replies,
+//! one transcript. A user message goes to its picked recipients, else the
+//! members it @mentions, else the sender's sticky last recipients, else the
+//! lead; members hand work to each other by @mentioning them in replies,
 //! bounded per user message. Every member speaks through its own hidden
 //! member thread, so it keeps its own key, grants and memory. Starting turns
 //! lives in `handlers::assistant_group`; this module owns the durable state.
@@ -13,6 +14,7 @@ use mongodb::{
 };
 use uuid::Uuid;
 
+/// The owner's sticky recipient selection for later unaddressed messages.
 pub async fn persist_last_recipients(
     db: &Database,
     owner: &str,
@@ -28,18 +30,41 @@ pub async fn persist_last_recipients(
     Ok(())
 }
 
-pub async fn persist_message_recipients(
-    db: &Database,
-    message_id: &str,
-    ids: &[String],
-) -> AppResult<()> {
-    db.collection::<GroupMessage>(MESSAGES)
-        .update_one(
-            doc! {"_id": message_id},
-            doc! {"$set": {"recipient_agent_ids": ids}},
-        )
-        .await?;
-    Ok(())
+/// An explicit recipient selection from the composer pills: deduplicated in
+/// order, 1 to `MAX_MEMBERS` ids, each a live (not destroyed) member.
+pub fn explicit_recipients(ids: &[String], live: &[AssistantAgent]) -> AppResult<Vec<String>> {
+    let mut selected: Vec<String> = Vec::new();
+    for id in ids {
+        if !selected.contains(id) {
+            selected.push(id.clone());
+        }
+    }
+    if selected.is_empty()
+        || selected.len() > MAX_MEMBERS
+        || selected
+            .iter()
+            .any(|id| !live.iter().any(|member| member.id == *id))
+    {
+        return Err(AppError::ValidationError(format!(
+            "Choose 1 to {MAX_MEMBERS} current group members as recipients"
+        )));
+    }
+    Ok(selected)
+}
+
+/// The recipients an unaddressed message goes to, as the composer previews
+/// them: the sticky selection's live members, else the lead while it is live.
+pub fn default_recipients(sticky: &[String], live_ids: &[String], lead: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in sticky {
+        if live_ids.contains(id) && !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    if ids.is_empty() && live_ids.iter().any(|id| id == lead) {
+        ids.push(lead.to_owned());
+    }
+    ids
 }
 
 pub async fn pending_thread_actions(
@@ -283,7 +308,7 @@ pub async fn update(
         db.collection::<AssistantGroup>(GROUPS)
             .update_one(
                 owner_filter(owner, id)?,
-                doc! {"$pull": {"pending_agent_ids": {"$nin": &ids}}},
+                doc! {"$pull": {"pending_agent_ids": {"$nin": &ids}, "last_recipient_ids": {"$nin": &ids}}},
             )
             .await?;
     }
@@ -350,6 +375,19 @@ pub async fn append(
     agent: Option<&AssistantAgent>,
     text: &str,
 ) -> AppResult<GroupMessage> {
+    append_addressed(db, owner, group_id, role, agent, text, &[]).await
+}
+
+/// Append a message that records the members it was addressed to.
+async fn append_addressed(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    recipients: &[String],
+) -> AppResult<GroupMessage> {
     let now = Utc::now();
     let group = db
         .collection::<AssistantGroup>(GROUPS)
@@ -377,7 +415,7 @@ pub async fn append(
         agent_id: agent.map(|agent| agent.id.clone()),
         agent_name: agent.map(|agent| agent.name.clone()),
         text: text.into(),
-        recipient_agent_ids: Vec::new(),
+        recipient_agent_ids: recipients.to_vec(),
         created_at: now,
     };
     db.collection::<GroupMessage>(MESSAGES)
@@ -386,7 +424,6 @@ pub async fn append(
     Ok(message)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn append_with_uploads(
     db: &Database,
     owner: &str,
@@ -396,8 +433,24 @@ pub async fn append_with_uploads(
     text: &str,
     ids: &[String],
 ) -> AppResult<GroupMessage> {
+    append_with_recipients(db, owner, group_id, role, agent, text, ids, &[]).await
+}
+
+/// Append a message with its uploads and the members it was addressed to,
+/// all in the one insert.
+#[allow(clippy::too_many_arguments)]
+pub async fn append_with_recipients(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    ids: &[String],
+    recipients: &[String],
+) -> AppResult<GroupMessage> {
     if ids.is_empty() {
-        return append(db, owner, group_id, role, agent, text).await;
+        return append_addressed(db, owner, group_id, role, agent, text, recipients).await;
     }
     if role != "user" {
         return Err(AppError::Forbidden("Only the owner uploads files".into()));
@@ -442,7 +495,7 @@ pub async fn append_with_uploads(
         agent_id: agent.map(|agent| agent.id.clone()),
         agent_name: agent.map(|agent| agent.name.clone()),
         text: text.into(),
-        recipient_agent_ids: Vec::new(),
+        recipient_agent_ids: recipients.to_vec(),
         created_at: now,
     };
     db.collection::<GroupMessage>(MESSAGES)
@@ -778,6 +831,16 @@ pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
     Ok(rows)
 }
 
+/// Drop a departed agent from the pending queue and every sticky selection
+/// (the owner's and, in organization groups, each participant's).
+fn pull_recipient(group: &AssistantGroup, agent_id: &str) -> bson::Document {
+    let mut pull = doc! {"pending_agent_ids": agent_id, "last_recipient_ids": agent_id};
+    for actor in group.last_recipient_ids_by_actor.keys() {
+        pull.insert(format!("last_recipient_ids_by_actor.{actor}"), agent_id);
+    }
+    pull
+}
+
 /// A purged agent leaves every group it was in.
 pub async fn remove_agent(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
     let groups: Vec<AssistantGroup> = db
@@ -811,7 +874,7 @@ pub async fn remove_agent(db: &Database, owner: &str, agent_id: &str) -> AppResu
                 doc! {"_id": &group.id, "user_id": owner},
                 doc! {"$set": {"member_agent_ids": &remaining,
                 "lead_agent_id": lead_of(&members)},
-                "$pull": {"pending_agent_ids": agent_id}},
+                "$pull": pull_recipient(&group, agent_id)},
             )
             .await?;
     }

@@ -110,6 +110,14 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
     }
 }
 
+fn live_member_ids(members: &[AssistantAgent]) -> Vec<String> {
+    members
+        .iter()
+        .filter(|member| member.destroyed_at.is_none())
+        .map(|member| member.id.clone())
+        .collect()
+}
+
 async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<GroupResponse> {
     let owner = group.user_id.clone();
     let members = groups::members(&state.db, &owner, &group).await?;
@@ -132,11 +140,11 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
         id: group.id,
         name: group.name,
         lead_agent_id: group.lead_agent_id.clone(),
-        default_recipient_ids: if group.last_recipient_ids.is_empty() {
-            vec![group.lead_agent_id.clone()]
-        } else {
-            group.last_recipient_ids.clone()
-        },
+        default_recipient_ids: groups::default_recipients(
+            &group.last_recipient_ids,
+            &live_member_ids(&members),
+            &group.lead_agent_id,
+        ),
         working_agent_ids: working,
         message_count: group.message_count,
         last_message_at: group.last_message_at,
@@ -157,6 +165,14 @@ async fn group_response_for(
         crate::services::org_group_service::display_name(&state.db, &access.group.user_id).await?;
     let role = access.role().to_owned();
     let owner_id = access.group.user_id.clone();
+    // Each participant has their own sticky selection.
+    let sticky = access
+        .group
+        .last_recipient_ids_by_actor
+        .get(&access.actor)
+        .cloned()
+        .unwrap_or_default();
+    let lead = access.group.lead_agent_id.clone();
     let working: Vec<_> = crate::services::org_group_service::threads(&state.db, &access.group)
         .await?
         .into_iter()
@@ -170,6 +186,13 @@ async fn group_response_for(
     for member in &mut response.members {
         member.working = working.contains(&member.id);
     }
+    let live_ids: Vec<String> = response
+        .members
+        .iter()
+        .filter(|member| !member.destroyed)
+        .map(|member| member.id.clone())
+        .collect();
+    response.default_recipient_ids = groups::default_recipients(&sticky, &live_ids, &lead);
     response.working_agent_ids = working;
     Ok(response)
 }
@@ -449,7 +472,8 @@ async fn spend_handoffs(
 }
 
 /// Post a message to a group and address its recipients: the members it
-/// @mentions, else the lead. `author` is the NyxBot posting for the user.
+/// @mentions, else the owner's sticky selection, else the lead. `author` is
+/// the NyxBot posting for the user; its posts address only their mentions.
 pub(crate) async fn post(
     state: &AppState,
     owner: &str,
@@ -482,7 +506,14 @@ async fn post_with_uploads(
                 "NyxBot cannot post into or follow organization groups".into(),
             ));
         }
-        return Box::pin(super::org_group::post(state, access, text, ids)).await;
+        return Box::pin(super::org_group::post(
+            state,
+            access,
+            text,
+            ids,
+            explicit_recipients,
+        ))
+        .await;
     }
     let group = access.group;
     let members = groups::members(&state.db, owner, &group).await?;
@@ -492,44 +523,33 @@ async fn post_with_uploads(
             member.destroyed_at.is_none() && author.is_none_or(|author| author.id != member.id)
         })
         .collect();
+    // Refuse a stale or forged selection before anything is decided.
+    let explicit = explicit_recipients
+        .map(|selected| groups::explicit_recipients(selected, &live))
+        .transpose()?;
     // The owner answering a member's confirmation in words decides that card
     // and sends the member back to it.
     let confirmed = match author {
         None => confirm_in_group(state, owner, &group, text).await?,
         Some(_) => None,
     };
-    let mut addressed = if let Some(ids) = explicit_recipients {
-        if ids.is_empty()
-            || ids
-                .iter()
-                .any(|id| !live.iter().any(|member| member.id == *id))
-        {
-            return Err(AppError::ValidationError(
-                "Unknown or empty recipient list".into(),
-            ));
-        }
-        ids.to_vec()
-    } else {
-        let mentioned = groups::mentions(text, &live);
-        if !mentioned.is_empty() {
-            mentioned
-        } else {
-            let sticky = group
-                .last_recipient_ids
-                .iter()
-                .filter(|id| live.iter().any(|member| &member.id == *id))
-                .cloned()
-                .collect::<Vec<_>>();
-            if sticky.is_empty() {
-                Vec::new()
+    let mut addressed = match (&confirmed, explicit) {
+        // A confirmation answers one card: its member plus anyone it names.
+        (Some(_), _) => groups::mentions(text, &live),
+        (None, Some(selected)) => selected,
+        (None, None) => {
+            let mentioned = groups::mentions(text, &live);
+            if !mentioned.is_empty() || author.is_some() {
+                mentioned
             } else {
-                sticky
+                let live_ids: Vec<String> = live.iter().map(|member| member.id.clone()).collect();
+                groups::default_recipients(&group.last_recipient_ids, &live_ids, "")
             }
         }
     };
-    if let Some(member) = confirmed {
-        addressed.retain(|id| id != &member);
-        addressed.insert(0, member);
+    if let Some(member) = &confirmed {
+        addressed.retain(|id| id != member);
+        addressed.insert(0, member.clone());
     }
     if addressed.is_empty()
         && author.is_none()
@@ -537,10 +557,7 @@ async fn post_with_uploads(
     {
         addressed.push(group.lead_agent_id.clone());
     }
-    if author.is_none() {
-        groups::persist_last_recipients(&state.db, owner, group_id, &addressed).await?;
-    }
-    let mut message = Box::pin(groups::append_with_uploads(
+    let message = Box::pin(groups::append_with_recipients(
         &state.db,
         owner,
         group_id,
@@ -548,10 +565,14 @@ async fn post_with_uploads(
         author,
         text,
         ids,
+        &addressed,
     ))
     .await?;
-    message.recipient_agent_ids = addressed.clone();
-    groups::persist_message_recipients(&state.db, &message.id, &addressed).await?;
+    // Only the owner's own routing is sticky: a confirmation answers its card
+    // and NyxBot's posts never change who the owner is talking to.
+    if author.is_none() && confirmed.is_none() {
+        groups::persist_last_recipients(&state.db, owner, group_id, &addressed).await?;
+    }
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.

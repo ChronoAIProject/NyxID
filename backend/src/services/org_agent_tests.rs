@@ -201,7 +201,7 @@ impl Fixture {
         .await
         .unwrap();
     }
-    fn request(&self, name: &str) -> team::CreateRequest {
+    pub(crate) fn request(&self, name: &str) -> team::CreateRequest {
         team::CreateRequest {
             name: name.into(),
             description: "Organization specialist".into(),

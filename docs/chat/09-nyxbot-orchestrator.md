@@ -249,9 +249,21 @@ is not woken by those direct chats.
 
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
-`notice`). A user message goes to the members it `@mentions`, then to the group's
-sticky last-recipient set (filtered to live members), else to the lead
-(NyxBot when it is a member, else the first member). A member's reply that
+`notice`). A user message goes to the recipients picked in the composer's pills
+(`recipient_agent_ids`, authoritative; 1–8 distinct live members, else 400
+before anything is decided), else to the members it `@mentions`, else to the
+sender's sticky last-recipient set (the owner's `last_recipient_ids`; in
+organization groups each participant's own `last_recipient_ids_by_actor`),
+filtered to live members, else to the lead (NyxBot when it is a member, else the
+first member). The resolved recipients are stored on the message
+(`recipient_agent_ids`, written in the same insert) and become the sender's
+sticky set; the group response previews them as `default_recipient_ids`. A typed
+confirmation ("yes 4821") addresses the card's member (plus anyone it
+`@mentions`) and leaves the sticky set unchanged; NyxBot's `post_to_group`
+addresses only its `@mentions` and never reads or writes the owner's sticky set.
+Member updates, purges and participant departures prune the sticky sets.
+`PostMessageRequest` rejects unknown fields, so deploy every backend replica
+before the frontend that sends `recipient_agent_ids`. A member's reply that
 `@mentions` others hands the work to them, bounded by the owner's settings:
 `max_group_handoffs` per new request (default 6, 0–24; 0 turns hand-offs off)
 and `max_group_handoffs_per_hour` across all their groups (default 60, 0–600). Each member speaks through its own hidden member thread
