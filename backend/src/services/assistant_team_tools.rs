@@ -372,7 +372,9 @@ pub fn schema(name: &str) -> Value {
                 "display_name": {"type": "string", "maxLength": 40,
                     "description": "Friendly name; empty clears it"},
                 "persona": {"type": "string", "maxLength": 2000,
-                    "description": "Personality and tone; empty clears it"}}),
+                    "description": "Personality and tone; empty clears it"},
+                "model": {"type": "string", "minLength": 1, "maxLength": 80,
+                    "description": "NyxAgent model for the agent's new threads (nyxagent/...); only when the user asks"}}),
             vec!["subagent"],
         ),
         "link_channel_bot" => (
@@ -672,7 +674,8 @@ pub(crate) fn description(name: &str) -> &'static str {
         "update_subagent" => {
             "Rename a specialist, refine its role, or set the friendly name and persona the user \
             wants: description is role/scope, persona is tone/style, Ornn skills hold repeatable procedures, checklists, references, templates and workflows. Search and preview existing skills, then propose attaching with set_agent_skills. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs. With subagent \"nyxbot\" it sets your own display name; only the user \
-            changes your persona."
+            changes your persona. Setting model changes which NyxAgent model the agent's new threads use; \
+            the user's access mode may require their confirmation card first."
         }
         "create_group" => {
             "Create a group chat of the user and several agents (you and/or specialists). In a \

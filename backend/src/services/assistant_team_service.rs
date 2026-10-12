@@ -1202,6 +1202,86 @@ pub async fn update_agent(
     Ok(updated)
 }
 
+/// An agent's model for new threads and its access-mode override. `None`
+/// leaves a field unchanged; `Some(None)` clears the override so the agent
+/// follows the owner's workspace mode again.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AgentPolicy<'a> {
+    pub model: Option<&'a str>,
+    pub access_mode_override: Option<Option<crate::models::assistant_settings::AccessMode>>,
+}
+
+/// Change an agent's model and access-mode override. Only people who
+/// maintain the agent (its owner, or an organization's admins and members)
+/// may; the caller has already checked the model against NyxAgent's live
+/// list. Each real change is audited with the acting person.
+pub async fn set_agent_policy(
+    db: &Database,
+    actor: &audit_service::AuditActor,
+    id: &str,
+    policy: AgentPolicy<'_>,
+) -> AppResult<AssistantAgent> {
+    let current = maintained_agent(db, &actor.user_id, id).await?;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
+    let mut set = doc! {"updated_at": bson::DateTime::now()};
+    let mut unset = doc! {};
+    if let Some(model) = policy.model {
+        if !super::assistant_nyxagent::valid_model(model) {
+            return Err(AppError::AssistantModelUnavailable);
+        }
+        set.insert("model", model);
+    }
+    match policy.access_mode_override {
+        Some(Some(mode)) => {
+            set.insert(
+                "access_mode_override",
+                bson::to_bson(&mode)
+                    .map_err(|_| AppError::Internal("Access mode serialization failed".into()))?,
+            );
+        }
+        Some(None) => {
+            unset.insert("access_mode_override", "");
+        }
+        None => {}
+    }
+    let mut update = doc! {"$set": set};
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
+    }
+    let updated = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find_one_and_update(
+            doc! {"_id": &current.id, "user_id": &current.user_id,
+            "destroyed_at": bson::Bson::Null},
+            update,
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(not_found)?;
+    if updated.model != current.model {
+        let _ = audit_service::log_actor_event(
+            db.clone(),
+            actor,
+            "assistant_model_changed",
+            Some(serde_json::json!({"scope": "agent", "agent_id": updated.id,
+                "owner_id": updated.user_id, "old": current.model, "new": updated.model})),
+        )
+        .await;
+    }
+    super::assistant_settings_service::audit_access_mode(
+        db,
+        actor,
+        Some(&updated.id),
+        current.access_mode_override,
+        updated.access_mode_override,
+    )
+    .await;
+    super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
+    Ok(updated)
+}
+
 /// A change to a specialist's grants. Merged inside the transaction against
 /// the grants it reads, so concurrent changes never undo each other. Guest
 /// access levels given with a change are laid over the current ones; every
@@ -1540,7 +1620,9 @@ pub async fn set_grants_as(
             "agent_id": &agent.id, "owner_id": &agent.user_id,
             "approver_user_id": approver_user_id,
             "approver_api_key_id": approver_api_key_id,
-            "approver_kind": if approver_api_key_id.is_some() {"nyxbot_or_key"} else {"owner"},
+            // Only NyxBot's thread key (grant, revoke and guest-access tools)
+            // passes a key; the owner's own edits pass none.
+            "approver_kind": if approver_api_key_id.is_some() {"nyxbot"} else {"owner"},
             "service_ids": &agent.grants.service_ids,
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
@@ -1891,6 +1973,10 @@ pub struct AgentSummary {
     pub description: String,
     pub specialty: Option<String>,
     pub created_by: String,
+    /// NyxAgent model for new threads.
+    pub model: String,
+    /// The agent's own access mode; absent follows the owner's workspace mode.
+    pub access_mode_override: Option<crate::models::assistant_settings::AccessMode>,
     /// `running`, `idle`, or `destroyed`.
     pub status: &'static str,
     pub services: Vec<String>,
@@ -2212,6 +2298,8 @@ pub async fn summaries(
             description: agent.description.clone(),
             specialty: agent.specialty.clone(),
             created_by: agent.created_by.clone(),
+            model: agent.model.clone(),
+            access_mode_override: agent.access_mode_override,
             home_conversation_id: home_id,
             memory_count: if super::org_agent_service::can_maintain(&acl) {
                 agent.memory.len()
