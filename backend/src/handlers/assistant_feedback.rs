@@ -220,10 +220,12 @@ async fn withdraw(
     }
     let filter = doc! {"user_id":&user_id,"message_id":&message_id};
     let deleted = feedback_service::delete_feedback(&state.db, &user_id, &message_id).await?;
-    if !deleted {
+    if deleted.is_none() {
         return Ok(StatusCode::NO_CONTENT);
     }
-    tracing::info!(target: "nyxid::assistant_feedback", event = "withdrawn", user_id = %user_id, message_id = %message_id, "assistant feedback state changed");
+    let context = deleted.as_ref().and_then(|row| row.context.as_ref());
+    tracing::info!(target: "nyxid::assistant_feedback", event = "withdrawn", user_id = %user_id, message_id = %message_id,
+        surface = ?context.and_then(|c| c.surface.as_deref()), agent_id = ?context.and_then(|c| c.agent_id.as_deref()), agent_kind = ?context.and_then(|c| c.agent_kind.as_deref()), model = ?context.and_then(|c| c.model.as_deref()), access_mode = ?context.and_then(|c| c.access_mode.as_deref()), reply_status = ?context.and_then(|c| c.reply_status.as_deref()), error_code = ?context.and_then(|c| c.error_code.as_deref()), origin = ?context.and_then(|c| c.origin.as_deref()), via = ?context.and_then(|c| c.via.as_deref()), turn_id = ?context.and_then(|c| c.turn_id.as_deref()), reply_seq = ?context.and_then(|c| c.reply_seq), latency_ms = ?context.and_then(|c| c.latency_ms), tool_calls = context.map(|c| c.tool_calls).unwrap_or(0), tool_errors = context.map(|c| c.tool_errors).unwrap_or(0), machine_used = context.map(|c| c.machine_used).unwrap_or(false), attachments = context.map(|c| c.attachments).unwrap_or(0), steered = context.map(|c| c.steered).unwrap_or(false), voice = context.map(|c| c.voice).unwrap_or(false), reply_chars = context.map(|c| c.reply_chars).unwrap_or(0), context_reset_since_reply = context.map(|c| c.context_reset_since_reply).unwrap_or(false), "assistant feedback state changed");
     audit_service::log_for_user(
         state.db.clone(),
         auth,

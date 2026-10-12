@@ -157,8 +157,6 @@ pub async fn delete_feedback(
 ) -> mongodb::error::Result<bool> {
     Ok(db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .delete_one(doc! {"user_id": user_id, "message_id": message_id})
-        .await?
-        .deleted_count
-        > 0)
+        .find_one_and_delete(doc! {"user_id": user_id, "message_id": message_id})
+        .await?)
 }
