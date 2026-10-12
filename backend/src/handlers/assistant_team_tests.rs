@@ -39,6 +39,13 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
         .insert_one(test_user(OWNER, UserType::Person))
         .await
         .unwrap();
+    db.collection(crate::models::assistant_settings::COLLECTION_NAME)
+        .insert_one(crate::models::assistant_settings::AssistantSettings {
+            access_mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            ..crate::models::assistant_settings::AssistantSettings::defaults(OWNER)
+        })
+        .await
+        .unwrap();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(

@@ -87,13 +87,6 @@ async fn base(name: &str) -> (crate::AppState, String) {
         .insert_one(test_user(&owner, UserType::Person))
         .await
         .unwrap();
-    db.collection(crate::models::assistant_settings::COLLECTION_NAME)
-        .insert_one(crate::models::assistant_settings::AssistantSettings {
-            access_mode: crate::models::assistant_settings::AccessMode::Autopilot,
-            ..crate::models::assistant_settings::AssistantSettings::defaults(&owner)
-        })
-        .await
-        .unwrap();
     (test_app_state(db), owner)
 }
 
@@ -1038,6 +1031,7 @@ async fn native_inventory(full: bool) {
             &f.owner,
             super::assistant_settings_service::Update {
                 skip_destructive_confirmation: Some(true),
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
                 ..Default::default()
             },
         )
@@ -1957,4 +1951,39 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
         .await
         .is_ok()
     );
+}
+
+#[tokio::test]
+async fn action_summary_succeeds_for_every_sensitive_or_destructive_tool() {
+    let f = orchestrator_fixture("card_summary_coverage").await;
+    let key = ordinary_key(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "summary-service",
+        "https://summary.example",
+    )
+    .await;
+    let tools = f.tools();
+    for (name, args) in [
+        ("delete_agent_key", json!({"api_key_id": key.clone()})),
+        (
+            "bind_agent_key_credential",
+            json!({"api_key_id": key.clone(), "binding_id": Uuid::new_v4().to_string()}),
+        ),
+        (
+            "unbind_agent_key_credential",
+            json!({"api_key_id": key.clone(), "binding_id": Uuid::new_v4().to_string()}),
+        ),
+        ("delete_service", json!({"service_id": service.clone()})),
+        (
+            "set_service_enabled",
+            json!({"service_id": service.clone()}),
+        ),
+    ] {
+        assert!(
+            tools.action_summary(&f.owner, name, &args).await.is_ok(),
+            "{name}"
+        );
+    }
 }

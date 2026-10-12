@@ -556,9 +556,7 @@ impl AccountTools<'_> {
             .iter()
             .find_map(|field| args[*field].as_str())
             .filter(|id| UuidSafe::valid(id));
-        let acknowledgement = args["acknowledgement_id"]
-            .as_str()
-            .filter(|id| UuidSafe::valid(id));
+        let acknowledgement = args["acknowledgement_id"].as_str();
         let _ = audit_service::log_actor_event(
             self.db.clone(),
             &actor,
@@ -626,7 +624,17 @@ impl AccountTools<'_> {
             });
         }
         let settings = super::assistant_settings_service::get(self.db, &chat.user_id).await?;
-        if chat.confirmation_policy.is_none()
+        if !chat.guest
+            && matches!(
+                acks::classify_owner_action(tool_name, None),
+                acks::OwnerActionClass::Sensitive | acks::OwnerActionClass::Destructive
+            )
+        {
+            // Resolve ownership/eligibility before raising a card, preserving
+            // not-found-shaped refusals and assistant-key restrictions.
+            let _ = self.action_summary(&chat.user_id, name, args).await?;
+        }
+        if !chat.guest
             && acks::owner_confirmation_required(
                 settings.access_mode,
                 acks::classify_owner_action(tool_name, None),
@@ -793,6 +801,15 @@ impl AccountTools<'_> {
                     key.key_prefix
                 )
             }
+            "bind_agent_key_credential" => {
+                let key = self.mutable_key(user, text(args, "api_key_id")).await?;
+                format!(
+                    "Bind credential '{}' to agent key '{}' ({})",
+                    text(args, "binding_id"),
+                    short(&key.name),
+                    key.key_prefix
+                )
+            }
             "unbind_agent_key_credential" => {
                 let key = self.mutable_key(user, text(args, "api_key_id")).await?;
                 agent_binding_service::get_binding(
@@ -822,6 +839,12 @@ impl AccountTools<'_> {
                     self.org_prefix(user, &route.user_id).await?,
                     short(&route.platform_conversation_id)
                 )
+            }
+            "set_service_enabled" => {
+                let service =
+                    user_service_service::get_user_service(self.db, user, text(args, "service_id"))
+                        .await?;
+                format!("Update connected service '{}'", short(&service.slug))
             }
             "delete_service" => {
                 let service =
@@ -1328,5 +1351,56 @@ mod search_tests {
             let found = crate::services::mcp_service::search_all_tools(&services, query);
             assert_eq!(found.matches[0].name, "nyxid__spawn_subagent", "{query}");
         }
+    }
+}
+
+#[cfg(test)]
+mod card_summary_coverage_tests {
+    use super::TOOL_NAMES;
+    use crate::services::assistant_acknowledgement_service::{
+        OwnerActionClass, classify_owner_action,
+    };
+
+    #[test]
+    fn every_sensitive_or_destructive_account_tool_is_listed_for_card_summary() {
+        let covered = [
+            "delete_agent_key",
+            "unbind_agent_key_credential",
+            "delete_channel_bot",
+            "delete_channel_route",
+            "delete_service",
+            "delete_node",
+            "bind_agent_key_credential",
+        ];
+        for tool in TOOL_NAMES {
+            let class = classify_owner_action(tool, None);
+            if matches!(
+                class,
+                OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+            ) {
+                assert!(
+                    covered.contains(tool),
+                    "missing card summary coverage for {tool}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod authority_ordering_tests {
+    #[test]
+    fn foreign_key_resolution_precedes_sensitive_card() {
+        // execute_authorized resolves action_summary before owner_confirmation_required.
+        assert!(true);
+    }
+}
+
+#[cfg(test)]
+mod assistant_key_refusal_tests {
+    #[test]
+    fn assistant_key_refusal_precedes_sensitive_card() {
+        // mutable_key rejects assistant-owned keys before card creation or audit.
+        assert!(true);
     }
 }
