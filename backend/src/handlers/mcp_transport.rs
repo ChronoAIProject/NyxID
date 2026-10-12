@@ -1797,6 +1797,7 @@ async fn handle_tools_call(
     }
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
+            let _legacy_activity_started = crate::services::assistant_nyxagent::activity_started;
             match crate::services::assistant_nyxagent::activity_started_with_digest(
                 &state.db,
                 &chat.user_id,
