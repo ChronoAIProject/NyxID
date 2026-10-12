@@ -204,6 +204,7 @@ pub async fn reply_context(
             via: reply.via.clone(),
             turn_id: Some(reply.turn_id.clone()),
             reply_seq: Some(reply.seq),
+            reply_created_at: Some(reply.created_at),
             latency_ms,
             tool_calls: reply.activities.len() as u32,
             tool_errors: reply
