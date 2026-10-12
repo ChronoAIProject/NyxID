@@ -134,11 +134,26 @@ pub async fn put_config(
     Json(input): Json<UpdateConfigRequest>,
 ) -> AppResult<Json<BillingConfigResponse>> {
     require_admin(&state, &auth).await?;
+    if input.billing.is_none() {
+        return Err(crate::errors::AppError::ValidationError(
+            "billing object is required; use null fields to clear values".into(),
+        ));
+    }
+    if input
+        .billing
+        .as_ref()
+        .and_then(|b| b.default_lane.as_deref())
+        .is_some_and(|lane| !matches!(lane, "byok" | "platform_key"))
+    {
+        return Err(crate::errors::AppError::ValidationError(
+            "default_lane must be byok or platform_key".into(),
+        ));
+    }
     if input
         .billing
         .as_ref()
         .and_then(|b| b.default_overdraft_cap_credits)
-        .is_some_and(|v| v < 0)
+        .is_some_and(|v| !(0..=i64::MAX / 1_000).contains(&v))
     {
         return Err(crate::errors::AppError::ValidationError(
             "default overdraft cap must be non-negative".into(),
