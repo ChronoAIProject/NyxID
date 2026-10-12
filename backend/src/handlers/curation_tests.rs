@@ -682,7 +682,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
             id: group_id.into(),
             user_id: f.owner.clone(),
             participant_user_ids: vec![f.owner.clone()],
-            created_by_user_id: Some(f.owner.clone()),
+            created_by_user_id: None,
             name: "Feedback".into(),
             member_agent_ids: vec!["agent".into()],
             lead_agent_id: "agent".into(),
