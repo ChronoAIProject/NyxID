@@ -1780,12 +1780,17 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
         f.state
             .db
             .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-            .find_one(
-                doc! {"event_type":"assistant_access_request_denied","event_data.scope":"account"}
-            )
+            .find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"account"})
             .await
             .unwrap()
-            .is_some()
+            .expect("account denial audit");
+    let audit_data = audit.get_document("event_data").unwrap();
+    assert_eq!(audit_data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(audit_data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(audit_data.get_str("key").unwrap(), f.row.credential_api_key_id);
+    assert_eq!(audit_data.get_str("target").unwrap(), "account");
+    assert_eq!(audit_data.get_str("scope").unwrap(), "account");
+    assert_eq!(audit_data.get_str("decision").unwrap(), "denied")
     );
     settings::update(
         &f.state.db,
