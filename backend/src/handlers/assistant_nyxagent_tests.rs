@@ -319,7 +319,7 @@ async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
     )
     .await
     .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let row = settled(&state).await;
     let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
         .await
@@ -371,7 +371,13 @@ async fn retried_turn_does_not_re_run_completed_actions() {
         .await
         .unwrap();
     let calls = calls.lock().await;
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[1].body["input"]
+            .as_str()
+            .unwrap()
+            .contains("must not be repeated")
+    );
     server.abort();
 }
 
