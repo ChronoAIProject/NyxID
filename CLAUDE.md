@@ -152,6 +152,8 @@ Platform-admin service account create/update with explicit `catalog:skills:read/
 
 Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
+Catalog Manager (`catalog_manager`, `nyxid:catalog:services:write`) lets an Operator create providers and public HTTP catalog services, edit rows they created, and set the first OAuth client on a provider that has none; replacing others' clients, deletes, and credential/identity/billing/policy fields stay Admin-only. Rows a Catalog Manager creates are marked `catalog_manager_created`; on those rows a non-admin may change the row or its endpoints only while holding the role, anonymous rules stay Admin-only, and destination changes are refused once an Admin attaches a credential or foreign provider. Unmarked rows keep the plain creator rule. Classify every new provider/service request field in `handlers/catalog_authority.rs` (exhaustive destructuring). CLI: `nyxid admin provider ...`, `nyxid admin catalog add|apply|validate` with secret-free manifests (`cli/templates/catalog/`). See `docs/CATALOG_MANAGER.md`.
+
 CatalogEditor `PUT /keys/{catalog_uuid}` accepts only `recommended_skill_refs` with live/token catalog write authority (plus the existing role for legacy editors). It uses the shared skill transaction against one server-observed revision, returns safe metadata without requiring read scope, and never rebases conflicts. Explicit revision/replay clients use `/catalog-curation/services/{id}/skills`. Human key writes keep their original handler; other SA purposes, API-key, delegated, and relay writes remain denied.
 
 ### 9. Agent Isolation
@@ -341,7 +343,7 @@ All API routes under `/api/v1`:
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials; `/codex-connection` status/import and `/codex-connection/verify` require first-party human auth and exact reviewed connection versions (see `docs/CODEX_CONNECTION.md`)
 - `/admin` -- user management, audit log, OAuth clients, service accounts
-- `/admin/usage` -- admin/operator platform-wide usage, default 24 hours and maximum 31 days; actor/owner and service filters, primary-request deduplication, MongoDB ranking and exact/legacy funding costs. Metering requires `BILLING_ENABLED`.
+- `/admin/usage` -- admin/operator (or `nyxid:admin:usage:read` role holders, e.g. seeded Usage Viewer; read-only) platform-wide usage, default 24 hours and maximum 31 days; actor/owner and service filters, primary-request deduplication, MongoDB ranking and exact/legacy funding costs. Metering requires `BILLING_ENABLED`.
 - `/admin/audit-log` -- unchanged substring filters; count and page queries run concurrently. Unfiltered totals are metadata-based via `estimated_document_count` (exact except briefly after an unclean shutdown), avoiding a collection-sized count scan. Every non-empty filter keeps an exact count; global-search-only counts use one collection pass instead of seven full index scans, and their pages use the existing sort index. Narrowing predicates retain normal index selection. Event-type filter options are derived display data cached per process/AppState for 30 seconds; audit rows and counts are never cached.
 - `/assistant/nyxagent/*` -- human-only, default-on NyxAgent conversations/history/rename/delete, model list (`GET /models`, per-owner live list with `available`) and per-thread model selection (`PATCH /conversations/{id}/model`, live-list validated, refused during a turn, audited `assistant_model_changed`; agent models via `PATCH /agents/{id}` `model`), turn SSE, Stop, acknowledgement decisions (`POST /conversations/{id}/acknowledgements/{ack_id}`), owner-only tool images (`GET /conversations/{id}/attachments/{attachment_id}`), working context (`GET /conversations/{id}/context`, `POST /conversations/{id}/context/reset`; durable checkpoint, see `docs/chat/08-nyxagent-engine.md`), idempotent reply feedback (`PUT/DELETE /conversations/{id}/messages/{message_id}/feedback` and the group equivalent), agents (`GET/POST /agents`, `GET/PATCH/DELETE /agents/{id}`, `PUT /agents/{id}/grants`, `POST /agents/{id}/destroy`, `DELETE /agents/{id}/memory/{note_id}`), settings (`GET/PUT /settings`), channel links (`GET/POST /channels`, `PATCH/DELETE /channels/{id}` incl. `private_chats`) and their chats (`GET /channels/{id}/chats`, `PATCH /channels/{id}/chats/{chat_id}`), the owner's live change stream (`GET /live`, SSE, identifiers only), and cached profile discovery; `PATCH /conversations/{id}/access-mode` answers 410. All routes enforce the engine flag and acting-person ownership
 - `/nyxbot/*` -- NyxBot as the Agent Event Gateway's `nyxbot` provider (`agent-card`, `bindings/{binding_id}`, `…/conversations/{conversation_id}`, `…/events/{event_id}`, `responses`) authenticated inside each handler by the channel's gateway agent key, plus `relay/{channel_id}` for NyxID's signed relay callbacks (direct platforms); outside JWT middleware
@@ -587,6 +589,13 @@ nyxid oracle worker forget <pool> <label> [--force]   # remove a stale worker ro
 nyxid oracle worker cancel-command <pool> <label> <command-id>   # withdraw a queued/delivered-but-unexecuted command (e.g. a bad upgrade)
 nyxid oracle worker upgrade --pool <pool> [--label <label>]
 nyxid oracle login <pool> [--worker-token-file <path>]
+
+# Catalog administration (Admin or Catalog Manager)
+nyxid admin user grant-role <EMAIL|ID> catalog_manager
+nyxid admin catalog add --template zoho-mail       # wizard: provider + service + OAuth client + validate
+nyxid admin catalog apply --file m.yaml [--dry-run] | validate --file m.yaml
+nyxid admin provider create | update <SLUG>            # wizard without --file; then offers the OAuth client
+nyxid admin provider list | show | set-credentials <SLUG>
 
 # Agent isolation
 nyxid api-key create --name "coding-agent" --platform claude-code

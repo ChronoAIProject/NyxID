@@ -10,6 +10,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::url_validation::validate_base_url;
 use crate::services::{audit_service, provider_service, user_credentials_service};
 
+use super::catalog_authority::{self, CatalogAuthority};
 use super::services_helpers::require_admin;
 
 // --- Request / Response types ---
@@ -330,7 +331,10 @@ pub async fn create_provider(
     auth_user: AuthUser,
     Json(body): Json<CreateProviderRequest>,
 ) -> AppResult<Json<ProviderResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == CatalogAuthority::CatalogManager {
+        catalog_authority::check_provider_create(&body)?;
+    }
 
     if body.name.is_empty() || body.slug.is_empty() {
         return Err(AppError::ValidationError(
@@ -599,6 +603,7 @@ pub async fn create_provider(
         Some(serde_json::json!({
             "provider_id": &provider.id,
             "slug": &provider.slug,
+            "authority": authority.as_str(),
         })),
     );
 
@@ -622,7 +627,11 @@ pub async fn update_provider(
     Path(provider_id): Path<String>,
     Json(body): Json<UpdateProviderRequest>,
 ) -> AppResult<Json<ProviderResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == CatalogAuthority::CatalogManager {
+        let provider = provider_service::get_provider(&state.db, &provider_id).await?;
+        catalog_authority::check_provider_update(&auth_user.user_id.to_string(), &provider, &body)?;
+    }
 
     // SSRF validation on URLs if provided
     if let Some(ref url) = body.authorization_url {
@@ -688,6 +697,7 @@ pub async fn update_provider(
         clear_client_credentials: body.clear_client_credentials,
     };
     let cleared_credentials = updates.clear_client_credentials == Some(true);
+    let set_client_credentials = updates.client_id.is_some() || updates.client_secret.is_some();
 
     let updated =
         provider_service::update_provider(&state.db, &state.encryption_keys, &provider_id, updates)
@@ -700,6 +710,8 @@ pub async fn update_provider(
         Some(serde_json::json!({
             "provider_id": &provider_id,
             "cleared_client_credentials": cleared_credentials,
+            "set_client_credentials": set_client_credentials,
+            "authority": authority.as_str(),
         })),
     );
 
@@ -734,14 +746,29 @@ pub async fn list_linked_services(
     auth_user: AuthUser,
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<super::services::ServiceListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    let caller_id = auth_user.user_id.to_string();
     let services =
         crate::services::provider_link_service::list_linked(&state.db, &provider_id).await?;
+    // Catalog Managers see public rows and their own, without the Admin-only
+    // credential inspection.
+    let (services, inspection_keys): (Vec<_>, _) = match authority {
+        CatalogAuthority::Admin => (services, Some(state.encryption_keys.as_ref())),
+        CatalogAuthority::CatalogManager => (
+            services
+                .into_iter()
+                .filter(|service| {
+                    service.visibility != "private" || service.created_by == caller_id
+                })
+                .collect(),
+            None,
+        ),
+    };
     let mut responses = Vec::with_capacity(services.len());
     for service in services {
         responses.push(
             super::services_helpers::service_to_response_with_viewer(
-                Some(&state.encryption_keys),
+                inspection_keys,
                 service,
                 None,
             )
@@ -758,14 +785,28 @@ pub async fn link_service(
     auth_user: AuthUser,
     Path((provider_id, service_id)): Path<(String, String)>,
 ) -> AppResult<Json<super::services::ServiceResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == CatalogAuthority::CatalogManager {
+        let caller_id = auth_user.user_id.to_string();
+        catalog_authority::check_owned_provider(&state, &caller_id, &provider_id).await?;
+        let service = super::services_helpers::fetch_service(&state, &service_id).await?;
+        if service.created_by != caller_id {
+            return Err(AppError::Forbidden(
+                "A Catalog Manager can only link services they created; ask an Admin".to_string(),
+            ));
+        }
+    }
     crate::services::provider_link_service::link(&state.db, &provider_id, &service_id, None)
         .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
         "service_provider_linked",
-        Some(serde_json::json!({ "service_id": &service_id, "provider_id": &provider_id })),
+        Some(serde_json::json!({
+            "service_id": &service_id,
+            "provider_id": &provider_id,
+            "authority": authority.as_str(),
+        })),
     );
     let service = super::services_helpers::fetch_service(&state, &service_id).await?;
     Ok(Json(

@@ -45,6 +45,8 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
   const config = { version: 1, draft: newView(), saved_views: [] };
   const get = vi.spyOn(api, "get").mockImplementation(async (path) => {
     if (path === "/admin/usage/workspace") return { revision: 1, config };
+    if (path.startsWith("/admin/usage/identities?"))
+      return { options: [], total: 0 };
     return usageFixture();
   });
   vi.spyOn(api, "put").mockImplementation(async (_path, body) => ({

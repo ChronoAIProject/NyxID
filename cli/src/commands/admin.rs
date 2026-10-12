@@ -12,7 +12,81 @@ pub async fn run(command: AdminCommands) -> Result<()> {
         }
         AdminCommands::InviteCode { command } => run_invite_code(command).await,
         AdminCommands::User { command } => run_user(command).await,
+        AdminCommands::Provider { command } => super::admin_catalog::run_provider(command).await,
+        AdminCommands::Catalog { command } => super::admin_catalog::run_catalog(command).await,
     }
+}
+
+/// Resolve a user UUID or an exact email address to a user ID.
+async fn resolve_user_id(api: &mut ApiClient, reference: &str) -> Result<String> {
+    if uuid::Uuid::parse_str(reference).is_ok() {
+        return Ok(reference.to_string());
+    }
+    let result: Value = api
+        .get(&format!(
+            "/admin/users?page=1&per_page=100&search={}",
+            urlencoding::encode(reference)
+        ))
+        .await?;
+    result["users"]
+        .as_array()
+        .and_then(|users| {
+            users.iter().find(|user| {
+                user["email"]
+                    .as_str()
+                    .is_some_and(|email| email.eq_ignore_ascii_case(reference))
+            })
+        })
+        .and_then(|user| user["id"].as_str().map(str::to_string))
+        .ok_or_else(|| anyhow::anyhow!("No user with email {reference}"))
+}
+
+/// Resolve a role slug or ID to a role ID.
+async fn resolve_role_id(api: &mut ApiClient, reference: &str) -> Result<String> {
+    let result: Value = api.get("/admin/roles").await?;
+    result["roles"]
+        .as_array()
+        .and_then(|roles| {
+            roles
+                .iter()
+                .find(|role| role["slug"] == reference || role["id"] == reference)
+        })
+        .and_then(|role| role["id"].as_str().map(str::to_string))
+        .ok_or_else(|| anyhow::anyhow!("No role {reference}; list roles with the admin UI or API"))
+}
+
+fn print_roles(result: &Value, output: OutputFormat) -> Result<()> {
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(result)?);
+        return Ok(());
+    }
+    let names = |key: &str| {
+        result[key]
+            .as_array()
+            .map(|roles| {
+                roles
+                    .iter()
+                    .filter_map(|role| role["slug"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|joined| !joined.is_empty())
+            .unwrap_or_else(|| "-".to_string())
+    };
+    eprintln!("Direct roles:    {}", names("direct_roles"));
+    eprintln!("Inherited roles: {}", names("inherited_roles"));
+    let permissions = result["effective_permissions"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    eprintln!("Permissions:     {permissions}");
+    Ok(())
 }
 
 async fn run_invite_code(command: InviteCodeCommands) -> Result<()> {
@@ -136,6 +210,37 @@ fn role_from_user(u: &Value) -> &str {
 
 async fn run_user(command: AdminUserCommands) -> Result<()> {
     match command {
+        AdminUserCommands::Roles { user, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let user_id = resolve_user_id(&mut api, &user).await?;
+            let result: Value = api.get(&format!("/admin/users/{user_id}/roles")).await?;
+            print_roles(&result, auth.output)
+        }
+        AdminUserCommands::GrantRole { user, role, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let user_id = resolve_user_id(&mut api, &user).await?;
+            let role_id = resolve_role_id(&mut api, &role).await?;
+            let _: Value = api
+                .post(
+                    &format!("/admin/users/{user_id}/roles/{role_id}"),
+                    &json!({}),
+                )
+                .await?;
+            let result: Value = api.get(&format!("/admin/users/{user_id}/roles")).await?;
+            eprintln!("Granted {role} to {user}.");
+            print_roles(&result, auth.output)
+        }
+        AdminUserCommands::RevokeRole { user, role, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let user_id = resolve_user_id(&mut api, &user).await?;
+            let role_id = resolve_role_id(&mut api, &role).await?;
+            let _: Value = api
+                .delete(&format!("/admin/users/{user_id}/roles/{role_id}"))
+                .await?;
+            let result: Value = api.get(&format!("/admin/users/{user_id}/roles")).await?;
+            eprintln!("Revoked {role} from {user}.");
+            print_roles(&result, auth.output)
+        }
         AdminUserCommands::List {
             page,
             per_page,
@@ -316,6 +421,63 @@ mod tests {
     use crate::test_support::mock_auth;
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // --- Role assignment ---
+
+    #[tokio::test]
+    async fn grant_role_resolves_email_and_role_slug() {
+        let server = MockServer::start().await;
+        let user_id = "33333333-3333-4333-8333-333333333333";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/users"))
+            .and(query_param("search", "ops@example.com"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "users": [
+                    { "id": "44444444-4444-4444-8444-444444444444", "email": "ops@example.com.au" },
+                    { "id": user_id, "email": "Ops@Example.com" },
+                ],
+                "total": 2,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/roles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "roles": [
+                { "id": "role-credits", "slug": "credits_manager" },
+                { "id": "role-catalog", "slug": "catalog_manager" },
+            ] })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/api/v1/admin/users/{user_id}/roles/role-catalog"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "message": "Role assigned" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/admin/users/{user_id}/roles")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "direct_roles": [{ "slug": "operator" }, { "slug": "catalog_manager" }],
+                "inherited_roles": [],
+                "effective_permissions": ["nyxid:admin:read", "nyxid:catalog:services:write"],
+            })))
+            .mount(&server)
+            .await;
+
+        run(AdminCommands::User {
+            command: AdminUserCommands::GrantRole {
+                user: "ops@example.com".into(),
+                role: "catalog_manager".into(),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .unwrap();
+    }
 
     // --- InviteCode subcommands ---
 

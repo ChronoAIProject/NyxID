@@ -1087,7 +1087,16 @@ pub async fn create_service_request(
     tele: TelemetryContext,
     Json(body): Json<serde_json::Value>,
 ) -> AppResult<Json<ServiceResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = super::catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == super::catalog_authority::CatalogAuthority::CatalogManager
+        && body
+            .get("twin_of_service_id")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::Forbidden(
+            "A Catalog Manager cannot create tool twins; ask an Admin".to_string(),
+        ));
+    }
     let prepared = crate::services::tool_twin_service::prepare_create(&state.db, body).await?;
     let body =
         serde_json::from_value(prepared).map_err(|e| AppError::ValidationError(e.to_string()))?;
@@ -1107,7 +1116,18 @@ async fn create_service_inner(
         inference.realtime |= inference.voice.is_some();
     }
 
-    require_admin(&state, &auth_user).await?;
+    let authority = super::catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == super::catalog_authority::CatalogAuthority::CatalogManager {
+        super::catalog_authority::check_service_create(&body)?;
+        if let Some(provider_id) = body.provider_config_id.as_deref() {
+            super::catalog_authority::check_owned_provider(
+                &state,
+                &auth_user.user_id.to_string(),
+                provider_id,
+            )
+            .await?;
+        }
+    }
 
     let create_fingerprint = crate::services::catalog_skill_service::create_fingerprint(
         &serde_json::to_value(&body).map_err(|e| AppError::Internal(e.to_string()))?,
@@ -1664,6 +1684,8 @@ async fn create_service_inner(
         requires_user_credential,
         is_active: true,
         created_by: user_id_str.clone(),
+        catalog_manager_created: authority
+            == super::catalog_authority::CatalogAuthority::CatalogManager,
         identity_propagation_mode: "none".to_string(),
         identity_include_user_id: false,
         identity_include_email: false,
@@ -1834,6 +1856,7 @@ pub async fn delete_service(
         require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
     }
 
     let now = Utc::now();
@@ -2007,6 +2030,18 @@ pub(crate) async fn update_service_inner(
         require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        if super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?
+            == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
+        {
+            super::catalog_authority::check_service_update(&body)?;
+            super::catalog_authority::check_destination_change(
+                &state,
+                &auth_user.user_id.to_string(),
+                &service,
+                body.base_url.as_deref(),
+            )
+            .await?;
+        }
     }
 
     if body.destination_targets.is_some() {
@@ -5764,6 +5799,335 @@ mod tests {
                 &serde_json::from_value(value).unwrap()
             ));
         }
+    }
+
+    async fn seed_operator(db: &mongodb::Database, catalog_manager: bool) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(role_ids.operator);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert operator");
+        if catalog_manager {
+            let role = db
+                .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+                .find_one(doc! { "slug": crate::models::role::CATALOG_MANAGER_ROLE_SLUG })
+                .await
+                .unwrap()
+                .expect("catalog manager role is seeded");
+            role_service::assign_role_to_user(db, &id, &role.id)
+                .await
+                .expect("assign catalog manager");
+        }
+        id
+    }
+
+    fn oauth_provider_request(slug: &str) -> super::super::providers::CreateProviderRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": slug,
+            "slug": slug,
+            "provider_type": "oauth2",
+            // Admin mode needs its client at creation; `both`, like the seeded
+            // connectors, starts without one.
+            "credential_mode": "both",
+            "authorization_url": "https://accounts.example.com/oauth/v2/auth",
+            "token_url": "https://accounts.example.com/oauth/v2/token",
+            "default_scopes": ["Mail.messages.READ"],
+            "extra_auth_params": { "access_type": "offline", "prompt": "consent" },
+            "token_endpoint_auth_method": "client_secret_post",
+            "supports_pkce": false,
+        }))
+        .unwrap()
+    }
+
+    fn provider_update(
+        value: serde_json::Value,
+    ) -> Json<super::super::providers::UpdateProviderRequest> {
+        Json(serde_json::from_value(value).unwrap())
+    }
+
+    #[tokio::test]
+    async fn catalog_manager_builds_owned_provider_and_service_within_limits() {
+        use super::super::providers::{create_provider, delete_provider, update_provider};
+        let Some(db) = connect_test_database("h_catalog_manager_flow").await else {
+            eprintln!("skipping catalog manager test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let manager_id = seed_operator(&db, true).await;
+        let plain_operator_id = seed_operator(&db, false).await;
+        let state = test_app_state(db.clone());
+        let manager = || test_auth_user(&manager_id);
+        fn forbidden<T>(result: AppResult<T>) -> bool {
+            matches!(result, Err(AppError::Forbidden(_)))
+        }
+
+        // Operators without the role keep read-only authority.
+        assert!(forbidden(
+            create_provider(
+                State(state.clone()),
+                test_auth_user(&plain_operator_id),
+                Json(oauth_provider_request("plain-operator")),
+            )
+            .await
+        ));
+
+        // Own provider: created without a client, then the client is set.
+        let Json(own) = create_provider(
+            State(state.clone()),
+            manager(),
+            Json(oauth_provider_request("zoho-mail-test")),
+        )
+        .await
+        .expect("catalog manager creates provider");
+        assert!(!own.has_client_id);
+        let Json(own) = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(own.id.clone()),
+            provider_update(serde_json::json!({
+                "client_id": "zoho-client-id",
+                "client_secret": "zoho-client-secret",
+            })),
+        )
+        .await
+        .expect("catalog manager sets client on own provider");
+        assert!(own.has_client_id && own.has_client_secret && own.has_oauth_config);
+
+        // Someone else's provider: only the first client, never other fields.
+        let Json(foreign) = create_provider(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(oauth_provider_request("admin-owned")),
+        )
+        .await
+        .expect("admin creates provider");
+        assert!(forbidden(
+            update_provider(
+                State(state.clone()),
+                manager(),
+                Path(foreign.id.clone()),
+                provider_update(serde_json::json!({
+                    "token_url": "https://attacker.example.com/token",
+                })),
+            )
+            .await
+        ));
+        let partial = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(foreign.id.clone()),
+            provider_update(serde_json::json!({ "client_id": "only-id" })),
+        )
+        .await;
+        assert!(matches!(partial, Err(AppError::ValidationError(_))));
+        let Json(foreign) = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(foreign.id.clone()),
+            provider_update(serde_json::json!({
+                "client_id": "first-id",
+                "client_secret": "first-secret",
+            })),
+        )
+        .await
+        .expect("first client on a provider without one");
+        assert!(foreign.has_client_id && foreign.has_client_secret);
+        assert!(forbidden(
+            update_provider(
+                State(state.clone()),
+                manager(),
+                Path(foreign.id.clone()),
+                provider_update(serde_json::json!({
+                    "client_id": "replacement-id",
+                    "client_secret": "replacement-secret",
+                })),
+            )
+            .await
+        ));
+        assert!(forbidden(
+            delete_provider(State(state.clone()), manager(), Path(own.id.clone())).await
+        ));
+
+        // Services: own provider only, descriptive fields only.
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let service_request = |slug: &str, provider: &str| {
+            let mut request = create_http_service_request(slug, slug, base_url.clone());
+            request.provider_config_id = Some(provider.to_string());
+            request.auth_method = Some("bearer".to_string());
+            request
+        };
+        assert!(forbidden(
+            create_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Json(service_request("borrowed-client", &foreign.id)),
+            )
+            .await
+        ));
+        let mut with_credential = service_request("shared-key", &own.id);
+        with_credential.credential = Some("platform-secret".to_string());
+        let denied = create_service(
+            State(state.clone()),
+            manager(),
+            Default::default(),
+            Json(with_credential),
+        )
+        .await;
+        assert!(
+            matches!(denied, Err(AppError::Forbidden(ref message)) if message.contains("credential"))
+        );
+        let Json(service) = create_service(
+            State(state.clone()),
+            manager(),
+            Default::default(),
+            Json(service_request("api-zoho-mail-test", &own.id)),
+        )
+        .await
+        .expect("catalog manager creates linked service");
+        server.abort();
+        assert_eq!(service.provider_config_id.as_deref(), Some(own.id.as_str()));
+        assert_eq!(service.created_by, manager_id);
+
+        let update = |value: serde_json::Value| {
+            update_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(serde_json::from_value(value).unwrap()),
+            )
+        };
+        let Json(edited) = update(serde_json::json!({ "description": "Zoho Mail (US)" }))
+            .await
+            .expect("descriptive edit");
+        assert_eq!(edited.description.as_deref(), Some("Zoho Mail (US)"));
+        assert!(forbidden(
+            update(serde_json::json!({ "forward_access_token": true })).await
+        ));
+        assert!(forbidden(
+            update(serde_json::json!({ "identity_propagation_mode": "jwt" })).await
+        ));
+
+        // Tool twins stay Admin-only.
+        assert!(forbidden(
+            super::create_service_request(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Json(serde_json::json!({ "name": "Twin", "twin_of_service_id": service.id })),
+            )
+            .await
+        ));
+
+        // Linking: own provider to own service only.
+        let Json(linked) = super::super::providers::link_service(
+            State(state.clone()),
+            manager(),
+            Path((own.id.clone(), service.id.clone())),
+        )
+        .await
+        .expect("own provider to own service");
+        assert_eq!(linked.provider_config_id.as_deref(), Some(own.id.as_str()));
+        let (admin_base_url, admin_server) = spawn_empty_docs_server().await;
+        let Json(admin_service) = create_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Json(create_http_service_request(
+                "admin-svc",
+                "admin-svc",
+                admin_base_url,
+            )),
+        )
+        .await
+        .expect("admin creates service");
+        admin_server.abort();
+        assert!(forbidden(
+            super::super::providers::link_service(
+                State(state.clone()),
+                manager(),
+                Path((own.id.clone(), admin_service.id.clone())),
+            )
+            .await
+        ));
+
+        // Once an Admin links someone else's provider to a manager's row, its
+        // destination is fixed for the manager so those users' tokens cannot be
+        // redirected.
+        let (draft_base_url, draft_server) = spawn_empty_docs_server().await;
+        let mut draft = create_http_service_request("draft-svc", "draft-svc", draft_base_url);
+        draft.auth_method = Some("bearer".to_string());
+        let Json(draft) = create_service(
+            State(state.clone()),
+            manager(),
+            Default::default(),
+            Json(draft),
+        )
+        .await
+        .expect("manager creates an unlinked service");
+        draft_server.abort();
+        let Json(linked_by_admin) = super::super::providers::link_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path((foreign.id.clone(), draft.id.clone())),
+        )
+        .await
+        .expect("admin links a foreign provider");
+        assert_eq!(
+            linked_by_admin.provider_config_id.as_deref(),
+            Some(foreign.id.as_str())
+        );
+        let update_draft = |value: serde_json::Value| {
+            update_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Path(draft.id.clone()),
+                Json(serde_json::from_value(value).unwrap()),
+            )
+        };
+        let moved =
+            update_draft(serde_json::json!({ "base_url": "https://elsewhere.example.com" })).await;
+        assert!(
+            matches!(moved, Err(AppError::Forbidden(ref message)) if message.contains("base_url"))
+        );
+        let Json(still) = update_draft(serde_json::json!({ "description": "still editable" }))
+            .await
+            .expect("descriptive edits remain");
+        assert_eq!(still.description.as_deref(), Some("still editable"));
+        // On a row carrying only their own provider, the destination stays theirs.
+        let Json(own_moved) =
+            update(serde_json::json!({ "base_url": "https://moved.example.com" }))
+                .await
+                .expect("own provider rows keep an editable destination");
+        assert_eq!(own_moved.base_url, "https://moved.example.com");
+
+        // Losing the role removes write access to public rows they created.
+        let role = db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! { "slug": crate::models::role::CATALOG_MANAGER_ROLE_SLUG })
+            .await
+            .unwrap()
+            .unwrap();
+        role_service::revoke_role_from_user(&db, &manager_id, &role.id)
+            .await
+            .unwrap();
+        assert!(forbidden(
+            update(serde_json::json!({ "description": "after revoke" })).await
+        ));
+        assert!(forbidden(
+            super::delete_service(State(state.clone()), manager(), Path(service.id.clone())).await
+        ));
+        db.drop().await.unwrap();
     }
 }
 

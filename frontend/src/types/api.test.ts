@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canManageCreditGrants, isBillingAvailable } from "./api";
+import { canManageCreditGrants, canReadAdminUsage, isBillingAvailable } from "./api";
 
 describe("isBillingAvailable", () => {
   it("fails closed when user capabilities are absent", () => {
@@ -46,5 +46,31 @@ describe("canManageCreditGrants", () => {
       }),
     ).toBe(false);
     expect(canManageCreditGrants(null)).toBe(false);
+  });
+});
+
+describe("canReadAdminUsage", () => {
+  it("allows admin readers and users the backend marks as usage readers", () => {
+    expect(canReadAdminUsage({ is_admin: true, role: "admin" })).toBe(true);
+    expect(canReadAdminUsage({ is_admin: false, role: "operator" })).toBe(true);
+    expect(
+      canReadAdminUsage({
+        is_admin: false,
+        role: "user",
+        capabilities: { read_admin_usage: true },
+      }),
+    ).toBe(true);
+  });
+
+  it("denies plain users and older backends", () => {
+    expect(
+      canReadAdminUsage({
+        is_admin: false,
+        role: "user",
+        capabilities: { read_admin_usage: false },
+      }),
+    ).toBe(false);
+    expect(canReadAdminUsage({ is_admin: false, role: "user" })).toBe(false);
+    expect(canReadAdminUsage(null)).toBe(false);
   });
 });

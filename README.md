@@ -67,7 +67,9 @@ any REST API as MCP (Model Context Protocol) tools.
 
 Administrators can configure shared credentials, access, endpoint rules, and
 billing from either services or linked providers. See [Service configuration and
-vendor retirement](docs/SERVICE_CONFIGURATION.md).
+vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role read-only
+access to platform-wide usage reports, for example with the seeded **Usage
+Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
 
 ## What NyxID Does
 

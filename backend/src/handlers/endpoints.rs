@@ -284,6 +284,7 @@ pub async fn create_endpoint(
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
     }
 
     validate_endpoint_name(&body.name)?;
@@ -345,6 +346,7 @@ pub async fn update_endpoint(
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
     }
 
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
@@ -417,6 +419,7 @@ pub async fn delete_endpoint(
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
     }
 
     service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
@@ -448,6 +451,7 @@ pub async fn discover_endpoints(
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
     }
 
     let api_spec_url = service

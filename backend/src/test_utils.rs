@@ -2672,6 +2672,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         requires_user_credential: false,
         is_active: true,
         created_by: "system".to_string(),
+        catalog_manager_created: false,
         identity_propagation_mode: "none".to_string(),
         identity_include_user_id: true,
         identity_include_email: true,

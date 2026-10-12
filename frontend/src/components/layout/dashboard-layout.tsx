@@ -1,6 +1,6 @@
 import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Sidebar, AssistantNavEntry, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
+import { Sidebar, AssistantNavEntry, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, getVisibleAdminNav, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
 import { canAdminWrite, hasAdminRead } from "@/types/api";
 import {
   CommandPalette,
@@ -412,8 +412,10 @@ function MobileNav({
   const logoutMutation = useLogout();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isAdmin = hasAdminRead(user);
+  // Usage-only role holders (no admin read access) get just the Usage entry.
+  const usageOnlyNav = isAdmin ? [] : getVisibleAdminNav(user);
   const mainNav = getVisibleMainNav(user);
-  const allItems = [...mainNav, ...APPROVALS_NAV, ...DEVELOPER_NAV, ...(isAdmin ? ADMIN_NAV : [])];
+  const allItems = [...mainNav, ...APPROVALS_NAV, ...DEVELOPER_NAV, ...(isAdmin ? ADMIN_NAV : usageOnlyNav)];
   const [searchQuery, setSearchQuery] = useState("");
 
   const searchResults = useMemo(() => {
@@ -562,7 +564,7 @@ function MobileNav({
               ))}
             </div>
 
-            {isAdmin && (
+            {(isAdmin || usageOnlyNav.length > 0) && (
               <>
                 <div className="px-4 my-3">
                   <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
@@ -570,7 +572,7 @@ function MobileNav({
                   </span>
                 </div>
                 <div className="flex flex-col gap-0.5">
-                  {ADMIN_NAV.filter((item) => !["/admin/platform-credentials", "/admin/upload-retention"].includes(item.to) || canAdminWrite(user)).map((item) => (
+                  {(isAdmin ? ADMIN_NAV.filter((item) => !["/admin/platform-credentials", "/admin/upload-retention"].includes(item.to) || canAdminWrite(user)) : usageOnlyNav).map((item) => (
                     <MobileNavItem
                       key={item.to}
                       item={item}

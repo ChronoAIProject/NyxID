@@ -1,0 +1,39 @@
+# Zoho Mail through a NyxID-managed OAuth client, pinned to one Zoho data
+# center. Mailboxes in other data centers cannot connect through this row.
+#
+# Zoho expects comma-separated scopes, while NyxID joins scope entries with
+# spaces, so the scopes are one comma-joined entry. They are the read-only
+# minimum from the Zoho Mail API documentation; Zoho publishes no Mail CLI to
+# compare against. `access_type=offline` and `prompt=consent` make Zoho
+# return a refresh token.
+variables:
+  zoho_domain:
+    prompt: Zoho data center domain of the test mailbox
+    default: zoho.com
+    allowed: [zoho.com, zoho.eu, zoho.in, zoho.com.au, zoho.jp, zohocloud.ca, zoho.sa, zoho.com.cn]
+providers:
+  - slug: zoho-mail
+    name: Zoho Mail
+    description: Zoho Mail OAuth (single data center)
+    provider_type: oauth2
+    credential_mode: admin
+    authorization_url: https://accounts.${zoho_domain}/oauth/v2/auth
+    token_url: https://accounts.${zoho_domain}/oauth/v2/token
+    default_scopes:
+      - ZohoMail.accounts.READ,ZohoMail.folders.READ,ZohoMail.messages.READ
+    supports_pkce: false
+    token_endpoint_auth_method: client_secret_post
+    extra_auth_params:
+      access_type: offline
+      prompt: consent
+    documentation_url: https://www.zoho.com/mail/help/api/
+services:
+  - slug: api-zoho-mail
+    name: Zoho Mail
+    provider: zoho-mail
+    description: Read Zoho Mail accounts, folders and messages.
+    base_url: https://mail.${zoho_domain}/api
+    auth_method: bearer
+    homepage_url: https://www.zoho.com/mail/
+    auth_notes: Zoho documents the `Zoho-oauthtoken` header scheme; NyxID sends `Bearer`. If reads return 401 with a fresh token, Zoho is rejecting the Bearer scheme.
+    known_limitations: One Zoho data center per row. Pricing https://www.zoho.com/mail/zohomail-pricing.html

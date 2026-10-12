@@ -2289,6 +2289,23 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
     }
 }
 
+/// RFC 6749 §5.2: a refresh token that is malformed, expired, revoked,
+/// rotated away, or unknown is `invalid_grant`. MCP clients (Claude Code,
+/// Codex, web connectors) answer `invalid_grant` by discarding their tokens
+/// and asking the user to sign in again. `invalid_client` would make them
+/// discard their client registration too, and other codes leave them failing
+/// silently. A deactivated issuing client (`AuthenticationFailed`) stays
+/// `invalid_client` so the client re-registers.
+fn refresh_token_grant_error(error: AppError) -> AppError {
+    match error {
+        AppError::Unauthorized(message) => AppError::ExternalTokenInvalid(message),
+        AppError::TokenExpired => {
+            AppError::ExternalTokenInvalid("Refresh token has expired".to_string())
+        }
+        other => other,
+    }
+}
+
 // TODO(telemetry): all grant branches blocked — see TELEMETRY.md §6.5
 // (oauth.token_issued). The four `/oauth/token` grant-type branches
 // (`authorization_code`, `refresh_token`, `client_credentials`, social
@@ -2529,7 +2546,8 @@ async fn token_inner(
                 Some(&state.mcp_sessions),
                 non_empty_resources(&body.resource),
             )
-            .await?;
+            .await
+            .map_err(refresh_token_grant_error)?;
 
             Ok(Json(TokenResponse {
                 access_token: tokens.access_token,
@@ -5851,6 +5869,161 @@ mod tests {
         .await
         .expect_err("should reject missing refresh_token");
         assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("refresh_token")));
+    }
+
+    fn refresh_grant_request(refresh_token: &str) -> TokenRequest {
+        TokenRequest {
+            grant_type: "refresh_token".to_string(),
+            code: None,
+            redirect_uri: None,
+            client_id: None,
+            client_secret: None,
+            code_verifier: None,
+            refresh_token: Some(refresh_token.to_string()),
+            subject_token: None,
+            subject_token_type: None,
+            scope: None,
+            provider: None,
+            resource: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: None,
+            allowed_node_ids: Vec::new(),
+            allow_all_nodes: None,
+        }
+    }
+
+    async fn refresh_grant_error(state: &AppState, refresh_token: &str) -> (StatusCode, String) {
+        let response = token(
+            State(state.clone()),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Form(refresh_grant_request(refresh_token)),
+        )
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("read token error body");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("token error body is JSON");
+        (
+            status,
+            body["error"].as_str().unwrap_or_default().to_string(),
+        )
+    }
+
+    fn stored_refresh_token(jti: &str, client_id: &str, user_id: &str) -> RefreshToken {
+        let now = Utc::now();
+        RefreshToken {
+            id: Uuid::new_v4().to_string(),
+            jti: jti.to_string(),
+            client_id: client_id.to_string(),
+            user_id: user_id.to_string(),
+            session_id: None,
+            scope: Some("openid proxy".to_string()),
+            expires_at: now + Duration::days(7),
+            revoked: false,
+            replaced_by: None,
+            revoked_at: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: true,
+            created_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_grant_reports_dead_refresh_tokens_as_invalid_grant() {
+        let Some(db) = connect_test_database("oauth_refresh_invalid_grant").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user = Uuid::new_v4();
+        let client_id = Uuid::new_v4().to_string();
+        // Active, so these cases reach the revocation checks rather than the
+        // deactivated-client check covered by the next test.
+        insert_public_client(&db, &client_id, "openid proxy").await;
+        let refresh_tokens = db.collection::<RefreshToken>(REFRESH_TOKENS);
+
+        // Malformed.
+        assert_eq!(
+            refresh_grant_error(&state, "not-a-jwt").await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+
+        // Expired (seven idle days).
+        let mut expired_config = state.config.clone();
+        expired_config.jwt_refresh_ttl_secs = -3600;
+        let (expired, _) = jwt::generate_refresh_token(&state.jwt_keys, &expired_config, &user)
+            .expect("mint expired refresh token");
+        assert_eq!(
+            refresh_grant_error(&state, &expired).await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+
+        // Signed but unknown (row gone).
+        let (unknown, _) = jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
+            .expect("mint refresh token");
+        assert_eq!(
+            refresh_grant_error(&state, &unknown).await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+
+        // Revoked without rotation.
+        let (revoked, revoked_jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
+                .expect("mint refresh token");
+        let mut row = stored_refresh_token(&revoked_jti, &client_id, &user.to_string());
+        row.revoked = true;
+        refresh_tokens
+            .insert_one(&row)
+            .await
+            .expect("insert revoked");
+        assert_eq!(
+            refresh_grant_error(&state, &revoked).await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+
+        // Rotated away more than the reuse grace period ago.
+        let (stale, stale_jti) = jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
+            .expect("mint refresh token");
+        let mut row = stored_refresh_token(&stale_jti, &client_id, &user.to_string());
+        row.revoked = true;
+        row.revoked_at = Some(Utc::now() - Duration::hours(1));
+        row.replaced_by = Some(Uuid::new_v4().to_string());
+        refresh_tokens
+            .insert_one(&row)
+            .await
+            .expect("insert rotated");
+        assert_eq!(
+            refresh_grant_error(&state, &stale).await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_grant_reports_deactivated_client_as_invalid_client() {
+        let Some(db) = connect_test_database("oauth_refresh_inactive_client").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user = Uuid::new_v4();
+        let (refresh, jti) = jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
+            .expect("mint refresh token");
+        // No active `oauth_clients` row exists for this client id.
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(stored_refresh_token(
+                &jti,
+                &Uuid::new_v4().to_string(),
+                &user.to_string(),
+            ))
+            .await
+            .expect("insert refresh token");
+
+        assert_eq!(
+            refresh_grant_error(&state, &refresh).await,
+            (StatusCode::UNAUTHORIZED, "invalid_client".to_string())
+        );
     }
 
     #[tokio::test]

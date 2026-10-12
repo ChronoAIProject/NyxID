@@ -165,7 +165,7 @@ async fn workspace_persistence_is_private_and_rejects_stale_writes() {
 }
 
 #[tokio::test]
-async fn workspace_handlers_enforce_admin_writes_and_operator_reads() {
+async fn workspace_handlers_enforce_admin_writes_and_usage_reader_reads() {
     use crate::models::user::UserType;
     use crate::test_utils::{test_app_state, test_auth_user, test_user};
     let db = crate::test_utils::connect_test_database("usage_workspace_auth")
@@ -180,17 +180,52 @@ async fn workspace_handlers_enforce_admin_writes_and_operator_reads() {
     crate::services::billing::usage_rollup::ensure_indexes(&db)
         .await
         .unwrap();
+    let usage_viewer = db
+        .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! { "slug": crate::models::role::USAGE_VIEWER_ROLE_SLUG })
+        .await
+        .unwrap()
+        .expect("usage viewer seeded");
+    let group_id = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::group::Group>(crate::models::group::COLLECTION_NAME)
+        .insert_one(crate::models::group::Group {
+            id: group_id.clone(),
+            name: "Usage readers".to_string(),
+            slug: "usage-readers".to_string(),
+            description: None,
+            role_ids: vec![usage_viewer.id.clone()],
+            parent_group_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
     let state = test_app_state(db.clone());
-    for role in ["admin", "operator", "user"] {
+    // An existing person with no usage: usage-only readers must not learn
+    // who it is by filtering the List report on its id.
+    let idle_id = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>("users")
+        .insert_one(test_user(&idle_id, UserType::Person))
+        .await
+        .unwrap();
+    for role in [
+        "admin",
+        "operator",
+        "usage_viewer",
+        "group_usage_viewer",
+        "user",
+    ] {
+        let can_read = role != "user";
         let uid = uuid::Uuid::new_v4().to_string();
         let mut user = test_user(&uid, UserType::Person);
         user.is_admin = role == "admin";
         user.is_operator = role == "operator";
-        if role == "admin" {
-            user.role_ids.push(roles.admin.clone());
-        }
-        if role == "operator" {
-            user.role_ids.push(roles.operator.clone());
+        match role {
+            "admin" => user.role_ids.push(roles.admin.clone()),
+            "operator" => user.role_ids.push(roles.operator.clone()),
+            "usage_viewer" => user.role_ids.push(usage_viewer.id.clone()),
+            "group_usage_viewer" => user.group_ids.push(group_id.clone()),
+            _ => {}
         }
         db.collection::<crate::models::user::User>("users")
             .insert_one(user)
@@ -201,7 +236,7 @@ async fn workspace_handlers_enforce_admin_writes_and_operator_reads() {
             test_auth_user(&uid),
         )
         .await;
-        assert_eq!(read.is_ok(), role != "user");
+        assert_eq!(read.is_ok(), can_read, "{role} workspace read");
         let write = crate::handlers::admin_usage::save_workspace(
             axum::extract::State(state.clone()),
             test_auth_user(&uid),
@@ -211,14 +246,73 @@ async fn workspace_handlers_enforce_admin_writes_and_operator_reads() {
             }),
         )
         .await;
-        assert_eq!(write.is_ok(), role == "admin");
+        assert_eq!(write.is_ok(), role == "admin", "{role} workspace write");
         let analytics = crate::handlers::admin_usage::get_analytics(
             axum::extract::State(state.clone()),
             test_auth_user(&uid),
             axum::extract::Query(AnalyticsQuery::default()),
         )
         .await;
-        assert_eq!(analytics.is_ok(), role != "user");
+        assert_eq!(analytics.is_ok(), can_read, "{role} analytics");
+        let identities = crate::handlers::admin_usage::get_identities(
+            axum::extract::State(state.clone()),
+            test_auth_user(&uid),
+            axum::extract::Query(
+                crate::services::admin_usage_service::identities::IdentityQuery {
+                    kind: Some("owners".to_string()),
+                    search: None,
+                    ids: None,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(identities.is_ok(), can_read, "{role} identities");
+        for (target, label) in [(&idle_id, "idle"), (&uid, "self")] {
+            let report = crate::handlers::admin_usage::get_usage(
+                axum::extract::State(state.clone()),
+                test_auth_user(&uid),
+                crate::telemetry::TelemetryContext::default(),
+                axum::extract::Query(crate::services::admin_usage_service::AdminUsageQuery {
+                    user: Some(target.clone()),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            if !can_read {
+                assert!(report.is_err(), "{role} list");
+                continue;
+            }
+            let selected = report.unwrap().0.selected_user.expect("selected user");
+            let disclosed = selected.email.is_some();
+            let expect_disclosed = label == "self" || role == "admin" || role == "operator";
+            assert_eq!(disclosed, expect_disclosed, "{role} {label} selected_user");
+            if !expect_disclosed {
+                assert_eq!(selected.display_name, "Unknown user");
+                assert_eq!(selected.user_type, "unknown");
+            }
+        }
+        if role == "usage_viewer" || role == "admin" {
+            let labels = crate::handlers::admin_usage::get_identities(
+                axum::extract::State(state.clone()),
+                test_auth_user(&uid),
+                axum::extract::Query(
+                    crate::services::admin_usage_service::identities::IdentityQuery {
+                        kind: None,
+                        search: None,
+                        ids: Some(uid.clone()),
+                    },
+                ),
+            )
+            .await
+            .expect("identity labels");
+            // This caller has no usage: admins label any identity, usage-only
+            // readers only identities present in usage data.
+            assert_eq!(
+                labels.0.options.len(),
+                usize::from(role == "admin"),
+                "{role} labels"
+            );
+        }
     }
     db.drop().await.unwrap();
 }

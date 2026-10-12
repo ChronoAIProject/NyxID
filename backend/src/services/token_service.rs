@@ -384,7 +384,7 @@ pub async fn create_mfa_pending_session(
 /// Does NOT generate a new session token (reuses the existing session).
 ///
 /// When `mcp_sessions` is provided, session revocations also cascade
-/// to MCP sessions for the affected user.
+/// to the affected user's bearer-less (session-fallback) MCP sessions.
 pub async fn refresh_tokens(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -457,7 +457,10 @@ pub async fn refresh_tokens(
                     }},
                 )
                 .await?;
-            return Err(AppError::Unauthorized(
+            // A distinct variant so `/oauth/token` keeps reporting this as
+            // `invalid_client` (the client must re-register) while every
+            // other refresh failure becomes `invalid_grant`. Same HTTP 401.
+            return Err(AppError::AuthenticationFailed(
                 "Issuing OAuth client is no longer active".to_string(),
             ));
         }
@@ -752,9 +755,10 @@ pub async fn revoke_session(
         )
         .await?;
 
-    // Cascade: remove MCP sessions for the affected user
+    // Cascade: end the user's MCP sessions that authenticate without a bearer
     if let (Some(mcp), Some(session)) = (mcp_sessions, &session_doc) {
-        mcp.remove_by_user_id(&session.user_id).await?;
+        mcp.remove_fallback_sessions_by_user_id(&session.user_id)
+            .await?;
     }
 
     tracing::info!(session_id = %session_id, "Session revoked");

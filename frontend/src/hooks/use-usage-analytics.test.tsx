@@ -23,67 +23,35 @@ function wrapper({ children }: PropsWithChildren) {
 }
 beforeEach(() => vi.clearAllMocks());
 
-it("searches people, organizations, and service accounts by name", async () => {
-  vi.mocked(api.get).mockImplementation(async (path) => {
-    if (path.startsWith("/admin/service-accounts?"))
-      return {
-        service_accounts: [{ id: "sa-id", name: "Heca Engineering worker" }],
-        total: 1,
-      };
-    const org = path.includes("user_type=org");
-    return {
-      users: [
-        {
-          id: org ? "org-id" : "person-id",
-          display_name: org ? "Engineering" : "Engineer",
-          email: org ? "generated@org.test" : "engineering@example.test",
-        },
-      ],
-      total: org ? 1 : 70,
-    };
-  });
+it("searches identities through the usage-scoped lookup", async () => {
+  const options = [
+    { id: "org-id", label: "Engineering", detail: "Organization" },
+    { id: "person-id", label: "Engineer", detail: "engineering@example.test" },
+    { id: "sa-id", label: "Heca Engineering worker", detail: "Service account" },
+  ];
+  vi.mocked(api.get).mockResolvedValue({ options, total: 72 });
   const { result } = renderHook(
     () => useAnalyticsOptions("owners", "engineering", true),
     { wrapper },
   );
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.get).toHaveBeenCalledTimes(1);
   expect(api.get).toHaveBeenCalledWith(
-    "/admin/users?page=1&per_page=50&user_type=org&search=engineering",
+    "/admin/usage/identities?kind=owners&search=engineering",
   );
-  expect(api.get).toHaveBeenCalledWith(
-    "/admin/users?page=1&per_page=50&user_type=person&search=engineering",
-  );
-  expect(api.get).toHaveBeenCalledWith(
-    "/admin/service-accounts?page=1&per_page=50&search=engineering",
-  );
-  expect(result.current.data).toEqual({
-    options: [
-      { id: "org-id", label: "Engineering", detail: "Organization" },
-      {
-        id: "person-id",
-        label: "Engineer",
-        detail: "engineering@example.test",
-      },
-      {
-        id: "sa-id",
-        label: "Heca Engineering worker",
-        detail: "Service account",
-      },
-    ],
-    total: 72,
-  });
+  expect(result.current.data).toEqual({ options, total: 72 });
 });
 
-it("resolves saved service-account filter names after reload", async () => {
+it("resolves saved filter names after reload in one request", async () => {
   vi.mocked(api.get).mockImplementation(async (path) => {
-    if (path === "/admin/users/sa-id")
-      throw new ApiError(404, {
-        error: "not_found",
-        error_code: 1000,
-        message: "User not found",
-      });
-    if (path === "/admin/service-accounts/sa-id")
-      return { name: "Heca production worker" };
+    if (path === "/admin/usage/identities?ids=person-id%2Csa-id")
+      return {
+        options: [
+          { id: "sa-id", label: "Heca production worker", detail: "Service account" },
+          { id: "person-id", label: "Engineer", detail: "e@example.test" },
+        ],
+        total: 2,
+      };
     throw new Error(`Unexpected request: ${path}`);
   });
   const { result } = renderHook(
@@ -91,7 +59,7 @@ it("resolves saved service-account filter names after reload", async () => {
       useAnalyticsLabels({
         ...EMPTY_FILTERS,
         actors: ["sa-id"],
-        owners: ["sa-id"],
+        owners: ["sa-id", "person-id"],
       }),
     { wrapper },
   );
@@ -99,17 +67,33 @@ it("resolves saved service-account filter names after reload", async () => {
     expect(result.current.actors["sa-id"]).toBe("Heca production worker"),
   );
   expect(result.current.owners["sa-id"]).toBe("Heca production worker");
+  expect(result.current.owners["person-id"]).toBe("Engineer");
+  expect(api.get).toHaveBeenCalledTimes(1);
+});
+
+it("labels more than 100 saved identities in batches", async () => {
+  const actors = Array.from({ length: 150 }, (_, i) => `id-${String(i).padStart(3, "0")}`);
+  vi.mocked(api.get).mockImplementation(async (path) => {
+    const ids = new URLSearchParams(path.split("?")[1]).get("ids")!.split(",");
+    expect(ids.length).toBeLessThanOrEqual(100);
+    return {
+      options: ids.map((id) => ({ id, label: `Label ${id}` })),
+      total: ids.length,
+    };
+  });
+  const { result } = renderHook(
+    () => useAnalyticsLabels({ ...EMPTY_FILTERS, actors }),
+    { wrapper },
+  );
+  await waitFor(() =>
+    expect(result.current.actors["id-149"]).toBe("Label id-149"),
+  );
+  expect(result.current.actors["id-000"]).toBe("Label id-000");
   expect(api.get).toHaveBeenCalledTimes(2);
 });
 
-it("keeps the UUID when both identity records are missing", async () => {
-  vi.mocked(api.get).mockRejectedValue(
-    new ApiError(404, {
-      error: "not_found",
-      error_code: 1000,
-      message: "Identity not found",
-    }),
-  );
+it("keeps the UUID when an identity no longer exists", async () => {
+  vi.mocked(api.get).mockResolvedValue({ options: [], total: 0 });
   const { result } = renderHook(
     () =>
       useAnalyticsLabels({
@@ -119,12 +103,12 @@ it("keeps the UUID when both identity records are missing", async () => {
     { wrapper },
   );
   await waitFor(() =>
-    expect(api.get).toHaveBeenCalledWith("/admin/service-accounts/deleted-id"),
+    expect(api.get).toHaveBeenCalledWith("/admin/usage/identities?ids=deleted-id"),
   );
   expect(result.current.actors["deleted-id"]).toBe("deleted-id");
 });
 
-it("does not fall back to service accounts on a directory authorization failure", async () => {
+it("keeps the UUID when the lookup is refused", async () => {
   vi.mocked(api.get).mockRejectedValue(
     new ApiError(403, {
       error: "forbidden",
@@ -141,7 +125,7 @@ it("does not fall back to service accounts on a directory authorization failure"
     { wrapper },
   );
   await waitFor(() =>
-    expect(api.get).toHaveBeenCalledWith("/admin/users/person-id"),
+    expect(api.get).toHaveBeenCalledWith("/admin/usage/identities?ids=person-id"),
   );
   expect(result.current.actors["person-id"]).toBe("person-id");
   expect(api.get).toHaveBeenCalledTimes(1);

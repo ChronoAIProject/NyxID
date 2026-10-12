@@ -18,7 +18,9 @@ credentials. A connection needs one of:
 
 - **A NyxID platform app.** An operator registers an OAuth app with the
   provider, using callback `{BASE_URL}/api/v1/providers/callback`, and stores
-  its client ID and secret on the NyxID provider.
+  its client ID and secret on the NyxID provider with
+  `nyxid admin provider set-credentials <slug>`. A Catalog Manager may set the
+  first client on a seeded provider; see [Catalog Manager](CATALOG_MANAGER.md).
 - **The user's own app.** The user supplies their app's client ID and secret
   when adding the service (`POST /keys` or `PUT /providers/{id}/credentials`).
   The app must use the same callback. NyxID runs the flow, then stores and

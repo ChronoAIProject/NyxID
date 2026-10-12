@@ -335,6 +335,148 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: AdminUserCommands,
     },
+    /// Create and edit OAuth / API-key providers (Admin or Catalog Manager)
+    Provider {
+        #[command(subcommand)]
+        command: AdminProviderCommands,
+    },
+    /// Add, apply and validate catalog services from a manifest (Admin or Catalog Manager)
+    Catalog {
+        #[command(subcommand)]
+        command: AdminCatalogCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminProviderCommands {
+    /// List active providers with their OAuth client status
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show one provider by ID or slug
+    Show {
+        /// Provider ID or slug
+        provider: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Create a provider; without --file, a wizard asks for each setting
+    Create {
+        /// Provider definition file (JSON or YAML, no secrets)
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Read the client ID from this environment variable (managed providers need it at creation)
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long)]
+        client_secret_env: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a provider; without --file, a wizard offers the current values
+    Update {
+        /// Provider ID or slug
+        provider: String,
+        /// Fields to change (JSON or YAML, no secrets)
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set the NyxID-managed OAuth client ID and secret (prompts unless env vars are given)
+    SetCredentials {
+        /// Provider ID or slug
+        provider: String,
+        /// Read the client ID from this environment variable
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long)]
+        client_secret_env: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Link a catalog service to a provider
+    Link {
+        /// Provider ID or slug
+        provider: String,
+        /// Catalog service ID or slug
+        service: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Deactivate a provider and revoke its user tokens (Admin only)
+    Delete {
+        /// Provider ID or slug
+        provider: String,
+        /// Confirm the deletion
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Args, Clone, Debug, Default)]
+pub struct ManifestArgs {
+    /// Manifest file (JSON or YAML) with `providers` and `services` lists
+    #[arg(long)]
+    pub file: std::path::PathBuf,
+    /// Value for a manifest `${name}` variable, as name=value (repeatable)
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    pub vars: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum AdminCatalogCommands {
+    /// Interactive wizard: create a provider and service, set the OAuth client, then validate
+    Add {
+        /// Start from a manifest instead of answering every question
+        #[arg(long, conflicts_with = "template")]
+        file: Option<std::path::PathBuf>,
+        /// Start from a built-in manifest (zoho-mail)
+        #[arg(long)]
+        template: Option<String>,
+        /// Value for a manifest `${name}` variable, as name=value (repeatable)
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        /// Write the manifest built by the wizard to this path
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        /// Read the client ID from this environment variable (single-provider manifests)
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable (single-provider manifests)
+        #[arg(long)]
+        client_secret_env: Option<String>,
+        /// Do not set OAuth client credentials now
+        #[arg(long)]
+        skip_credentials: bool,
+        /// Apply without asking for confirmation
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Create or update every provider and service in a manifest; safe to rerun
+    Apply {
+        #[command(flatten)]
+        manifest: ManifestArgs,
+        /// Show the plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Check that each manifest service is linked, configured and ready to connect
+    Validate {
+        #[command(flatten)]
+        manifest: ManifestArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -408,6 +550,31 @@ pub enum AdminUserCommands {
         id: String,
         /// New platform role
         #[arg(long, value_parser = ["admin", "operator", "user"])]
+        role: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List a user's assigned roles and effective permissions
+    Roles {
+        /// User ID (UUID) or exact email
+        user: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Assign a role such as catalog_manager or credits_manager (Operators only gain its powers)
+    GrantRole {
+        /// User ID (UUID) or exact email
+        user: String,
+        /// Role slug (e.g. catalog_manager) or role ID
+        role: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Remove a directly assigned role
+    RevokeRole {
+        /// User ID (UUID) or exact email
+        user: String,
+        /// Role slug or role ID
         role: String,
         #[command(flatten)]
         auth: AuthArgs,
