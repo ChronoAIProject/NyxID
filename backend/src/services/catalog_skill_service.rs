@@ -67,6 +67,7 @@ impl SkillActor {
     }
 }
 
+#[derive(Debug)]
 pub struct SkillCommit {
     pub service: DownstreamService,
     pub state: SkillState,
