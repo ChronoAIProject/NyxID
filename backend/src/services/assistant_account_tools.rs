@@ -549,7 +549,9 @@ impl AccountTools<'_> {
             .iter()
             .find_map(|field| args[*field].as_str())
             .filter(|id| UuidSafe::valid(id));
-        let acknowledgement = args["acknowledgement_id"].as_str();
+        let acknowledgement = args["acknowledgement_id"]
+            .as_str()
+            .filter(|id| UuidSafe::valid(id));
         let _ = audit_service::log_actor_event(
             self.db.clone(),
             &actor,
