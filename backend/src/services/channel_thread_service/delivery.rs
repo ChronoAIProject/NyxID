@@ -76,7 +76,7 @@ pub async fn send_reply(
             }
             Err(error) => {
                 let _ = db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-                    .update_one(doc! {"_id": &bot.id}, doc! {"$set": {"diagnostics.last_outbound_error": {"code": error.error_code(), "at": mongodb::bson::DateTime::now()}}}).await;
+                    .update_one(doc! {"_id": &bot.id}, doc! {"$set": {"diagnostics.last_outbound_error": {"code": error.error_code().to_string(), "at": mongodb::bson::DateTime::now()}}}).await;
                 result.error = Some(error);
                 break;
             }
