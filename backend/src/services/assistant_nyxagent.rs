@@ -1877,6 +1877,7 @@ pub async fn begin_turn_with_voice(
                         attachments: lost.attachments,
                         origin: Some(lost.origin),
                         via: None,
+                        retry_of: None,
                     };
                     Box::pin(write_checkpoint_in_session(
                         db, session, &row, &lost_turn, &message, now,
@@ -2550,12 +2551,14 @@ async fn finish_turn_inner(
                         continuations,
                         turn_id: turn_id.clone(),
                         occurred_at: now,
-                    }),
+                        }),
+                    retry_of: start.retry_of.clone(),
                     created_at: now,
                     activities,
                     attachments,
                     origin,
                     via: None,
+                    retry_of: None,
                 };
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(write_checkpoint_in_session(
@@ -2960,7 +2963,8 @@ pub async fn retry_context_in_session(
     let mut completed_labels = Vec::new();
     let mut chain = vec![failed.clone()];
     let mut prior = chain[0].retry_of.clone();
-    while let Some(turn_id) = prior {
+    for _ in 0..32 {
+        let Some(turn_id) = prior.take() else { break };
         let ancestor = messages
             .find_one(doc! {
                 "conversation_id": conversation_id, "user_id": user_id,
