@@ -1113,14 +1113,43 @@ mode with `access_mode_override`.
 NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; policy floors remain enforced in every mode. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
 
 The policy floor cannot be bypassed by Autopilot: per-service proxy approvals, `machine_confirm`, webhook confirmation policy, and guest access rules always remain authoritative.
-### Skill editing and controls
-
-Attached Ornn skill pins are versioned, bounded guidance. Owners can enable or disable each pin without removing it; disabled pins are omitted from prompt metadata and `skill_read`. Learning proposal edits carry a top-level revision fence (legacy nested fences are accepted during migration), and the learning status response includes maintenance, consent, threshold, and publication-blocking state. Preview and history endpoints expose bounded metadata only.
-
 ### Editable skills and attached pins
 
-When rolling out pin disablement, upgrade all NyxID replicas before writing disabled pins so older replicas never deserialize rows containing the additive field.
+Attached Ornn skill pins are exact, bounded guidance. Each pin can be disabled
+without removing it (`SkillReference.disabled`, omitted while false): disabled
+pins are left out of prompt metadata and `nyxid__skill_read`. Writing a disabled
+pin is gated by the default-off `assistant:skill-pin-disable` flag (403 while
+off, on both `PUT /agents/{id}/skills` and NyxBot's `set_agent_skills`). Roll out
+in this order: every backend replica (older replicas reject the field and the
+top-level edit `revision`), then the frontend (it shows the toggle only while the
+flag is on for the viewer), then the flag. NyxBot may disable or remove a pin
+without a card; attaching a new pin or re-enabling a disabled one needs the
+owner's card, whose summary marks disabled pins. Approving an improved version
+keeps its base pin's disabled state.
 
-NyxBot skill proposals are editable before publication. The review editor preserves the revision fence and supports name, description, markdown, rationale, optional base skill, and bounded file edits. Publishing is a two-step owner confirmation: requesting a card does not publish; confirming the exact card publishes and attaches the pinned version.
+Per attached pin the app offers **Test** (`GET /agents/{id}/skills/{skill_id}/preview`:
+verifies the exact pinned version in Ornn, then reads SKILL.md through the same
+reader as `nyxid__skill_read`; a disabled pin reports `readable: false`) and
+**Edit** (`POST /agents/{id}/skills/{skill_id}/improve`: an authored improve
+draft prefilled from the exact package's SKILL.md body and `.md`/`.txt` files,
+with its review card raised in NyxBot's home thread; organization agents are
+refused as for any authored draft). `GET /agents/{id}/skills/history` lists the
+agent's newest 50 pin changes (every pin with its disabled state) and
+learning/authoring events to anyone who can read the agent, whoever made the
+change (index `audit_agent_skill_history`). The Plugins page Skills tab manages a
+chosen agent's pins with the same routes, attaching exact versions and hashes.
 
-Organization members can change learning consent through the learning consent action. Status reports publication blocks, owner binding, thresholds, and the current consent state. Attached skill pins can be enabled or disabled independently; disabled pins are omitted from skill reads and prompt injection while remaining in history. Preview and bounded history are owner-scoped; validation is a dry-run authoring check. The Skills panel uses the live Ornn catalog and agent skill selection APIs for pin management.
+Learned and authored drafts are editable before publication
+(`PUT /agents/{id}/learning/proposals/{proposal_id}` with `{revision, draft}`;
+the top-level revision is canonical, a nested legacy fence is accepted for one
+release). `POST …/proposals/{proposal_id}/validate` with `{draft}` dry-runs the
+proposal's own validator. Both refuse with a field diagnostic
+(`details: {rule, field, line?, limit?, actual?, unit?}`, never the offending
+text), which the app shows beside the field with rule-keyed remediation.
+Publishing is a two-step owner confirmation: requesting a card does not publish;
+confirming the exact card publishes and attaches the pinned version. Authored
+drafts are confirmed only from their conversation card.
+
+Organization members can change learning consent through the learning consent
+action. Status reports publication blocks, owner binding, thresholds and the
+current consent state.

@@ -24,6 +24,9 @@ function interruptedCopy(actions: readonly string[]): string {
     : "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version.";
 }
 
+export const SAVED_EDIT_NOTICE =
+  "Draft saved. A new review card for this version was posted in this conversation; confirm it there.";
+
 export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly deciding: boolean;
@@ -130,8 +133,12 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
         {editing ? "Close the editor" : "Edit before publishing"}
       </Button>
       {editing ? <>
-        <p className="text-[12px] text-muted-foreground">Saving changes this draft. Publish it only from this card.</p>
-        <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => void refresh()} />
+        <p className="text-[12px] text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
+        <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => {
+          setEditing(false);
+          setNotice(SAVED_EDIT_NOTICE);
+          void refresh();
+        }} />
       </> : null}
     </div> : null}
     {data?.status === "publishing" ? <p role="status" className="text-[12px] text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}

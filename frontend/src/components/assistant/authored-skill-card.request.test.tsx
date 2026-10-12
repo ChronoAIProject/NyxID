@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { AuthoredSkillCard } from "./authored-skill-card";
+import { AuthoredSkillCard, SAVED_EDIT_NOTICE } from "./authored-skill-card";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
 // Exercises the real request path (assistantJson -> fetch); only fetch is stubbed.
@@ -148,7 +148,7 @@ it("edits the draft before publishing and re-reads the card after saving", async
   show();
   fireEvent.click(await screen.findByRole("button", { name: "Edit before publishing" }));
   const markdown = await screen.findByRole("textbox", { name: "Skill draft" });
-  // Publishing stays on this card; the editor does not link elsewhere.
+  // The editor does not link elsewhere; publishing waits for the saved version's new card.
   expect(screen.queryByRole("link", { name: "Open the confirmation card" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Allow and publish" })).toBeVisible();
   const readsBeforeSave = cardReads();
@@ -158,6 +158,9 @@ it("edits the draft before publishing and re-reads the card after saving", async
   const put = fetchMock.mock.calls.find(([url, init]) => url === proposalPath && (init as RequestInit | undefined)?.method === "PUT")!;
   expect(JSON.parse(String((put[1] as RequestInit).body))).toEqual({ revision: 4, draft: { ...draft, skill_md: "# Weekly review\nAdd a summary" } });
   await waitFor(() => expect(cardReads()).toBeGreaterThan(readsBeforeSave));
+  // The saved revision gets a fresh card (the server raises it); this one says where to go.
+  expect(await screen.findByText(SAVED_EDIT_NOTICE)).toBeVisible();
+  expect(screen.queryByRole("textbox", { name: "Skill draft" })).not.toBeInTheDocument();
 });
 
 it("offers no editing once the draft is no longer editable", async () => {

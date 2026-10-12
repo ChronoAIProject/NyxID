@@ -3991,14 +3991,40 @@ async fn specialist_channel_bot_tools_remain_orchestrator_only() {
 #[tokio::test]
 async fn s9_specialist_guest_disabled_pin_denial() {
     let f = fixture("s9_mcp_disabled_pin").await;
+    // The specialist already has one attached pin.
+    let pin = json!({"source":"ornn","skill_id":uuid::Uuid::new_v4().to_string(),"name":"checklist","version":"1.0","sha256":"a".repeat(64),"dependencies":[]});
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"skills": [mongodb::bson::to_bson(&pin).unwrap()], "skills_revision": 0}},
+        )
+        .await
+        .unwrap();
+    let mut disabled = pin.clone();
+    disabled["disabled"] = json!(true);
+    let args =
+        json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[disabled]}});
+    let stored = || async {
+        f.state
+            .db
+            .collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &f.chat.agent_id})
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    // The specialist cannot change its own skills; a guest turn cannot either.
     let specialist = authenticate(&f).await;
-    let args = json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[{"source":"ornn","skill_id":uuid::Uuid::new_v4().to_string(),"name":"disabled","version":"1.0","sha256":"a".repeat(64),"dependencies":[],"disabled":true}]}});
     let refusal = result(
         call(&f, &specialist, "nyxid__set_agent_skills", args.clone()).await,
         true,
     )
     .await;
-    assert_eq!(refusal["error"], "owner_only");
+    assert_eq!(refusal["error"], "orchestrator_only");
     let mut guest = authenticate(&f).await;
     guest.chat.as_mut().unwrap().guest = true;
     let guest_refusal = result(
@@ -4007,18 +4033,45 @@ async fn s9_specialist_guest_disabled_pin_denial() {
     )
     .await;
     assert_eq!(guest_refusal["error"], "owner_only");
+    // NyxBot is refused while the rollout flag is off...
     let owner = authenticate_id(&f, &f.nyxbot_thread).await;
+    let flag_off = result(
+        call(&f, &owner, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(flag_off["error"], "forbidden", "{flag_off}");
+    let agent = stored().await;
+    assert_eq!(agent.skills_revision, 0);
+    assert!(!agent.skills[0].disabled);
+    // ...and disables the pin without a card once it is on.
+    crate::services::feature_flag_service::set_platform_override(
+        &f.state.db,
+        crate::services::feature_flag_service::SKILL_PIN_DISABLE_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
     let owner_result = result(
-        call(
-            &f,
-            &owner,
-            "nyxid__set_agent_skills",
-            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[]}}),
-        )
-        .await,
+        call(&f, &owner, "nyxid__set_agent_skills", args.clone()).await,
         false,
     )
     .await;
     assert_eq!(owner_result["revision"], 1);
+    let agent = stored().await;
+    assert_eq!(agent.skills_revision, 1);
+    assert!(agent.skills[0].disabled);
+    // Turning it back on needs the owner's card.
+    let enable =
+        json!({"agent":f.chat.agent_id,"selection":{"expected_revision":1,"skills":[pin]}});
+    let card = result(
+        call(&f, &owner, "nyxid__set_agent_skills", enable).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["error"], "acknowledgement_required", "{card}");
+    assert!(stored().await.skills[0].disabled);
     f.state.db.drop().await.unwrap();
 }

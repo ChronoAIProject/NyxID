@@ -564,6 +564,16 @@ pub async fn read(
     page(&content, id, version, path, offset)
 }
 
+/// Every file of an attached pin's exact package (hash-checked), by
+/// package-relative path. Reads regardless of the pin's disabled state.
+pub(crate) async fn pinned_files(
+    reader: &impl OrnnReader,
+    pin: &SkillReference,
+) -> AppResult<BTreeMap<String, Vec<u8>>> {
+    literal(&pin.skill_id, &pin.version)?;
+    package(&download(reader, &pin.skill_id, &pin.version, &pin.sha256).await?)
+}
+
 fn page(content: &str, id: &str, version: &str, path: &str, offset: usize) -> AppResult<Value> {
     if offset > content.len() || !content.is_char_boundary(offset) {
         return Err(invalid("Offset must be a UTF-8 byte boundary in the file"));
@@ -593,12 +603,18 @@ fn same_pin_ignoring_disabled(a: &SkillReference, b: &SkillReference) -> bool {
         && a.dependencies == b.dependencies
 }
 
+/// A NyxBot change needs the owner's card when it attaches a pin the agent
+/// does not have, or turns a disabled pin back on. Disabling and removing do not.
 pub fn needs_confirmation(agent: &AssistantAgent, selection: &Selection) -> bool {
     selection.skills.iter().any(|s| {
-        !agent
+        match agent
             .skills
             .iter()
-            .any(|current| same_pin_ignoring_disabled(current, s))
+            .find(|current| same_pin_ignoring_disabled(current, s))
+        {
+            None => true,
+            Some(current) => current.disabled && !s.disabled,
+        }
     })
 }
 
@@ -704,7 +720,7 @@ pub async fn set(
         "assistant_skills_updated",
         Some(json!({
             "owner_id": agent.user_id, "agent_id": id, "revision": revision, "count": selection.skills.len(),
-            "skills": selection.skills.iter().map(|s| json!({"id": s.skill_id, "version": s.version})).collect::<Vec<_>>(),
+            "skills": selection.skills.iter().map(|s| json!({"id": s.skill_id, "name": s.name, "version": s.version, "disabled": s.disabled})).collect::<Vec<_>>(),
         })),
     ).await;
     Ok(SkillsResponse {
@@ -779,16 +795,79 @@ pub fn instructions(agent: &AssistantAgent) -> String {
 #[path = "agent_skill_service_tests.rs"]
 mod tests;
 
-pub async fn history(db: &Database, owner: &str, agent_id: &str) -> AppResult<Value> {
+/// Audit events that make up an agent's skill history.
+pub const HISTORY_EVENTS: [&str; 7] = [
+    "assistant_skills_updated",
+    "assistant_learning_proposal_edited",
+    "assistant_learning_proposal_rejected",
+    "assistant_learning_proposal_reprepared",
+    "assistant_learning_publication_approved",
+    "assistant_learning_publication_deferred",
+    "assistant_learning_skill_pinned",
+];
+
+#[derive(Debug, Serialize)]
+pub struct HistoryPin {
+    pub skill_id: String,
+    pub name: String,
+    pub version: String,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryItem {
+    pub id: String,
+    pub event_type: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub revision: Option<i64>,
+    pub proposal_id: Option<String>,
+    pub skills: Vec<HistoryPin>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryResponse {
+    pub items: Vec<HistoryItem>,
+}
+
+/// The newest 50 skill events of an agent, whoever performed them (the
+/// owner, an organization maintainer, or NyxBot for the owner). The caller
+/// must already be allowed to read the agent.
+pub async fn history(db: &Database, agent: &AssistantAgent) -> AppResult<HistoryResponse> {
     let rows: Vec<crate::models::audit_log::AuditLog> = db
         .collection(crate::models::audit_log::COLLECTION_NAME)
-        .find(doc! {"user_id": owner, "event_type": "assistant_skills_updated", "event_data.agent_id": agent_id})
+        .find(
+            doc! {"event_data.agent_id": &agent.id, "event_type": {"$in": HISTORY_EVENTS.to_vec()}},
+        )
         .sort(doc! {"created_at": -1})
         .limit(50)
         .await?
         .try_collect()
         .await?;
-    Ok(
-        json!({"items": rows.into_iter().map(|r| json!({"id": r.id, "created_at": r.created_at, "event_data": r.event_data})).collect::<Vec<_>>() }),
-    )
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
+    Ok(HistoryResponse {
+        items: rows
+            .into_iter()
+            .map(|row| {
+                let data = row.event_data.unwrap_or(Value::Null);
+                HistoryItem {
+                    id: row.id,
+                    event_type: row.event_type,
+                    created_at: row.created_at,
+                    revision: data["revision"].as_i64(),
+                    proposal_id: data["proposal_id"].as_str().map(str::to_owned),
+                    skills: data["skills"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|pin| HistoryPin {
+                            skill_id: text(pin, "id"),
+                            name: text(pin, "name"),
+                            version: text(pin, "version"),
+                            disabled: pin["disabled"].as_bool().unwrap_or(false),
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+    })
 }

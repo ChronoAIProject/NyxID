@@ -215,6 +215,121 @@ pub async fn create(
         rationale: String::new(),
         safety_notes: String::new(),
     };
+    // Tool retries within the same turn reuse the encrypted proposal and card.
+    submit(state, chat, &agent, body, reader, |fingerprint| {
+        let turn = chat
+            .turn_id
+            .as_deref()
+            .ok_or_else(|| AppError::Forbidden("Draft from an active owner turn".into()))?;
+        Ok(format!(
+            "skill-draft:{}:{turn}:{fingerprint}",
+            chat.conversation_id
+        ))
+    })
+    .await
+}
+
+/// The owner's "Edit" of an attached skill in the app: an authored improve
+/// draft prefilled from the exact pinned package, reviewed on an owner card in
+/// `chat` (NyxBot's home thread) like any authored draft. Repeating the same
+/// edit reuses the pending draft.
+pub async fn create_improve_draft(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent_id: &str,
+    skill_id: &str,
+    reader: &impl super::agent_skill_service::OrnnReader,
+) -> AppResult<Value> {
+    require_author(&state.db, chat).await?;
+    let agent = team::maintained_agent(&state.db, &chat.user_id, agent_id).await?;
+    if agent.destroyed_at.is_some() {
+        return Err(AppError::NotFound("Agent not found".into()));
+    }
+    if agent.user_id != chat.user_id {
+        return Err(AppError::Conflict("owner_binding_unavailable: Ornn currently publishes person-owned skills only. Ask an organization maintainer to attach an existing approved skill; no personal publication fallback is allowed".into()));
+    }
+    let pin = agent
+        .skills
+        .iter()
+        .find(|pin| pin.skill_id == skill_id && pin.source == "ornn")
+        .cloned()
+        .ok_or_else(|| AppError::NotFound("Attached skill not found".into()))?;
+    if !pin.dependencies.is_empty() {
+        return Err(AppError::Conflict(
+            "skill_dependencies_unsupported: skills with pinned dependencies are improved through NyxBot".into(),
+        ));
+    }
+    let mut files = super::agent_skill_service::pinned_files(reader, &pin).await?;
+    let skill_md = files
+        .remove("SKILL.md")
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| {
+            AppError::Conflict("source_skill_unavailable: SKILL.md is not text".into())
+        })?;
+    let mut extra = Vec::new();
+    for (path, bytes) in files {
+        let content = String::from_utf8(bytes).ok().filter(|_| {
+            (path.ends_with(".md") || path.ends_with(".txt")) && !path.contains(['\\', ':'])
+        });
+        let Some(content) = content else {
+            return Err(AppError::Conflict(
+                "skill_files_unsupported: only .md and .txt text files can be edited here; improve this skill through NyxBot".into(),
+            ));
+        };
+        extra.push(GeneratedFile { path, content });
+    }
+    let description = agent
+        .skill_metadata
+        .get(&pin.skill_id)
+        .map(|meta| meta.description.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| format!("Improved version of {}", pin.name));
+    let body = GeneratedProposal {
+        schema_version: 1,
+        kind: "improve".into(),
+        name: pin.name.clone(),
+        description,
+        skill_md: without_frontmatter(&skill_md).to_owned(),
+        files: extra,
+        base_skill: Some(crate::models::catalog_skill_revision::SkillPin {
+            source: pin.source.clone(),
+            skill_id: pin.skill_id.clone(),
+            name: pin.name.clone(),
+            version: pin.version.clone(),
+            sha256: pin.sha256.clone(),
+        }),
+        rationale: String::new(),
+        safety_notes: String::new(),
+    };
+    let seed = format!(
+        "skill-improve:{}:{}:{}",
+        agent.id, pin.skill_id, pin.version
+    );
+    submit(state, chat, &agent, body, reader, |fingerprint| {
+        Ok(format!("{seed}:{fingerprint}"))
+    })
+    .await
+}
+
+/// Published SKILL.md starts with NyxID's generated YAML frontmatter; the
+/// editable guidance is what follows it.
+fn without_frontmatter(text: &str) -> &str {
+    text.strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---\n").map(|end| &rest[end + 5..]))
+        .map_or(text, |body| body.trim_start_matches('\n'))
+}
+
+/// Validate, store (idempotently, keyed by `seed(fingerprint)`) and raise the
+/// owner review card for an authored draft.
+async fn submit(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    body: GeneratedProposal,
+    reader: &impl super::agent_skill_service::OrnnReader,
+    seed: impl FnOnce(&str) -> AppResult<String>,
+) -> AppResult<Value> {
+    let agent = agent.clone();
     let encoded = validate_body(&body)?;
     review::validate_proposal_base(&state.db, &agent, &body, ProposalSource::Authored).await?;
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(state.audit_chain_hmac_key.as_slice())
@@ -223,16 +338,7 @@ pub async fn create(
     mac.update(agent.id.as_bytes());
     mac.update(&encoded);
     let fingerprint = hex::encode(mac.finalize().into_bytes());
-    // Tool retries within the same turn reuse the encrypted proposal and card.
-    let turn = chat
-        .turn_id
-        .as_deref()
-        .ok_or_else(|| AppError::Forbidden("Draft from an active owner turn".into()))?;
-    let id = Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("skill-draft:{}:{turn}:{fingerprint}", chat.conversation_id).as_bytes(),
-    )
-    .to_string();
+    let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, seed(&fingerprint)?.as_bytes()).to_string();
     let collection = state
         .db
         .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
@@ -313,15 +419,104 @@ pub async fn create(
             return Err(failure.error);
         }
     };
-    let card = acks::request(&state.db, chat, acks::Request {
-        kind: "action", service: None, tool: Some(review::TOOL), arguments: Some(&binding),
-        summary: "Review the complete skill draft, publish it privately to Ornn and attach its exact version to this agent.", platform: false,
-    }).await?;
+    let card = acks::request(
+        &state.db,
+        chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some(review::TOOL),
+            arguments: Some(&binding),
+            summary: CARD_SUMMARY,
+            platform: false,
+        },
+    )
+    .await?;
     let mut result = acks::refusal(&card);
     result["proposal_id"] = id.into();
     result["agent_id"] = agent.id.into();
     result["source"] = "authored".into();
     result["instructions"] = "End your turn. The owner reviews all files on this card; NyxID publishes and pins after approval without a tool retry. Never confirm publication yourself.".into();
+    Ok(result)
+}
+
+const CARD_SUMMARY: &str = "Review the complete skill draft, publish it privately to Ornn and attach its exact version to this agent.";
+
+/// Whether a proposal of this agent is an authored draft.
+pub async fn is_authored(db: &Database, agent_id: &str, proposal_id: &str) -> AppResult<bool> {
+    Ok(db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":proposal_id,"agent_id":agent_id,"source":"authored"})
+        .await?
+        .is_some())
+}
+
+/// The live chat of a draft's newest review card, if that chat may still
+/// author skills.
+pub async fn latest_card_chat(
+    db: &Database,
+    actor: &str,
+    proposal_id: &str,
+) -> AppResult<Option<ChatAuthority>> {
+    let Some(card) = db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+        .find_one(doc! {"user_id":actor,"tool_name":review::TOOL,"authored_skill.proposal_id":proposal_id})
+        .sort(doc! {"created_at":-1})
+        .await?
+    else {
+        return Ok(None);
+    };
+    match card_authority(db, actor, &card).await {
+        Ok(chat) => Ok(Some(chat)),
+        Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// An owner edit changes the draft its card was bound to, so that card can no
+/// longer publish (a renewal only repeats the same binding). Raise a fresh
+/// card for the saved revision in `chat`.
+pub async fn raise_review_card(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent_id: &str,
+    proposal_id: &str,
+    reader: &impl super::agent_skill_service::OrnnReader,
+) -> AppResult<Value> {
+    require_author(&state.db, chat).await?;
+    let agent = team::maintained_agent(&state.db, &chat.user_id, agent_id).await?;
+    let row = state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":proposal_id,"agent_id":&agent.id,"source":"authored"})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Learning proposal not found".into()))?;
+    let binding = review::approval_binding_typed(
+        state,
+        &chat.user_id,
+        &agent.id,
+        proposal_id,
+        row.revision,
+        agent.skills_revision,
+        reader,
+    )
+    .await
+    .map_err(|failure| failure.error)?;
+    let card = acks::request(
+        &state.db,
+        chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some(review::TOOL),
+            arguments: Some(&binding),
+            summary: CARD_SUMMARY,
+            platform: false,
+        },
+    )
+    .await?;
+    let mut result = acks::refusal(&card);
+    result["proposal_id"] = proposal_id.into();
     Ok(result)
 }
 

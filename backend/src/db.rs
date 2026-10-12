@@ -570,6 +570,22 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+    // An agent's skill history (pin changes and learning/authoring events).
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "event_data.agent_id": 1, "event_type": 1, "created_at": -1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("audit_agent_skill_history".to_string())
+                        .partial_filter_expression(
+                            doc! { "event_data.agent_id": { "$exists": true } },
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     audit
         .create_index(
             IndexModel::builder()

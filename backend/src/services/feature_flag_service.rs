@@ -1835,6 +1835,7 @@ mod tests {
             vec![
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
+                "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
                 "assistant:operation-scopes",
                 "assistant:live-turn-gate",
