@@ -2623,7 +2623,7 @@ async fn owner_settings_put_audits_access_mode_changes() {
         serde_json::to_value(&saved).unwrap()["access_mode"],
         "ask_every_time"
     );
-    put(json!({"timezone": "Asia/Singapore"})).await.unwrap();
+    let _ = put(json!({"timezone": "Asia/Singapore"})).await.unwrap();
     let logs = state
         .db
         .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);

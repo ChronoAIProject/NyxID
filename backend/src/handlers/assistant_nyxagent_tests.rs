@@ -2645,7 +2645,7 @@ async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
     assert_eq!(data.get_str("old").unwrap(), engine::DEFAULT_MODEL);
     assert_eq!(data.get_str("new").unwrap(), "nyxagent/research");
     // Reselecting the current model is a no-op: no reset and no audit.
-    change("nyxagent/research").await.unwrap();
+    let _ = change("nyxagent/research").await.unwrap();
     assert_eq!(
         logs.count_documents(doc! {"event_type": "assistant_model_changed"})
             .await
