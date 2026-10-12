@@ -242,6 +242,15 @@ async fn every_changing_account_tool_has_a_card_summary() {
         })
         .await
         .unwrap();
+    set_mode(&f, AccessMode::Autopilot).await;
+    let route = account(
+        &f,
+        "set_channel_route",
+        &json!({"bot_id": bot, "agent_api_key_id": key, "platform_conversation_id": "c2"}),
+    )
+    .await;
+    assert!(!route.is_error, "{}", route.value);
+    let route = route.value["id"].as_str().unwrap().to_owned();
     let tools = f.tools();
     let cases = [
         (
@@ -273,6 +282,11 @@ async fn every_changing_account_tool_has_a_card_summary() {
             "delete_channel_bot",
             json!({"bot_id": bot}),
             "Delete channel bot 'Build bot'",
+        ),
+        (
+            "delete_channel_route",
+            json!({"route_id": route}),
+            "Delete channel route 'c2'",
         ),
         (
             "set_channel_route",
