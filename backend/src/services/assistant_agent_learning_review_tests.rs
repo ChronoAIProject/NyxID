@@ -1427,6 +1427,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                specialist_id: None,
                 steering: None,
                 voice: None,
                 execution_pending: false,

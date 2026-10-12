@@ -237,6 +237,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                specialist_id: None,
                 steering: None,
                 voice: None,
                 execution_pending: true,
@@ -280,6 +281,7 @@ pub(crate) fn settled_result(
     request: &VoiceRequest,
     mut source: AssistantMessage,
 ) -> AssistantMessage {
+                specialist_id: None,
     if request.async_operation_pending
         && request.state == RequestState::Cancelled
         && source.error_code.is_none()
@@ -342,6 +344,7 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                specialist_id: None,
                         steering: None,
                         id: id.clone(),
                         conversation_id: current.conversation_id,
@@ -740,6 +743,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+                specialist_id: None,
             steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,

@@ -5,6 +5,7 @@ pub const COLLECTION_NAME: &str = "assistant_messages";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+                specialist_id: None,
     /// Guidance delivered to an existing response, never a new instruction turn.
     #[serde(default)]
     pub steering: Option<Box<Steering>>,
@@ -44,6 +45,7 @@ pub struct AssistantMessage {
 }
 
 impl std::fmt::Debug for AssistantMessage {
+                specialist_id: None,
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AssistantMessage")
             .field("id", &self.id)
