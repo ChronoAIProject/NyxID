@@ -484,8 +484,6 @@ mod access_authority_tests {
             confirmation_policy: None,
         }
     }
-
-
 }
 
 async fn fence(
@@ -1633,6 +1631,9 @@ pub async fn audit_decision(
             "conversation_id": row.conversation_id, "kind": row.kind,
             "service_id": row.service_id, "tool_name": row.tool_name,
             "decision": if row.status == "allowed" {"allow"} else {"deny"},
+            "approver_user_id": actor.user_id,
+            "approver_api_key_id": actor.api_key_id,
+            "approver_kind": if actor.api_key_id.is_some() {"nyxbot_or_key"} else {"owner"},
         })),
     )
     .await;
