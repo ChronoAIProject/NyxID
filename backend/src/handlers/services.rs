@@ -5959,7 +5959,7 @@ mod tests {
 
         // Tool twins stay Admin-only.
         assert!(forbidden(
-            create_service_request(
+            super::create_service_request(
                 State(state.clone()),
                 manager(),
                 Default::default(),
