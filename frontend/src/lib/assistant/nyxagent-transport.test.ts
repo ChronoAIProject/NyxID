@@ -36,7 +36,7 @@ it("keeps a persisted diagnostic detail visible after reload", () => {
   expect(parsed.error_detail?.upstream_request_id).toBe("req-1");
 });
 
-it.each([["turn_failed", CONTEXT_RESET_NOTICE], ["stopped", "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it."], ["credential_replaced", "key was replaced"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
+it.each([["turn_failed", CONTEXT_RESET_NOTICE], ["stopped", "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it."], ["credential_replaced", "The assistant's key was replaced, so it continues in a fresh context with a recap of this chat."], ["user_reset", "You reset the working context."]])("explains reset reason %s", (reason, text) => {
   expect(contextResetCopy(reason)).toBe(text);
   expect(contextResetCopy(reason)).not.toContain("decided cards were preserved");
 });
