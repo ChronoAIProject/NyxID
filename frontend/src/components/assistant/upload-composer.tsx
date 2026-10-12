@@ -14,14 +14,13 @@ import {
   createUploadDraft,
   isSupportedAttachment,
   removeUpload,
+  UNSUPPORTED_FORMAT_MESSAGE,
   uploadFile,
   type UploadedMessage,
   type UploadScope,
 } from "@/lib/assistant/uploads";
 import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import type { NyxAgentAttachment } from "@/schemas/assistant-nyxagent";
-
-const UNSUPPORTED_FORMAT_MESSAGE = "Format not supported. Please try again.";
 
 type Pending = {
   key: string;
@@ -175,12 +174,17 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                   className="flex min-w-0 items-center gap-2 rounded-lg border border-hairline bg-card p-2 text-xs"
                 >
                   {file.preview ? (
-                    <button type="button" className="shrink-0" aria-label={`Preview ${file.name}`} onClick={() => file.preview && setPreview(file)} onKeyDown={(event) => { if (event.key === "Enter") setPreview(file); }}>
-                    <img
-                      src={file.preview}
+                    <button
+                      type="button"
+                      className="shrink-0"
+                      aria-label={`Preview ${file.name}`}
+                      onClick={() => setPreview(file)}
+                    >
+                      <img
+                        src={file.preview}
                         alt={file.name}
-                      className="h-16 w-16 shrink-0 rounded object-cover"
-                    />
+                        className="h-16 w-16 shrink-0 rounded object-cover"
+                      />
                     </button>
                   ) : (
                     <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
