@@ -1804,3 +1804,31 @@ async fn mongodb_gate_family_team_and_service_modes() {
     assert!(changing.is_error);
     assert_eq!(changing.value["error"], "acknowledgement_required");
 }
+
+#[tokio::test]
+async fn mongodb_gate_autopilot_preserves_webhook_floor() {
+    let f = orchestrator_fixture("gate_family_floor").await;
+    super::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        super::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut chat = f.chat.clone();
+    chat.confirmation_policy = Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes);
+    let result = super::assistant_acknowledgement_service::webhook_action_gate(
+        &f.state.db,
+        &chat,
+        "nyx__service_change",
+        &json!({}),
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(result.is_some());
+}
