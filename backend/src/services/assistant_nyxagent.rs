@@ -3292,17 +3292,12 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
     bounded_recap_with_checkpoint(history, false, None)
 }
 
-/// Build the reset recap with audience-sensitive metadata. Guest/channel
-/// turns may receive only the conversation text; owner-only tool and upload
-/// metadata is never disclosed through a recap.
-pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> String {
-    bounded_recap_with_checkpoint(history, guest, None)
-}
-
 /// Bytes reserved for the durable checkpoint block of a recap.
 pub const RECAP_CHECKPOINT_BYTES: usize = 4096;
 
-/// The reset recap: a reserved block first (the durable checkpoint for owner
+/// The reset recap. Guest/channel audiences (`guest`) receive only the
+/// conversation text; owner-only tool, upload, error and checkpoint metadata is
+/// never disclosed to them. A reserved block comes first (the durable checkpoint for owner
 /// audiences, else the oldest user message of the 20-message window, which
 /// is the goal the window still holds), then the newest messages that fit.
 pub fn bounded_recap_with_checkpoint(

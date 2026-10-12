@@ -529,7 +529,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         origin: None,
         via: None,
     };
-    let recap = bounded_recap_for_audience(std::slice::from_ref(&row), true);
+    let recap = bounded_recap_with_checkpoint(std::slice::from_ref(&row), true, None);
     assert!(recap.contains("Visible channel reply"));
     assert!(!recap.contains("owner.secret_tool"));
     assert!(!recap.contains("private.txt"));
