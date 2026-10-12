@@ -1019,6 +1019,8 @@ async fn b4_duplicate_action_fence_through_tools_call() {
     );
     let different = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "calendar"})).await;
     assert_eq!(different.status(), StatusCode::OK);
+    let repeated_read = direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await;
+    assert_eq!(repeated_read.status(), StatusCode::OK);
 }
 
 #[tokio::test]
