@@ -1712,6 +1712,26 @@ pub async fn find_active_webhook_bot(
         .await?)
 }
 
+pub async fn record_outbound_error(
+    db: &mongodb::Database,
+    bot_id: &str,
+    code: u32,
+) -> AppResult<()> {
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
+        doc! { "_id": bot_id },
+        doc! { "$set": { "diagnostics.last_outbound_error": { "code": code.to_string(), "at": mongodb::bson::DateTime::now() } } },
+    ).await?;
+    Ok(())
+}
+
+pub async fn record_outbound_success(db: &mongodb::Database, bot_id: &str) -> AppResult<()> {
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
+        doc! { "_id": bot_id },
+        doc! { "$set": { "diagnostics.last_outbound_at": mongodb::bson::DateTime::now(), "diagnostics.last_outbound_error": mongodb::bson::Bson::Null } },
+    ).await?;
+    Ok(())
+}
+
 pub async fn record_webhook_error(
     db: &mongodb::Database,
     bot_id: &str,
