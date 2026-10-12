@@ -665,15 +665,15 @@ mod s9_denial_tests {
 
     #[tokio::test]
     async fn destroyed_agent_put_skills_is_refused() {
-        let f = orchestrator_fixture("s9_destroyed_put").await;
-        enable(&f.state.db, &f.owner).await;
-        team::destroy(&f.state.db, &f.owner, &f.chat.agent_id)
+        let f = crate::services::org_agent_tests::Fixture::new("s9_destroyed_specialist").await;
+        let (agent, _) = f.create().await;
+        crate::services::assistant_team_service::destroy(&f.state.db, &f.admin, &agent.id)
             .await
             .unwrap();
         let err = crate::handlers::agent_skills::set(
             State(f.state.clone()),
-            crate::test_utils::test_auth_user(&f.owner),
-            Path(f.chat.agent_id.clone()),
+            crate::test_utils::test_auth_user(&f.admin),
+            Path(agent.id),
             Json(crate::services::agent_skill_service::Selection {
                 expected_revision: 0,
                 skills: vec![],
@@ -681,7 +681,10 @@ mod s9_denial_tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err.to_string(), "Agent is destroyed");
+        assert_eq!(
+            err.to_string(),
+            "Skill unavailable or not visible through your Ornn access"
+        );
     }
 
     #[tokio::test]
