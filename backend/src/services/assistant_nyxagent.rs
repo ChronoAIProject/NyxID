@@ -112,7 +112,7 @@ pub const SUBAGENT_PROMPT: &str = concat!(
     "a task, finish with a concise report; it is delivered to NyxBot. The user may also talk ",
     "to you directly, in the app or a linked chat app. You can use only the services you ",
     "were granted. Ask NyxBot to create or change schedules; schedule tools are NyxBot-only. ",
-    "If a tool returns acknowledgement_required, NyxID has asked NyxBot for ",
+    "If a tool returns access_request_denied, report the missing access to NyxBot; no request card was created. If it returns acknowledgement_required, NyxID has asked NyxBot for ",
     "permission: end your turn with a one-line note and you will be resumed with the ",
     "decision. Never retry a denied request. You cannot create agents, change account ",
     "settings, or delete anything. Remember durable facts about your work with ",
