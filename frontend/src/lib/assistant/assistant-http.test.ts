@@ -17,6 +17,11 @@ const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
 
 describe("assistantHttp", () => {
+  it("preserves validation details from a real error response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "validation_error", error_code: 400, message: "Invalid", details: { rule: "required", field: "name", line: 2, remediation: "Add a name" } }), { status: 400, headers: { "Content-Type": "application/json" } })));
+    await expect(assistantHttp("/assistant/test")).rejects.toMatchObject({ errorResponse: { details: { rule: "required", field: "name", line: 2 } } });
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
