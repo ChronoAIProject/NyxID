@@ -10,7 +10,9 @@ vi.mock("@/hooks/use-agent-skills", () => ({
   useSkillSearch: vi.fn(() => ({ data: { items: [], total_pages: 1 }, isLoading: false })),
   useAgentSkills: vi.fn(() => ({ data: undefined })),
   useSetAgentSkills: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useAttachLatestSkill: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
 }));
+// The Skills tab is covered by plugins-view.skills.request.test.tsx.
 
 const mocks = vi.hoisted(() => ({
   useCatalog: vi.fn(),
@@ -548,19 +550,5 @@ describe("PluginsView", () => {
     expect(
       screen.getByText("No plugins match this search."),
     ).toBeInTheDocument();
-  });
-
-  it("uses the live Ornn catalog surface for skills", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    expect(screen.getByRole("tab", { name: "Skills" })).toBeInTheDocument();
-  });
-
-  it("selects an agent for real skill attach and surfaces the management target", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    expect(screen.getByRole("textbox", { name: "Agent id for skill management" })).toBeInTheDocument();
   });
 });
