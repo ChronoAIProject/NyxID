@@ -146,11 +146,11 @@ pub async fn owner_gate_required(
     policy_floor: bool,
 ) -> AppResult<bool> {
     let settings = crate::services::assistant_settings_service::get(db, &chat.user_id).await?;
-    let mode = if let Some(agent_id) = &chat.agent_id {
+    let mode = if !chat.agent_id.is_empty() {
         db.collection::<crate::models::assistant_agent::AssistantAgent>(
             crate::models::assistant_agent::COLLECTION_NAME,
         )
-        .find_one(mongodb::bson::doc! {"_id": agent_id, "user_id": &chat.user_id})
+        .find_one(mongodb::bson::doc! {"_id": &chat.agent_id, "user_id": &chat.user_id})
         .await?
         .and_then(|agent| agent.access_mode_override)
         .unwrap_or(settings.access_mode)

@@ -145,6 +145,7 @@ async fn upsert(
             turn_id: turn_id.clone(),
             vote: input.vote.clone(),
             comment: comment.clone(),
+            comment_present: input.comment.is_some(),
             context: reply_context,
         },
     )
@@ -367,7 +368,6 @@ pub async fn admin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn per_user_feedback_burst_is_limited_independently() {
@@ -453,7 +453,7 @@ mod tests {
             turn_id: Some("t".into()),
             vote: "up".into(),
             comment: None,
-            context: reply_context,
+            context: None,
             created_at: now,
             updated_at: now,
         }

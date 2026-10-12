@@ -9,6 +9,9 @@ mod fixtures {
     use chrono::Utc;
     pub fn message(id: &str, conversation_id: &str, user_id: &str) -> AssistantMessage {
         AssistantMessage {
+            error_detail: None,
+            specialist_id: None,
+            upstream_error_code: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -30,6 +33,7 @@ mod fixtures {
     }
     pub fn group_message(id: &str, group_id: &str, user_id: &str) -> GroupMessage {
         GroupMessage {
+            recipient_agent_ids: Vec::new(),
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -49,6 +53,8 @@ mod fixtures {
     }
     pub fn group(id: &str, owner: &str) -> AssistantGroup {
         AssistantGroup {
+            last_recipient_ids: Vec::new(),
+            last_recipient_ids_by_actor: Default::default(),
             id: id.into(),
             user_id: owner.into(),
             participant_user_ids: vec![owner.into()],

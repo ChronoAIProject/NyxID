@@ -1547,6 +1547,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        requester_agent_id: None,
         authored_skill: None,
         voice_request_id: None,
         continuation_receipt_id: None,

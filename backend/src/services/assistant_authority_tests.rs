@@ -1817,9 +1817,10 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
         audit_data.get_str("key").unwrap(),
         f.row.credential_api_key_id
     );
-    assert!(
-        audit_data.get("target").is_none() || audit_data.get("target").unwrap().as_null().is_ok()
-    );
+    assert!(matches!(
+        audit_data.get("target"),
+        None | Some(bson::Bson::Null)
+    ));
     assert_eq!(audit_data.get_str("scope").unwrap(), "account");
     assert_eq!(audit_data.get_str("decision").unwrap(), "denied");
     settings::update(

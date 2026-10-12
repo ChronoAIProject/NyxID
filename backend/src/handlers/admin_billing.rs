@@ -374,6 +374,8 @@ pub async fn update_service_billing(
         credential: None,
         auth_notes: None,
         known_limitations: None,
+        required_permissions: None,
+        examples_url: None,
         recommended_skills: None,
         recommended_skill_refs: None,
         clear_skill_refs: false,

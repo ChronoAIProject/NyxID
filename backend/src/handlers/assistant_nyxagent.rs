@@ -1198,7 +1198,7 @@ pub async fn turns(
     let (parts, body) = request.into_parts();
     let bytes =
         super::body_limit::read_body(body, engine::MAX_REQUEST_BYTES, "Assistant turn").await?;
-    let mut input = engine::parse_turn(&bytes)?;
+    let input = engine::parse_turn(&bytes)?;
     let mut retry_note = None;
     if let (Some(retry_of), Some(conversation_id)) = (&input.retry_of, &input.conversation_id) {
         let history = engine::messages(&state.db, &user_id, conversation_id, 100, None).await?;

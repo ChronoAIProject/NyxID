@@ -10,6 +10,15 @@ const schema = z.object({
       message_id: z.string(),
       vote: z.enum(["up", "down"]),
       comment: z.string().nullable().optional(),
+      context: z
+        .object({
+          agent_kind: z.string().nullable().optional(),
+          model: z.string().nullable().optional(),
+          reply_status: z.string().nullable().optional(),
+          error_code: z.string().nullable().optional(),
+        })
+        .nullable()
+        .optional(),
       created_at: z.string(),
       updated_at: z.string(),
     }),

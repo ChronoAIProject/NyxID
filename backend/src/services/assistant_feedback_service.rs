@@ -130,7 +130,7 @@ pub async fn upsert_feedback(
     db: &Database,
     write: FeedbackWrite,
 ) -> mongodb::error::Result<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
-    let filter = doc! {"user_id": user_id, "message_id": message_id};
+    let filter = doc! {"user_id": &write.user_id, "message_id": &write.message_id};
     let existing = db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
         .find_one(filter.clone())
@@ -166,10 +166,9 @@ pub async fn delete_feedback(
     user_id: &str,
     message_id: &str,
 ) -> mongodb::error::Result<Option<AssistantMessageFeedback>> {
-    Ok(db
-        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find_one_and_delete(doc! {"user_id": &write.user_id, "message_id": &write.message_id})
-        .await?)
+    db.collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find_one_and_delete(doc! {"user_id": user_id, "message_id": message_id})
+        .await
 }
 
 pub async fn reply_context(
