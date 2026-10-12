@@ -1490,16 +1490,11 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
     assert_eq!(turn.retry_of.as_deref(), Some(failed_turn.as_str()));
     assert_eq!(turn.retry_digests, ["digest-send"]);
     let note = turn.note.as_deref().unwrap();
-    assert!(
-        note.contains(&failed_turn) && note.contains("idle_timeout"),
-        "{note}"
-    );
-    assert!(note.contains("already completed there; use their results. NyxID refuses repeating any of them with the same arguments: mail__send."), "{note}");
-    assert!(
-        note.contains(
-            "did not complete; check their effect before running them again: drive__upload."
-        ),
-        "{note}"
+    assert_eq!(
+        note,
+        format!(
+            "[NyxID retry context: the owner is retrying turn {failed_turn}, which failed (idle_timeout). These actions already completed there; use their results. NyxID refuses repeating any of them with the same arguments: mail__send. These did not complete; check their effect before running them again: drive__upload. The original message's attachments are attached again.]"
+        )
     );
     let input = messages(&db, &user, &first.id, 1, None)
         .await

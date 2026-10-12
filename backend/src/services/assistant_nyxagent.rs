@@ -2997,6 +2997,7 @@ pub async fn retry_context_in_session(
         .await?;
     let mut digests: Vec<String> = Vec::new();
     let mut completed_labels = Vec::new();
+    let mut completed_keys = std::collections::HashSet::new();
     let mut chain = vec![failed.clone()];
     let mut prior = chain[0].retry_of.clone();
     for _ in 0..32 {
@@ -3019,7 +3020,13 @@ pub async fn retry_context_in_session(
             {
                 digests.push(digest.to_owned());
             }
-            completed_labels.push(activity.label.as_str());
+            let key = activity
+                .digest
+                .clone()
+                .unwrap_or_else(|| format!("label:{}", activity.label));
+            if completed_keys.insert(key) {
+                completed_labels.push(activity.label.clone());
+            }
         }
     }
     let completed: Vec<&TurnActivity> = failed
@@ -3041,21 +3048,14 @@ pub async fn retry_context_in_session(
             .as_deref()
             .unwrap_or("assistant_unavailable")
     );
-    if completed.is_empty() {
+    if completed_labels.is_empty() {
         note.push_str("No action completed in that turn.");
     } else {
         note.push_str(
             "These actions already completed there; use their results. NyxID refuses \
              repeating any of them with the same arguments: ",
         );
-        note.push_str(
-            &completed
-                .iter()
-                .map(|a| a.label.as_str())
-                .chain(completed_labels.iter().copied())
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
+        note.push_str(&completed_labels.join(", "));
         note.push('.');
     }
     if !unfinished.is_empty() {
