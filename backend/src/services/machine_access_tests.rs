@@ -1937,13 +1937,10 @@ async fn specialist_machine_login_request_is_denied_audited_and_routed_when_allo
                 .unwrap()
                 .is_some()
         );
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            loop {
-                let messages = f.state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
-                if messages.find_one(doc! {"conversation_id":&f.nyxbot_thread,"role":"event","text":{"$regex":id}}).await.unwrap().is_some() { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        }).await.expect("NyxBot receives resource permission request");
+        let queued = f.state.db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id": &f.nyxbot_thread, "pending_events": {"$elemMatch": {"text": {"$regex": id}}}})
+            .await.unwrap();
+        assert!(queued.is_some(), "NyxBot pending event");
     }
 }
 
