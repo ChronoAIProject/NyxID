@@ -746,6 +746,7 @@ mod tests {
         f.state.db.drop().await.unwrap();
     }
 
+    #[tokio::test]
     async fn agent_skills_ornn_requires_live_person_identity_and_refuses_master_credentials() {
         let f = orchestrator_fixture("skill_ornn_identity").await;
         let upstream = MockServer::start().await;

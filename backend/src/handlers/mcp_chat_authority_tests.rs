@@ -3089,6 +3089,17 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
     )
     .await;
     assert_eq!(disabled_read["error"], "forbidden");
+    f.state
+        .db
+        .collection::<crate::models::assistant_agent::AssistantAgent>(
+            crate::models::assistant_agent::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"skills.0.disabled": false}},
+        )
+        .await
+        .unwrap();
     let other = result(
         direct_call(&f, &auth, "nyxid__skill_read", json!({"skill":id})).await,
         true,
