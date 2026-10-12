@@ -75,16 +75,19 @@ pub async fn send_reply(
                 break;
             }
             Err(error) => {
-                let _ = db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-                    .update_one(doc! {"_id": &bot.id}, doc! {"$set": {"diagnostics.last_outbound_error": {"code": error.error_code(), "at": mongodb::bson::DateTime::now()}}}).await;
+                let _ = crate::services::channel_bot_service::record_outbound_error(
+                    db,
+                    &bot.id,
+                    error.error_code(),
+                )
+                .await;
                 result.error = Some(error);
                 break;
             }
         };
         // Preserve known acceptance even if recording fails. Never retry sends.
         result.message_ids.push(id.clone());
-        let _ = db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-            .update_one(doc! {"_id": &bot.id}, doc! {"$set": {"diagnostics.last_outbound_at": mongodb::bson::DateTime::now(), "diagnostics.last_outbound_error": bson::Bson::Null}}).await;
+        let _ = crate::services::channel_bot_service::record_outbound_success(db, &bot.id).await;
         let mut facts = target.facts.clone();
         facts.message_id = id.clone();
         facts.parent_message_id = Some(target.facts.message_id.clone());

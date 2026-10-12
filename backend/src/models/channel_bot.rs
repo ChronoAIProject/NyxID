@@ -1,10 +1,27 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_error_code<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Code {
+        Text(String),
+        Number(i64),
+    }
+    match Code::deserialize(deserializer)? {
+        Code::Text(value) => Ok(value),
+        Code::Number(value) => Ok(value.to_string()),
+    }
+}
 
 pub const COLLECTION_NAME: &str = "channel_bots";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotError {
+    #[serde(deserialize_with = "deserialize_error_code")]
     pub code: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub at: DateTime<Utc>,
@@ -244,6 +261,20 @@ mod tests {
             bot.diagnostics.last_inbound_source.as_deref(),
             Some("webhook")
         );
+    }
+
+    #[test]
+    fn diagnostics_accept_legacy_numeric_error_codes() {
+        let doc = bson::doc! {
+            "_id": "legacy-error", "user_id": "u", "platform": "twitter", "label": "x",
+            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
+            "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false,
+            "webhook_secret_hash": "h", "status": "active", "is_active": true,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            "diagnostics": { "last_outbound_error": { "code": 10004, "at": bson::DateTime::now() } }
+        };
+        let bot: ChannelBot = bson::from_document(doc).unwrap();
+        assert_eq!(bot.diagnostics.last_outbound_error.unwrap().code, "10004");
     }
 
     #[test]

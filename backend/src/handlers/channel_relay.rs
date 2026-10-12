@@ -1141,6 +1141,17 @@ pub(crate) async fn deliver_initiated_message(
         observation.waba_id = bot.app_id.clone();
     }
     let platform_message_id = outcome.final_id;
+    if let Some(error) = &outcome.error {
+        let _ = crate::services::channel_bot_service::record_outbound_error(
+            &state.db,
+            &bot.id,
+            error.error_code(),
+        )
+        .await;
+    } else {
+        let _ =
+            crate::services::channel_bot_service::record_outbound_success(&state.db, &bot.id).await;
+    }
     // After upstream acceptance, retain pending claims on persistence failure.
     // An uncertain outcome must never automatically dispatch a second copy.
     let stored = channel_relay_service::store_outbound_message(
