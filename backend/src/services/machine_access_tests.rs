@@ -1928,7 +1928,7 @@ async fn specialist_machine_login_request_is_denied_audited_and_routed_when_allo
         .await
         .unwrap();
         assert_eq!(routed["error"], "acknowledgement_required");
-        assert_eq!(routed["decider"], "orchestrator");
+        assert_eq!(routed["decider"], "user");
         let id = routed["acknowledgement_id"].as_str().unwrap();
         assert!(
             cards

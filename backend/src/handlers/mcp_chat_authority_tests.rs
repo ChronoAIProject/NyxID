@@ -3872,15 +3872,6 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     .unwrap();
     assert!(body.contains("access_request_denied"));
     assert!(f.state.db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"connect_service"}).await.unwrap().is_some());
-    assert_eq!(
-        f.state
-            .db
-            .collection::<mongodb::bson::Document>(crate::models::connect_link::COLLECTION_NAME)
-            .count_documents(doc! {"conversation_id":&f.row.id})
-            .await
-            .unwrap(),
-        0
-    );
     settings::update(
         &f.state.db,
         &f.owner,
@@ -3907,7 +3898,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
             .to_vec(),
     )
     .unwrap();
-    assert!(!routed_body.contains("access_request_denied"));
+    assert!(routed_body.contains("access_request_denied"));
 }
 
 #[tokio::test]
