@@ -137,8 +137,3 @@ pub(super) fn capture_client_context(
         client_device_memory: body.client_device_memory,
     })
 }
-
-#[cfg(test)]
-mod management_route_tests {
-    use super::require_first_party_human;
-}

@@ -461,30 +461,6 @@ pub fn arguments_digest(arguments: &Value) -> String {
     hex::encode(Sha256::digest(canonical(&value).to_string().as_bytes()))
 }
 
-#[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod access_authority_tests {
-    use super::*;
-    use crate::models::assistant_conversation::AgentRole;
-
-    fn chat(role: AgentRole, guest: bool) -> ChatAuthority {
-        ChatAuthority {
-            org_agent_access: None,
-            turn_id: None,
-            turn_stopped: false,
-            turn_live: true,
-            machine_node_ids: vec![],
-            saved_login_ids: vec![],
-            conversation_id: "thread".into(),
-            user_id: "user".into(),
-            api_key_id: "key".into(),
-            role,
-            agent_id: "agent".into(),
-            agent_name: "specialist".into(),
-            guest,
-            confirmation_policy: None,
-        }
-    }
 }
 
 async fn fence(
