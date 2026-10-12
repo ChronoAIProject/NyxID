@@ -791,7 +791,12 @@ impl AccountTools<'_> {
             .collect())
     }
 
-    async fn action_summary(&self, user: &str, name: &str, args: &Value) -> AppResult<String> {
+    pub(crate) async fn action_summary(
+        &self,
+        user: &str,
+        name: &str,
+        args: &Value,
+    ) -> AppResult<String> {
         Ok(match name {
             "delete_agent_key" => {
                 let key = self.mutable_key(user, text(args, "api_key_id")).await?;

@@ -924,7 +924,11 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
         if !tools::read_only(name) {
             assert_eq!(result.value["error"], "orchestrator_only", "{name}");
         } else if name.starts_with("list_") && *name != "list_agent_key_bindings" {
-            assert!(!result.is_error, "{name}: unexpected error result");
+            assert!(
+                !result.is_error,
+                "{name}: unexpected error result: {}",
+                result.value
+            );
         } else {
             assert!(result.is_error, "{name}");
             assert!(
@@ -985,7 +989,9 @@ pub(crate) async fn ordinary_key(f: &Fixture) -> String {
 async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
     let name = format!("nyxid__{name}");
     let mut result = f.tools().execute(&f.auth, &name, &args).await;
-    if result.value["error"] == "acknowledgement_required" && result.value["kind"] == "action" {
+    if result.value["error"] == "acknowledgement_required"
+        && result.value["acknowledgement_id"].is_string()
+    {
         let id = result.value["acknowledgement_id"].as_str().unwrap();
         acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
             .await
@@ -993,7 +999,11 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
         args["acknowledgement_id"] = json!(id);
         result = f.tools().execute(&f.auth, &name, &args).await;
     }
-    assert!(!result.is_error, "{name}: unexpected error result");
+    assert!(
+        !result.is_error,
+        "{name}: unexpected error result: {}",
+        result.value
+    );
     let serialized = result.value.to_string();
     for secret_field in [
         "key_hash",
