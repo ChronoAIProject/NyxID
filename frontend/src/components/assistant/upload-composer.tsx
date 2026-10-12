@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import {
   createUploadDraft,
+  isSupportedAttachment,
   removeUpload,
   uploadFile,
   type UploadedMessage,
@@ -92,7 +93,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         progress: 0,
         controller: new AbortController(),
       };
-      if (["image/svg+xml", "video/mp4", "audio/mpeg"].includes(file.type)) {
+      if (!isSupportedAttachment(file)) {
         entry.error = UNSUPPORTED_FORMAT_MESSAGE;
         pending.current.set(entry.key, entry);
         refresh();
@@ -230,8 +231,9 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       }
       attachmentButton={
         <>
-          {/* No picker MIME filter: extensionless text and browser MIME guesses
-              must reach the same server sniffing/validation as paste and drop. */}
+          {/* No picker MIME filter: it would hide extensionless text and files
+              with unusual browser MIME guesses. `add` applies the same allowlist
+              to picker, paste and drop, and the server still sniffs every file. */}
           <input
             ref={input}
             type="file"

@@ -14,7 +14,9 @@ import {
 } from "@/lib/assistant/uploads";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 
-vi.mock("@/lib/assistant/uploads", () => ({
+vi.mock("@/lib/assistant/uploads", async (importOriginal) => ({
+  // The real format allowlist and copy; only network calls are stubbed.
+  ...(await importOriginal<typeof import("@/lib/assistant/uploads")>()),
   createUploadDraft: vi.fn().mockResolvedValue("nyxa-draft"),
   removeUpload: vi.fn().mockResolvedValue(undefined),
   uploadFile: vi.fn(),
@@ -50,6 +52,49 @@ describe("Assistant uploads composer", () => {
     choose(new File(["svg"], "drawing.svg", { type: "image/svg+xml" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Format not supported. Please try again.");
     expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["photo.heic", "image/heic"],
+    ["photo.HEIC", ""],
+    ["archive.zip", "application/zip"],
+    ["archive.zip", "application/x-zip-compressed"],
+    ["scan.bmp", "image/bmp"],
+    ["scan.tiff", "image/tiff"],
+    ["clip.mp4", "video/mp4"],
+    ["page.html", "text/html"],
+    ["script.py", "text/x-python"],
+    ["photo.png", "text/plain"],
+  ])("rejects %s (%s) before uploading it", async (name, type) => {
+    render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+    choose(new File(["bytes"], name, { type }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/^Format not supported\. Please try again\.$/);
+    expect(screen.getByRole("list", { name: "Attachments" })).toHaveTextContent(name);
+    await act(async () => {});
+    expect(uploadFile).not.toHaveBeenCalled();
+    expect(createUploadDraft).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["photo.png", "image/png"],
+    ["photo.jpeg", "image/jpeg"],
+    ["camera.jfif", "image/jpeg"],
+    ["loop.gif", "image/gif"],
+    ["shot.webp", "image/webp"],
+    ["paper.pdf", "application/pdf"],
+    ["memo.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    ["memo.docx", ""],
+    ["notes.txt", "text/plain"],
+    ["notes.md", "text/markdown"],
+    ["data.json", "application/json"],
+  ])("uploads the supported %s (%s)", async (name, type) => {
+    render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+    const file = new File(["bytes"], name, { type });
+    choose(file);
+    await screen.findByText("Ready");
+    expect(uploadFile).toHaveBeenCalledWith(
+      { kind: "conversations", id: "one" }, file, expect.any(AbortSignal), expect.any(Function),
+    );
   });
 
   it("opens and closes an image preview", async () => {
