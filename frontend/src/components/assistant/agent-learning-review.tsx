@@ -321,6 +321,7 @@ export function AgentLearningReview({
                     }))
                   }
                 />
+                <Input aria-label="Skill kind" value={draft.kind} readOnly={readOnly} onChange={() => undefined} />
                 <Input
                   aria-label="Skill name"
                   value={draftNames[proposal.id] ?? draft.name}
@@ -421,6 +422,9 @@ export function AgentLearningReview({
                 {!readOnly &&
                 (drafts[proposal.id] !== undefined ||
                   draftRationales[proposal.id] !== undefined ||
+                  draftBases[proposal.id] !== undefined ||
+                  draftNames[proposal.id] !== undefined ||
+                  draftDescriptions[proposal.id] !== undefined ||
                   draftFiles[proposal.id] !== undefined) ? (
                   <Button
                     size="sm"

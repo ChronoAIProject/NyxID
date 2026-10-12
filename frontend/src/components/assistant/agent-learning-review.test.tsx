@@ -102,6 +102,15 @@ describe("AgentLearningReview", () => {
     await waitFor(() => expect(mocks.reject).toHaveBeenCalledWith({ proposalId: "proposal", revision: 2 }));
   });
 
+  it("saves a changed name in the edit payload", async () => {
+    mocks.feature.mockReturnValue(true);
+    render(<AgentLearningReview agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Skill name" }), { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith(expect.objectContaining({ draft: expect.objectContaining({ name: "Renamed" }) })));
+  });
+
   it("renders organization consent and sends the PUT learning consent mutation", () => {
     mocks.feature.mockReturnValue(true);
     mocks.review.mockReturnValue({
