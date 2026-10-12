@@ -753,7 +753,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
             assert_eq!(rows.len(), 1);
             assert!(rows[0].platform);
             assert_eq!(rows[0].service_id.as_deref(), Some(service.id.as_str()));
-            // The chat may also mint a hosted connect link in Ask mode.
+            // Specialist chat keys cannot mint hosted connect links, even in routed mode.
             let connect = handle_meta_connect(
                 &f.state,
                 &auth,
@@ -766,11 +766,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
             let bytes = axum::body::to_bytes(connect.into_body(), 1024 * 1024)
                 .await
                 .unwrap();
-            assert!(
-                !String::from_utf8_lossy(&bytes).contains("does not have access"),
-                "{}",
-                String::from_utf8_lossy(&bytes)
-            );
+            assert!(String::from_utf8_lossy(&bytes).contains("access_request_denied"));
             acks::decide(&f.state.db, &f.owner, &f.row.id, &ids[0], true)
                 .await
                 .unwrap();
