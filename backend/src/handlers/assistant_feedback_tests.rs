@@ -580,7 +580,10 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"].as_str(), Some("not_found"));
-    assert_eq!(body["message"].as_str(), Some("Not found: Assistant route not found."));
+    assert_eq!(
+        body["message"].as_str(),
+        Some("Not found: Assistant route not found.")
+    );
     f.state
         .db
         .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
@@ -1009,7 +1012,10 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
         let (status, body) = request(&f.state, method, &wrong, &f.human_token, input).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {body}");
         assert_eq!(body["error"].as_str(), Some("not_found"));
-        assert_eq!(body["message"].as_str(), Some("Not found: message not found"));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("Not found: message not found")
+        );
     }
     let stored = f
         .state
