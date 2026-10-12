@@ -92,6 +92,19 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     (test_app_state(db), calls, server)
 }
 
+async fn enable_routed_requests(state: &AppState) {
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": OWNER,
+            "specialist_access_requests": "routed_to_nyxbot",
+            "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+}
+
 async fn idle_row(state: &AppState, id: &str) -> AssistantConversation {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -1052,6 +1065,7 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
 #[tokio::test]
 async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialist() {
     let (state, _, server) = setup("team_permissions").await;
+    enable_routed_requests(&state).await;
     let (orchestrator, chat) = orchestrator(&state).await;
     let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
     spawn(
@@ -1332,6 +1346,7 @@ async fn event_budget_used(state: &AppState) -> i64 {
 #[tokio::test]
 async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
     let (state, calls, server) = setup("team_grant_keys").await;
+    enable_routed_requests(&state).await;
     let (orchestrator, chat) = orchestrator(&state).await;
     let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
     let slack = connected(&state.db, OWNER, "slack", "https://slack.com/api").await;
