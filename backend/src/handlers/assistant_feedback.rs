@@ -108,12 +108,18 @@ async fn upsert(
     let user_id = auth.user_id.to_string();
     enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
+    let mut reply_context = None;
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
         let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
         engine::authorize_thread_read(&state.db, &conversation).await?;
         let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+        reply_context = Some(
+            feedback_service::reply_context(&state.db, "conversation", &row, Some(&conversation))
+                .await
+                .map_err(AppError::from)?,
+        );
         (
             Some(row.turn_id),
             row.role == "assistant" && row.status == "completed",
@@ -139,7 +145,7 @@ async fn upsert(
             turn_id: turn_id.clone(),
             vote: input.vote.clone(),
             comment: comment.clone(),
-            context: None,
+            context: reply_context,
         },
     )
     .await
@@ -432,7 +438,7 @@ mod tests {
             turn_id: Some("t".into()),
             vote: "up".into(),
             comment: None,
-            context: None,
+            context: reply_context,
             created_at: now,
             updated_at: now,
         }
