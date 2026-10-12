@@ -1,6 +1,5 @@
 import { AutomationPreferences } from "./automation-preferences";
 import { useState } from "react";
-import type { Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -84,7 +83,7 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
 function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
   const update = useUpdateNyxBotSettings();
   const form = useAppForm<NyxAgentSettingsForm>({
-    resolver: zodResolver(nyxAgentSettingsFormSchema(settings)) as Resolver<NyxAgentSettingsForm>,
+    resolver: zodResolver(nyxAgentSettingsFormSchema(settings)),
     defaultValues: formValues(settings),
   });
   const [error, setError] = useState<string>();
@@ -244,7 +243,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
           />
         ))}
         <FormField control={form.control} name="specialist_access_requests" render={({ field }) => (
-          <FormItem className="rounded-lg border border-border p-4"><FormLabel>Specialist access requests</FormLabel><FormDescription>Specialists are sandboxed and cannot grant access. Denied mode stops requests; routed mode sends them to NyxBot for approval.</FormDescription><FormControl><select className="mt-2 h-10 rounded-md border bg-background px-3" {...field}><option value="denied">Deny requests</option><option value="routed_to_nyxbot">Route to NyxBot</option></select></FormControl></FormItem>
+          <FormItem className="rounded-lg border border-border p-4"><FormLabel>Specialist access requests</FormLabel><FormDescription>Specialists are sandboxed and cannot grant access. Denied mode stops requests; routed mode sends them to NyxBot for approval.</FormDescription><FormControl><select className="mt-2 h-8 w-full rounded-lg border border-input bg-background px-3 text-12" {...field}><option value="denied">Deny requests</option><option value="routed_to_nyxbot">Route to NyxBot</option></select></FormControl></FormItem>
         )} />
         <p className="text-11 text-muted-foreground">
           Every specialist turn and group hand-off is billed to your credits
