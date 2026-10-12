@@ -47,6 +47,9 @@ pub struct AssistantMessage {
     /// A user message written in a chat app: its platform.
     #[serde(default)]
     pub via: Option<String>,
+    /// Failed turn this user message retries, when applicable.
+    #[serde(default)]
+    pub retry_of: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

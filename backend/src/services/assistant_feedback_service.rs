@@ -358,6 +358,8 @@ pub async fn reply_context(
 }
 
 /// Snapshot of a group reply. Conversation-only fields stay absent.
+/// The group feedback PUT path uses this to persist the same metadata-only
+/// context as conversation feedback.
 pub fn group_reply_context(reply: &GroupMessage) -> FeedbackReplyContext {
     FeedbackReplyContext {
         surface: Some("group".into()),
