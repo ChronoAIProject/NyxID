@@ -2067,7 +2067,6 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
-        retry_of: None,
                     retry_of: None,
                     specialist_id: None,
                     steering: None,
@@ -2558,13 +2557,11 @@ async fn finish_turn_inner(
                         turn_id: turn_id.clone(),
                         occurred_at: now,
                         }),
-                    retry_of: start.retry_of.clone(),
                     created_at: now,
                     activities,
                     attachments,
                     origin,
                     via: None,
-                    retry_of: None,
                 };
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(write_checkpoint_in_session(
