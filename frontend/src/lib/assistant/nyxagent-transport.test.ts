@@ -1354,6 +1354,7 @@ describe("sent images", () => {
     endpoint: `/assistant/nyxagent/conversations/${id}/attachments/img-1`,
     contentType: "image/png",
     label: "photo.png",
+    origin: "user_upload",
   };
 
   it("shows them on the optimistic user message and exactly once after the history reload", async () => {

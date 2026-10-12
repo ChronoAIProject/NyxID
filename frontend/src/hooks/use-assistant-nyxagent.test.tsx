@@ -517,6 +517,7 @@ it("shows a new thread's sent image at once, before the draft is adopted", async
     endpoint: `/assistant/nyxagent/conversations/${draftId}/attachments/img-1`,
     contentType: "image/png",
     label: "photo.png",
+    origin: "user_upload",
   }]));
   expect(result.current.session.messages[0]).toMatchObject({ role: "user", content: "Look" });
   // Still a new thread to the page: no conversation id until adoption.
