@@ -8,6 +8,7 @@ import { useAgentLearningReview } from "@/hooks/use-agent-learning-review";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
+import { learningDraftEditable } from "@/schemas/agent-skills";
 import { LearningDraftEditor } from "./learning-draft-editor";
 
 function requestFailure(cause: unknown): string {
@@ -194,7 +195,7 @@ export function AgentLearningReview({
                 key={`${proposal.id}:${proposal.revision}`}
                 agentId={agentId}
                 proposal={{ ...proposal, draft }}
-                readOnly={readOnly}
+                readOnly={readOnly || !learningDraftEditable(proposal.status)}
                 edit={review.edit}
                 validate={review.validate}
               />

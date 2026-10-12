@@ -9,6 +9,7 @@ import {
   type AgentSkill,
   attachedSkillPreviewSchema,
   agentSkillHistorySchema,
+  skillImproveSchema,
 } from "@/schemas/agent-skills";
 const base = "/assistant/nyxagent";
 export function useAgentSkills(id: string) {
@@ -36,7 +37,12 @@ export function useSetAgentSkills(id: string) {
         body: selection,
       }),
     onSuccess: () =>
-      client.invalidateQueries({ queryKey: ["agent-skills", owner, id] }),
+      Promise.all([
+        client.invalidateQueries({ queryKey: ["agent-skills", owner, id] }),
+        client.invalidateQueries({
+          queryKey: ["agent-skill-history", owner, id],
+        }),
+      ]),
   });
 }
 export function useSkillSearch(query: string | null, page: number) {
@@ -81,6 +87,7 @@ export function useSkillPreview(id: string | undefined, version: string) {
     retry: false,
   });
 }
+/** Explicit per-pin test: reads the pinned version the way the agent does. */
 export function useAttachedSkillPreview(agentId: string, skillId: string) {
   const owner = useAuthStore((s) => s.user?.id);
   return useQuery({
@@ -107,5 +114,27 @@ export function useAgentSkillHistory(agentId: string) {
       ),
     enabled: Boolean(owner && agentId),
     retry: false,
+  });
+}
+
+/**
+ * Starts an authored improve draft of an attached skill. The server raises
+ * its owner review card; the draft then appears in the learning proposals.
+ */
+export function useImproveAgentSkill(agentId: string) {
+  const client = useQueryClient();
+  const owner = useAuthStore((s) => s.user?.id);
+  return useMutation({
+    mutationFn: async (skillId: string) =>
+      skillImproveSchema.parse(
+        await assistantJson(
+          `${base}/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/improve`,
+          { method: "POST", body: {} },
+        ),
+      ),
+    onSuccess: () =>
+      client.invalidateQueries({
+        queryKey: ["agent-learning-proposals", owner, agentId],
+      }),
   });
 }

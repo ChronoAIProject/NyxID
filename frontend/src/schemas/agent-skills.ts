@@ -277,7 +277,10 @@ export function skillDraftDiagnostics(cause: unknown): SkillDraftDiagnostic[] {
   });
 }
 
-export const SKILL_DRAFT_KINDS = ["new", "improve"] as const;
+/** Only these drafts accept edits; the server refuses the rest. */
+export function learningDraftEditable(status: string): boolean {
+  return status === "pending" || status === "publication_failed";
+}
 
 /** The draft editor's form. `base_skill_id` selects one attached pin. */
 export const skillDraftFormSchema = z

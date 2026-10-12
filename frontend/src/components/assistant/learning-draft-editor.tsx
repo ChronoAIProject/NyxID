@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useFieldArray, type FieldPath } from "react-hook-form";
 import { Button } from "@/components/ui/button";
@@ -21,14 +22,15 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useAgentSkills } from "@/hooks/use-agent-skills";
-import type {
-  LearningDraftBody,
+import {
   useAgentLearningReview,
+  type LearningDraftBody,
 } from "@/hooks/use-agent-learning-review";
 import {
   skillDraftDiagnostics,
   skillDraftFieldLabel,
   skillDraftFormSchema,
+  learningDraftEditable,
   type SkillDraftDiagnostic,
   type SkillDraftForm,
   type SkillPin,
@@ -179,12 +181,14 @@ export function LearningDraftEditor({
   readOnly,
   edit,
   validate,
+  onSaved,
 }: {
   readonly agentId: string;
   readonly proposal: Proposal & { readonly draft: Draft };
   readonly readOnly: boolean;
   readonly edit: Review["edit"];
   readonly validate: Review["validate"];
+  readonly onSaved?: () => void;
 }) {
   const draft = proposal.draft;
   const form = useAppForm<SkillDraftForm>({
@@ -256,11 +260,13 @@ export function LearningDraftEditor({
   const save = form.handleSubmit((values) => {
     setBanner(undefined);
     setValidBytes(undefined);
-    edit.mutate({
+    const variables = {
       proposalId: proposal.id,
       revision: proposal.revision,
       draft: body(values),
-    });
+    };
+    if (onSaved) edit.mutate(variables, { onSuccess: onSaved });
+    else edit.mutate(variables);
   });
 
   // Runs the proposal's own validator on the current values without saving.
@@ -483,5 +489,70 @@ export function LearningDraftEditor({
         ) : null}
       </form>
     </Form>
+  );
+}
+
+/**
+ * One proposal's editor, loaded by id: used where a draft is opened outside
+ * the learning panel (an attached skill's Edit, an authored card).
+ */
+export function ProposalDraftEditor({
+  agentId,
+  proposalId,
+  readOnly = false,
+  showCardLink = true,
+  onSaved,
+}: {
+  readonly agentId: string;
+  readonly proposalId: string;
+  readonly readOnly?: boolean;
+  /** Off inside the card itself, which is the place to publish. */
+  readonly showCardLink?: boolean;
+  readonly onSaved?: () => void;
+}) {
+  const review = useAgentLearningReview(agentId);
+  const proposal = review.data?.proposals.find((item) => item.id === proposalId);
+  if (review.isPending) {
+    return (
+      <p role="status" className="text-11 text-muted-foreground">
+        Loading the draft…
+      </p>
+    );
+  }
+  if (review.error) {
+    return (
+      <p role="alert" className="text-11 text-destructive">
+        The draft could not be loaded. {requestFailure(review.error)}
+      </p>
+    );
+  }
+  if (!proposal?.draft) {
+    return (
+      <p role="status" className="text-11 text-muted-foreground">
+        This draft is no longer available.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <LearningDraftEditor
+        key={`${proposal.id}:${proposal.revision}`}
+        agentId={agentId}
+        proposal={{ ...proposal, draft: proposal.draft }}
+        readOnly={readOnly || !learningDraftEditable(proposal.status)}
+        edit={review.edit}
+        validate={review.validate}
+        onSaved={onSaved}
+      />
+      {showCardLink && proposal.card_conversation_id ? (
+        <Link
+          to="/assistant"
+          search={{ c: proposal.card_conversation_id }}
+          className="text-11 text-primary hover:underline"
+        >
+          Open the confirmation card
+        </Link>
+      ) : null}
+    </div>
   );
 }

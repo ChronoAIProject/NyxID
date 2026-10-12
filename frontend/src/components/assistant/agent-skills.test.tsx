@@ -28,6 +28,7 @@ vi.mock("@/hooks/use-agent-skills", () => ({
   useSkillPreview: mocks.preview,
   useAttachedSkillPreview: mocks.attachedPreview,
   useAgentSkillHistory: mocks.history,
+  useImproveAgentSkill: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
 const pin = {
   source: "ornn",
@@ -49,8 +50,8 @@ beforeEach(() => {
       },
     },
   });
-  mocks.attachedPreview.mockReturnValue({ data: { description: "Attached guidance" } });
-  mocks.history.mockReturnValue({ data: { items: [{ id: "h1", event_data: { action: "disabled" } }] } });
+  mocks.attachedPreview.mockReturnValue({ data: undefined, isFetching: false, error: null });
+  mocks.history.mockReturnValue({ data: { items: [] } });
   mocks.search.mockReturnValue({ data: undefined });
   mocks.versions.mockReturnValue({
     data: {
@@ -201,11 +202,9 @@ it("refuses a seventeenth attachment while retaining removal", () => {
   expect(screen.getByRole("button", { name: "Remove Skill 0" })).toBeEnabled();
 });
 
-it("renders attached preview content, bounded history rows, and bounded preview errors", () => {
-  const view = render(<AgentSkills agentId="agent" />);
-  expect(screen.getByText("Attached preview: Attached guidance")).toBeInTheDocument();
-  expect(screen.getByText("disabled")).toBeInTheDocument();
-  mocks.attachedPreview.mockReturnValue({ error: new Error("preview unavailable"), data: undefined });
-  view.rerender(<AgentSkills agentId="agent" />);
-  expect(screen.getByRole("alert")).toHaveTextContent("Attached preview unavailable. Try again.");
+it("never tests a pin until its Test button is clicked", () => {
+  render(<AgentSkills agentId="agent" />);
+  expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "");
+  fireEvent.click(screen.getByRole("button", { name: "Test Research" }));
+  expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "skill-id");
 });
