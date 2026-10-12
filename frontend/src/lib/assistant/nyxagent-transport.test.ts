@@ -1280,3 +1280,71 @@ describe("send admission", () => {
     expect(isAdmittedSendError(error)).toBe(false);
   });
 });
+
+describe("sent images", () => {
+  const photo = { id: "img-1", content_type: "image/png" as const, size: 4, label: "photo.png", origin: "user_upload" as const };
+  const photoImage = {
+    id: "img-1",
+    endpoint: `/assistant/nyxagent/conversations/${id}/attachments/img-1`,
+    contentType: "image/png",
+    label: "photo.png",
+  };
+
+  it("shows them on the optimistic user message and exactly once after the history reload", async () => {
+    const page = history();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const bodies: unknown[] = [];
+    globalThis.__nyxidAssistantHttpMock = async ({ endpoint, init }) => {
+      if (endpoint.endsWith("/turns")) {
+        bodies.push(JSON.parse(String(init.body)));
+        // Admission stores the user message with its bound upload.
+        page.messages.push({
+          ...page.messages[0]!, id: "u2", seq: 3, turn_id: "turn-2", text: "Look", created_at: afterReset, attachments: [photo],
+        });
+        await gate;
+        page.messages.push({
+          ...page.messages[1]!, id: "a2", seq: 4, turn_id: "turn-2", text: "A photo", created_at: afterReset,
+        });
+        return chunked(sseBytes(
+          { ...runningStatus, turn_id: "turn-2" },
+          { event: "message.started", message_id: "a2", role: "assistant" },
+          { event: "block.started", block_id: "b2", message_id: "a2", index: 0, block: { type: "text", block_id: "b2", text: "" } },
+          { event: "block.delta", block_id: "b2", text: "A photo" },
+          { event: "block.completed", block_id: "b2", block: { type: "text", block_id: "b2", text: "A photo" } },
+          { event: "message.completed", message_id: "a2" },
+          { event: "turn.completed", turn_id: "turn-2", status: "completed", error: null },
+        ));
+      }
+      return endpoint.includes(`/conversations/${id}`)
+        ? json(page)
+        : json({ conversations: [page.conversation], next_cursor: null });
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const imageSets = () =>
+      transport.session(id).messages.filter((message) => message.images?.length);
+    let most = 0;
+    transport.subscribe(() => {
+      most = Math.max(most, imageSets().length);
+    });
+    const sending = transport.send(id, "Look", vi.fn(), undefined, {
+      attachmentIds: [photo.id],
+      attachments: [photo],
+    });
+    await vi.waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toEqual({ conversation_id: id, text: "Look", attachment_ids: ["img-1"] });
+    const optimistic = imageSets();
+    expect(optimistic).toHaveLength(1);
+    expect(optimistic[0]).toMatchObject({ role: "user", content: "Look", images: [photoImage] });
+    // A poll that lands mid-turn already holds the stored message; it must not add a second copy.
+    await transport.history(id);
+    expect(imageSets()).toHaveLength(1);
+    release();
+    await sending;
+    const settled = transport.session(id).messages;
+    expect(settled.map((message) => message.id)).toEqual(["u", "a", "u2", "a2"]);
+    expect(imageSets()).toEqual([expect.objectContaining({ id: "u2", images: [photoImage] })]);
+    expect(most).toBe(1);
+  });
+});

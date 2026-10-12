@@ -156,6 +156,27 @@ describe("Assistant uploads composer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
     expect(removeUpload).not.toHaveBeenCalled();
   });
+  it("retries a refused send with the same text and attachment ids", async () => {
+    const onSend = vi.fn()
+      .mockRejectedValueOnce(new Error("The assistant is busy. Try again shortly."))
+      .mockResolvedValue(undefined);
+    render(<UploadComposer {...base} onSend={onSend} scope={{ kind: "conversations", id: "one" }} />);
+    choose();
+    await screen.findByText("Ready");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Summarize" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })));
+    const sent = { attachmentIds: [item.id], attachments: [item], conversationId: "one" };
+    expect(onSend).toHaveBeenNthCalledWith(1, "Summarize", sent);
+    // Not admitted: the chip and the text come back for the retry.
+    expect(screen.getByRole("list", { name: "Attachments" })).toHaveTextContent("notes.txt");
+    expect(screen.getByRole("textbox")).toHaveValue("Summarize");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })));
+    expect(onSend).toHaveBeenNthCalledWith(2, "Summarize", sent);
+    expect(screen.queryByRole("list", { name: "Attachments" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    expect(uploadFile).toHaveBeenCalledOnce();
+    expect(removeUpload).not.toHaveBeenCalled();
+  });
   it("creates a draft once, shows progress and sends attachment-only messages", async () => {
     let resolve!: (value: typeof item) => void;
     vi.mocked(uploadFile).mockImplementation(

@@ -451,6 +451,34 @@ it("names the agent only when a send starts a new thread", async () => {
   existing.unmount();
 });
 
+it("passes an upload's attachment ids and metadata to the transport", async () => {
+  page.conversation.active_turn = null;
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue();
+  const photo = { id: "img-1", content_type: "image/png" as const, size: 4, label: "photo.png", origin: "user_upload" as const };
+  const draftId = `nyxa-${"d".repeat(32)}`;
+  // A new thread: the composer created an upload draft, which the turn adopts.
+  const fresh = renderHook(() => useNyxAgentAssistantChat({
+    onConversationAdopted: vi.fn(), draftAgent: nyxbotRef,
+  }), { wrapper });
+  await act(() => fresh.result.current.send("Look", {
+    attachmentIds: [photo.id], attachments: [photo], conversationId: draftId,
+  }));
+  expect(send).toHaveBeenLastCalledWith(draftId, "Look", expect.any(Function), expect.any(Function), {
+    attachmentIds: [photo.id], attachments: [photo], adoptExisting: true,
+  });
+  fresh.unmount();
+  const existing = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(), draftAgent: nyxbotRef,
+  }), { wrapper });
+  await act(() => existing.result.current.send("", {
+    attachmentIds: [photo.id], attachments: [photo], conversationId: id,
+  }));
+  expect(send).toHaveBeenLastCalledWith(id, "", expect.any(Function), expect.any(Function), {
+    attachmentIds: [photo.id], attachments: [photo], adoptExisting: false,
+  });
+  existing.unmount();
+});
+
 it("phrases continuation turns per acknowledgement kind", () => {
   const base = {
     id: "12345678-1234-4123-8123-123456789012",
