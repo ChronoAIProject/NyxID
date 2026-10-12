@@ -42,10 +42,8 @@ pub struct EditBody {
 }
 
 fn normalize_edit_draft(revision: Option<i64>, mut draft: Value) -> Value {
-    if revision.is_none() {
-        if let Some(object) = draft.as_object_mut() {
-            object.remove("revision");
-        }
+    if revision.is_none() && let Some(object) = draft.as_object_mut() {
+        object.remove("revision");
     }
     draft
 }

@@ -112,6 +112,7 @@ pub async fn group_message(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_feedback(
     db: &Database,
     user_id: &str,
@@ -155,8 +156,7 @@ pub async fn delete_feedback(
     user_id: &str,
     message_id: &str,
 ) -> mongodb::error::Result<Option<AssistantMessageFeedback>> {
-    Ok(db
-        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+    db.collection::<AssistantMessageFeedback>(COLLECTION_NAME)
         .find_one_and_delete(doc! {"user_id": user_id, "message_id": message_id})
-        .await?)
+        .await
 }

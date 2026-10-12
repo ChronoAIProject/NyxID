@@ -390,7 +390,7 @@ async fn handle_webhook_inner_impl(
             actual = %bot.platform,
             "webhook platform mismatch"
         );
-        let _ = channel_bot_service::record_webhook_error(&state.db, bot_id, "target").await;
+        let _ = channel_bot_service::record_webhook_error(state.db, bot_id, "target").await;
         return Ok(None);
     }
 
@@ -452,7 +452,7 @@ async fn handle_webhook_inner_impl(
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            channel_bot_service::record_webhook_error(&state.db, &bot.id, "signature").await?;
+            channel_bot_service::record_webhook_error(state.db, &bot.id, "signature").await?;
             return Err(format!("webhook verification failed: {error}").into());
         }
     };
@@ -464,7 +464,7 @@ async fn handle_webhook_inner_impl(
     if bot.credential_source == "connection" {
         if !bot.webhook_registered {
             tracing::warn!(platform = %bot.platform, bot_id, stage = "subscription", "channel webhook is not registered");
-            channel_bot_service::record_webhook_error(&state.db, bot_id, "unregistered").await?;
+            channel_bot_service::record_webhook_error(state.db, bot_id, "unregistered").await?;
             return Ok(None);
         }
         crate::services::channel_credentials::resolve_bot_token(

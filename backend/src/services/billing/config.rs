@@ -221,10 +221,13 @@ mod tests {
     fn service_override_wins_over_global_and_env() {
         let service = ServiceBilling {
             byok_pricing: Some(crate::models::service_billing::LanePricing {
+                metric: Default::default(),
                 credits_per_unit: "1".into(),
                 lago_metric_code: String::new(),
                 sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
                 sync_error: None,
+                components: Vec::new(),
+                operations: Vec::new(),
             }),
             ..Default::default()
         };
