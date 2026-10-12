@@ -1235,3 +1235,52 @@ async fn resubscribe_without_platform_webhook_credentials_asks_an_admin() {
             .contains("Platform Credentials")
     );
 }
+
+#[tokio::test]
+async fn resubscribe_keeps_success_when_post_write_readback_is_unavailable() {
+    for status in [503, 429] {
+        let (state, adapter, server, owner, connection) = fixture().await;
+        let state = https_state(&state);
+        credentials(&state, &adapter, &owner).await;
+        let bot = insert_bot(&state, &owner, &connection).await;
+        Mock::given(method("GET"))
+            .and(path("/2/webhooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{
+                "id": "100", "valid": true, "url": "https://nyx.example/api/v1/webhooks/channel/x/platform"
+            }]})))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2/activity/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/2/activity/subscriptions"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/2/activity/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "subscription_id": "200", "event_type": "dm.received", "filter": {"user_id": "10"},
+                "webhook_id": "100", "tag": format!("nyxid:{}", bot.id)
+            }})))
+            .mount(&server)
+            .await;
+        assert!(
+            crate::handlers::channel_bots::resubscribe_with_adapter(&state, &bot, &adapter)
+                .await
+                .unwrap()
+        );
+        let current = channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        assert!(current.webhook_registered);
+        assert_eq!(
+            current.diagnostics.failure_reason.as_deref(),
+            Some("subscription_check_failed")
+        );
+    }
+}

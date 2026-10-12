@@ -53,6 +53,8 @@ pub mod codes {
     pub const WEBHOOK_MISSING: &str = "webhook_missing";
     /// The live check found no subscription for this bot's account.
     pub const SUBSCRIPTION_MISSING: &str = "subscription_missing";
+    /// The post-write live subscription read could not be completed.
+    pub const SUBSCRIPTION_CHECK_FAILED: &str = "subscription_check_failed";
     /// An authenticated delivery arrived for a bot whose subscription is not recorded.
     pub const UNREGISTERED: &str = "unregistered";
     /// Unexpected internal error.

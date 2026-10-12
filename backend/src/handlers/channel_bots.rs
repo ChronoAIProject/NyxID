@@ -1419,7 +1419,16 @@ pub(crate) async fn resubscribe_with_adapter(
         &current,
         &state.config.base_url,
     )
-    .await?;
+    .await;
+    let live = match live {
+        Ok(live) => live,
+        Err(error) => {
+            tracing::warn!(bot_id = %bot.id, error = %error, "X webhook subscription read-back failed after resubscribe");
+            let _ =
+                channel_bot_service::record_subscription_check_failure(&state.db, &bot.id).await;
+            return Ok(true);
+        }
+    };
     Ok(live.is_none_or(|status| status.registered))
 }
 
@@ -1568,7 +1577,7 @@ pub(crate) async fn verify_bot_with_adapter(
         {
             // Setup reported success; confirm it with a read-only live check.
             let configured = channel_bot_service::get_bot(&state.db, &bot.id).await?;
-            crate::services::channel_connection_webhook_service::check_live(
+            let live = crate::services::channel_connection_webhook_service::check_live(
                 &state.db,
                 &state.encryption_keys,
                 &state.http_client,
@@ -1576,7 +1585,12 @@ pub(crate) async fn verify_bot_with_adapter(
                 &configured,
                 &state.config.base_url,
             )
-            .await?;
+            .await;
+            if let Err(error) = live {
+                tracing::warn!(bot_id = %bot.id, error = %error, "X webhook subscription read-back failed after verify");
+                let _ = channel_bot_service::record_subscription_check_failure(&state.db, &bot.id)
+                    .await;
+            }
             let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
             return Ok(Json(VerifyBotResponse {
                 last_verification: None,
