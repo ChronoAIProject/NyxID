@@ -101,6 +101,9 @@ export function GroupMessageRow({
   const [vote, setVote] = useState<"up" | "down" | undefined>(
     message.feedback?.vote,
   );
+  const [commentOpen, setCommentOpen] = useState(false);
+  const [comment, setComment] = useState(message.feedback?.comment ?? "");
+  const [feedbackError, setFeedbackError] = useState(false);
   if (message.role === "notice") {
     return (
       <div className="min-w-0 px-8">
@@ -203,7 +206,11 @@ export function GroupMessageRow({
                   setVote(selected);
                   void feedback
                     .mutateAsync(selected ? { vote: selected } : {})
-                    .catch(() => setVote(vote));
+                    .then(() => setFeedbackError(false))
+                    .catch(() => {
+                      setVote(vote);
+                      setFeedbackError(true);
+                    });
                 }}
                 className={`rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50 ${vote === next ? "text-nyx-secondary-400" : ""}`}
               >
@@ -214,7 +221,54 @@ export function GroupMessageRow({
                 )}
               </button>
             ))}
+            <button
+              type="button"
+              aria-label="Add feedback comment"
+              aria-expanded={commentOpen}
+              onClick={() => setCommentOpen((open) => !open)}
+              className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
+            >
+              Comment
+            </button>
           </div>
+          {commentOpen ? (
+            <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
+              <textarea
+                autoFocus
+                aria-label="Optional feedback comment"
+                value={comment}
+                maxLength={1000}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setCommentOpen(false);
+                }}
+                onChange={(event) => setComment(event.target.value)}
+                className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none"
+                placeholder={vote ? "Optional comment" : "Choose helpful or not helpful first"}
+              />
+              <button
+                type="button"
+                disabled={!vote || feedback.isPending}
+                className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10 disabled:opacity-50"
+                onClick={() => {
+                  if (!vote) return;
+                  void feedback
+                    .mutateAsync({ vote, comment })
+                    .then(() => {
+                      setFeedbackError(false);
+                      setCommentOpen(false);
+                    })
+                    .catch(() => setFeedbackError(true));
+                }}
+              >
+                Send
+              </button>
+            </div>
+          ) : null}
+          {feedbackError ? (
+            <p role="alert" className="mt-1 text-11 text-destructive">
+              Unable to save feedback. Try again.
+            </p>
+          ) : null}
         </div>
       </div>
     </article>
