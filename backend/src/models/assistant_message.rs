@@ -23,6 +23,9 @@ pub struct AssistantMessage {
     pub text: String,
     pub status: String,
     pub error_code: Option<String>,
+    /// Specialist identity for bounded access-denial notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialist_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     /// Tool calls observed during the turn that produced this reply (assistant rows only).

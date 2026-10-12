@@ -263,8 +263,8 @@ pub async fn audit_access_request_denied(
                 "user_id": &chat.user_id,
                 "role": "event",
                 "error_code": "specialist_access_denied",
+                "specialist_id": &chat.agent_id,
                 "created_at": {"$gte": cutoff},
-                "text": {"$regex": format!("^specialist_access_denied: {} ", chat.agent_id)},
             })
             .await
             .unwrap_or(1);
