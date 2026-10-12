@@ -729,3 +729,4 @@ Assistant reply feedback is a human-only NyxAgent conversation feature: `PUT`/`D
 Feedback writes are scoped to the current parent conversation or group and are purged by parent deletion; concurrent first votes are resolved by the unique user/message index.
  Feedback changes emit metadata-only `nyxid::assistant_feedback` structured logs; comment and reply text are excluded.
 - Admin billing configuration mirrors non-secret environment values with per-value sources and redacts secret material; service lane precedence follows the synced BYOK/platform-key, legacy fallback, and free rules documented in `docs/PLATFORM_KEYS_AND_INFERENCE.md`.
+ Feedback administration supports model, agent-kind, and error filters; legacy rows without reply context remain readable.

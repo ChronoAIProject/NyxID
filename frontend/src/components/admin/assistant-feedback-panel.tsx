@@ -103,6 +103,9 @@ export function AssistantFeedbackPanel() {
             <span>
               {row.vote}
               {row.comment ? ` ${row.comment}` : ""}
+              {row.context
+                ? ` ${row.context.agent_kind ?? ""} ${row.context.model ?? ""}`
+                : " no context (pre-A1 row)"}
             </span>
           </div>
         ))}

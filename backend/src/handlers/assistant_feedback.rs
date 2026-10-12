@@ -108,12 +108,18 @@ async fn upsert(
     let user_id = auth.user_id.to_string();
     enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
+    let mut reply_context = None;
     let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
         let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
         engine::authorize_thread_read(&state.db, &conversation).await?;
         let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+        reply_context = Some(
+            feedback_service::reply_context(&state.db, "conversation", &row, Some(&conversation))
+                .await
+                .map_err(AppError::from)?,
+        );
         (
             Some(row.turn_id),
             row.role == "assistant" && row.status == "completed",
@@ -131,14 +137,16 @@ async fn upsert(
     }
     let (row, existing) = feedback_service::upsert_feedback(
         &state.db,
-        &user_id,
-        message_id,
-        conversation_id.clone(),
-        group_id.clone(),
-        turn_id.clone(),
-        &input.vote,
-        comment.clone(),
-        None,
+        feedback_service::FeedbackWrite {
+            user_id: user_id.clone(),
+            message_id: message_id.to_owned(),
+            conversation_id: conversation_id.clone(),
+            group_id: group_id.clone(),
+            turn_id: turn_id.clone(),
+            vote: input.vote.clone(),
+            comment: comment.clone(),
+            context: reply_context,
+        },
     )
     .await
     .map_err(AppError::from)?;
@@ -159,13 +167,13 @@ async fn upsert(
     } else {
         "comment_updated"
     };
-    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), surface = if group_id.is_some() { "group" } else { "conversation" }, context = ?row.context, "assistant feedback state changed");
+    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), surface = if group_id.is_some() { "group" } else { "conversation" }, conversation_id = ?conversation_id, group_id = ?group_id, context_surface = ?row.context.as_ref().and_then(|c| c.surface.as_deref()), context_agent_id = ?row.context.as_ref().and_then(|c| c.agent_id.as_deref()), context_agent_kind = ?row.context.as_ref().and_then(|c| c.agent_kind.as_deref()), context_model = ?row.context.as_ref().and_then(|c| c.model.as_deref()), context_error_code = ?row.context.as_ref().and_then(|c| c.error_code.as_deref()), latency_ms = ?row.context.as_ref().and_then(|c| c.latency_ms), tool_calls = row.context.as_ref().map(|c| c.tool_calls).unwrap_or(0), tool_errors = row.context.as_ref().map(|c| c.tool_errors).unwrap_or(0), tool_labels = ?row.context.as_ref().map(|c| &c.tool_labels), context = ?row.context, "assistant feedback state changed");
     audit_service::log_for_user(
         state.db.clone(),
         auth,
         "assistant_feedback_submitted",
         Some(
-            serde_json::json!({"message_id":message_id,"vote":input.vote,"conversation_id":conversation_id,"group_id":group_id}),
+            serde_json::json!({"message_id":message_id,"vote":input.vote,"conversation_id":conversation_id,"group_id":group_id,"previous_vote":existing.as_ref().map(|r| r.vote.clone()),"change":event,"has_comment":input.comment.is_some()}),
         ),
     );
     Ok(Json(row.into()))
@@ -255,6 +263,9 @@ pub struct AdminQuery {
     pub to: Option<DateTime<Utc>>,
     pub vote: Option<String>,
     pub cursor: Option<String>,
+    pub model: Option<String>,
+    pub agent_kind: Option<String>,
+    pub has_error: Option<bool>,
 }
 #[derive(Serialize)]
 pub struct AdminResponse {
@@ -264,6 +275,7 @@ pub struct AdminResponse {
 }
 #[derive(Serialize)]
 pub struct AdminFeedbackRow {
+    pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
     pub message_id: String,
     pub vote: String,
     pub comment: Option<String>,
@@ -280,6 +292,15 @@ pub async fn admin(
     let mut filter = doc! {};
     if let Some(v) = q.vote {
         filter.insert("vote", v);
+    }
+    if let Some(v) = q.model {
+        filter.insert("context.model", v);
+    }
+    if let Some(v) = q.agent_kind {
+        filter.insert("context.agent_kind", v);
+    }
+    if q.has_error == Some(true) {
+        filter.insert("context.error_code", doc! {"$nin": [bson::Bson::Null, ""]});
     }
     if let Some(f) = q.from {
         filter.insert("created_at", doc! {"$gte":bson::DateTime::from_chrono(f)});
@@ -317,6 +338,7 @@ pub async fn admin(
     let recent = rows
         .iter()
         .map(|r| AdminFeedbackRow {
+            context: r.context.clone(),
             message_id: r.message_id.clone(),
             vote: r.vote.clone(),
             comment: r.comment.clone(),
@@ -423,7 +445,7 @@ mod tests {
     fn response_does_not_expose_owner_or_message_text() {
         let now = Utc::now();
         let response: FeedbackResponse = AssistantMessageFeedback {
-            id: Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
             user_id: "u".into(),
             conversation_id: Some("c".into()),
             group_id: None,
@@ -431,7 +453,7 @@ mod tests {
             turn_id: Some("t".into()),
             vote: "up".into(),
             comment: None,
-            context: None,
+            context: reply_context,
             created_at: now,
             updated_at: now,
         }

@@ -14,6 +14,7 @@ pub struct AdminCount {
     pub down: i64,
 }
 pub struct AdminRow {
+    pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
     pub message_id: String,
     pub vote: String,
     pub comment: Option<String>,
@@ -37,6 +38,7 @@ pub async fn admin_recent(
     Ok(rows
         .into_iter()
         .map(|r| AdminRow {
+            context: r.context,
             message_id: r.message_id,
             vote: r.vote,
             comment: r.comment,
@@ -112,17 +114,21 @@ pub async fn group_message(
         .await
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct FeedbackWrite {
+    pub user_id: String,
+    pub message_id: String,
+    pub conversation_id: Option<String>,
+    pub group_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub vote: String,
+    pub comment: Option<String>,
+    pub comment_present: bool,
+    pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
+}
+
 pub async fn upsert_feedback(
     db: &Database,
-    user_id: &str,
-    message_id: &str,
-    conversation_id: Option<String>,
-    group_id: Option<String>,
-    turn_id: Option<String>,
-    vote: &str,
-    comment: Option<String>,
-    context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
+    write: FeedbackWrite,
 ) -> mongodb::error::Result<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
     let filter = doc! {"user_id": user_id, "message_id": message_id};
     let existing = db
@@ -130,11 +136,15 @@ pub async fn upsert_feedback(
         .find_one(filter.clone())
         .await?;
     let now = chrono::Utc::now();
-    let mut set = doc! {"vote": vote, "updated_at": bson::DateTime::from_chrono(now), "conversation_id": conversation_id, "group_id": group_id, "turn_id": turn_id};
-    if comment.is_some() {
-        set.insert("comment", comment);
+    let mut set = doc! {"vote": &write.vote, "updated_at": bson::DateTime::from_chrono(now), "conversation_id": write.conversation_id.clone(), "group_id": write.group_id.clone(), "turn_id": write.turn_id.clone()};
+    if write.comment_present {
+        if let Some(comment) = write.comment.clone() {
+            set.insert("comment", comment);
+        } else {
+            set.insert("comment", bson::Bson::Null);
+        }
     }
-    if let Some(context) = context {
+    if let Some(context) = write.context {
         set.insert(
             "context",
             bson::to_bson(&context).unwrap_or(bson::Bson::Null),
@@ -156,7 +166,108 @@ pub async fn delete_feedback(
     user_id: &str,
     message_id: &str,
 ) -> mongodb::error::Result<Option<AssistantMessageFeedback>> {
-    db.collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find_one_and_delete(doc! {"user_id": user_id, "message_id": message_id})
-        .await
+    Ok(db
+        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+        .find_one_and_delete(doc! {"user_id": &write.user_id, "message_id": &write.message_id})
+        .await?)
+}
+
+pub async fn reply_context(
+    db: &Database,
+    surface: &str,
+    reply: &AssistantMessage,
+    conversation: Option<&crate::models::assistant_conversation::AssistantConversation>,
+) -> mongodb::error::Result<crate::models::assistant_message_feedback::FeedbackReplyContext> {
+    let user_time = db.collection::<AssistantMessage>(MESSAGE_COLLECTION).find_one(doc! {"conversation_id": &reply.conversation_id, "turn_id": &reply.turn_id, "role":"user"}).await?.map(|row| row.created_at);
+    let latency_ms = user_time.map(|created| {
+        reply
+            .created_at
+            .signed_duration_since(created)
+            .num_milliseconds()
+    });
+    let labels = reply
+        .activities
+        .iter()
+        .map(|a| a.label.clone())
+        .filter(|v| !v.is_empty())
+        .take(20)
+        .collect::<Vec<_>>();
+    Ok(
+        crate::models::assistant_message_feedback::FeedbackReplyContext {
+            surface: Some(surface.to_owned()),
+            agent_id: conversation.and_then(|c| c.agent_id.clone()),
+            agent_kind: conversation.map(|c| {
+                if c.agent_id.is_some() {
+                    "specialist".into()
+                } else {
+                    "nyxbot".into()
+                }
+            }),
+            model: conversation.map(|c| c.model.clone()),
+            access_mode: conversation.map(|c| format!("{:?}", c.access_mode)),
+            reply_status: Some(reply.status.clone()),
+            error_code: reply.error_code.clone(),
+            origin: reply.origin.as_ref().map(|v| format!("{v:?}")),
+            via: reply.via.clone(),
+            turn_id: Some(reply.turn_id.clone()),
+            reply_seq: Some(reply.seq),
+            reply_created_at: Some(reply.created_at),
+            latency_ms,
+            tool_calls: reply.activities.len() as u32,
+            tool_errors: reply
+                .activities
+                .iter()
+                .filter(|a| a.status == "error")
+                .count() as u32,
+            tool_labels: labels,
+            machine_used: reply.activities.iter().any(|a| a.machine.is_some()),
+            attachments: reply.attachments.len() as u32,
+            steered: reply.steering.is_some(),
+            voice: reply.voice.is_some(),
+            reply_chars: reply.text.chars().count() as u32,
+            context_reset_since_reply: conversation
+                .and_then(|c| c.context_reset_at)
+                .is_some_and(|at| at > reply.created_at),
+            org_group: false,
+        },
+    )
+}
+
+pub fn group_reply_context(
+    reply: &GroupMessage,
+) -> crate::models::assistant_message_feedback::FeedbackReplyContext {
+    crate::models::assistant_message_feedback::FeedbackReplyContext {
+        surface: Some("group".into()),
+        agent_id: reply.agent_id.clone(),
+        agent_kind: None,
+        model: None,
+        access_mode: None,
+        reply_status: None,
+        error_code: None,
+        origin: None,
+        via: None,
+        turn_id: None,
+        reply_seq: Some(reply.seq),
+        reply_created_at: Some(reply.created_at),
+        latency_ms: None,
+        tool_calls: reply.activities.len() as u32,
+        tool_errors: reply
+            .activities
+            .iter()
+            .filter(|a| a.status == "error")
+            .count() as u32,
+        tool_labels: reply
+            .activities
+            .iter()
+            .map(|a| a.label.clone())
+            .take(20)
+            .collect(),
+        machine_used: reply.activities.iter().any(|a| a.machine.is_some()),
+        attachments: reply.attachments.len() as u32,
+        steered: false,
+        voice: false,
+        reply_chars: reply.text.chars().count() as u32,
+        context_reset_since_reply: false,
+        org_group: reply.org_group,
+    }
 }

@@ -1250,3 +1250,5 @@ A1 feedback rows may include a metadata-only reply context snapshot (agent/model
 ### Detached stream settlement
 
 The turn subscription returns HTTP 200 once the detached execution is accepted. Upstream failures are settled asynchronously: the stream emits the terminal normalized error event, and the failed reply persisted in history carries the sanitized error class, upstream code, and `error_detail` metadata (stage, status, request id, response id, continuations, turn id, and timestamp).
+
+A1 admin feedback filters accept `model`, `agent_kind`, and `has_error`; legacy rows without a context snapshot remain readable and are displayed as having no context. Context is recomputed on vote/comment changes and includes effective access metadata, latency, tool labels/errors, and reply timestamps.
