@@ -238,7 +238,6 @@ pub(crate) async fn enqueue_in_session(
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
                 retry_of: None,
-                retry_of: None,
                 specialist_id: None,
                 steering: None,
                 voice: None,
@@ -348,7 +347,6 @@ pub(crate) async fn publish_result(
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
         retry_of: None,
-                    retry_of: None,
                         specialist_id: None,
                         steering: None,
                         id: id.clone(),

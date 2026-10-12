@@ -511,7 +511,6 @@ pub async fn audit_access_request_denied(
         {
             let message = crate::models::assistant_message::AssistantMessage {
                 retry_of: None,
-                retry_of: None,
                 specialist_id: Some(chat.agent_id.clone()),
                 steering: None,
                 error_detail: None,

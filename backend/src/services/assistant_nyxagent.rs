@@ -1852,7 +1852,6 @@ pub async fn begin_turn_with_voice(
                     row.message_count += 1;
                     let message = AssistantMessage {
         retry_of: None,
-                    retry_of: None,
                         specialist_id: None,
                         steering: None,
                         voice: None,
@@ -2528,7 +2527,6 @@ async fn finish_turn_inner(
                 }
                 let message = AssistantMessage {
         retry_of: None,
-                    retry_of: None,
                     specialist_id: None,
                     steering: None,
                     voice: None,

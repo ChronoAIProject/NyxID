@@ -269,7 +269,6 @@ mod tests {
             "m1".into(),
             AssistantMessage {
                 retry_of: None,
-                retry_of: None,
                 specialist_id: None,
                 steering: None,
                 voice: None,
