@@ -556,7 +556,9 @@ impl AccountTools<'_> {
             .iter()
             .find_map(|field| args[*field].as_str())
             .filter(|id| UuidSafe::valid(id));
-        let acknowledgement = args["acknowledgement_id"].as_str();
+        let acknowledgement = args["acknowledgement_id"]
+            .as_str()
+            .filter(|id| UuidSafe::valid(id));
         let _ = audit_service::log_actor_event(
             self.db.clone(),
             &actor,
@@ -624,7 +626,13 @@ impl AccountTools<'_> {
             });
         }
         let settings = super::assistant_settings_service::get(self.db, &chat.user_id).await?;
-        if !chat.guest
+        if acks::owner_gate_required(
+            self.db,
+            chat,
+            acks::classify_owner_action(tool_name, None),
+            false,
+        )
+        .await?
             && matches!(
                 acks::classify_owner_action(tool_name, None),
                 acks::OwnerActionClass::Sensitive | acks::OwnerActionClass::Destructive

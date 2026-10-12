@@ -139,59 +139,72 @@ pub fn owner_confirmation_required(
     }
 }
 
+pub async fn owner_gate_required(
+    db: &mongodb::Database,
+    chat: &ChatAuthority,
+    class: OwnerActionClass,
+    policy_floor: bool,
+) -> AppResult<bool> {
+    let settings = crate::services::assistant_settings_service::get(db, &chat.user_id).await?;
+    let mode = if let Some(agent_id) = &chat.agent_id {
+        db.collection::<crate::models::assistant_agent::AssistantAgent>(
+            crate::models::assistant_agent::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! {"_id": agent_id, "user_id": &chat.user_id})
+        .await?
+        .and_then(|agent| agent.access_mode_override)
+        .unwrap_or(settings.access_mode)
+    } else {
+        settings.access_mode
+    };
+    Ok(!chat.guest && owner_confirmation_required(mode, class, policy_floor))
+}
+
 pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionClass {
-    let lower = tool.to_ascii_lowercase();
-    if method.is_some_and(|m| matches!(m, "DELETE" | "PUT" | "PATCH"))
-        || [
-            "delete",
-            "destroy",
-            "revoke",
-            "disconnect",
-            "forget",
-            "machine_",
-            "set_guest_access",
-            "grant_subagent",
-            "spawn_subagent",
-            "create_schedule",
-            "enable",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-    {
-        return if [
-            "delete",
-            "destroy",
-            "revoke",
-            "disconnect",
-            "forget",
-            "machine_",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
-        {
-            OwnerActionClass::Destructive
-        } else {
-            OwnerActionClass::Sensitive
-        };
-    }
-    if [
+    let name = tool.strip_prefix("nyxid__").unwrap_or(tool);
+    let destructive = [
+        "delete_agent_key",
+        "unbind_agent_key_credential",
+        "delete_channel_bot",
+        "delete_channel_route",
+        "delete_service",
+        "delete_node",
+        "destroy_subagent",
+        "revoke_subagent",
+        "disconnect_channel_bot",
+        "forget",
+        "machine_exec",
+        "machine_update",
+    ];
+    let sensitive = [
+        "bind_agent_key_credential",
+        "set_approval_mode",
+        "update_agent_key",
+        "update_channel_bot",
+        "set_channel_route",
+        "set_guest_access",
+        "grant_subagent",
+        "spawn_subagent",
         "update_settings",
-        "set_agent_model",
-        "bind_agent_key",
         "connect_channel_bot",
-        "mint",
-        "credential",
-        "link",
-    ]
-    .iter()
-    .any(|p| lower.contains(p))
+        "set_agent_model",
+        "create_schedule",
+        "enable_schedule",
+        "mint_link",
+    ];
+    if method.is_some_and(|m| m.eq_ignore_ascii_case("DELETE")) || destructive.contains(&name) {
+        return OwnerActionClass::Destructive;
+    }
+    if sensitive.contains(&name)
+        || method.is_some_and(|m| matches!(m.to_ascii_uppercase().as_str(), "PUT" | "PATCH"))
     {
         return OwnerActionClass::Sensitive;
     }
-    if method.is_some_and(|m| matches!(m, "POST")) {
-        return OwnerActionClass::Change;
+    if method.is_some_and(|m| m.eq_ignore_ascii_case("POST")) {
+        OwnerActionClass::Change
+    } else {
+        OwnerActionClass::Read
     }
-    OwnerActionClass::Read
 }
 
 #[cfg(test)]
@@ -1855,16 +1868,18 @@ pub async fn webhook_action_gate(
     read_only: bool,
     destructive: bool,
 ) -> AppResult<Option<Value>> {
-    if !chat.guest && tool.starts_with("nyxid__") {
-        // Native account tools own their card lifecycle and audit.
-        return Ok(None);
-    }
     if chat.confirmation_policy.is_none() && !chat.guest && tool.starts_with("nyxid__") {
         // Native account tools own their per-tool card summaries. The shared gate
         // only classifies service/team actions and must not emit a duplicate card.
         return Ok(None);
     }
-    if !webhook_confirmation_required(chat, read_only, destructive) {
+    let policy_floor = webhook_confirmation_required(chat, read_only, destructive);
+    if !policy_floor
+        && !owner_gate_required(db, chat, classify_owner_action(tool, None), false).await?
+    {
+        return Ok(None);
+    }
+    if !policy_floor && chat.guest {
         return Ok(None);
     }
     if let Some(id) = args["acknowledgement_id"].as_str() {
@@ -1967,6 +1982,43 @@ mod sensitive_tool_policy_tests {
                 class,
                 true
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod closed_classifier_tests {
+    use super::*;
+    #[test]
+    fn every_registered_mutating_tool_is_classified() {
+        let names = crate::services::assistant_account_tools::TOOL_NAMES
+            .iter()
+            .chain(crate::services::assistant_team_tools::TOOL_NAMES)
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES);
+        for name in names {
+            let class = classify_owner_action(&format!("nyxid__{name}"), None);
+            if [
+                "update_agent_key",
+                "set_approval_mode",
+                "set_channel_route",
+                "update_channel_bot",
+                "delete_agent_key",
+                "delete_service",
+                "spawn_subagent",
+                "grant_subagent",
+                "set_guest_access",
+                "update_settings",
+                "destroy_subagent",
+                "revoke_subagent",
+                "delete_schedule",
+            ]
+            .contains(name)
+            {
+                assert!(
+                    !matches!(class, OwnerActionClass::Read),
+                    "unclassified tool: {name}"
+                );
+            }
         }
     }
 }
