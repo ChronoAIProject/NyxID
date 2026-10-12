@@ -1712,6 +1712,19 @@ pub async fn find_active_webhook_bot(
         .await?)
 }
 
+pub async fn record_subscription_state(
+    db: &mongodb::Database,
+    bot_id: &str,
+    registered: bool,
+    error: Option<&str>,
+) -> AppResult<()> {
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(doc! { "_id": bot_id }, doc! { "$set": {
+        "diagnostics.subscription_state": { "registered": registered, "checked_at": mongodb::bson::DateTime::now(), "last_error": error },
+        "diagnostics.failure_reason": if registered { mongodb::bson::Bson::Null } else { mongodb::bson::Bson::String("subscription_missing".into()) }
+    }}).await?;
+    Ok(())
+}
+
 pub async fn record_outbound_error(
     db: &mongodb::Database,
     bot_id: &str,

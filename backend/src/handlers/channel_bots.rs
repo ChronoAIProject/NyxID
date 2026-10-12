@@ -1522,6 +1522,17 @@ pub(crate) async fn verify_bot_with_adapter(
         .await?
         {
             let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+            channel_bot_service::record_subscription_state(
+                &state.db,
+                &bot.id,
+                current.webhook_registered,
+                if current.webhook_registered {
+                    None
+                } else {
+                    Some("subscription_missing")
+                },
+            )
+            .await?;
             return Ok(Json(VerifyBotResponse {
                 last_verification: None,
                 id: current.id,
