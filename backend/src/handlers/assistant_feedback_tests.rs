@@ -579,7 +579,8 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"].as_str(), Some("Assistant route not found."));
+    assert_eq!(body["error"].as_str(), Some("not_found"));
+    assert_eq!(body["message"].as_str(), Some("Not found: Assistant route not found."));
     f.state
         .db
         .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
@@ -753,10 +754,10 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
     .unwrap();
     let (status, body) = request(&f.state, "PUT", &path, &token, Some(json!({"vote":"up"}))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    assert_eq!(body["message"].as_str(), Some("Not found: Group not found"));
     let (status, body) = request(&f.state, "DELETE", &path, &token, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    assert_eq!(body["message"].as_str(), Some("Not found: Group not found"));
     let org_id = Uuid::new_v4().to_string();
     f.state
         .db
@@ -826,10 +827,10 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    assert_eq!(body["message"].as_str(), Some("Not found: Group not found"));
     let (status, body) = request(&f.state, "DELETE", &org_path, &token, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    assert_eq!(body["message"].as_str(), Some("Not found: Group not found"));
 }
 
 #[tokio::test]
@@ -1008,7 +1009,7 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
         let (status, body) = request(&f.state, method, &wrong, &f.human_token, input).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {body}");
         assert_eq!(body["error"].as_str(), Some("not_found"));
-        assert_eq!(body["message"].as_str(), Some("message not found"));
+        assert_eq!(body["message"].as_str(), Some("Not found: message not found"));
     }
     let stored = f
         .state
@@ -1104,14 +1105,14 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     let (status, body) = request(&f.state, "PUT", path, &token, Some(json!({"vote":"down"}))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
-        body["error"].as_str(),
-        Some("Organization agent access was revoked or is no longer permitted")
+        body["message"].as_str(),
+        Some("Forbidden: Organization agent access was revoked or is no longer permitted")
     );
     let (status, body) = request(&f.state, "DELETE", path, &token, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(
-        body["error"].as_str(),
-        Some("Organization agent access was revoked or is no longer permitted")
+        body["message"].as_str(),
+        Some("Forbidden: Organization agent access was revoked or is no longer permitted")
     );
 }
 

@@ -1395,7 +1395,11 @@ pub(crate) async fn write_checkpoint_in_session(
         _ => None,
     };
     let goal = request.or_else(|| previous.as_ref().and_then(|p| p.goal.clone()));
-    let open = previous.as_ref().filter(|p| p.status == "failed");
+    // A failed turn continues the open window of a previous failure; a
+    // successful turn closes it and records only its own actions.
+    let open = previous
+        .as_ref()
+        .filter(|p| p.status == "failed" && reply.status != "completed");
     let mut completed_actions = open
         .map(|p| p.completed_actions.clone())
         .unwrap_or_default();
