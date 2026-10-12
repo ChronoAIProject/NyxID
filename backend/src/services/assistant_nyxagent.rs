@@ -2745,13 +2745,6 @@ pub async fn retry_duplicate_digest(
     let Some(retry_of) = row.active_turn.and_then(|turn| turn.retry_of) else {
         return Ok(false);
     };
-    if let Some(active) = get(db, user_id, conversation_id).await?.active_turn
-        && active.activities.iter().any(|activity| {
-            activity.status == "completed" && activity.digest.as_deref() == Some(digest)
-        })
-    {
-        return Ok(true);
-    }
     let messages = messages(db, user_id, conversation_id, 100, None).await?;
     Ok(messages
         .iter()
