@@ -323,6 +323,12 @@ impl BillingService {
                 "Lago client is not configured".to_string(),
             )
         })?;
+        if let Some(wallet) = provisioning::get_wallet(&self.db, owner_id).await? {
+            return Ok(provisioning::ProvisionedWallet {
+                wallet,
+                created: false,
+            });
+        }
         let cap = crate::services::billing::config::load_settings(&self.db)
             .await?
             .and_then(|s| s.default_overdraft_cap_credits)
