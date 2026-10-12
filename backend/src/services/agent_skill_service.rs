@@ -627,7 +627,7 @@ pub async fn set(
     }
     let mut metadata = BTreeMap::new();
     for r in &selection.skills {
-        if let Some(existing) = agent
+        if let Some(_existing) = agent
             .skills
             .iter()
             .find(|current| same_pin_ignoring_disabled(current, r))

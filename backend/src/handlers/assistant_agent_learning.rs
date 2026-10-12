@@ -777,7 +777,9 @@ mod s9_denial_tests {
             .unwrap();
         f.state
             .db
-            .collection(crate::models::assistant_agent::COLLECTION_NAME)
+            .collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
             .update_one(
                 mongodb::bson::doc! {"_id": &f.chat.agent_id},
                 mongodb::bson::doc! {"$set":{"user_id":&org}},
