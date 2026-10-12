@@ -337,7 +337,7 @@ pub async fn update_service_billing(
 ) -> AppResult<Json<BillingServiceResponse>> {
     require_admin(&state, &auth_user).await?;
     let body = crate::handlers::services::UpdateServiceRequest::billing_only(body.billing);
-    crate::handlers::services::update_service_inner(
+    let _service = crate::handlers::services::update_service_inner(
         state.clone(),
         auth_user,
         tele,

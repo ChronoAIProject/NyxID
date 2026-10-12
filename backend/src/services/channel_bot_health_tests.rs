@@ -15,11 +15,21 @@ fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
     }
 }
 
+/// (platform, status, webhook_registered, failure_reason, backoff, expected action)
+type Row = (
+    &'static str,
+    &'static str,
+    bool,
+    Option<&'static str>,
+    bool,
+    &'static str,
+);
+
 #[test]
 fn recommendation_table_covers_status_mode_and_failure_codes() {
     use codes::*;
     // (platform, status, webhook_registered, failure_reason, backoff, expected action)
-    let rows: &[(&str, &str, bool, Option<&str>, bool, &str)] = &[
+    let rows: &[Row] = &[
         ("x", "active", true, None, false, "none"),
         ("x", "active", false, None, false, "none"),
         ("x", "active", false, None, true, "wait_rate_limit"),
@@ -152,8 +162,8 @@ fn recommendation_table_covers_status_mode_and_failure_codes() {
     ];
     for (platform, status, registered, reason, backoff, expected) in rows {
         let facts = HealthFacts {
-            platform: *platform,
-            status: *status,
+            platform,
+            status,
             webhook_registered: *registered,
             failure_reason: *reason,
             outbound_reason: None,

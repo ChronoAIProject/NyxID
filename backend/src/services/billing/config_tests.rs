@@ -81,7 +81,7 @@ fn env(rates: &HashMap<String, BillingRateCache>) -> ResolverEnv<'_> {
     }
 }
 
-fn class<'a>(resolved: &'a EffectiveServiceBilling, credential: C) -> &'a EffectiveClassBilling {
+fn class(resolved: &EffectiveServiceBilling, credential: C) -> &EffectiveClassBilling {
     resolved
         .classes
         .iter()

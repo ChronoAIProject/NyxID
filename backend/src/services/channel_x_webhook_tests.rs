@@ -1150,7 +1150,7 @@ async fn verify_live_check_persists_a_missing_subscription_and_resubscribe_resto
     let bot = insert_bot(&state, &owner, &connection).await;
     // X accepts the subscription create but does not list it: Verify must say so.
     mount_live(&server, &bot, false).await;
-    crate::handlers::channel_bots::verify_bot_with_adapter(
+    let _verified = crate::handlers::channel_bots::verify_bot_with_adapter(
         &state,
         bot.clone(),
         &adapter,
