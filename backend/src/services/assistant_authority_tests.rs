@@ -1783,3 +1783,24 @@ async fn action_summary_succeeds_for_every_sensitive_or_destructive_tool() {
         );
     }
 }
+
+#[tokio::test]
+async fn mongodb_gate_family_team_and_service_modes() {
+    let f = orchestrator_fixture("gate_family_team_service").await;
+    let read = f
+        .tools()
+        .execute(&f.auth, "nyxid__list_agent_keys", &json!({}))
+        .await;
+    assert!(!read.is_error);
+    let key = ordinary_key(&f).await;
+    let changing = f
+        .tools()
+        .execute(
+            &f.auth,
+            "nyxid__delete_agent_key",
+            &json!({"api_key_id": key}),
+        )
+        .await;
+    assert!(changing.is_error);
+    assert_eq!(changing.value["error"], "acknowledgement_required");
+}
