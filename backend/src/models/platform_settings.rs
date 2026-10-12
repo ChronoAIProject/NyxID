@@ -29,12 +29,12 @@ pub struct PlatformSettings {
     pub billing: Option<BillingSettings>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Global billing defaults edited on the central admin billing page.
+/// Prices remain service-owned; see `services::billing::config`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingSettings {
-    /// Defaults used when a service has no scoped override. Prices remain
-    /// service-owned; this is deliberately configuration metadata only.
-    #[serde(default)]
-    pub default_lane: Option<String>,
+    /// Overdraft cap for newly provisioned wallets; `None` uses
+    /// `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS`.
     #[serde(default)]
     pub default_overdraft_cap_credits: Option<i64>,
 }
