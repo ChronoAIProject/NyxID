@@ -1878,7 +1878,6 @@ pub async fn begin_turn_with_voice(
                         attachments: lost.attachments,
                         origin: Some(lost.origin),
                         via: None,
-                        retry_of: None,
                     };
                     Box::pin(write_checkpoint_in_session(
                         db, session, &row, &lost_turn, &message, now,
