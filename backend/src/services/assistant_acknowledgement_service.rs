@@ -146,7 +146,18 @@ pub async fn owner_gate_required(
     policy_floor: bool,
 ) -> AppResult<bool> {
     let settings = crate::services::assistant_settings_service::get(db, &chat.user_id).await?;
-    Ok(!chat.guest && owner_confirmation_required(settings.access_mode, class, policy_floor))
+    let mode = if let Some(agent_id) = &chat.agent_id {
+        db.collection::<crate::models::assistant_agent::AssistantAgent>(
+            crate::models::assistant_agent::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! {"_id": agent_id, "user_id": &chat.user_id})
+        .await?
+        .and_then(|agent| agent.access_mode_override)
+        .unwrap_or(settings.access_mode)
+    } else {
+        settings.access_mode
+    };
+    Ok(!chat.guest && owner_confirmation_required(mode, class, policy_floor))
 }
 
 pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionClass {
