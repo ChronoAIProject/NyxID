@@ -167,7 +167,7 @@ async fn upsert(
     } else {
         "comment_updated"
     };
-    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), surface = if group_id.is_some() { "group" } else { "conversation" }, context = ?row.context, "assistant feedback state changed");
+    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), surface = if group_id.is_some() { "group" } else { "conversation" }, conversation_id = ?conversation_id, group_id = ?group_id, context_surface = ?row.context.as_ref().and_then(|c| c.surface.as_deref()), context_agent_id = ?row.context.as_ref().and_then(|c| c.agent_id.as_deref()), context_agent_kind = ?row.context.as_ref().and_then(|c| c.agent_kind.as_deref()), context_model = ?row.context.as_ref().and_then(|c| c.model.as_deref()), context_error_code = ?row.context.as_ref().and_then(|c| c.error_code.as_deref()), latency_ms = ?row.context.as_ref().and_then(|c| c.latency_ms), tool_calls = row.context.as_ref().map(|c| c.tool_calls).unwrap_or(0), tool_errors = row.context.as_ref().map(|c| c.tool_errors).unwrap_or(0), tool_labels = ?row.context.as_ref().map(|c| &c.tool_labels), context = ?row.context, "assistant feedback state changed");
     audit_service::log_for_user(
         state.db.clone(),
         auth,
