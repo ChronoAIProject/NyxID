@@ -80,6 +80,13 @@ describe("canonical chat presentation", () => {
     expect(screen.getByText("Run failed")).toBeVisible();
   });
 
+  it("exposes Retry for a failed reply", async () => {
+    const retry = vi.fn();
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Turn lost" }} onRetry={retry} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
   it("shows thinking treatment only for a content-free streaming message", () => {
     const { container, rerender } = render(
       <ChatMessageBubble message={{ ...BASE, content: "", status: "streaming" }} />,

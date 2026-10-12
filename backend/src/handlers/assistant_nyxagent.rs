@@ -342,6 +342,31 @@ impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscript
     }
 }
 #[derive(Serialize)]
+pub struct ErrorDetailResponse {
+    stage: String,
+    http_status: Option<u16>,
+    upstream_request_id: Option<String>,
+    response_id: Option<String>,
+    continuations: u32,
+    turn_id: String,
+    occurred_at: DateTime<Utc>,
+}
+
+impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetailResponse {
+    fn from(value: crate::models::assistant_message::AssistantErrorDetail) -> Self {
+        Self {
+            stage: value.stage,
+            http_status: value.http_status,
+            upstream_request_id: value.upstream_request_id,
+            response_id: value.response_id,
+            continuations: value.continuations,
+            turn_id: value.turn_id,
+            occurred_at: value.occurred_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
 pub struct MessageResponse {
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
     steering: Option<steering::SteeringResponse>,
@@ -355,7 +380,7 @@ pub struct MessageResponse {
     status: String,
     error_code: Option<String>,
     upstream_error_code: Option<String>,
-    error_detail: Option<crate::models::assistant_message::AssistantErrorDetail>,
+    error_detail: Option<ErrorDetailResponse>,
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
     attachments: Vec<AttachmentResponse>,
@@ -380,7 +405,7 @@ impl From<AssistantMessage> for MessageResponse {
             status: row.status,
             error_code: row.error_code,
             upstream_error_code: row.upstream_error_code,
-            error_detail: row.error_detail,
+            error_detail: row.error_detail.map(ErrorDetailResponse::from),
             created_at: row.created_at,
             activities: row
                 .activities
@@ -633,6 +658,8 @@ pub struct ContextResponse {
     pub goal: Option<String>,
     pub completed_actions: Vec<String>,
     pub pending_actions: Vec<String>,
+    pub failed_actions: Vec<String>,
+    pub last_successful_turn: Option<String>,
     pub reset_reason: Option<String>,
     pub binding_state: String,
 }
@@ -644,35 +671,16 @@ pub async fn context(
 ) -> AppResult<Json<ContextResponse>> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let (row, messages) = engine::history_page(&state.db, &user_id, &id, 100, None).await?;
-    let goal = messages
-        .iter()
-        .find(|m| m.role == "user")
-        .map(|m| m.text.clone());
-    let actions = messages
-        .iter()
-        .flat_map(|m| m.activities.iter())
-        .map(|a| format!("{}={}", a.label, a.status))
-        .collect::<Vec<_>>();
+    let checkpoint = engine::checkpoint_summary(&state.db, &user_id, &id).await?;
     Ok(Json(ContextResponse {
-        conversation_id: row.id,
-        goal,
-        completed_actions: actions
-            .iter()
-            .filter(|a| a.ends_with("=completed"))
-            .cloned()
-            .collect(),
-        pending_actions: actions
-            .iter()
-            .filter(|a| a.ends_with("=running"))
-            .cloned()
-            .collect(),
-        reset_reason: row.context_reset_reason,
-        binding_state: if row.nyxagent_session_id.is_some() {
-            "bound".into()
-        } else {
-            "reset".into()
-        },
+        conversation_id: checkpoint.conversation.id,
+        goal: checkpoint.goal,
+        completed_actions: checkpoint.completed_actions,
+        pending_actions: checkpoint.pending_actions,
+        failed_actions: checkpoint.failed_actions,
+        last_successful_turn: checkpoint.last_successful_turn,
+        reset_reason: checkpoint.conversation.context_reset_reason,
+        binding_state: checkpoint.binding_state,
     }))
 }
 
@@ -1190,7 +1198,19 @@ pub async fn turns(
     let (parts, body) = request.into_parts();
     let bytes =
         super::body_limit::read_body(body, engine::MAX_REQUEST_BYTES, "Assistant turn").await?;
-    let input = engine::parse_turn(&bytes)?;
+    let mut input = engine::parse_turn(&bytes)?;
+    if let (Some(retry_of), Some(conversation_id)) = (&input.retry_of, &input.conversation_id) {
+        let history = engine::messages(&state.db, &user_id, conversation_id, 100, None).await?;
+        let completed = history
+            .iter()
+            .find(|message| message.turn_id == *retry_of)
+            .map(|message| engine::bounded_recap(std::slice::from_ref(message)))
+            .unwrap_or_default();
+        input.text = format!(
+            "{}\n\n[NyxID retry context: completed actions from turn {} must not be repeated.]\n{}",
+            input.text, retry_of, completed
+        );
+    }
     if !input.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
     }
@@ -1215,6 +1235,9 @@ pub async fn turns(
         );
     }
     let (_, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
+    if let (Some(conversation_id), Some(retry_of)) = (&input.conversation_id, &input.retry_of) {
+        engine::mark_retry_of(&state.db, &user_id, conversation_id, retry_of).await?;
+    }
     Ok(subscribe_events(receiver))
 }
 
@@ -1702,15 +1725,10 @@ async fn execute_turn(
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
 ) -> Result<TurnResult, TurnError> {
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
-    let mut history = engine::messages(
-        &state.db,
-        &row.user_id,
-        &row.id,
-        20,
-        Some(row.message_count + 1),
-    )
-    .await
-    .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    let mut history = engine::checkpoint_summary(&state.db, &row.user_id, &row.id)
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?
+        .messages;
     // Queued speech is visible to the human, but never becomes an instruction
     // until its own claim. Include earlier completed replies even if their
     // sequence is after the input that queued this turn.
@@ -1808,7 +1826,12 @@ async fn execute_turn(
         .map_err(|_| TurnError::new("assistant_unavailable"))?;
         binding = None;
     }
-    let recap = binding.is_none() && (context.reset || row.context_reset_reason.is_some());
+    let recap = binding.is_none()
+        && (context.reset
+            || row
+                .context_reset_reason
+                .as_deref()
+                .is_some_and(|reason| reason != "user_reset"));
     if recap {
         events.notice();
     }
@@ -1986,7 +2009,7 @@ async fn execute_turn(
                 "POST",
                 "v1/responses",
                 Some({
-                    let input = context.input(
+                    let input = context.input_with_memory(
                         if continuations.count == 0 || binding.is_none() {
                             // Recovery into a fresh session must restore the
                             // turn facts that its discarded session had seen.
@@ -1998,6 +2021,7 @@ async fn execute_turn(
                             &listing
                         },
                         input,
+                        continuations.count == 0 || binding.is_none(),
                     );
                     let mut body =
                         engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
@@ -2017,6 +2041,11 @@ async fn execute_turn(
         .map_err(proxy_turn_error)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let upstream_request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .and_then(sanitize_upstream_request_id);
             let bytes = tokio::time::timeout(
                 Duration::from_secs(10),
                 axum::body::to_bytes(response.into_body(), 65536),
@@ -2103,11 +2132,15 @@ async fn execute_turn(
                     .await;
                 }
                 RecoveryAction::Fail => {
-                    return Err(TurnError::new(if status == 401 || status == 403 {
+                    let mut error = TurnError::new(if status == 401 || status == 403 {
                         "agent_key_required"
                     } else {
                         code
-                    }));
+                    });
+                    error.stage = "upstream_response";
+                    error.http_status = Some(status);
+                    error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
+                    return Err(error);
                 }
             }
             continue;
@@ -2122,13 +2155,23 @@ async fn execute_turn(
         let mut body = response.into_body().into_data_stream();
         let mut decoder = ResponseStream::default();
         let mut first = true;
-        let mut last_progress = tokio::time::Instant::now();
+        // Keepalive frames keep the transport open, but they do not prove that
+        // the upstream turn is making semantic progress.  Use the documented
+        // per-request turn cap for the no-progress bound so long tool calls and
+        // silent reasoning can complete; the outer turn deadline still bounds
+        // the whole operation.
+        let mut last_transport_activity = tokio::time::Instant::now();
+        let mut last_semantic_progress = tokio::time::Instant::now();
         let mut emitted_bytes = completed.len();
         loop {
             let timeout = if first {
                 deadline.saturating_duration_since(tokio::time::Instant::now())
             } else {
-                Duration::from_secs(120).saturating_sub(last_progress.elapsed())
+                stream_timeout(
+                    false,
+                    last_transport_activity.elapsed(),
+                    last_semantic_progress.elapsed(),
+                )
             };
             let next = tokio::time::timeout(timeout, body.next())
                 .await
@@ -2143,12 +2186,16 @@ async fn execute_turn(
                 break;
             };
             let chunk = chunk.map_err(|_| TurnError::new("invalid_stream"))?;
-            // SSE comments/keepalives do not extend the useful-response deadline.
-            if chunk.windows(5).any(|bytes| bytes == b"data:") {
-                first = false;
-                last_progress = tokio::time::Instant::now();
-            }
+            last_transport_activity = tokio::time::Instant::now();
+            let before_text = decoder.text.len();
             let decoded = decoder.push(&chunk);
+            if decoder.text.len() != before_text
+                || decoder.created.is_some()
+                || decoder.terminal.is_some()
+            {
+                first = false;
+                last_semantic_progress = tokio::time::Instant::now();
+            }
             *partial = completed.clone()
                 + &context.redact(
                     &decoder
@@ -2286,6 +2333,29 @@ async fn continue_turn(
         json!({"turn_id":active.turn_id,"continuation":continuations.count}),
     );
     Ok(true)
+}
+
+fn stream_timeout(
+    first: bool,
+    transport_elapsed: Duration,
+    semantic_elapsed: Duration,
+) -> Duration {
+    if first {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(120)
+            .saturating_sub(transport_elapsed)
+            .min(Duration::from_secs(610).saturating_sub(semantic_elapsed))
+    }
+}
+
+fn sanitize_upstream_request_id(value: &str) -> Option<String> {
+    (value.len() <= 128
+        && !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)))
+    .then(|| value.to_owned())
 }
 
 #[cfg(test)]

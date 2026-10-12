@@ -25,7 +25,7 @@ import {
 
 const ROOT = "/assistant/nyxagent";
 export const CONTEXT_RESET_NOTICE =
-  "Conversation context was reset; the assistant was given a recap of this chat.";
+  "Context was reset; completed actions, attachments, and decided cards were preserved. Review them and rerun any incomplete action.";
 
 interface LiveTurn {
   state: DirectTurnState;
@@ -100,12 +100,12 @@ export function storedError(code: string | null): string {
 
 export function contextResetCopy(reason: string | null | undefined): string {
   switch (reason) {
-    case "turn_failed": return "The previous turn failed; completed actions were preserved for review.";
+    case "turn_failed": return CONTEXT_RESET_NOTICE;
     case "memory_updated": return "Memory was updated; the next turn will use the new note.";
     case "instructions_changed": return "Instructions changed; the assistant context was refreshed.";
     case "stopped": return "The turn was stopped; review pending actions before retrying.";
     case "user_reset": return "You reset the working context.";
-    default: return "Context was refreshed; review the working context before continuing.";
+    default: return CONTEXT_RESET_NOTICE;
   }
 }
 
@@ -530,7 +530,7 @@ export class NyxAgentTransport {
       messages.splice(position < 0 ? messages.length : position, 0, {
         id: `nyxagent-context-reset:${id ?? "draft"}`,
         role: "system",
-        content: CONTEXT_RESET_NOTICE,
+        content: contextResetCopy(conversation?.context_reset_reason),
         timestamp,
         status: "complete",
       });
@@ -588,6 +588,7 @@ export class NyxAgentTransport {
       readonly attachmentIds?: string[];
       readonly attachments?: readonly NyxAgentAttachment[];
       readonly adoptExisting?: boolean;
+      readonly retryOf?: string;
     } = {},
   ) {
     const generation = this.identity();
@@ -658,6 +659,7 @@ export class NyxAgentTransport {
               ? { conversation_id: id }
               : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
             text,
+            ...(options.retryOf ? { retry_of: options.retryOf } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
           headers: { Accept: "text/event-stream" },
@@ -788,7 +790,7 @@ export class NyxAgentTransport {
     const failed = [...messages].reverse().find((message) => message.role === "assistant" && message.status === "failed");
     const user = failed && [...messages].reverse().find((message) => message.role === "user" && message.seq < failed.seq && !message.execution_pending);
     if (!user) throw new Error("No failed turn is available to retry.");
-    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true });
+    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true, retryOf: failed?.turnId });
   }
 }
 

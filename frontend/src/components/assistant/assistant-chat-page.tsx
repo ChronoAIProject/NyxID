@@ -345,7 +345,6 @@ export function DirectAssistantChatPage() {
     selectedConversationId: selectedId,
     onConversationAdopted: adoptConversation,
   });
-
   useLayoutEffect(() => {
     const element = composerRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
@@ -541,6 +540,12 @@ function NyxAgentThreadPage() {
     threadsAgentId: selectedAgent?.id,
     draftAgent,
   });
+  const retryFailedMessage = useCallback((messageId: string) => {
+    const messages = chat.session?.messages ?? [];
+    const index = messages.findIndex((message) => message.id === messageId);
+    const previous = index >= 0 ? [...messages.slice(0, index)].reverse().find((message) => message.role === "user") : undefined;
+    if (previous) void chat.send(previous.content);
+  }, [chat]);
   useLayoutEffect(() => {
     const element = composerRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
@@ -630,7 +635,7 @@ function NyxAgentThreadPage() {
         {selectedId && !chat.isStreaming ? (
           <WaitingNote items={chat.waiting} agentName={agentName} />
         ) : null}
-        {selectedId ? <WorkingContextPanel conversationId={selectedId} /> : null}
+        {selectedId ? <WorkingContextPanel conversationId={selectedId} onManageMemory={() => setDetailsAgentId(headerAgent?.id ?? "nyxbot")} /> : null}
       </div>
     </div>
   ) : null;
@@ -733,9 +738,12 @@ function NyxAgentThreadPage() {
                   return (
                     <div className="flex flex-col items-end gap-1">
                       <ChannelBadge platform={via} />
-                      <ChatMessageBubble message={message} />
+                      <ChatMessageBubble message={message} onRetry={message.status === "error" ? () => retryFailedMessage(message.id) : undefined} />
                     </div>
                   );
+                }
+                if (message.role === "assistant") {
+                  return <ChatMessageBubble message={message} onRetry={message.status === "error" ? () => retryFailedMessage(message.id) : undefined} />;
                 }
                 const approval = chat.approvals.find(
                   (row) => message.id === `nyxagent-approval:${row.id}`,

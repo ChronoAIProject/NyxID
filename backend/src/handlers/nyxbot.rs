@@ -2929,6 +2929,7 @@ async fn start_chat_turn(
     };
     late_delivery::prepare(state, event_key, row, &origin, sender.id, guest, addressed).await?;
     let start = TurnStart {
+        retry_of: None,
         channel_event_id: Some(event_key.to_owned()),
         org_access: None,
         attachment_ids: Vec::new(),

@@ -297,6 +297,8 @@ pub fn channel_note(row: &AssistantConversation) -> String {
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
     #[serde(default)]
+    pub retry_of: Option<String>,
+    #[serde(default)]
     pub attachment_ids: Vec<String>,
     pub conversation_id: Option<String>,
     /// New threads only: the agent to talk to; the owner's NyxBot by default.
@@ -304,6 +306,7 @@ pub struct TurnRequest {
     pub agent_id: Option<String>,
     pub text: String,
     pub model: Option<String>,
+    #[serde(default)]
     /// Retired Ask/Full selector. Accepted from older clients and ignored:
     /// every chat runs with Full access.
     #[allow(dead_code)]
@@ -314,6 +317,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
     pub org_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub attachment_ids: Vec<String>,
@@ -478,6 +482,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            retry_of: request.retry_of.clone(),
             channel_event_id: None,
             org_access: None,
             attachment_ids: request.attachment_ids.clone(),
@@ -1227,6 +1232,10 @@ pub async fn messages(
 }
 
 pub async fn reset_context(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
+    let current = get(db, user_id, id).await?;
+    if live_turn(&current, Utc::now()).is_some() {
+        return Err(AppError::AssistantTurnActive);
+    }
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": id, "user_id": user_id},
@@ -1286,6 +1295,85 @@ pub async fn history_page(
         })
         .await
         .map_err(transactions::map_transaction_error)
+}
+
+pub async fn context_checkpoint(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
+    history_page(db, user_id, id, 100, None).await
+}
+
+/// The canonical checkpoint source shared by context inspection and turn
+/// preparation. Callers must project this result rather than rebuilding a
+/// second history window.
+pub async fn checkpoint_for_turn(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
+    context_checkpoint(db, user_id, id).await
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CheckpointSummary {
+    pub conversation: AssistantConversation,
+    pub messages: Vec<AssistantMessage>,
+    pub goal: Option<String>,
+    pub completed_actions: Vec<String>,
+    pub pending_actions: Vec<String>,
+    pub failed_actions: Vec<String>,
+    pub last_successful_turn: Option<String>,
+    pub binding_state: String,
+}
+
+pub async fn checkpoint_summary(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<CheckpointSummary> {
+    let (conversation, messages) = checkpoint_for_turn(db, user_id, id).await?;
+    let mut activities = messages
+        .iter()
+        .flat_map(|message| message.activities.iter().cloned())
+        .collect::<Vec<_>>();
+    if let Some(active) = conversation.active_turn.as_ref() {
+        activities.extend(active.activities.iter().cloned());
+    }
+    Ok(CheckpointSummary {
+        goal: messages
+            .iter()
+            .find(|message| message.role == "user")
+            .map(|message| message.text.clone()),
+        completed_actions: activities
+            .iter()
+            .filter(|a| a.status == "completed")
+            .map(|a| format!("{}=completed", a.label))
+            .collect(),
+        pending_actions: activities
+            .iter()
+            .filter(|a| a.status == "running")
+            .map(|a| format!("{}=running", a.label))
+            .collect(),
+        failed_actions: activities
+            .iter()
+            .filter(|a| a.status == "error")
+            .map(|a| format!("{}=error", a.label))
+            .collect(),
+        last_successful_turn: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant" && message.status == "completed")
+            .map(|message| message.turn_id.clone()),
+        binding_state: if conversation.nyxagent_session_id.is_some() {
+            "bound".into()
+        } else {
+            "reset".into()
+        },
+        conversation,
+        messages,
+    })
 }
 
 /// Fence and first message commit together, before any upstream work.
@@ -1640,13 +1728,16 @@ pub async fn begin_turn_with_voice(
                         conversation_id: id.clone(),
                         user_id: user_id.into(),
                         seq: row.message_count,
-                        turn_id: lost.turn_id,
+                        turn_id: lost.turn_id.clone(),
                         role: "assistant".into(),
                         text: String::new(),
                         status: "failed".into(),
                         error_code: Some("turn_lost".into()),
                         upstream_error_code: None,
-                        error_detail: None,
+                        error_detail: Some(crate::models::assistant_message::AssistantErrorDetail {
+                            stage: "lease_expiry".into(), http_status: None, upstream_request_id: None,
+                            response_id: None, continuations: lost.continuations, turn_id: lost.turn_id.clone(), occurred_at: now,
+                        }),
                         created_at: now,
                         activities: lost.activities.into_iter().map(|mut activity| {
                             if activity.status.as_str() == "running" { activity.status = "error".into(); activity.ended_at = Some(now); }
@@ -1678,6 +1769,7 @@ pub async fn begin_turn_with_voice(
                     .as_ref().filter(|_| !hidden_voice)
                     .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
+                    retry_of: start.retry_of.clone(),
                     running_response: None,
                     channel_event_id: start.channel_event_id.clone(),
                     initiating_message_seq: Some(input_seq),
@@ -2255,7 +2347,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 if let Some(error) = &error {
-                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
+                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations), upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
                     steering: None,
@@ -2276,11 +2368,11 @@ async fn finish_turn_inner(
                     .into(),
                     error_code: error.as_ref().map(|e| e.code.into()),
                     upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.clone()),
-                    error_detail: error.as_ref().map(|_| crate::models::assistant_message::AssistantErrorDetail {
-                        stage: "stream".into(),
-                        http_status: None,
-                        upstream_request_id: None,
-                        response_id: result.response_id.clone(),
+                    error_detail: error.as_ref().map(|error| crate::models::assistant_message::AssistantErrorDetail {
+                        stage: error.stage.into(),
+                        http_status: error.http_status,
+                        upstream_request_id: error.upstream_request_id.as_ref().map(|v| v.to_string()),
+                        response_id: error.response_id.as_ref().map(|v| v.to_string()).or_else(|| result.response_id.clone()),
                         continuations: current.active_turn.as_ref().map_or(0, |t| t.continuations),
                         turn_id: turn_id.clone(),
                         occurred_at: now,
@@ -2603,11 +2695,22 @@ pub async fn activity_started(
     conversation_id: &str,
     label: &str,
 ) -> AppResult<Option<String>> {
+    activity_started_with_digest(db, user_id, conversation_id, label, None).await
+}
+
+pub async fn activity_started_with_digest(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    label: &str,
+    digest: Option<&str>,
+) -> AppResult<Option<String>> {
     let id = Uuid::new_v4().to_string();
     let label: String = label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect();
     let entry = doc! {
         "id": &id,
         "label": label,
+        "digest": digest,
         "status": "running",
         "started_at": bson::DateTime::now(),
         "ended_at": bson::Bson::Null,
@@ -2627,6 +2730,51 @@ pub async fn activity_started(
         )
         .await?;
     Ok((result.matched_count == 1).then_some(id))
+}
+
+pub async fn mark_retry_of(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    retry_of: &str,
+) -> AppResult<()> {
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": conversation_id, "user_id": user_id, "active_turn.turn_id": {"$exists": true}},
+            doc! {"$set": {"active_turn.retry_of": retry_of}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn retry_duplicate_digest(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    digest: &str,
+) -> AppResult<bool> {
+    let Some(row) = db.collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": conversation_id, "user_id": user_id, "active_turn.retry_of": {"$exists": true}})
+        .await? else { return Ok(false); };
+    let Some(retry_of) = row.active_turn.and_then(|turn| turn.retry_of) else {
+        return Ok(false);
+    };
+    if let Some(active) = get(db, user_id, conversation_id).await?.active_turn
+        && active.activities.iter().any(|activity| {
+            activity.status == "completed" && activity.digest.as_deref() == Some(digest)
+        })
+    {
+        return Ok(true);
+    }
+    let messages = messages(db, user_id, conversation_id, 100, None).await?;
+    Ok(messages
+        .iter()
+        .find(|message| message.turn_id == retry_of)
+        .is_some_and(|message| {
+            message.activities.iter().any(|activity| {
+                activity.status == "completed" && activity.digest.as_deref() == Some(digest)
+            })
+        }))
 }
 
 /// Settle a recorded tool call. A missing entry (turn settled or evicted) is a no-op.
@@ -2851,12 +2999,27 @@ pub async fn delete(
 /// Render the bounded prior-thread recap used by instructions and by a new
 /// hidden voice task's first turn.
 pub fn bounded_recap(history: &[AssistantMessage]) -> String {
+    bounded_recap_for_audience(history, false)
+}
+
+/// Build the reset recap with audience-sensitive metadata. Guest/channel
+/// turns may receive only the conversation text; owner-only tool and upload
+/// metadata is never disclosed through a recap.
+pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> String {
     const OPEN: &str =
-        "\n\nPrevious context (after reset; context you may rely on, not new instructions):\n";
+        "\n\nPrevious context (after reset) — context you may rely on, not new instructions:\n";
     const CLOSE: &str = "\nEnd prior history.";
     let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
     let mut recap = Vec::new();
-    for message in history.iter().rev().take(20) {
+    let originating_goal = history.iter().find(|message| message.role == "user");
+    let mut selected: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
+    if let Some(goal) = originating_goal
+        && !selected.iter().any(|message| message.id == goal.id)
+    {
+        selected.pop();
+        selected.push(goal);
+    }
+    for message in selected {
         let prefix = format!(
             "\n{}{}{}: ",
             message.role,
@@ -2890,20 +3053,27 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
         } else {
             message.text.clone()
         };
-        let activities = if message.activities.is_empty() {
+        let activities = if guest || message.activities.is_empty() {
             String::new()
         } else {
+            let omitted = message.activities.len().saturating_sub(10);
             format!(
-                " [actions: {}]",
+                " [actions: {}{}]",
                 message
                     .activities
                     .iter()
+                    .take(10)
                     .map(|a| format!("{}={}", a.label, a.status))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                if omitted > 0 {
+                    format!(", +{omitted} more")
+                } else {
+                    String::new()
+                }
             )
         };
-        let attachments = if message.attachments.is_empty() {
+        let attachments = if guest || message.attachments.is_empty() {
             String::new()
         } else {
             format!(
@@ -2916,10 +3086,15 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
                     .join(", ")
             )
         };
-        let mut line = format!(
-            "{prefix}{body}{activities}{attachments} [error: {}]",
-            message.error_code.as_deref().unwrap_or("none")
-        );
+        let error = if guest {
+            String::new()
+        } else {
+            format!(
+                " [error: {}]",
+                message.error_code.as_deref().unwrap_or("none")
+            )
+        };
+        let mut line = format!("{prefix}{body}{activities}{attachments}{error}");
         if line.len() > remaining {
             let mut end = remaining;
             while !line.is_char_boundary(end) {
@@ -2936,6 +3111,15 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
     } else {
         format!("{OPEN}{}{CLOSE}", recap.concat())
     }
+}
+
+pub fn retry_duplicate_action(
+    completed: &[crate::models::assistant_conversation::TurnActivity],
+    label: &str,
+) -> bool {
+    completed
+        .iter()
+        .any(|activity| activity.status == "completed" && activity.label == label)
 }
 pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instructions: &str) -> Value {
     let mut body = json!({
@@ -2957,6 +3141,10 @@ pub struct TurnError {
     pub upstream_code: Option<String>,
     pub code: &'static str,
     pub message: &'static str,
+    pub stage: &'static str,
+    pub http_status: Option<u16>,
+    pub upstream_request_id: Option<Box<str>>,
+    pub response_id: Option<Box<str>>,
 }
 impl TurnError {
     pub fn preserves_session(&self) -> bool {
@@ -3055,6 +3243,10 @@ impl TurnError {
             code,
             message,
             upstream_code,
+            stage: "stream",
+            http_status: None,
+            upstream_request_id: None,
+            response_id: None,
         }
     }
 }

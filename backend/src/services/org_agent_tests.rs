@@ -293,6 +293,7 @@ async fn org_agent_auth_resolves_access_once_and_reuses_only_within_request() {
         &f.state.db,
         &f.admin,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: vec![upload.id.clone()],
             conversation_id: Some(row.id.clone()),
             agent_id: None,
@@ -610,6 +611,7 @@ async fn org_agent_revocation_refuses_key_tool_turn_and_queued_work() {
             &f.state.db,
             &f.member,
             &engine::TurnRequest {
+                retry_of: None,
                 attachment_ids: Vec::new(),
                 conversation_id: Some(row.id.clone()),
                 agent_id: None,
@@ -627,6 +629,7 @@ async fn org_agent_revocation_refuses_key_tool_turn_and_queued_work() {
             &f.state.db,
             &f.member,
             &engine::TurnRequest {
+                retry_of: None,
                 attachment_ids: Vec::new(),
                 conversation_id: None,
                 agent_id: Some(agent.id),
@@ -2261,6 +2264,7 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
             db,
             &f.member,
             &engine::TurnRequest {
+                retry_of: None,
                 conversation_id: Some(thread.id.clone()),
                 text: "Delete the selected object".into(),
                 attachment_ids: Vec::new(),

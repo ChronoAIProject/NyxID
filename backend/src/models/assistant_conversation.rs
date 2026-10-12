@@ -88,6 +88,8 @@ pub struct TurnActivity {
     pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub digest: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -123,6 +125,8 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub retry_of: Option<String>,
     /// The running response, not the previous committed response head.
     #[serde(default)]
     pub running_response: Option<Box<RunningResponse>>,

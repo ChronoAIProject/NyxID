@@ -3,6 +3,7 @@ import { NyxAgentTransport, CONTEXT_RESET_NOTICE, storedError, contextResetCopy 
 import { transitionAssistantIdentity } from "./identity";
 import { assistantChatSurface } from "./conversation-ids";
 import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
+import { nyxAgentMessageSchema } from "@/schemas/assistant-nyxagent";
 
 const id = `nyxa-${"1".repeat(32)}`;
 const other = `nyxa-${"2".repeat(32)}`;
@@ -20,13 +21,22 @@ it.each([
   expect(storedError(code)).toContain(text);
 });
 
-it("keeps a persisted diagnostic detail visible after reload", () => {
-  const detail = { stage: "stream", http_status: 502, upstream_request_id: "req-1", response_id: "resp-1", continuations: 2, turn_id: "turn-1", occurred_at: start };
-  expect(detail.turn_id).toBe("turn-1");
-  expect(detail.upstream_request_id).toBe("req-1");
+it("maps an unknown raw upstream code to specific recoverable copy", () => {
+  expect(storedError("provider_rate_limited")).toContain("could not complete");
 });
 
-it.each([["turn_failed", "previous turn failed"], ["memory_updated", "new note"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
+it("keeps a persisted diagnostic detail visible after reload", () => {
+  const parsed = nyxAgentMessageSchema.parse({
+    id: "failed", seq: 2, turn_id: "turn-1", role: "assistant", text: "",
+    status: "failed", error_code: "turn_lost", created_at: start,
+    activities: [], attachments: [],
+    error_detail: { stage: "lease", http_status: 502, upstream_request_id: "req-1", response_id: "resp-1", continuations: 2, turn_id: "turn-1", occurred_at: start },
+  });
+  expect(parsed.error_detail?.turn_id).toBe("turn-1");
+  expect(parsed.error_detail?.upstream_request_id).toBe("req-1");
+});
+
+it.each([["turn_failed", "completed actions"], ["memory_updated", "new note"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
   expect(contextResetCopy(reason)).toContain(text);
 });
 

@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     models::{
+        assistant_message::{AssistantErrorDetail, AssistantMessage},
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
@@ -18,6 +19,122 @@ use std::sync::{
 };
 
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
+
+#[test]
+fn upstream_request_id_is_bounded_and_validated() {
+    assert_eq!(
+        sanitize_upstream_request_id("req_123:abc"),
+        Some("req_123:abc".into())
+    );
+    assert_eq!(sanitize_upstream_request_id("bad id"), None);
+    assert_eq!(sanitize_upstream_request_id(&"x".repeat(129)), None);
+}
+
+#[test]
+fn long_tool_call_keepalives_use_no_progress_bound() {
+    assert_eq!(
+        stream_timeout(
+            false,
+            std::time::Duration::from_secs(119),
+            std::time::Duration::from_secs(300)
+        ),
+        std::time::Duration::from_secs(1)
+    );
+    assert_eq!(
+        stream_timeout(
+            false,
+            std::time::Duration::from_secs(0),
+            std::time::Duration::from_secs(609)
+        ),
+        std::time::Duration::from_secs(1)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn keepalives_for_300_seconds_then_text_complete_before_no_progress_timeout() {
+    tokio::time::advance(std::time::Duration::from_secs(300)).await;
+    assert!(
+        stream_timeout(false, std::time::Duration::ZERO, std::time::Duration::ZERO)
+            > std::time::Duration::ZERO
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn keepalive_only_beyond_no_progress_bound_reports_idle_timeout() {
+    tokio::time::advance(std::time::Duration::from_secs(611)).await;
+    assert_eq!(
+        stream_timeout(
+            false,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(611)
+        ),
+        std::time::Duration::ZERO
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_mcp_activity_resets_semantic_progress_and_does_not_idle() {
+    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    assert!(
+        stream_timeout(false, std::time::Duration::ZERO, std::time::Duration::ZERO)
+            > std::time::Duration::ZERO
+    );
+}
+
+#[test]
+fn failed_message_response_serializes_error_detail_as_rfc3339() {
+    let occurred_at = Utc::now();
+    let response = MessageResponse::from(AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "message".into(),
+        conversation_id: "conversation".into(),
+        user_id: OWNER.into(),
+        seq: 1,
+        turn_id: "turn".into(),
+        role: "assistant".into(),
+        text: String::new(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: Some(AssistantErrorDetail {
+            stage: "lease".into(),
+            http_status: Some(504),
+            upstream_request_id: Some("req".into()),
+            response_id: None,
+            continuations: 0,
+            turn_id: "turn".into(),
+            occurred_at,
+        }),
+        created_at: occurred_at,
+        activities: Vec::new(),
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    });
+    let json = serde_json::to_value(response).unwrap();
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["error_detail"]["stage"], "lease");
+    assert_eq!(json["error_detail"]["http_status"], 504);
+    assert_eq!(
+        json["error_detail"]["occurred_at"],
+        occurred_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+    );
+}
+
+#[test]
+fn preexisting_message_row_without_diagnostics_remains_readable() {
+    let row = mongodb::bson::from_document::<AssistantMessage>(mongodb::bson::doc! {
+        "_id": "old-message", "conversation_id": "conversation", "user_id": OWNER,
+        "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "old",
+        "status": "completed", "error_code": mongodb::bson::Bson::Null,
+        "created_at": mongodb::bson::DateTime::now(), "activities": [], "attachments": []
+    })
+    .unwrap();
+    assert!(row.error_detail.is_none());
+    assert!(row.upstream_error_code.is_none());
+}
 const SESSION: &str = "conv_11111111111111111111111111111111";
 const RESPONSE: &str = "resp_11111111111111111111111111111111_22222222222222222222222222222222";
 struct Capture {
@@ -78,6 +195,7 @@ async fn setup_options(
                     {
                         return (
                             StatusCode::from_u16(status).unwrap(),
+                            [("x-request-id", "req-5xx")],
                             Json(json!({"error": {
                                 "code": code,
                                 "message": "SECRET upstream failure detail",
@@ -188,6 +306,287 @@ async fn settled(state: &AppState) -> AssistantConversation {
     })
     .await
     .expect("turn settled")
+}
+
+#[tokio::test]
+async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
+    let (state, _calls, server) =
+        setup_options(Some((503, "")), Duration::ZERO, vec![], false).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let failed = messages.last().expect("failed reply");
+    assert_eq!(failed.error_code.as_deref(), Some("assistant_unavailable"));
+    assert_eq!(failed.upstream_error_code, None);
+    let detail = failed.error_detail.as_ref().expect("diagnostic detail");
+    assert_eq!(detail.http_status, Some(503));
+    assert_eq!(detail.upstream_request_id.as_deref(), Some("req-5xx"));
+    assert_eq!(detail.stage, "upstream_response");
+    server.abort();
+}
+
+#[tokio::test]
+async fn retried_turn_does_not_re_run_completed_actions() {
+    let (state, calls, server) =
+        setup_options(None, Duration::ZERO, vec!["tool_completed"], false).await;
+    let first = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let _ = axum::body::to_bytes(first.into_body(), 100_000)
+        .await
+        .unwrap();
+    let failed = settled(&state).await;
+    let failed_message = engine::messages(&state.db, OWNER, &failed.id, 10, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.status == "failed")
+        .expect("failed turn reply");
+    let retry = Request::builder()
+        .method("POST")
+        .uri("/api/v1/assistant/nyxagent/turns")
+        .body(Body::from(
+            json!({
+                "conversation_id": failed.id,
+                "text": "hello",
+                "retry_of": failed_message.turn_id,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let _ = turns(State(state.clone()), test_auth_user(OWNER), retry)
+        .await
+        .unwrap();
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[1].body["input"]
+            .as_str()
+            .unwrap()
+            .contains("must not be repeated")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn context_checkpoint_matches_turn_source_and_reset_reason_is_visible() {
+    let (state, _calls, server) = setup(None, Duration::ZERO).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let row = settled(&state).await;
+    let (turn_row, turn_messages) = engine::checkpoint_for_turn(&state.db, OWNER, &row.id)
+        .await
+        .unwrap();
+    let (route_row, route_messages) = engine::context_checkpoint(&state.db, OWNER, &row.id)
+        .await
+        .unwrap();
+    assert_eq!(turn_row.id, route_row.id);
+    assert_eq!(
+        serde_json::to_value(&turn_messages).unwrap(),
+        serde_json::to_value(&route_messages).unwrap()
+    );
+    let endpoint = context(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        axum::extract::Path(row.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let summary = engine::checkpoint_summary(&state.db, OWNER, &row.id)
+        .await
+        .unwrap();
+    assert_eq!(endpoint.goal, summary.goal);
+    assert_eq!(endpoint.pending_actions, summary.pending_actions);
+    engine::reset_context(&state.db, OWNER, &row.id)
+        .await
+        .unwrap();
+    let reset = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(reset.context_reset_reason.as_deref(), Some("user_reset"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn context_checkpoint_pending_includes_running_activity() {
+    let db = connect_transaction_test_database("nyxa_checkpoint_pending").await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = engine::begin_turn(
+        &db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: None,
+            agent_id: None,
+            text: "work".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    engine::activity_started(&db, OWNER, &row.id, "mcp.long_call")
+        .await
+        .unwrap();
+    let checkpoint = engine::checkpoint_summary(&db, OWNER, &row.id)
+        .await
+        .unwrap();
+    assert!(
+        checkpoint
+            .pending_actions
+            .iter()
+            .any(|action| action.contains("mcp.long_call"))
+    );
+}
+
+#[tokio::test]
+async fn recap_and_context_endpoint_share_goal_and_pending_projection() {
+    let db = connect_transaction_test_database("nyxa_checkpoint_parity").await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = engine::begin_turn(
+        &db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: None,
+            agent_id: None,
+            text: "goal".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    engine::activity_started(&db, OWNER, &row.id, "mcp.pending")
+        .await
+        .unwrap();
+    let checkpoint = engine::checkpoint_summary(&db, OWNER, &row.id)
+        .await
+        .unwrap();
+    let recap = engine::bounded_recap(&checkpoint.messages);
+    assert!(recap.contains("goal"));
+    assert!(
+        checkpoint
+            .pending_actions
+            .iter()
+            .any(|item| item.contains("mcp.pending"))
+    );
+}
+
+#[tokio::test]
+async fn user_reset_changes_the_next_turn_recap() {
+    let db = connect_transaction_test_database("nyxa_reset_recap").await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = engine::begin_turn(
+        &db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: None,
+            agent_id: None,
+            text: "before reset".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let before = engine::bounded_recap(
+        &engine::messages(&db, OWNER, &row.id, 20, None)
+            .await
+            .unwrap(),
+    );
+    engine::force_stop(
+        &db,
+        OWNER,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+    )
+    .await
+    .unwrap();
+    engine::reset_context(&db, OWNER, &row.id).await.unwrap();
+    let after = engine::bounded_recap(
+        &engine::messages(&db, OWNER, &row.id, 20, None)
+            .await
+            .unwrap(),
+    );
+    assert_ne!(before, after);
+    let reset_reason = engine::get(&db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .context_reset_reason;
+    let next_turn_recap = (reset_reason.as_deref() != Some("user_reset"))
+        .then_some(after.as_str())
+        .unwrap_or("");
+    assert!(!next_turn_recap.contains(&before));
+}
+
+#[tokio::test]
+async fn stream_failure_persists_stream_diagnostic_stage() {
+    let (state, _calls, server) =
+        setup_options(None, Duration::ZERO, vec!["stream_failure"], false).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let row = settled(&state).await;
+    let failed = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        failed.error_detail.as_ref().map(|d| d.stage.as_str()),
+        Some("stream")
+    );
+    server.abort();
 }
 
 #[tokio::test]
@@ -319,6 +718,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -501,6 +901,8 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("DELETE", format!("conversations/{id}")),
         ("POST", format!("conversations/{id}/stop")),
         ("PATCH", format!("conversations/{id}/access-mode")),
+        ("GET", format!("conversations/{id}/context")),
+        ("POST", format!("conversations/{id}/context/reset")),
         (
             "POST",
             format!("conversations/{id}/acknowledgements/missing"),
@@ -508,6 +910,12 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("POST", "turns".into()),
         ("GET", "models".into()),
     ];
+    assert!(routes.iter().any(|(_, path)| path.ends_with("/context")));
+    assert!(
+        routes
+            .iter()
+            .any(|(_, path)| path.ends_with("/context/reset"))
+    );
     use base64::Engine;
     let forbidden_tokens: Vec<_> = ["sa", "delegated", "relay"]
         .into_iter()
@@ -576,6 +984,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -627,6 +1036,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -766,6 +1176,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -815,6 +1226,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1014,6 +1426,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1103,6 +1516,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,

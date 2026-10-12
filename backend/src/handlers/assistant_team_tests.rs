@@ -172,6 +172,7 @@ async fn server_started_turn_preserves_picocredits_and_obeys_cutover() {
                 .unwrap();
         }
         let start = TurnStart::from(&engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -240,6 +241,7 @@ async fn user_turn(
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: agent_id.map(str::to_owned),
             conversation_id: conversation_id.map(str::to_owned),
@@ -268,6 +270,7 @@ async fn orchestrator(state: &AppState) -> (AssistantConversation, ChatAuthority
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -726,6 +729,7 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
@@ -1241,6 +1245,7 @@ async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialis
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
@@ -1781,6 +1786,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
 // path. Captured prompts contain a private marker: never print request bodies.
 fn refresh_start(id: Option<&str>, agent_id: Option<&str>, text: &str) -> TurnStart {
     TurnStart::from(&engine::TurnRequest {
+        retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: agent_id.map(str::to_owned),
         conversation_id: id.map(str::to_owned),
@@ -2029,7 +2035,11 @@ async fn instruction_refresh_legacy_adopts_then_detects_changes_without_grant_ti
     .unwrap();
     let (changed, notices) =
         refresh_turn(&state, refresh_start(Some(&first.id), None, "Again")).await;
-    assert_eq!(notices, 0);
+    assert_eq!(notices, 1);
+    assert_eq!(
+        changed.context_reset_reason.as_deref(),
+        Some("instructions_changed")
+    );
     assert!(
         changed
             .nyxagent_instruction_binding

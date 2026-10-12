@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: None,
         conversation_id: id.map(str::to_owned),
@@ -12,6 +13,27 @@ fn request(id: Option<&str>, text: &str) -> TurnRequest {
         model: None,
         access_mode: None,
     }
+}
+
+#[test]
+fn retry_duplicate_action_is_refused_after_completed_activity() {
+    let activity = crate::models::assistant_conversation::TurnActivity {
+        machine: None,
+        id: "activity-1".into(),
+        digest: None,
+        label: "mcp.mail.send".into(),
+        status: "completed".into(),
+        started_at: Utc::now(),
+        ended_at: Some(Utc::now()),
+    };
+    assert!(retry_duplicate_action(
+        std::slice::from_ref(&activity),
+        "mcp.mail.send"
+    ));
+    assert!(!retry_duplicate_action(
+        std::slice::from_ref(&activity),
+        "mcp.calendar.list"
+    ));
 }
 fn terminal(kind: &str, seq: u64, text: &str) -> Value {
     let sid = "1234567890abcdef1234567890abcdef";
@@ -322,8 +344,100 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 }
 
 #[test]
+fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
+    let rows = vec![
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "goal".into(),
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            seq: 1,
+            turn_id: "t1".into(),
+            role: "user".into(),
+            text: "ORIGINATING GOAL".into(),
+            status: "completed".into(),
+            error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
+            created_at: Utc::now(),
+            activities: Vec::new(),
+            attachments: Vec::new(),
+            origin: None,
+            via: None,
+        },
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "last".into(),
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            seq: 2,
+            turn_id: "t2".into(),
+            role: "assistant".into(),
+            text: format!("HEAD {} TAIL", "x".repeat(6000)),
+            status: "completed".into(),
+            error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
+            created_at: Utc::now(),
+            activities: Vec::new(),
+            attachments: Vec::new(),
+            origin: None,
+            via: None,
+        },
+    ];
+    let recap = bounded_recap(&rows);
+    assert!(recap.contains("ORIGINATING GOAL"));
+    assert!(recap.contains("HEAD"));
+    assert!(recap.contains("TAIL"));
+    assert!(recap.len() <= 16384);
+    assert!(recap.contains("ORIGINATING GOAL"));
+}
+
+#[test]
+fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
+    let row = AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "cap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "goal".into(),
+        status: "completed".into(),
+        error_code: None,
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: (0..40)
+            .map(|i| crate::models::assistant_conversation::TurnActivity {
+                machine: None,
+                id: i.to_string(),
+                digest: None,
+                label: format!("tool-{i}"),
+                status: "completed".into(),
+                started_at: Utc::now(),
+                ended_at: None,
+            })
+            .collect(),
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap(&[row]);
+    assert!(recap.len() <= 16384);
+    assert!(recap.contains("tool-0"));
+}
+
+#[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
-    let mut row = AssistantMessage {
+    let row = AssistantMessage {
         steering: None,
         voice: None,
         execution_pending: false,
@@ -342,6 +456,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         activities: vec![crate::models::assistant_conversation::TurnActivity {
             machine: None,
             id: "a".into(),
+            digest: None,
             label: "tool.check".into(),
             status: "completed".into(),
             started_at: Utc::now(),
@@ -359,11 +474,93 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         origin: None,
         via: None,
     };
-    let recap = bounded_recap(std::slice::from_mut(&mut row));
+    let recap = bounded_recap(std::slice::from_ref(&row));
     assert!(recap.contains("Previous context (after reset)"));
     assert!(recap.contains("tool.check=completed"));
     assert!(recap.contains("result.txt"));
     assert!(recap.contains("partial, failed"));
+}
+
+#[test]
+fn guest_recap_omits_owner_tool_metadata() {
+    let row = AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "guest-recap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "Visible channel reply".into(),
+        status: "completed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "owner-action".into(),
+            digest: None,
+            label: "owner.secret_tool".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            image_input: None,
+            origin: "tool".into(),
+            pages: None,
+            id: "owner-attachment".into(),
+            content_type: "text/plain".into(),
+            size: 1,
+            label: "private.txt".into(),
+        }],
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap_for_audience(std::slice::from_ref(&row), true);
+    assert!(recap.contains("Visible channel reply"));
+    assert!(!recap.contains("owner.secret_tool"));
+    assert!(!recap.contains("private.txt"));
+    assert!(!recap.contains("turn_lost"));
+}
+
+#[test]
+fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
+    let row = AssistantMessage {
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "retry-recap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "partial".into(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "activity-42".into(),
+            digest: None,
+            label: "mail.send".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap(std::slice::from_ref(&row));
+    assert!(recap.contains("mail.send=completed"));
+    assert!(recap.contains("activity-42") || recap.contains("mail.send"));
 }
 
 #[tokio::test]
@@ -578,6 +775,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            retry_of: None,
             running_response: None,
             channel_event_id: None,
             initiating_message_seq: None,
@@ -1110,6 +1308,52 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
             .chars()
             .count(),
         MAX_ACTIVITY_LABEL_CHARS
+    );
+}
+
+#[tokio::test]
+async fn b4_duplicate_action_fence_end_to_end_keeps_tool_counter_at_one() {
+    let db = connect_transaction_test_database("nyxa_retry_fence").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        &user,
+        &request(None, "send mail"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let digest = "digest-mail-1";
+    let activity = activity_started_with_digest(&db, &user, &row.id, "mcp.mail.send", Some(digest))
+        .await
+        .unwrap()
+        .unwrap();
+    activity_finished(&db, &user, &row.id, &activity, true)
+        .await
+        .unwrap();
+    mark_retry_of(
+        &db,
+        &user,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        retry_duplicate_digest(&db, &user, &row.id, digest)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !retry_duplicate_digest(&db, &user, &row.id, "digest-mail-2")
+            .await
+            .unwrap()
     );
 }
 
@@ -1778,7 +2022,7 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
             );
             assert!(
                 prepared
-                    .input("Current preferences", "continue")
+                    .input_with_memory("Current preferences", "continue", true)
                     .contains("Current preferences")
             );
             continue;

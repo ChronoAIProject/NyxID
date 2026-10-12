@@ -156,6 +156,7 @@ async fn run_member(
     )
     .await?;
     let start = engine::TurnStart {
+        retry_of: None,
         channel_event_id: None,
         org_access: access.org.clone(),
         group_request_id: Some(request.id.clone()),
