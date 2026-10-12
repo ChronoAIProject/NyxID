@@ -3750,3 +3750,75 @@ async fn specialist_request_tool_is_denied_audited_and_routed_when_allowed() {
     .await
     .expect("NyxBot receives exact request event");
 }
+
+#[tokio::test]
+async fn specialist_service_card_request_denied_audited_and_routed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_service_gate_card").await;
+    let specialist = authenticate(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "strict-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (denied, card) = service_gate(
+        &f.state.db,
+        &f.chat,
+        &service,
+        "strict-service",
+        "Strict service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(denied["error"], "access_request_denied");
+    assert!(card.is_none());
+    assert!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(
+                doc! {"event_type":"assistant_access_request_denied","event_data.scope":"service"}
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (_, card) = service_gate(
+        &f.state.db,
+        &f.chat,
+        &service,
+        "strict-service",
+        "Strict service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(card.is_some());
+    let _ = specialist;
+}
