@@ -120,6 +120,7 @@ pub struct FeedbackWrite {
     pub turn_id: Option<String>,
     pub vote: String,
     pub comment: Option<String>,
+    pub comment_present: bool,
     pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
 }
 
@@ -134,8 +135,12 @@ pub async fn upsert_feedback(
         .await?;
     let now = chrono::Utc::now();
     let mut set = doc! {"vote": &write.vote, "updated_at": bson::DateTime::from_chrono(now), "conversation_id": write.conversation_id.clone(), "group_id": write.group_id.clone(), "turn_id": write.turn_id.clone()};
-    if write.comment.is_some() {
-        set.insert("comment", write.comment.clone());
+    if write.comment_present {
+        if let Some(comment) = write.comment.clone() {
+            set.insert("comment", comment);
+        } else {
+            set.insert("comment", bson::Bson::Null);
+        }
     }
     if let Some(context) = write.context {
         set.insert(
