@@ -469,7 +469,10 @@ export class NyxAgentHttpFixtures {
     row.history.conversation.active_turn = null;
     row.history.conversation.message_count = row.history.messages.length;
     row.history.conversation.last_message_at = now;
-    if (cancelled) row.history.conversation.context_reset_at = now;
+    if (cancelled) {
+      row.history.conversation.context_reset_at = now;
+      row.history.conversation.context_reset_reason = "stopped";
+    }
     delete row.settleAt;
     const reportTo = row.reportTo ? this.rows.get(row.reportTo) : undefined;
     delete row.reportTo;

@@ -36,7 +36,7 @@ it("keeps a persisted diagnostic detail visible after reload", () => {
   expect(parsed.error_detail?.upstream_request_id).toBe("req-1");
 });
 
-it.each([["turn_failed", "completed actions"], ["memory_updated", "new note"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
+it.each([["turn_failed", "completed actions"], ["stopped", "stopped turn finished"], ["credential_replaced", "key was replaced"], ["user_reset", "reset"]])("explains reset reason %s", (reason, text) => {
   expect(contextResetCopy(reason)).toContain(text);
 });
 
@@ -228,6 +228,47 @@ describe("NyxAgent server-backed transport", () => {
     const transport = new NyxAgentTransport();
     await transport.history(id);
     expect(transport.session(id).messages[0]?.errorCode).toBe("cancelled");
+  });
+  it("retries the clicked failed reply without re-sending its bound uploads", async () => {
+    const message = (overrides: Record<string, unknown>) => ({
+      status: "completed",
+      error_code: null,
+      created_at: start,
+      activities: [],
+      attachments: [],
+      ...overrides,
+    });
+    const transcript = {
+      conversation: conversation(),
+      messages: [
+        message({
+          id: "u1", seq: 1, turn_id: "t1", role: "user", text: "Send the brief",
+          attachments: [{ id: "att-1", label: "brief.txt", content_type: "text/plain", size: 9 }],
+        }),
+        message({ id: "f1", seq: 2, turn_id: "t1", role: "assistant", text: "", status: "failed", error_code: "idle_timeout" }),
+        message({ id: "u2", seq: 3, turn_id: "t2", role: "user", text: "Newer request" }),
+        message({ id: "f2", seq: 4, turn_id: "t2", role: "assistant", text: "", status: "failed", error_code: "turn_lost" }),
+      ],
+      before_seq: null,
+      acknowledgements: [],
+      approvals: [],
+      waiting: [],
+    };
+    const bodies: Record<string, unknown>[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint.endsWith("/turns")) {
+        bodies.push(JSON.parse(String(init.body)));
+        return stream();
+      }
+      return json(transcript);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    await transport.retry(id, "f1", () => undefined);
+    expect(bodies).toEqual([{ conversation_id: id, text: "Send the brief", retry_of: "t1" }]);
+    await expect(transport.retry(id, "u2", () => undefined)).rejects.toThrow(
+      "This reply can no longer be retried",
+    );
   });
   it("adopts server identity, decodes fragmented SSE and a live inline notice, then reads history", async () => {
     const requests: { endpoint: string; body?: BodyInit | null }[] = [];

@@ -154,6 +154,65 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   );
 }
 
+type ErrorDetail = NonNullable<ChatMessage["errorDetail"]>;
+
+/** Metadata-only diagnostics of a failed turn, with a copyable ID. */
+function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
+  const diagnosticId = [
+    `turn ${detail.turnId}`,
+    detail.responseId ? `response ${detail.responseId}` : null,
+    detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  return (
+    <details className="mt-2 text-11 text-text-tertiary">
+      <summary className="cursor-pointer">Details</summary>
+      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
+        <dt>stage</dt>
+        <dd>{detail.stage}</dd>
+        {detail.httpStatus != null ? (
+          <>
+            <dt>http</dt>
+            <dd>{detail.httpStatus}</dd>
+          </>
+        ) : null}
+        <dt>turn</dt>
+        <dd>{detail.turnId}</dd>
+        {detail.responseId ? (
+          <>
+            <dt>response</dt>
+            <dd>{detail.responseId}</dd>
+          </>
+        ) : null}
+        {detail.upstreamRequestId ? (
+          <>
+            <dt>request</dt>
+            <dd>{detail.upstreamRequestId}</dd>
+          </>
+        ) : null}
+        <dt>continuations</dt>
+        <dd>{detail.continuations}</dd>
+        {detail.occurredAt ? (
+          <>
+            <dt>at</dt>
+            <dd>
+              <time dateTime={detail.occurredAt}>{new Date(detail.occurredAt).toLocaleString()}</time>
+            </dd>
+          </>
+        ) : null}
+      </dl>
+      <button
+        type="button"
+        className="mt-1 underline"
+        onClick={() => void navigator.clipboard?.writeText(diagnosticId)}
+      >
+        Copy diagnostic ID
+      </button>
+    </details>
+  );
+}
+
 export function ChatMessageBubble({
   message,
   interactiveCards = true,
@@ -163,11 +222,25 @@ export function ChatMessageBubble({
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
-  readonly onRetry?: () => void;
+  readonly onRetry?: () => Promise<void> | void;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
 }) {
   const streaming = message.status === "streaming";
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string>();
+  const retry = async () => {
+    if (!onRetry) return;
+    setRetrying(true);
+    setRetryError(undefined);
+    try {
+      await onRetry();
+    } catch (error) {
+      setRetryError(error instanceof Error && error.message ? error.message : "Retry failed. Try again.");
+    } finally {
+      setRetrying(false);
+    }
+  };
   const content =
     message.role === "assistant"
       ? sanitizeAssistantMessageContent(message.content)
@@ -267,36 +340,24 @@ export function ChatMessageBubble({
           ))}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.status === "error" && message.errorDetail ? (
-          <details className="mt-2 text-11 text-text-tertiary">
-            <summary className="cursor-pointer">Details</summary>
-            <div className="mt-1 space-y-1 rounded border border-hairline p-2 font-mono">
-              <div>stage: {message.errorDetail.stage}</div>
-              <div>turn: {message.errorDetail.turnId}</div>
-              {message.errorDetail.upstreamRequestId ? (
-                <div>request: {message.errorDetail.upstreamRequestId}</div>
-              ) : null}
-              <button
-                type="button"
-                className="underline"
-                onClick={() =>
-                  void navigator.clipboard?.writeText(
-                    `${message.errorDetail?.turnId}${message.errorDetail?.upstreamRequestId ? ` / ${message.errorDetail.upstreamRequestId}` : ""}`,
-                  )
-                }
-              >
-                Copy diagnostic ID
-              </button>
-            </div>
-          </details>
+          <ErrorDetails detail={message.errorDetail} />
         ) : null}
         {message.status === "error" && onRetry ? (
-          <button
-            type="button"
-            className="mt-2 text-11 underline"
-            onClick={onRetry}
-          >
-            Retry
-          </button>
+          <div className="mt-2">
+            <button
+              type="button"
+              className="text-11 underline disabled:opacity-50"
+              disabled={retrying}
+              onClick={() => void retry()}
+            >
+              {retrying ? "Retrying…" : "Retry"}
+            </button>
+            {retryError ? (
+              <p role="alert" className="mt-1 text-11 text-destructive">
+                {retryError}
+              </p>
+            ) : null}
+          </div>
         ) : null}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
@@ -367,6 +428,7 @@ export function ChatMessageBubble({
               type="button"
               aria-label="Helpful"
               aria-pressed={vote === "up"}
+              disabled={feedback.isPending}
               onClick={() => void setFeedback("up")}
               className={cn(
                 "rounded p-1 text-text-tertiary hover:bg-overlay",
@@ -379,6 +441,7 @@ export function ChatMessageBubble({
               type="button"
               aria-label="Not helpful"
               aria-pressed={vote === "down"}
+              disabled={feedback.isPending}
               onClick={() => void setFeedback("down")}
               className={cn(
                 "rounded p-1 text-text-tertiary hover:bg-overlay",
@@ -451,7 +514,7 @@ export function ChatMessageEntry({
   readonly interactiveCards?: boolean;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
-  readonly onRetry?: () => void;
+  readonly onRetry?: () => Promise<void> | void;
 }) {
   if (
     message.role === "system" &&

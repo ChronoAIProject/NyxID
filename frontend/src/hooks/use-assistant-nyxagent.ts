@@ -324,7 +324,12 @@ export function useNyxAgentAssistantChat({
     isLoading: history.isLoading,
     error: history.error?.message ?? threads.error?.message ?? agents.error?.message,
     send,
-    retry: (id: string) => nyxAgentTransport.retry(id, onConversationAdopted),
+    retry: (id: string, messageId: string) =>
+      nyxAgentTransport.retry(id, messageId, onConversationAdopted),
+    /** Reload the selected thread's transcript (after a context reset). */
+    refreshHistory: async () => {
+      if (selectedConversationId) await nyxAgentTransport.history(selectedConversationId);
+    },
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],
     decideAcknowledgement: decision.mutateAsync,

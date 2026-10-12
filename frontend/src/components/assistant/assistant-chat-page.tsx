@@ -93,6 +93,27 @@ function sidebarConversation(
 }
 
 export function AevatarAssistantMessageList({ session, bottomInset, footer, notice, projectionVersion, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly footer?: React.ReactNode; readonly notice?: React.ReactNode; readonly projectionVersion?: string; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} footer={footer} notice={notice} projectionVersion={projectionVersion} emptyDescription={emptyDescription} />; }
+/** How the NyxAgent thread page renders an assistant reply: the entry with
+ * author header and feedback controls, and Retry for a failed reply. */
+export function NyxAgentAssistantEntry({
+  message,
+  conversationId,
+  retry,
+}: {
+  readonly message: import("@/lib/assistant/chat-types").ChatMessage;
+  readonly conversationId: string | undefined;
+  readonly retry: (messageId: string) => Promise<void>;
+}) {
+  return (
+    <ChatMessageEntry
+      message={message}
+      conversationId={conversationId}
+      feedbackEnabled
+      onRetry={message.status === "error" ? () => retry(message.id) : undefined}
+    />
+  );
+}
+
 export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} />; }
 
 export function AssistantChatPage() {
@@ -544,9 +565,11 @@ function NyxAgentThreadPage() {
     threadsAgentId: selectedAgent?.id,
     draftAgent,
   });
-  const retryFailedMessage = useCallback((messageId: string) => {
-    void messageId;
-    if (selectedId) void chat.retry(selectedId);
+  // The bubble shows a rejected retry (turn_active, an expired upload, a
+  // network error) next to its Retry button.
+  const retryFailedMessage = useCallback(async (messageId: string) => {
+    if (!selectedId) throw new Error("Select the conversation to retry.");
+    await chat.retry(selectedId, messageId);
   }, [chat, selectedId]);
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -637,7 +660,7 @@ function NyxAgentThreadPage() {
         {selectedId && !chat.isStreaming ? (
           <WaitingNote items={chat.waiting} agentName={agentName} />
         ) : null}
-        {selectedId ? <WorkingContextPanel conversationId={selectedId} onManageMemory={() => setDetailsAgentId(headerAgent?.id ?? "nyxbot")} /> : null}
+        {selectedId ? <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} /> : null}
       </div>
     </div>
   ) : null;
@@ -745,14 +768,11 @@ function NyxAgentThreadPage() {
                   );
                 }
                 if (message.role === "assistant") {
-                  // Keep Issue 9's feedback-enabled entry (author header, thumbs) while
-                  // wiring Issue 7+8's Retry; a bare bubble here hides the feedback controls.
                   return (
-                    <ChatMessageEntry
+                    <NyxAgentAssistantEntry
                       message={message}
                       conversationId={chat.session.conversationId}
-                      feedbackEnabled
-                      onRetry={message.status === "error" ? () => retryFailedMessage(message.id) : undefined}
+                      retry={retryFailedMessage}
                     />
                   );
                 }

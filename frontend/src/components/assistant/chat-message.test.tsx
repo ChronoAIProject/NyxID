@@ -10,6 +10,7 @@ import {
 import {
   AevatarAssistantMessageList,
   NyxAgentThreadMessageList,
+  NyxAgentAssistantEntry,
 } from "@/components/assistant/assistant-chat-page";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 
@@ -31,10 +32,21 @@ describe("canonical chat presentation", () => {
       messages: [BASE],
       expectedTurnCount: 0,
     };
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const failed: ChatMessage = { ...BASE, id: "failed-1", status: "error", error: "Turn lost" };
+    // The page's own assistant renderer, as the thread page passes it.
     const { rerender } = render(
-      <NyxAgentThreadMessageList session={session} bottomInset={0} />,
+      <NyxAgentThreadMessageList
+        session={{ ...session, messages: [BASE, failed] }}
+        bottomInset={0}
+        renderMessage={(message) => (
+          <NyxAgentAssistantEntry message={message} conversationId={session.conversationId} retry={retry} />
+        )}
+      />,
     );
     expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledWith("failed-1");
 
     rerender(
       <AevatarAssistantMessageList
@@ -245,6 +257,49 @@ describe("canonical chat presentation", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("shows a rejected retry beside its Retry button", async () => {
+    const retry = vi.fn().mockRejectedValue(new Error("A turn is already active."));
+    render(
+      <ChatMessageBubble
+        message={{ ...BASE, status: "error", error: "Turn lost" }}
+        onRetry={retry}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("A turn is already active.");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("shows every diagnostic field and copies the diagnostic ID", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(
+      <ChatMessageBubble
+        message={{
+          ...BASE,
+          status: "error",
+          error: "Stopped responding",
+          errorDetail: {
+            stage: "no_progress",
+            httpStatus: 503,
+            upstreamRequestId: "req-1",
+            responseId: "resp_1",
+            continuations: 2,
+            turnId: "turn-1",
+            occurredAt: "2026-01-01T00:00:00Z",
+          },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByText("Details"));
+    for (const value of ["no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
+      expect(screen.getByText(value)).toBeInTheDocument();
+    }
+    expect(screen.getByRole("time")).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
+    fireEvent.click(screen.getByRole("button", { name: "Copy diagnostic ID" }));
+    expect(writeText).toHaveBeenCalledWith("turn turn-1 / response resp_1 / request req-1");
   });
 
   it("shows thinking treatment only for a content-free streaming message", () => {
