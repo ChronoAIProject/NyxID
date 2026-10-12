@@ -68,6 +68,22 @@ pub async fn save_settings_and_audit(
     session.commit_transaction().await?;
     Ok(())
 }
+pub async fn record_resync_audit(
+    db: &mongodb::Database,
+    actor: &crate::services::audit_service::AuditActor,
+    service_id: &str,
+    synced: bool,
+) -> AppResult<()> {
+    crate::services::audit_service::log_actor_event(
+        db.clone(),
+        actor,
+        "billing_service_resynced",
+        Some(serde_json::json!({"service_id": service_id, "synced": synced})),
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn load_rates(db: &mongodb::Database) -> AppResult<Vec<BillingRateCache>> {
     Ok(db
         .collection::<BillingRateCache>(RATES)

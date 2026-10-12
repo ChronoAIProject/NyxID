@@ -290,11 +290,11 @@ pub async fn resync_service(
             "service not found".into(),
         ))?;
     let synced = state.billing.sync_service_price(&service).await?;
-    crate::services::audit_service::log_actor_event(
-        state.db.clone(),
+    crate::services::billing::config::record_resync_audit(
+        &state.db,
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
-        "billing_service_resynced",
-        Some(serde_json::json!({"service_id": id, "synced": synced})),
+        &id,
+        synced,
     )
     .await?;
     Ok(Json(synced))
