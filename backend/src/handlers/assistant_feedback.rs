@@ -161,7 +161,7 @@ async fn upsert(
     } else {
         "comment_updated"
     };
-    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), "assistant feedback state changed");
+    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), surface = if group_id.is_some() { "group" } else { "conversation" }, context = ?row.context, "assistant feedback state changed");
     audit_service::log_for_user(
         state.db.clone(),
         auth,
