@@ -237,7 +237,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
-                    retry_of: None,
+                retry_of: None,
                 specialist_id: None,
                 steering: None,
                 voice: None,
@@ -284,7 +284,6 @@ pub(crate) fn settled_result(
     request: &VoiceRequest,
     mut source: AssistantMessage,
 ) -> AssistantMessage {
-                    retry_of: None,
     if request.async_operation_pending
         && request.state == RequestState::Cancelled
         && source.error_code.is_none()
@@ -749,7 +748,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
-                    retry_of: None,
+            retry_of: None,
             specialist_id: None,
             steering: None,
             id: Uuid::new_v4().to_string(),
