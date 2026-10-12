@@ -4,7 +4,6 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -310,27 +309,12 @@ pub async fn admin_list(
     Query(query): Query<AdminChannelBotQuery>,
 ) -> AppResult<Json<Vec<ChannelBotHealthResponse>>> {
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
-    let mut filter = mongodb::bson::doc! {};
-    if let Some(platform) = query.platform {
-        filter.insert(
-            "platform",
-            if platform == "x" {
-                "twitter"
-            } else {
-                &platform
-            },
-        );
-    }
-    if let Some(status) = query.status {
-        filter.insert("status", status);
-    }
-    let bots: Vec<crate::models::channel_bot::ChannelBot> = state
-        .db
-        .collection(crate::models::channel_bot::COLLECTION_NAME)
-        .find(filter)
-        .await?
-        .try_collect()
-        .await?;
+    let bots = channel_bot_service::list_all_filtered(
+        &state.db,
+        query.platform.as_deref(),
+        query.status.as_deref(),
+    )
+    .await?;
     Ok(Json(
         bots.iter()
             .map(|bot| health_for(bot, state.config.billing_enabled))
@@ -369,7 +353,13 @@ pub(crate) fn health_for(
             "reconnect",
             "Reconnect the X account, or verify credentials and resubscribe.",
         )
-    } else if mode == "webhook" && !bot.webhook_registered {
+    } else if bot
+        .diagnostics
+        .subscription_state
+        .as_ref()
+        .is_some_and(|state| !state.registered)
+        || (mode == "webhook" && !bot.webhook_registered)
+    {
         (
             "resubscribe",
             "Register the X Activity webhook subscription.",
