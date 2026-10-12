@@ -11,12 +11,19 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize, Debug, Serialize)]
+pub struct GlobalBillingDefaultsResponse {
+    pub default_lane: Option<String>,
+    pub default_overdraft_cap_credits: Option<i64>,
+    pub source: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 pub struct BillingConfigResponse {
     pub billing_enabled: bool,
     pub lago_configured: bool,
     pub resale_enabled: bool,
-    pub global: Option<BillingSettings>,
+    pub global: Option<GlobalBillingDefaultsResponse>,
     pub precedence: [&'static str; 4],
     pub environment: Vec<ConfigValue>,
 }
@@ -39,7 +46,11 @@ pub async fn get_config(
         billing_enabled: state.billing.billing_enabled(),
         lago_configured: state.billing.lago_configured(),
         resale_enabled: state.billing.resale_enabled(),
-        global,
+        global: global.map(|settings| GlobalBillingDefaultsResponse {
+            default_lane: settings.default_lane,
+            default_overdraft_cap_credits: settings.default_overdraft_cap_credits,
+            source: "global",
+        }),
         precedence: ["env", "global", "service", "legacy/free"],
         environment: vec![
             ConfigValue {
@@ -134,11 +145,26 @@ pub async fn put_config(
     Json(input): Json<UpdateConfigRequest>,
 ) -> AppResult<Json<BillingConfigResponse>> {
     require_admin(&state, &auth).await?;
+    if input.billing.is_none() {
+        return Err(crate::errors::AppError::ValidationError(
+            "billing object is required; use null fields to clear values".into(),
+        ));
+    }
+    if input
+        .billing
+        .as_ref()
+        .and_then(|b| b.default_lane.as_deref())
+        .is_some_and(|lane| !matches!(lane, "byok" | "platform_key"))
+    {
+        return Err(crate::errors::AppError::ValidationError(
+            "default_lane must be byok or platform_key".into(),
+        ));
+    }
     if input
         .billing
         .as_ref()
         .and_then(|b| b.default_overdraft_cap_credits)
-        .is_some_and(|v| v < 0)
+        .is_some_and(|v| !(0..=i64::MAX / 1_000).contains(&v))
     {
         return Err(crate::errors::AppError::ValidationError(
             "default overdraft cap must be non-negative".into(),
@@ -301,29 +327,57 @@ pub async fn resync_service(
     Ok(Json(synced))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BillingOnlyRequest {
+    billing: crate::handlers::services::BillingUpdate,
+}
+
 pub async fn update_service_billing(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: crate::telemetry::TelemetryContext,
     Path(service_id): Path<String>,
-    Json(body): Json<crate::handlers::services::UpdateServiceRequest>,
+    Json(body): Json<BillingOnlyRequest>,
 ) -> AppResult<Json<crate::handlers::services::ServiceResponse>> {
     require_admin(&state, &auth_user).await?;
-    if body.billing.is_none()
-        || body.name.is_some()
-        || body.base_url.is_some()
-        || body.is_active.is_some()
-        || body.description.is_some()
-        || body.visibility.is_some()
-        || body.service_category.is_some()
-        || body.offering_kind.is_some()
-        || body.topics.is_some()
-        || body.destination_targets.is_some()
-        || body.credential.is_some()
-    {
-        return Err(crate::errors::AppError::ValidationError(
-            "billing update must contain only billing".into(),
-        ));
-    }
+    let body = crate::handlers::services::UpdateServiceRequest {
+        billing: Some(body.billing),
+        service_category: None,
+        offering_kind: None,
+        topics: None,
+        supplier: None,
+        import_source: None,
+        destination_targets: None,
+        name: None,
+        description: None,
+        base_url: None,
+        is_active: None,
+        visibility: None,
+        openapi_spec_url: None,
+        asyncapi_spec_url: None,
+        identity_propagation_mode: None,
+        identity_include_user_id: None,
+        identity_include_email: None,
+        identity_include_name: None,
+        identity_jwt_audience: None,
+        forward_access_token: None,
+        inject_delegation_token: None,
+        delegation_token_scope: None,
+        ssh_config: None,
+        homepage_url: None,
+        repository_url: None,
+        issues_url: None,
+        capabilities: None,
+        inference: None,
+        platform_key: None,
+        credential: None,
+        auth_notes: None,
+        known_limitations: None,
+        recommended_skills: None,
+        recommended_skill_refs: None,
+        clear_skill_refs: false,
+        skills_request_id: None,
+    };
     crate::handlers::services::update_service_inner(state, auth_user, tele, service_id, body).await
 }
