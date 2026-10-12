@@ -244,8 +244,7 @@ pub(super) async fn dispatch_platform_webhook(
         "platform"
     };
     for target in targets {
-        let bot = state.db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-            .find_one(doc! { "platform": platform, "credential_source": source, "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
+        let bot = channel_bot_service::find_active_webhook_bot(&state.db, platform, source, &target).await?;
         let Some(bot) = bot else {
             tracing::warn!(
                 platform,
@@ -388,7 +387,7 @@ async fn handle_webhook_inner_impl(
             actual = %bot.platform,
             "webhook platform mismatch"
         );
-        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(mongodb::bson::doc! {"_id": bot_id}, mongodb::bson::doc! {"$set": {"diagnostics.last_webhook_error": {"code": "target", "at": mongodb::bson::DateTime::now()}, "diagnostics.failure_reason": "target"}}).await;
+        let _ = channel_bot_service::record_webhook_error(&state.db, bot_id, "target").await;
         return Ok(None);
     }
 
@@ -450,7 +449,7 @@ async fn handle_webhook_inner_impl(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             let db = state.db.clone();
             let id = bot.id.clone();
-            tokio::spawn(async move { let _ = db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(mongodb::bson::doc! {"_id": id}, mongodb::bson::doc! {"$set": {"diagnostics.last_webhook_error": {"code": "signature", "at": mongodb::bson::DateTime::now()}, "diagnostics.failure_reason": "signature"}}).await; });
+            tokio::spawn(async move { let _ = channel_bot_service::record_webhook_error(&db, &id, "signature").await; });
             format!("webhook verification failed: {e}").into()
         })?;
 
@@ -461,7 +460,7 @@ async fn handle_webhook_inner_impl(
     if bot.credential_source == "connection" {
         if !bot.webhook_registered {
             tracing::warn!(platform = %bot.platform, bot_id, stage = "subscription", "channel webhook is not registered");
-            state.db.collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(mongodb::bson::doc! {"_id": bot_id}, mongodb::bson::doc! {"$set": {"diagnostics.last_webhook_error": {"code": "unregistered", "at": mongodb::bson::DateTime::now()}, "diagnostics.failure_reason": "unregistered"}}).await?;
+            channel_bot_service::record_webhook_error(&state.db, bot_id, "unregistered").await?;
             return Ok(None);
         }
         crate::services::channel_credentials::resolve_bot_token(

@@ -1696,6 +1696,41 @@ pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec
 }
 
 /// Get a bot by ID regardless of ownership.
+pub async fn find_active_webhook_bot(
+    db: &mongodb::Database,
+    platform: &str,
+    credential_source: &str,
+    target: &str,
+) -> AppResult<Option<ChannelBot>> {
+    Ok(db.collection(COLLECTION_NAME).find_one(doc! {
+        "platform": platform, "credential_source": credential_source,
+        "platform_bot_id": target, "is_active": true,
+        "status": { "$in": ["active", "pending_webhook"] }
+    }).await?)
+}
+
+pub async fn record_webhook_error(db: &mongodb::Database, bot_id: &str, reason: &str) -> AppResult<()> {
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
+        doc! { "_id": bot_id },
+        doc! { "$set": {
+            "diagnostics.last_webhook_error": { "code": reason, "at": mongodb::bson::DateTime::now() },
+            "diagnostics.failure_reason": reason
+        } },
+    ).await?;
+    Ok(())
+}
+
+pub async fn list_all_filtered(
+    db: &mongodb::Database,
+    platform: Option<&str>,
+    status: Option<&str>,
+) -> AppResult<Vec<ChannelBot>> {
+    let mut filter = doc! {};
+    if let Some(platform) = platform { filter.insert("platform", if platform == "x" { "twitter" } else { platform }); }
+    if let Some(status) = status { filter.insert("status", status); }
+    Ok(db.collection(COLLECTION_NAME).find(filter).await?.try_collect().await?)
+}
+
 pub async fn get_bot(db: &mongodb::Database, bot_id: &str) -> AppResult<ChannelBot> {
     db.collection::<ChannelBot>(COLLECTION_NAME)
         .find_one(doc! { "_id": bot_id })
