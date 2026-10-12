@@ -50,6 +50,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -104,6 +105,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -288,6 +290,7 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -366,6 +369,7 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -424,6 +428,7 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -527,6 +532,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -610,6 +616,7 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                specialist_id: None,
                 steering: None,
                 voice: None,
                 execution_pending: false,
@@ -868,6 +875,7 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -971,6 +979,7 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -1056,6 +1065,7 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,

@@ -282,6 +282,7 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -347,6 +348,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -368,6 +370,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -400,6 +403,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        specialist_id: None,
         steering: None,
         voice: None,
         execution_pending: false,
@@ -438,6 +442,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        specialist_id: None,
         steering: None,
         voice: None,
         execution_pending: false,
@@ -484,6 +489,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        specialist_id: None,
         steering: None,
         voice: None,
         execution_pending: false,
@@ -530,6 +536,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        specialist_id: None,
         steering: None,
         voice: None,
         execution_pending: false,

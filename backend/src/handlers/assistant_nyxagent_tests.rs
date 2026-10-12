@@ -85,6 +85,7 @@ async fn long_mcp_activity_resets_semantic_progress_and_does_not_idle() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        specialist_id: None,
         steering: None,
         voice: None,
         execution_pending: false,
