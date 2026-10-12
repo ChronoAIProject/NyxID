@@ -4,7 +4,6 @@ import { ThumbsDown, ThumbsUp } from "lucide-react";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import {
   Fragment,
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -38,6 +37,20 @@ import {
   workingLabel,
 } from "@/lib/assistant/nyxbot-labels";
 import { mentionSegments } from "@/lib/assistant/nyxbot-mentions";
+import {
+  NO_RECIPIENT_EDITS,
+  resolveRecipients,
+  withAdded,
+  withDraft,
+  withRemoved,
+  type RecipientSelection,
+} from "@/lib/assistant/nyxbot-recipients";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn, formatClockTime } from "@/lib/utils";
 import type {
   AssistantGroup,
@@ -86,15 +99,30 @@ function UserText({
   );
 }
 
+/** "to Luna, researcher": the agents a sent message was addressed to. */
+export function recipientLine(
+  ids: readonly string[],
+  members: readonly AssistantGroupMember[],
+): string {
+  return `to ${ids
+    .map((id) => {
+      const member = members.find((row) => row.id === id);
+      return member ? agentTitle(member) : "a removed agent";
+    })
+    .join(", ")}`;
+}
+
 export function GroupMessageRow({
   groupId,
   message,
   names,
+  members = [],
   onOpenAgent,
 }: {
   readonly groupId: string;
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
+  readonly members?: readonly AssistantGroupMember[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
   const feedback = useAssistantFeedback("group", groupId, message.id);
@@ -124,7 +152,11 @@ export function GroupMessageRow({
       <div className="ml-[30px] flex justify-end">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
           {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
-          {message.recipient_agent_ids?.length ? <p className="mb-1 text-11 text-muted-foreground">to {message.recipient_agent_ids.map((id) => `@${names.find((name) => name.toLowerCase() === id.toLowerCase()) ?? id}`).join(", ")}</p> : null}
+          {message.recipient_agent_ids?.length ? (
+            <p className="mb-1 text-11 text-muted-foreground">
+              {recipientLine(message.recipient_agent_ids, members)}
+            </p>
+          ) : null}
           <UserText text={message.text} names={names} />
           {message.attachments?.map((item) => (
             <ToolImage
@@ -328,6 +360,7 @@ function GroupTranscript({
             message={message}
             groupId={group.id}
             names={names}
+            members={group.members}
             onOpenAgent={onOpenAgent}
           />
         ))}
@@ -553,6 +586,79 @@ export function GroupPendingActions({
   );
 }
 
+/**
+ * Who the next message goes to: removable pills plus a picker of the other
+ * live members. Announced as a group so screen readers hear the set.
+ */
+export function GroupRecipientPills({
+  members,
+  recipientIds,
+  onRemove,
+  onAdd,
+}: {
+  readonly members: readonly AssistantGroupMember[];
+  readonly recipientIds: readonly string[];
+  readonly onRemove: (id: string) => void;
+  readonly onAdd: (id: string) => void;
+}) {
+  const live = members.filter((member) => !member.destroyed);
+  const others = live.filter((member) => !recipientIds.includes(member.id));
+  return (
+    <div
+      role="group"
+      aria-label="Message recipients"
+      className="mb-2 flex flex-wrap items-center gap-1.5"
+    >
+      <span className="text-11 text-muted-foreground">To</span>
+      {recipientIds.flatMap((id) => {
+        const member = live.find((row) => row.id === id);
+        return member
+          ? [
+              <Button
+                key={id}
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="rounded-full"
+                aria-label={`Remove recipient ${agentTitle(member)}`}
+                onClick={() => onRemove(id)}
+              >
+                {agentTitle(member)} ×
+              </Button>,
+            ]
+          : [];
+      })}
+      {recipientIds.length ? null : (
+        <span role="status" className="text-11 text-destructive">
+          Choose at least one recipient.
+        </span>
+      )}
+      {others.length ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="rounded-full"
+              aria-label="Add recipient"
+            >
+              + Add
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {others.map((member) => (
+              <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
+                {agentTitle(member)}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
+    </div>
+  );
+}
+
 export function NyxAgentGroupPage({
   groupId,
   mock,
@@ -570,9 +676,8 @@ export function NyxAgentGroupPage({
   const [composerHeight, setComposerHeight] = useState(0);
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [recipientAgentIds, setRecipientAgentIds] = useState<string[]>([]);
-  const [excludedRecipientIds, setExcludedRecipientIds] = useState<string[]>([]);
-  const [recipientsEdited, setRecipientsEdited] = useState(false);
+  const [recipientSelection, setRecipientSelection] =
+    useState<RecipientSelection>(NO_RECIPIENT_EDITS);
   // Group payloads name agents by handle; their display names live on the agent list.
   const group =
     transcript.data && !transcript.error
@@ -588,16 +693,16 @@ export function NyxAgentGroupPage({
         }
       : message,
   );
-  useEffect(() => {
-    if (group && !recipientAgentIds.length) setRecipientAgentIds(group.default_recipient_ids ?? []);
-  }, [group, recipientAgentIds.length]);
+  const recipients = resolveRecipients(
+    recipientSelection,
+    group?.default_recipient_ids ?? [],
+    group?.members ?? [],
+  );
   const onComposerContentChange = (content: string) => {
     if (!group) return;
-    const mentioned = group.members.filter((member) =>
-      new RegExp(`(^|\\s)@${member.name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}(?=\\s|$)`, "i").test(content),
-    ).map((member) => member.id);
-    if (mentioned.length) setRecipientAgentIds(mentioned.filter((id) => !excludedRecipientIds.includes(id)));
-    else if (group.default_recipient_ids?.length) setRecipientAgentIds(group.default_recipient_ids.filter((id) => !excludedRecipientIds.includes(id)));
+    setRecipientSelection((current) =>
+      withDraft(current, content, group.members),
+    );
   };
 
   useLayoutEffect(() => {
@@ -756,10 +861,20 @@ export function NyxAgentGroupPage({
             placeholder={GROUP_COMPOSER_PLACEHOLDER}
             mentions={mentions}
             onSend={async (text, uploads) => {
+              if (recipients.edited && !recipients.ids.length) {
+                const error = new Error("Choose at least one recipient.");
+                toast.error(error.message);
+                throw error;
+              }
               try {
-                await transcript.post.mutateAsync(
-                  uploads ? { text, attachmentIds: uploads.attachmentIds, ...(recipientsEdited ? { recipientAgentIds } : {}) } : { text, attachmentIds: [], ...(recipientsEdited ? { recipientAgentIds } : {}) },
-                );
+                await transcript.post.mutateAsync({
+                  text,
+                  attachmentIds: uploads?.attachmentIds ?? [],
+                  ...(recipients.edited
+                    ? { recipientAgentIds: recipients.ids }
+                    : {}),
+                });
+                setRecipientSelection(NO_RECIPIENT_EDITS);
               } catch (error) {
                 toast.error(
                   error instanceof Error
@@ -770,16 +885,20 @@ export function NyxAgentGroupPage({
               }
             }}
             onContentChange={onComposerContentChange}
-            recipients={group ? <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Message recipients">
-              {recipientAgentIds.map((id) => {
-                const member = group.members.find((row) => row.id === id);
-                return member ? <Button key={id} type="button" size="sm" variant="secondary" className="rounded-full" aria-label={`Remove recipient ${member.name}`} onClick={() => { setRecipientsEdited(true); setRecipientAgentIds((current) => current.filter((value) => value !== id)); setExcludedRecipientIds((current) => current.includes(id) ? current : [...current, id]); }}>@{member.name} ×</Button> : null;
-              })}
-              <select aria-label="Add recipient" className="h-8 rounded-lg border bg-card px-2 text-12" value="" onChange={(event) => { if (event.target.value) { setRecipientsEdited(true); setRecipientAgentIds((current) => current.includes(event.target.value) ? current : [...current, event.target.value]); } }}>
-                <option value="">+ add</option>
-                {group.members.filter((member) => !recipientAgentIds.includes(member.id)).map((member) => <option key={member.id} value={member.id}>@{member.name}</option>)}
-              </select>
-            </div> : undefined}
+            recipients={
+              group ? (
+                <GroupRecipientPills
+                  members={group.members}
+                  recipientIds={recipients.ids}
+                  onRemove={(id) =>
+                    setRecipientSelection((current) => withRemoved(current, id))
+                  }
+                  onAdd={(id) =>
+                    setRecipientSelection((current) => withAdded(current, id))
+                  }
+                />
+              ) : undefined
+            }
             onStop={async () => undefined}
           />
         </div>
