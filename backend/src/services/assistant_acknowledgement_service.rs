@@ -1685,7 +1685,13 @@ pub async fn webhook_action_gate(
         // only classifies service/team actions and must not emit a duplicate card.
         return Ok(None);
     }
-    if !webhook_confirmation_required(chat, read_only, destructive) {
+    let policy_floor = webhook_confirmation_required(chat, read_only, destructive);
+    if !policy_floor
+        && !owner_gate_required(db, chat, classify_owner_action(tool, None), false).await?
+    {
+        return Ok(None);
+    }
+    if !policy_floor && chat.guest {
         return Ok(None);
     }
     if let Some(id) = args["acknowledgement_id"].as_str() {
