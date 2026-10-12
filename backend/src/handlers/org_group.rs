@@ -5,9 +5,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_conversation::{AssistantConversation, TurnOrigin},
-        assistant_group::{
-            AssistantGroup, GroupMessage, GroupRequest, REQUESTS_COLLECTION_NAME as REQUESTS,
-        },
+        assistant_group::{AssistantGroup, GroupMessage, GroupRequest},
     },
     services::{
         assistant_group_service as personal, assistant_nyxagent as engine,
@@ -15,8 +13,6 @@ use crate::{
     },
 };
 use chrono::Utc;
-use futures::TryStreamExt;
-use mongodb::bson::doc;
 use uuid::Uuid;
 
 pub(crate) async fn post(
@@ -50,8 +46,8 @@ pub(crate) async fn post(
     if addressed.is_empty() {
         addressed.push(access.group.lead_agent_id.clone());
     }
-    state.db.collection::<AssistantGroup>(crate::models::assistant_group::COLLECTION_NAME)
-        .update_one(mongodb::bson::doc! {"_id": &access.group.id}, mongodb::bson::doc! {"$set": {format!("last_recipient_ids_by_actor.{}", access.actor): &addressed}}).await?;
+    groups::persist_actor_recipients(&state.db, &access.group.id, &access.actor, &addressed)
+        .await?;
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
         id: id.clone(),
@@ -83,15 +79,7 @@ pub(crate) async fn post(
 
 pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
     let result: AppResult<()> = Box::pin(async {
-        let requests: Vec<GroupRequest> = state
-            .db
-            .collection(REQUESTS)
-            .find(doc! {"group_id":&group.id,"pending_agent_ids.0":{"$exists":true}})
-            .sort(doc! {"created_at":1})
-            .limit(100)
-            .await?
-            .try_collect()
-            .await?;
+        let requests = groups::pending_requests(&state.db, &group.id).await?;
         for request in requests {
             let access = match groups::get(&state.db, &request.actor_user_id, &group.id, None).await
             {
@@ -111,14 +99,7 @@ pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
                     continue;
                 }
                 if !access.group.member_agent_ids.contains(agent_id) {
-                    state
-                        .db
-                        .collection::<GroupRequest>(REQUESTS)
-                        .update_one(
-                            doc! {"_id":&request.id},
-                            doc! {"$pull":{"pending_agent_ids":agent_id}},
-                        )
-                        .await?;
+                    groups::remove_pending_agent(&state.db, &request.id, agent_id).await?;
                     continue;
                 }
                 // begin_turn consumes this queue entry in the same transaction
@@ -166,9 +147,14 @@ async fn run_member(
     ))
     .await?;
     let (transcript, newest) = groups::transcript(&state.db, access, thread.group_seen_seq).await?;
-    let trigger = state.db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
-        .find_one(doc! {"group_id":&access.group.id,"request_id":&request.id,"seq":request.message_seq,"role":"user","author_user_id":&access.actor})
-        .await?.ok_or_else(groups::missing)?;
+    let trigger = groups::request_trigger(
+        &state.db,
+        &access.group.id,
+        &request.id,
+        request.message_seq,
+        &access.actor,
+    )
+    .await?;
     let start = engine::TurnStart {
         channel_event_id: None,
         org_access: access.org.clone(),
@@ -225,28 +211,81 @@ pub(crate) async fn member_settled(
     text: &str,
     error: Option<&str>,
 ) {
-    let result:AppResult<()>=Box::pin(async {
-        let Some(id)=row.group_request_id.as_deref() else { return Ok(()); };
-        let request=groups::request(&state.db,&access,id).await?;
-        let agent=crate::services::assistant_team_service::agent_for_conversation(&state.db,row).await?;
+    let result: AppResult<()> = Box::pin(async {
+        let Some(id) = row.group_request_id.as_deref() else {
+            return Ok(());
+        };
+        let request = groups::request(&state.db, &access, id).await?;
+        let agent =
+            crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await?;
         if error.is_none() && !text.trim().is_empty() {
-            let message=groups::append(&state.db,&access,"agent",Some(&agent),text,Some(id),&[],None).await?;
-            Box::pin(crate::services::machine_activity_service::publish_group(&state.db,row,&message)).await?;
-            let agents=groups::resolve_agents(&state.db,&access.group.user_id,&access.group.member_agent_ids).await?;
-            let per_hour=crate::services::assistant_settings_service::get(&state.db,&access.actor).await?.max_group_handoffs_per_hour.max(0) as u64;
-            for target in personal::mentions(text,&agents).into_iter().filter(|id|id!=&agent.id) {
-                if per_hour==0 { break; }
-                let allowed=crate::services::coordination_service::RateWindowStore::admit(&state.db,"assistant_group_handoffs",&access.actor,per_hour,std::time::Duration::from_secs(3600)).await?.allowed;
-                if !allowed {break;}
-                state.db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":&request.id,"hops_remaining":{"$gt":0}},
-                    doc! {"$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target}}).await?;
+            let message = groups::append(
+                &state.db,
+                &access,
+                "agent",
+                Some(&agent),
+                text,
+                Some(id),
+                &[],
+                None,
+            )
+            .await?;
+            Box::pin(crate::services::machine_activity_service::publish_group(
+                &state.db, row, &message,
+            ))
+            .await?;
+            let agents = groups::resolve_agents(
+                &state.db,
+                &access.group.user_id,
+                &access.group.member_agent_ids,
+            )
+            .await?;
+            let per_hour =
+                crate::services::assistant_settings_service::get(&state.db, &access.actor)
+                    .await?
+                    .max_group_handoffs_per_hour
+                    .max(0) as u64;
+            for target in personal::mentions(text, &agents)
+                .into_iter()
+                .filter(|id| id != &agent.id)
+            {
+                if per_hour == 0 {
+                    break;
+                }
+                let allowed = crate::services::coordination_service::RateWindowStore::admit(
+                    &state.db,
+                    "assistant_group_handoffs",
+                    &access.actor,
+                    per_hour,
+                    std::time::Duration::from_secs(3600),
+                )
+                .await?
+                .allowed;
+                if !allowed {
+                    break;
+                }
+                groups::queue_handoff(&state.db, &request.id, &target).await?;
             }
         } else if error.is_some() {
-            let message=groups::append(&state.db,&access,"notice",Some(&agent),"An agent could not finish this request.",Some(id),&[],None).await?;
-            Box::pin(crate::services::machine_activity_service::publish_group(&state.db,row,&message)).await?;
+            let message = groups::append(
+                &state.db,
+                &access,
+                "notice",
+                Some(&agent),
+                "An agent could not finish this request.",
+                Some(id),
+                &[],
+                None,
+            )
+            .await?;
+            Box::pin(crate::services::machine_activity_service::publish_group(
+                &state.db, row, &message,
+            ))
+            .await?;
         }
         Ok(())
-    }).await;
+    })
+    .await;
     if result.is_err() {
         tracing::debug!("Organization group reply deferred");
     }

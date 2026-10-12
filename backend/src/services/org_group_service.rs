@@ -29,6 +29,73 @@ use crate::{
 pub fn missing() -> AppError {
     AppError::NotFound("Group not found".into())
 }
+
+pub async fn persist_actor_recipients(
+    db: &Database,
+    group_id: &str,
+    actor: &str,
+    ids: &[String],
+) -> AppResult<()> {
+    db.collection::<AssistantGroup>(GROUPS)
+        .update_one(
+            doc! {"_id":group_id},
+            doc! {"$set": {format!("last_recipient_ids_by_actor.{actor}"): ids}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn pending_requests(
+    db: &Database,
+    group_id: &str,
+) -> AppResult<Vec<crate::models::assistant_group::GroupRequest>> {
+    use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
+    Ok(db
+        .collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
+        .find(doc! {"group_id":group_id,"pending_agent_ids.0":{"$exists":true}})
+        .sort(doc! {"created_at":1})
+        .limit(100)
+        .await?
+        .try_collect()
+        .await?)
+}
+
+pub async fn remove_pending_agent(
+    db: &Database,
+    request_id: &str,
+    agent_id: &str,
+) -> AppResult<()> {
+    use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
+    db.collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":request_id},
+            doc! {"$pull":{"pending_agent_ids":agent_id}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn request_trigger(
+    db: &Database,
+    group_id: &str,
+    request_id: &str,
+    seq: i64,
+    actor: &str,
+) -> AppResult<crate::models::assistant_group::GroupMessage> {
+    use crate::models::assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME};
+    db.collection::<GroupMessage>(MESSAGES_COLLECTION_NAME).find_one(doc! {"group_id":group_id,"request_id":request_id,"seq":seq,"role":"user","author_user_id":actor}).await?.ok_or_else(missing)
+}
+
+pub async fn queue_handoff(db: &Database, request_id: &str, target: &str) -> AppResult<()> {
+    use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
+    db.collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":request_id,"hops_remaining":{"$gt":0}},
+            doc! {"$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target}},
+        )
+        .await?;
+    Ok(())
+}
 pub fn is_org(group: &AssistantGroup) -> bool {
     group.created_by_user_id.is_some()
 }
