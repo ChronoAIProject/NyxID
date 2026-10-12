@@ -1800,3 +1800,69 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
     let (_, card) = account_gate(&f.state.db, &f.chat).await.unwrap().unwrap();
     assert!(card.is_some());
 }
+
+#[tokio::test]
+async fn specialist_operation_scope_card_request_denied_audited_and_routed() {
+    use super::assistant_settings_service as settings;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = fixture("strict_operation_scope_card").await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "operation-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let err = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "operations",
+            service: Some((&service, "operation-service", "Operation service")),
+            tool: None,
+            arguments: None,
+            summary: "Request operation scope",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("access_request_denied"));
+    assert!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"operations"}).await.unwrap().is_some());
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        super::assistant_acknowledgement_service::request_tracked(
+            &f.state.db,
+            &f.chat,
+            super::assistant_acknowledgement_service::Request {
+                kind: "operations",
+                service: Some((&service, "operation-service", "Operation service")),
+                tool: None,
+                arguments: None,
+                summary: "Request operation scope",
+                platform: false
+            }
+        )
+        .await
+        .is_ok()
+    );
+}
