@@ -167,7 +167,7 @@ async fn upsert(
         auth,
         "assistant_feedback_submitted",
         Some(
-            serde_json::json!({"message_id":message_id,"vote":input.vote,"conversation_id":conversation_id,"group_id":group_id}),
+            serde_json::json!({"message_id":message_id,"vote":input.vote,"conversation_id":conversation_id,"group_id":group_id,"previous_vote":existing.as_ref().map(|r| r.vote.clone()),"change":event,"has_comment":input.comment.is_some()}),
         ),
     );
     Ok(Json(row.into()))
