@@ -20,12 +20,15 @@ import {
   useAgentSkillHistory,
 } from "@/hooks/use-agent-skills";
 import type { AgentSkill } from "@/schemas/agent-skills";
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
 
 function AttachedSkill({
   skill,
   description,
   size,
   disabled,
+  canDisable,
   remove,
   review,
   toggle,
@@ -34,6 +37,8 @@ function AttachedSkill({
   readonly description?: string;
   readonly size?: number;
   readonly disabled: boolean;
+  /** Pin disabling is behind `assistant:skill-pin-disable`; the server refuses it otherwise. */
+  readonly canDisable: boolean;
   readonly remove: () => void;
   readonly review: () => void;
   readonly toggle: (enabled: boolean) => void;
@@ -66,15 +71,19 @@ function AttachedSkill({
         <Button size="sm" disabled={disabled} onClick={remove}>
           Remove {skill.name}
         </Button>
-        <label className="flex items-center gap-2 text-11">
-          <Switch
-            checked={!skill.disabled}
-            disabled={disabled}
-            aria-label={`Use ${skill.name}`}
-            onCheckedChange={toggle}
-          />
-          {skill.disabled ? "Disabled" : "Enabled"}
-        </label>
+        {canDisable ? (
+          <label className="flex items-center gap-2 text-11">
+            <Switch
+              checked={!skill.disabled}
+              disabled={disabled}
+              aria-label={`Use ${skill.name}`}
+              onCheckedChange={toggle}
+            />
+            {skill.disabled ? "Disabled" : "Enabled"}
+          </label>
+        ) : skill.disabled ? (
+          <span className="text-11 text-text-tertiary">Disabled</span>
+        ) : null}
       </div>
     </div>
   );
@@ -88,6 +97,9 @@ export function AgentSkills({
   readonly readOnly?: boolean;
 }) {
   const current = useAgentSkills(agentId);
+  const canDisable = useAuthStore((s) =>
+    userHasFeature(s.user, FEATURE_FLAG.SKILL_PIN_DISABLE),
+  );
   const attachedPreview = useAttachedSkillPreview(agentId, current.data?.skills[0]?.skill_id ?? "");
   const history = useAgentSkillHistory(agentId);
   const write = useSetAgentSkills(agentId);
@@ -161,6 +173,7 @@ export function AgentSkills({
           description={current.data.metadata[skill.skill_id]?.description}
           size={current.data.metadata[skill.skill_id]?.size_bytes}
           disabled={disabled}
+          canDisable={canDisable}
           review={() => choose(skill.skill_id, skill.name)}
           toggle={(enabled) => save(current.data!.skills.map((item) => item.skill_id === skill.skill_id ? { ...item, disabled: !enabled } : item))}
           remove={() =>

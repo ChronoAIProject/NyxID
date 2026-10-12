@@ -2,6 +2,15 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AgentSkills } from "./agent-skills";
+import { useAuthStore } from "@/stores/auth-store";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import type { User } from "@/types/api";
+
+function signIn(features: string[] = []) {
+  useAuthStore.setState({
+    user: { id: "owner", capabilities: { enabled_features: features } } as unknown as User,
+  });
+}
 const mocks = vi.hoisted(() => ({
   current: vi.fn(),
   save: vi.fn(),
@@ -30,6 +39,7 @@ const pin = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  signIn();
   mocks.current.mockReturnValue({
     data: {
       revision: 4,
@@ -70,7 +80,22 @@ it("removes immediately with the observed revision", () => {
     expect.anything(),
   );
 });
+it("hides the enable toggle while assistant:skill-pin-disable is off", () => {
+  render(<AgentSkills agentId="agent" />);
+  expect(screen.getByText("Research guide")).toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "Use Research" })).not.toBeInTheDocument();
+  expect(mocks.save).not.toHaveBeenCalled();
+});
+it("still marks a disabled pin when the toggle is hidden", () => {
+  mocks.current.mockReturnValue({
+    data: { revision: 4, skills: [{ ...pin, disabled: true }], metadata: {} },
+  });
+  render(<AgentSkills agentId="agent" />);
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  expect(screen.getByText("Disabled")).toBeInTheDocument();
+});
 it("toggles a pin and sends disabled true in the PUT body", () => {
+  signIn([FEATURE_FLAG.SKILL_PIN_DISABLE]);
   render(<AgentSkills agentId="agent" />);
   fireEvent.click(screen.getByRole("switch", { name: "Use Research" }));
   expect(mocks.save).toHaveBeenCalledWith({ expected_revision: 4, skills: [{ ...pin, disabled: true }] }, expect.anything());
