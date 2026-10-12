@@ -1,7 +1,7 @@
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    models::assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME},
+    models::assistant_message_feedback::AssistantMessageFeedback,
     mw::auth::AuthUser,
     services::{
         assistant_feedback_service as feedback_service, assistant_nyxagent as engine, audit_service,
@@ -121,8 +121,7 @@ async fn upsert(
         )
     } else {
         let gid = group_id.as_deref().unwrap();
-        let access =
-            crate::services::org_group_service::get(&state.db, &user_id, gid, None).await?;
+        crate::services::org_group_service::get(&state.db, &user_id, gid, None).await?;
         let row = feedback_service::group_message(&state.db, gid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
@@ -218,7 +217,6 @@ async fn withdraw(
             }
         }
     }
-    let filter = doc! {"user_id":&user_id,"message_id":&message_id};
     let deleted = feedback_service::delete_feedback(&state.db, &user_id, &message_id).await?;
     if deleted.is_none() {
         return Ok(StatusCode::NO_CONTENT);
@@ -433,6 +431,7 @@ mod tests {
             turn_id: Some("t".into()),
             vote: "up".into(),
             comment: None,
+            context: None,
             created_at: now,
             updated_at: now,
         }

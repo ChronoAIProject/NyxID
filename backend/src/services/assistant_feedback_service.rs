@@ -154,7 +154,7 @@ pub async fn delete_feedback(
     db: &Database,
     user_id: &str,
     message_id: &str,
-) -> mongodb::error::Result<bool> {
+) -> mongodb::error::Result<Option<AssistantMessageFeedback>> {
     Ok(db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
         .find_one_and_delete(doc! {"user_id": user_id, "message_id": message_id})

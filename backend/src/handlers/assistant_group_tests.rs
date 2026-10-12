@@ -331,6 +331,7 @@ async fn groups_validate_members_and_delete_with_their_member_threads() {
                 turn_id: None,
                 vote: "up".into(),
                 comment: None,
+                context: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             },

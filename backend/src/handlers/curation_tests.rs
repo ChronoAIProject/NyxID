@@ -45,12 +45,11 @@ pub(super) struct Fixture {
 async fn feedback_concurrent_first_puts_share_one_row() {
     // The unique index and barrier make concurrent first writes deterministic; repeat attempts are covered by the shared fixture index.
     let f = fixture("feedback-r3", false).await;
-    let conversation_id = "nyxa-feedback-r3";
+    let conversation_id = "nyxa-00000000000000000000000000000001";
     let message_id = "reply-feedback-r3";
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
@@ -68,9 +67,10 @@ async fn feedback_concurrent_first_puts_share_one_row() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let path = format!(
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
@@ -101,10 +101,9 @@ async fn feedback_concurrent_first_puts_share_one_row() {
         .unwrap();
     assert_eq!(count, 1);
     let direct_message = "reply-feedback-r3-direct";
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
@@ -122,9 +121,10 @@ async fn feedback_concurrent_first_puts_share_one_row() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     f.state.db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME).insert_one(doc! {"_id":"existing-direct","user_id":&f.owner,"message_id":direct_message,"conversation_id":conversation_id,"vote":"up","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
     let direct_path = format!(
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{direct_message}/feedback"
@@ -166,6 +166,7 @@ async fn feedback_admin_counts_group_exact_per_day_through_service_and_route() {
             turn_id: None,
             vote: vote.into(),
             comment: None,
+            context: None,
             created_at: created,
             updated_at: created,
         });
@@ -180,6 +181,7 @@ async fn feedback_admin_counts_group_exact_per_day_through_service_and_route() {
             turn_id: None,
             vote: "up".into(),
             comment: None,
+            context: None,
             created_at: day_b,
             updated_at: day_b,
         });
@@ -232,6 +234,7 @@ async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
             turn_id: None,
             vote: "up".into(),
             comment: None,
+            context: None,
             created_at: created,
             updated_at: created,
         })
@@ -280,12 +283,11 @@ async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
 #[tokio::test]
 async fn feedback_put_change_withdraw_and_ineligible_reply() {
     let f = fixture("feedback-b5-behavior", false).await;
-    let conversation_id = "b5-conversation";
+    let conversation_id = "nyxa-00000000000000000000000000000002";
     let message_id = "b5-reply";
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
@@ -303,9 +305,10 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let path = format!(
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
@@ -360,15 +363,14 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
 async fn feedback_vote_change_preserves_comment_without_comment_field() {
     let f = fixture("feedback-s2-comment", false).await;
     let message_id = "s2-reply";
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
             id: message_id.into(),
-            conversation_id: "s2-conv".into(),
+            conversation_id: "nyxa-00000000000000000000000000000003".into(),
             user_id: f.owner.clone(),
             seq: 1,
             turn_id: "s2-turn".into(),
@@ -381,11 +383,13 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
-    let path =
-        format!("/api/v1/assistant/nyxagent/conversations/s2-conv/messages/{message_id}/feedback");
+        },
+    )
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/nyxa-00000000000000000000000000000003/messages/{message_id}/feedback"
+    );
     request(
         &f.state,
         "PUT",
@@ -417,15 +421,14 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
 async fn feedback_withdraw_is_idempotent_after_first_delete() {
     let f = fixture("feedback-s3-withdraw", false).await;
     let message_id = "s3-reply";
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
             id: message_id.into(),
-            conversation_id: "s3-conv".into(),
+            conversation_id: "nyxa-00000000000000000000000000000004".into(),
             user_id: f.owner.clone(),
             seq: 1,
             turn_id: "s3-turn".into(),
@@ -438,11 +441,13 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
-    let path =
-        format!("/api/v1/assistant/nyxagent/conversations/s3-conv/messages/{message_id}/feedback");
+        },
+    )
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/nyxa-00000000000000000000000000000004/messages/{message_id}/feedback"
+    );
     request(
         &f.state,
         "PUT",
@@ -518,11 +523,10 @@ async fn feedback_route_limits_one_user_burst() {
 async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     let f = fixture("feedback-s5-engine-off", false).await;
     let message_id = "engine-gated-reply";
-    let conversation_id = "engine-gated-conversation";
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    let conversation_id = "nyxa-00000000000000000000000000000005";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
@@ -540,9 +544,10 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let path = format!(
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
@@ -580,7 +585,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
         .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
             crate::models::feature_flag_override::COLLECTION_NAME,
         )
-        .delete_many(doc! {"id":"s5-off"})
+        .delete_many(doc! {"_id":"s5-off"})
         .await
         .unwrap();
     let (status, _) = request(
@@ -602,15 +607,23 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         ("failed", "assistant", "failed"),
         ("stopped", "assistant", "failed"),
     ] {
-        f.state
-            .db
-            .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-            .insert_one(AssistantMessage {
+        insert_feedback_message(
+            &f,
+            AssistantMessage {
                 steering: None,
                 voice: None,
                 execution_pending: false,
                 id: id.into(),
-                conversation_id: format!("conv-{id}"),
+                conversation_id: format!(
+                    "nyxa-{:032x}",
+                    if id == "user" {
+                        101
+                    } else if id == "failed" {
+                        102
+                    } else {
+                        103
+                    }
+                ),
                 user_id: f.owner.clone(),
                 seq: 1,
                 turn_id: id.into(),
@@ -627,11 +640,20 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
                 attachments: vec![],
                 origin: None,
                 via: None,
-            })
-            .await
-            .unwrap();
-        let path =
-            format!("/api/v1/assistant/nyxagent/conversations/conv-{id}/messages/{id}/feedback");
+            },
+        )
+        .await
+        .unwrap();
+        let path = format!(
+            "/api/v1/assistant/nyxagent/conversations/nyxa-{:032x}/messages/{id}/feedback",
+            if id == "user" {
+                101
+            } else if id == "failed" {
+                102
+            } else {
+                103
+            }
+        );
         assert_eq!(
             request(
                 &f.state,
@@ -650,7 +672,7 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
 #[tokio::test]
 async fn feedback_group_acl_rejects_non_participant_as_not_found() {
     let f = fixture("feedback-group-acl", false).await;
-    let group_id = "feedback-real-group";
+    let group_id = "nyxg-11111111111111111111111111111111";
     let message_id = "feedback-group-reply";
     let now = Utc::now();
     f.state
@@ -747,7 +769,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .insert_one(test_utils::test_user(&org_id, UserType::Org))
         .await
         .unwrap();
-    let org_group_id = "feedback-org-group";
+    let org_group_id = "nyxg-22222222222222222222222222222222";
     let org_message_id = "feedback-org-reply";
     f.state
         .db
@@ -841,12 +863,11 @@ async fn feedback_admin_route_rejects_non_admin() {
 #[tokio::test]
 async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     let f = fixture("feedback-other-user", false).await;
-    let conversation_id = "owned-conversation";
+    let conversation_id = "nyxa-00000000000000000000000000000006";
     let message_id = "owned-reply";
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
@@ -864,9 +885,10 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let other_id = Uuid::new_v4().to_string();
     let other = test_utils::test_user(&other_id, UserType::Person);
     f.state
@@ -905,7 +927,7 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
 #[tokio::test]
 async fn feedback_conversation_delete_purges_existing_rows() {
     let f = fixture("feedback-conversation-purge", false).await;
-    let id = "feedback-purge-conversation";
+    let id = "nyxa-00000000000000000000000000000007";
     f.state
         .db
         .collection::<Document>("assistant_conversations")
@@ -946,15 +968,14 @@ async fn feedback_conversation_delete_purges_existing_rows() {
 #[tokio::test]
 async fn feedback_rejects_message_from_another_owned_conversation() {
     let f = fixture("feedback-cross-conversation", false).await;
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
             id: "scoped-reply".into(),
-            conversation_id: "actual-conversation".into(),
+            conversation_id: "nyxa-00000000000000000000000000000008".into(),
             user_id: f.owner.clone(),
             seq: 1,
             turn_id: "turn".into(),
@@ -967,10 +988,11 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
-    let actual = "/api/v1/assistant/nyxagent/conversations/actual-conversation/messages/scoped-reply/feedback";
+        },
+    )
+    .await
+    .unwrap();
+    let actual = "/api/v1/assistant/nyxagent/conversations/nyxa-00000000000000000000000000000008/messages/scoped-reply/feedback";
     assert_eq!(
         request(
             &f.state,
@@ -983,7 +1005,7 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
         .0,
         StatusCode::OK
     );
-    let wrong = "/api/v1/assistant/nyxagent/conversations/other-owned-conversation/messages/scoped-reply/feedback";
+    let wrong = "/api/v1/assistant/nyxagent/conversations/other-nyxa-00000000000000000000000000000006/messages/scoped-reply/feedback";
     for method in ["PUT", "DELETE"] {
         let input = (method == "PUT").then(|| json!({"vote":"up"}));
         let (status, body) = request(&f.state, method, wrong, &f.human_token, input).await;
@@ -1030,16 +1052,15 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
         .await
         .unwrap();
     let now = bson::DateTime::now();
-    f.state.db.collection::<Document>("assistant_conversations").insert_one(doc! {"_id":"org-thread","user_id":&member,"title":"Org","model":"test","credential_api_key_id":"unused","message_count":1,"agent_owner_id":&org,"created_at":now,"updated_at":now}).await.unwrap();
-    f.state
-        .db
-        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
-        .insert_one(AssistantMessage {
+    f.state.db.collection::<Document>("assistant_conversations").insert_one(doc! {"_id":"nyxa-0000000000000000000000000000000a","user_id":&member,"title":"Org","model":"test","credential_api_key_id":"unused","message_count":1,"agent_owner_id":&org,"created_at":now,"updated_at":now}).await.unwrap();
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
             steering: None,
             voice: None,
             execution_pending: false,
             id: "org-reply".into(),
-            conversation_id: "org-thread".into(),
+            conversation_id: "nyxa-0000000000000000000000000000000a".into(),
             user_id: member.clone(),
             seq: 1,
             turn_id: "t".into(),
@@ -1052,9 +1073,10 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
             attachments: vec![],
             origin: None,
             via: None,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let token = jwt::generate_access_token(
         &f.state.jwt_keys,
         &f.state.config,
@@ -1067,7 +1089,7 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
         None,
     )
     .unwrap();
-    let path = "/api/v1/assistant/nyxagent/conversations/org-thread/messages/org-reply/feedback";
+    let path = "/api/v1/assistant/nyxagent/conversations/nyxa-0000000000000000000000000000000a/messages/org-reply/feedback";
     assert_eq!(
         request(&f.state, "PUT", path, &token, Some(json!({"vote":"up"})))
             .await
@@ -1077,15 +1099,36 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     f.state
         .db
         .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
-        .delete_many(doc! {"org_user_id":&org,"user_id":&member})
+        .delete_many(doc! {"org_user_id":&org,"member_user_id":&member})
         .await
         .unwrap();
     let (status, body) = request(&f.state, "PUT", path, &token, Some(json!({"vote":"down"}))).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"].as_str(), Some("Conversation not found"));
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"].as_str(),
+        Some("Organization agent access was revoked or is no longer permitted")
+    );
     let (status, body) = request(&f.state, "DELETE", path, &token, None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"].as_str(), Some("Conversation not found"));
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"].as_str(),
+        Some("Organization agent access was revoked or is no longer permitted")
+    );
+}
+
+async fn insert_feedback_message(
+    f: &Fixture,
+    message: AssistantMessage,
+) -> mongodb::error::Result<mongodb::results::InsertOneResult> {
+    f.state.db.collection::<Document>("assistant_conversations").update_one(
+        doc! {"_id": &message.conversation_id},
+        doc! {"$setOnInsert": {"user_id": &message.user_id, "title":"Feedback fixture", "model":"test", "credential_api_key_id":"unused", "message_count":1, "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now()}}
+    ).upsert(true).await?;
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(message)
+        .await
 }
 
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
