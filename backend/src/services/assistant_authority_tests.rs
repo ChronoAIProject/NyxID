@@ -1761,3 +1761,42 @@ async fn deleting_a_conversation_revokes_children_clears_bindings_and_audits_aft
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn specialist_account_card_request_denied_audited_and_routed() {
+    use super::assistant_settings_service as settings;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = fixture("strict_account_gate_card").await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .delete_one(doc! {"_id":&f.owner})
+        .await
+        .unwrap();
+    let (denied, card) = account_gate(&f.state.db, &f.chat).await.unwrap().unwrap();
+    assert_eq!(denied["error"], "access_request_denied");
+    assert!(card.is_none());
+    assert!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(
+                doc! {"event_type":"assistant_access_request_denied","event_data.scope":"account"}
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (_, card) = account_gate(&f.state.db, &f.chat).await.unwrap().unwrap();
+    assert!(card.is_some());
+}
