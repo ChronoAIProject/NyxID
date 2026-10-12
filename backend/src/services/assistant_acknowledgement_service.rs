@@ -275,6 +275,26 @@ pub async fn audit_access_request_denied(
             .collection::<crate::models::assistant_conversation::AssistantConversation>(
                 crate::models::assistant_conversation::COLLECTION_NAME,
             );
+        let _ = super::assistant_nyxagent::push_events(
+            db,
+            &chat.user_id,
+            &home,
+            vec![crate::models::assistant_conversation::AgentEvent {
+                id: Uuid::new_v4().to_string(),
+                kind: "permission_requested".into(),
+                text: format!(
+                    "specialist_access_denied: {} needs {} for {}",
+                    chat.agent_name,
+                    scope,
+                    target.unwrap_or("account")
+                ),
+                agent_id: Some(chat.agent_id.clone()),
+                question_key: None,
+                reply_to: Vec::new(),
+                created_at: Utc::now(),
+            }],
+        )
+        .await;
         if let Ok(Some(row)) = conversations
             .find_one_and_update(
                 doc! {"_id": &home, "user_id": &chat.user_id},
