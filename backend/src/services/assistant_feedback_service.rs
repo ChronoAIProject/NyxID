@@ -164,3 +164,63 @@ pub async fn delete_feedback(
         .find_one_and_delete(doc! {"user_id": &write.user_id, "message_id": &write.message_id})
         .await?)
 }
+
+pub async fn reply_context(
+    db: &Database,
+    surface: &str,
+    reply: &AssistantMessage,
+    conversation: Option<&crate::models::assistant_conversation::AssistantConversation>,
+) -> mongodb::error::Result<crate::models::assistant_message_feedback::FeedbackReplyContext> {
+    let user_time = db.collection::<AssistantMessage>(MESSAGE_COLLECTION).find_one(doc! {"conversation_id": &reply.conversation_id, "turn_id": &reply.turn_id, "role":"user"}).await?.map(|row| row.created_at);
+    let latency_ms = user_time.map(|created| {
+        reply
+            .created_at
+            .signed_duration_since(created)
+            .num_milliseconds()
+    });
+    let labels = reply
+        .activities
+        .iter()
+        .map(|a| a.label.clone())
+        .filter(|v| !v.is_empty())
+        .take(20)
+        .collect::<Vec<_>>();
+    Ok(
+        crate::models::assistant_message_feedback::FeedbackReplyContext {
+            surface: Some(surface.to_owned()),
+            agent_id: conversation.and_then(|c| c.agent_id.clone()),
+            agent_kind: conversation.map(|c| {
+                if c.agent_id.is_some() {
+                    "specialist".into()
+                } else {
+                    "nyxbot".into()
+                }
+            }),
+            model: conversation.map(|c| c.model.clone()),
+            access_mode: conversation.map(|c| format!("{:?}", c.access_mode)),
+            reply_status: Some(reply.status.clone()),
+            error_code: reply.error_code.clone(),
+            origin: reply.origin.as_ref().map(|v| format!("{v:?}")),
+            via: reply.via.clone(),
+            turn_id: Some(reply.turn_id.clone()),
+            reply_seq: Some(reply.seq),
+            latency_ms,
+            tool_calls: reply.activities.len() as u32,
+            tool_errors: reply
+                .activities
+                .iter()
+                .filter(|a| a.status == "error")
+                .count() as u32,
+            tool_labels: labels,
+            machine_used: reply.activities.iter().any(|a| a.machine.is_some()),
+            attachments: reply.attachments.len() as u32,
+            steered: reply.steering.is_some(),
+            voice: reply.voice.is_some(),
+            reply_chars: reply.text.chars().count() as u32,
+            context_reset_since_reply: conversation
+                .and_then(|c| c.context_reset_at)
+                .is_some_and(|at| at > reply.created_at),
+            org_group: false,
+        },
+    )
+}
