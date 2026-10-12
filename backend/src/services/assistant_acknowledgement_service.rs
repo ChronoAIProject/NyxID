@@ -461,8 +461,6 @@ pub fn arguments_digest(arguments: &Value) -> String {
     hex::encode(Sha256::digest(canonical(&value).to_string().as_bytes()))
 }
 
-}
-
 async fn fence(
     db: &Database,
     chat: &ChatAuthority,
