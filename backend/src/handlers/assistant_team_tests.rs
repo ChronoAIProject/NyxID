@@ -96,11 +96,11 @@ async fn enable_routed_requests(state: &AppState) {
     state
         .db
         .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
-        .insert_one(doc! {
-            "_id": OWNER,
-            "specialist_access_requests": "routed_to_nyxbot",
-            "updated_at": bson::DateTime::now(),
-        })
+        .update_one(
+            doc! {"_id": OWNER},
+            doc! {"$set": {"specialist_access_requests": "routed_to_nyxbot", "updated_at": bson::DateTime::now()}},
+        )
+        .upsert(true)
         .await
         .unwrap();
 }
