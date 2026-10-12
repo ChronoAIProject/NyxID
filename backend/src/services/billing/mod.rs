@@ -2150,7 +2150,7 @@ mod tests {
         let lago = Arc::new(FakeLago::default());
         let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
         let actor = crate::services::audit_service::AuditActor::from_auth_user(
-            &crate::test_utils::test_auth_user("admin-1"),
+            &crate::test_utils::test_auth_user(&Uuid::new_v4().to_string()),
         );
         super::config::update_global_defaults(
             &db,

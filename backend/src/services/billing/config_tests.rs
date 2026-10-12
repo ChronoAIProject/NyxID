@@ -313,24 +313,42 @@ fn legacy_only_service_uses_the_cached_plan_rate_for_every_class() {
     });
     let rates: HashMap<_, _> = [rate("platform_requests", 1_250_000_000_000, 3_600, false)].into();
     let resolved = resolve_service_billing(&env(&rates), &svc);
-    assert_eq!(resolved.classes.len(), 1, "all classes resolve identically");
-    let all = &resolved.classes[0];
-    assert_eq!(all.credential_classes, CREDENTIAL_CLASSES.to_vec());
-    assert_eq!(all.reason, EffectiveReason::LegacyPlatformBillable);
-    assert_eq!(all.source, BillingConfigSource::Legacy);
-    let price = &all.prices[0];
-    assert_eq!(price.origin, "legacy_plan");
-    assert_eq!(price.lago_metric_code, "platform_requests");
-    assert_eq!(price.credits_per_unit.as_deref(), Some("1.25"));
-    let cached = price.cached_rate.as_ref().expect("cached");
-    assert!(cached.stale, "older than the 600s TTL");
-    assert!(!cached.retired);
+    // One group per lane: platform key, own-key classes, no credential.
+    assert_eq!(
+        resolved
+            .classes
+            .iter()
+            .map(|group| group.lane)
+            .collect::<Vec<_>>(),
+        vec![Some("platform_key"), Some("byok"), None]
+    );
+    assert_eq!(
+        resolved
+            .classes
+            .iter()
+            .flat_map(|group| group.credential_classes.clone())
+            .collect::<Vec<_>>(),
+        CREDENTIAL_CLASSES.to_vec()
+    );
+    for all in &resolved.classes {
+        assert_eq!(all.reason, EffectiveReason::LegacyPlatformBillable);
+        assert_eq!(all.source, BillingConfigSource::Legacy);
+        let price = &all.prices[0];
+        assert_eq!(price.origin, "legacy_plan");
+        assert_eq!(price.lago_metric_code, "platform_requests");
+        assert_eq!(price.credits_per_unit.as_deref(), Some("1.25"));
+        let cached = price.cached_rate.as_ref().expect("cached");
+        assert!(cached.stale, "older than the 600s TTL");
+        assert!(!cached.retired);
+    }
 
     let not_billable = service(ServiceBilling::default());
     let resolved = resolve_service_billing(&env(&rates), &not_billable);
-    assert_eq!(resolved.classes.len(), 1);
-    assert_eq!(resolved.classes[0].reason, EffectiveReason::NotBillable);
-    assert_eq!(resolved.classes[0].source, BillingConfigSource::Free);
+    assert!(resolved.classes.iter().all(|group| {
+        group.reason == EffectiveReason::NotBillable
+            && group.source == BillingConfigSource::Free
+            && !group.platform_charged
+    }));
 }
 
 #[test]

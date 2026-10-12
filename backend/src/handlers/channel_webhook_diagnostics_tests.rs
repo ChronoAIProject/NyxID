@@ -59,6 +59,10 @@ async fn only_authenticated_deliveries_write_bot_diagnostics() {
     credentials(&state, &adapter, &owner).await;
     let bot = insert_bot(&state, &owner, &connection).await;
     let body = dm(&bot.id, "700");
+    // The typed insert stores default diagnostics; nothing below may change them
+    // until an authenticated delivery arrives.
+    let untouched = raw_bot(&state, &bot.id).await.get("diagnostics").cloned();
+    assert!(untouched.is_some());
 
     // 1. Unsigned platform delivery: counted per platform, bot row untouched.
     reset_rejection_throttle();
@@ -67,7 +71,10 @@ async fn only_authenticated_deliveries_write_bot_diagnostics() {
             .await
             .is_err()
     );
-    assert!(!raw_bot(&state, &bot.id).await.contains_key("diagnostics"));
+    assert_eq!(
+        raw_bot(&state, &bot.id).await.get("diagnostics").cloned(),
+        untouched
+    );
     assert_eq!(rejections(&state, "x:signature").await, 1);
 
     // 2. A per-bot route for the wrong platform is refused before verification.
@@ -78,7 +85,10 @@ async fn only_authenticated_deliveries_write_bot_diagnostics() {
             .unwrap()
             .is_none()
     );
-    assert!(!raw_bot(&state, &bot.id).await.contains_key("diagnostics"));
+    assert_eq!(
+        raw_bot(&state, &bot.id).await.get("diagnostics").cloned(),
+        untouched
+    );
     assert_eq!(rejections(&state, "telegram:platform_mismatch").await, 1);
 
     // 3. A per-bot forgery is counted, never written to the bot.
@@ -88,7 +98,10 @@ async fn only_authenticated_deliveries_write_bot_diagnostics() {
             .await
             .is_err()
     );
-    assert!(!raw_bot(&state, &bot.id).await.contains_key("diagnostics"));
+    assert_eq!(
+        raw_bot(&state, &bot.id).await.get("diagnostics").cloned(),
+        untouched
+    );
     assert_eq!(rejections(&state, "x:signature").await, 2);
 
     // 4. An authenticated delivery for an unregistered subscription is recorded.

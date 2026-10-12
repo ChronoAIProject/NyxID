@@ -5,6 +5,14 @@ mod tests {
     use mongodb::bson::{Document, doc};
     use serde_json::{Value, json};
 
+    /// Effective prices only charge on billing-enabled deployments.
+    fn with_billing_enabled(mut f: Fixture) -> Fixture {
+        let mut config = f.state.config.clone();
+        config.billing_enabled = true;
+        f.state = crate::test_utils::test_app_state_with_config(f.state.db.clone(), config);
+        f
+    }
+
     async fn set_roles(f: &Fixture, is_admin: bool, role_ids: Vec<String>) {
         f.state
             .db
@@ -311,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn resync_without_lago_records_the_failed_sync_and_one_audit() {
-        let f = fixture("admin_billing_resync", false).await;
+        let f = with_billing_enabled(fixture("admin_billing_resync", false).await);
         let id = insert_service(
             &f,
             "resync-svc",
@@ -373,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn overview_reports_per_value_prices_and_sources_sorted_by_slug() {
-        let f = fixture("admin_billing_overview_sources", false).await;
+        let f = with_billing_enabled(fixture("admin_billing_overview_sources", false).await);
         insert_service(
             &f,
             "c-byok-synced",
@@ -456,10 +464,14 @@ mod tests {
 
         // Legacy-only: every class resolves identically to the cached plan rate.
         let legacy = &rows[1]["effective"]["classes"];
-        assert_eq!(legacy.as_array().unwrap().len(), 1);
-        assert_eq!(legacy[0]["reason"], "legacy_platform_billable");
-        assert_eq!(legacy[0]["prices"][0]["credits_per_unit"], "1.5");
-        assert_eq!(legacy[0]["prices"][0]["cached_rate"]["stale"], false);
+        // Grouped by lane (platform key, own-key classes, no credential);
+        // every group charges the same cached plan rate.
+        assert_eq!(legacy.as_array().unwrap().len(), 3);
+        for group in legacy.as_array().unwrap() {
+            assert_eq!(group["reason"], "legacy_platform_billable");
+            assert_eq!(group["prices"][0]["credits_per_unit"], "1.5");
+            assert_eq!(group["prices"][0]["cached_rate"]["stale"], false);
+        }
 
         // Synced BYOK lane: the service price with its own source; the pending
         // component is free until synced.
@@ -477,7 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn central_billing_put_matches_the_service_editor_write_and_audit() {
-        let f = fixture("admin_billing_central_put", false).await;
+        let f = with_billing_enabled(fixture("admin_billing_central_put", false).await);
         let id = insert_service(&f, "central-put", Some(json!({}))).await;
         let billing = json!({
             "platform_charge_nyxid_credentials_only": true,
