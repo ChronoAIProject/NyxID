@@ -13,6 +13,12 @@ use crate::{
     AppState,
     crypto::jwt,
     models::{
+        assistant_group::{
+            AssistantGroup, COLLECTION_NAME as GROUPS, GroupMessage,
+            MESSAGES_COLLECTION_NAME as GROUP_MESSAGES,
+        },
+        assistant_message::{AssistantMessage, COLLECTION_NAME as ASSISTANT_MESSAGES},
+        assistant_message_feedback::{AssistantMessageFeedback, COLLECTION_NAME as FEEDBACK},
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         service_account::{COLLECTION_NAME as ACCOUNTS, ServiceAccount},
         service_account_token::{COLLECTION_NAME as TOKENS, ServiceAccountToken},
@@ -35,8 +41,1099 @@ pub(super) struct Fixture {
     pub human_token: String,
 }
 
+#[tokio::test]
+async fn feedback_concurrent_first_puts_share_one_row() {
+    // The unique index and barrier make concurrent first writes deterministic; repeat attempts are covered by the shared fixture index.
+    let f = fixture("feedback-r3", false).await;
+    let conversation_id = "nyxa-00000000000000000000000000000001";
+    let message_id = "reply-feedback-r3";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn-r3".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let make = |vote: &'static str| {
+        let state = f.state.clone();
+        let token = f.human_token.clone();
+        let path = path.clone();
+        let barrier = barrier.clone();
+        async move {
+            barrier.wait().await;
+            request(&state, "PUT", &path, &token, Some(json!({"vote": vote}))).await
+        }
+    };
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        tasks.push(tokio::spawn(make("up")));
+    }
+    for task in tasks {
+        assert!(task.await.unwrap().0.is_success());
+    }
+    let count = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+        .count_documents(doc! {"user_id": &f.owner, "message_id": message_id})
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let direct_message = "reply-feedback-r3-direct";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: direct_message.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 2,
+            turn_id: "turn-direct".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state.db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME).insert_one(doc! {"_id":"existing-direct","user_id":&f.owner,"message_id":direct_message,"conversation_id":conversation_id,"vote":"up","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let direct_path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{direct_message}/feedback"
+    );
+    assert!(
+        request(
+            &f.state,
+            "PUT",
+            &direct_path,
+            &f.human_token,
+            Some(json!({"vote":"down"}))
+        )
+        .await
+        .0
+        .is_success()
+    );
+}
+
+#[tokio::test]
+async fn feedback_admin_counts_group_exact_per_day_through_service_and_route() {
+    let f = fixture("feedback-r2", false).await;
+    let day_a = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let day_b = chrono::DateTime::parse_from_rfc3339("2026-01-11T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut rows = Vec::new();
+    for (i, (vote, created)) in [("up", day_a), ("up", day_a), ("down", day_a), ("up", day_b)]
+        .into_iter()
+        .enumerate()
+    {
+        rows.push(AssistantMessageFeedback {
+            id: format!("r2-{i}"),
+            user_id: f.owner.clone(),
+            conversation_id: None,
+            group_id: None,
+            message_id: format!("r2-message-{i}"),
+            turn_id: None,
+            vote: vote.into(),
+            comment: None,
+            context: None,
+            created_at: created,
+            updated_at: created,
+        });
+    }
+    for i in 0..120 {
+        rows.push(AssistantMessageFeedback {
+            id: format!("r2-fill-{i}"),
+            user_id: f.owner.clone(),
+            conversation_id: None,
+            group_id: None,
+            message_id: format!("r2-fill-message-{i}"),
+            turn_id: None,
+            vote: "up".into(),
+            comment: None,
+            context: None,
+            created_at: day_b,
+            updated_at: day_b,
+        });
+    }
+    f.state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let counts = crate::services::assistant_feedback_service::admin_counts(&f.state.db, doc! {})
+        .await
+        .unwrap();
+    let a = counts.iter().find(|v| v.day == "2026-01-10").unwrap();
+    let b = counts.iter().find(|v| v.day == "2026-01-11").unwrap();
+    assert_eq!((a.up, a.down), (2, 1));
+    assert_eq!((b.up, b.down), (121, 0));
+    let (status, body) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    let route_a = body["counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["day"] == "2026-01-10")
+        .unwrap();
+    assert_eq!(
+        (route_a["up"].as_i64(), route_a["down"].as_i64()),
+        (Some(2), Some(1))
+    );
+}
+
+#[tokio::test]
+async fn feedback_admin_cursor_tie_break_and_invalid_cursor() {
+    let f = fixture("feedback-b2-cursor", false).await;
+    let created = Utc::now();
+    let rows = (0..101)
+        .map(|i| AssistantMessageFeedback {
+            id: format!("b2-{i:03}"),
+            user_id: f.owner.clone(),
+            conversation_id: None,
+            group_id: None,
+            message_id: format!("b2-message-{i}"),
+            turn_id: None,
+            vote: "up".into(),
+            comment: None,
+            context: None,
+            created_at: created,
+            updated_at: created,
+        })
+        .collect::<Vec<_>>();
+    f.state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let (status, body) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(body["recent"].as_array().unwrap().len(), 100);
+    let cursor = body["next_cursor"].as_str().unwrap();
+    let (encoded_time, encoded_id) = cursor.split_once('|').unwrap();
+    assert!(encoded_time.ends_with('Z'));
+    assert!(!encoded_id.is_empty());
+    let (status, next) = request(
+        &f.state,
+        "GET",
+        &format!("/api/v1/admin/assistant/feedback?cursor={cursor}"),
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status} {next}");
+    assert_eq!(next["recent"].as_array().unwrap().len(), 1);
+    let (status, _) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback?cursor=bad",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn feedback_put_change_withdraw_and_ineligible_reply() {
+    let f = fixture("feedback-b5-behavior", false).await;
+    let conversation_id = "nyxa-00000000000000000000000000000002";
+    let message_id = "b5-reply";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "b5-turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
+    assert!(
+        request(
+            &f.state,
+            "PUT",
+            &path,
+            &f.human_token,
+            Some(json!({"vote":"up","comment":"kept"}))
+        )
+        .await
+        .0
+        .is_success()
+    );
+    assert!(
+        request(
+            &f.state,
+            "PUT",
+            &path,
+            &f.human_token,
+            Some(json!({"vote":"down"}))
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let row = f
+        .state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .find_one(doc! {"message_id": message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.vote, "down");
+    assert_eq!(row.comment.as_deref(), Some("kept"));
+    let (status, body) = request(&f.state, "DELETE", &path, &f.human_token, None).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantMessageFeedback>(FEEDBACK)
+            .count_documents(doc! {"message_id": message_id})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn feedback_vote_change_preserves_comment_without_comment_field() {
+    let f = fixture("feedback-s2-comment", false).await;
+    let message_id = "s2-reply";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: "nyxa-00000000000000000000000000000003".into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "s2-turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/nyxa-00000000000000000000000000000003/messages/{message_id}/feedback"
+    );
+    request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up","comment":"keep"})),
+    )
+    .await;
+    request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"down"})),
+    )
+    .await;
+    let row = f
+        .state
+        .db
+        .collection::<AssistantMessageFeedback>(FEEDBACK)
+        .find_one(doc! {"message_id": message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.comment.as_deref(), Some("keep"));
+}
+
+#[tokio::test]
+async fn feedback_withdraw_is_idempotent_after_first_delete() {
+    let f = fixture("feedback-s3-withdraw", false).await;
+    let message_id = "s3-reply";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: "nyxa-00000000000000000000000000000004".into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "s3-turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/nyxa-00000000000000000000000000000004/messages/{message_id}/feedback"
+    );
+    request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    let (status, body) = request(&f.state, "DELETE", &path, &f.human_token, None).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert!(
+        request(&f.state, "DELETE", &path, &f.human_token, None)
+            .await
+            .0
+            .is_success()
+    );
+    let mut audits = 0;
+    for _ in 0..20 {
+        audits = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type": "assistant_feedback_withdrawn"})
+            .await
+            .unwrap();
+        if audits == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(audits, 1);
+}
+
+#[tokio::test]
+async fn feedback_put_rejects_unknown_conversation_as_not_found() {
+    let f = fixture("feedback-s1-acl", false).await;
+    let (status, _) = request(
+        &f.state,
+        "PUT",
+        "/api/v1/assistant/nyxagent/conversations/not-owned/messages/missing/feedback",
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn feedback_route_limits_one_user_burst() {
+    let f = fixture("feedback-s4-limit", false).await;
+    let mut limited = false;
+    for i in 0..31 {
+        let path =
+            format!("/api/v1/assistant/nyxagent/conversations/missing-{i}/messages/m/feedback");
+        if request(
+            &f.state,
+            "PUT",
+            &path,
+            &f.human_token,
+            Some(json!({"vote":"up"})),
+        )
+        .await
+        .0 == StatusCode::TOO_MANY_REQUESTS
+        {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited);
+}
+
+#[tokio::test]
+async fn feedback_routes_reject_when_engine_flag_is_disabled() {
+    let f = fixture("feedback-s5-engine-off", false).await;
+    let message_id = "engine-gated-reply";
+    let conversation_id = "nyxa-00000000000000000000000000000005";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
+    let override_doc = crate::models::feature_flag_override::FeatureFlagOverride {
+        id: "s5-off".into(),
+        org_user_id: None,
+        flag_key: crate::services::feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY.into(),
+        target_kind: crate::models::feature_flag_override::FlagTargetKind::User,
+        target_key: Some(f.owner.clone()),
+        enabled: false,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        updated_by: f.owner.clone(),
+    };
+    f.state
+        .db
+        .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
+            crate::models::feature_flag_override::COLLECTION_NAME,
+        )
+        .insert_one(override_doc)
+        .await
+        .unwrap();
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Assistant route not found."));
+    f.state
+        .db
+        .collection::<crate::models::feature_flag_override::FeatureFlagOverride>(
+            crate::models::feature_flag_override::COLLECTION_NAME,
+        )
+        .delete_many(doc! {"_id":"s5-off"})
+        .await
+        .unwrap();
+    let (status, _) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn feedback_rejects_user_failed_and_stopped_replies() {
+    let f = fixture("feedback-ineligible", false).await;
+    for (id, role, status) in [
+        ("user", "user", "completed"),
+        ("failed", "assistant", "failed"),
+        ("stopped", "assistant", "failed"),
+    ] {
+        insert_feedback_message(
+            &f,
+            AssistantMessage {
+                steering: None,
+                voice: None,
+                execution_pending: false,
+                id: id.into(),
+                conversation_id: format!(
+                    "nyxa-{:032x}",
+                    if id == "user" {
+                        101
+                    } else if id == "failed" {
+                        102
+                    } else {
+                        103
+                    }
+                ),
+                user_id: f.owner.clone(),
+                seq: 1,
+                turn_id: id.into(),
+                role: role.into(),
+                text: "reply".into(),
+                status: status.into(),
+                error_code: (status == "failed").then_some(if id == "stopped" {
+                    "cancelled".into()
+                } else {
+                    "failed".into()
+                }),
+                created_at: Utc::now(),
+                activities: vec![],
+                attachments: vec![],
+                origin: None,
+                via: None,
+            },
+        )
+        .await
+        .unwrap();
+        let path = format!(
+            "/api/v1/assistant/nyxagent/conversations/nyxa-{:032x}/messages/{id}/feedback",
+            if id == "user" {
+                101
+            } else if id == "failed" {
+                102
+            } else {
+                103
+            }
+        );
+        assert_eq!(
+            request(
+                &f.state,
+                "PUT",
+                &path,
+                &f.human_token,
+                Some(json!({"vote":"up"}))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[tokio::test]
+async fn feedback_group_acl_rejects_non_participant_as_not_found() {
+    let f = fixture("feedback-group-acl", false).await;
+    let group_id = "nyxg-11111111111111111111111111111111";
+    let message_id = "feedback-group-reply";
+    let now = Utc::now();
+    f.state
+        .db
+        .collection::<AssistantGroup>(GROUPS)
+        .insert_one(AssistantGroup {
+            id: group_id.into(),
+            user_id: f.owner.clone(),
+            participant_user_ids: vec![f.owner.clone()],
+            created_by_user_id: Some(f.owner.clone()),
+            name: "Feedback".into(),
+            member_agent_ids: vec!["agent".into()],
+            lead_agent_id: "agent".into(),
+            created_by: "user".into(),
+            message_count: 1,
+            pending_agent_ids: vec![],
+            hops_remaining: 0,
+            followers: vec![],
+            pending_checked_at: None,
+            last_message_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<GroupMessage>(GROUP_MESSAGES)
+        .insert_one(GroupMessage {
+            activities: vec![],
+            org_group: false,
+            author_user_id: None,
+            author_display_name: None,
+            request_id: None,
+            attachments: vec![],
+            id: message_id.into(),
+            group_id: group_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            role: "agent".into(),
+            agent_id: Some("agent".into()),
+            agent_name: None,
+            text: "reply".into(),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    let path =
+        format!("/api/v1/assistant/nyxagent/groups/{group_id}/messages/{message_id}/feedback");
+    let (status, _) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        request(&f.state, "DELETE", &path, &f.human_token, None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let other_id = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&other_id, UserType::Person))
+        .await
+        .unwrap();
+    let token = jwt::generate_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &Uuid::parse_str(&other_id).unwrap(),
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (status, body) = request(&f.state, "PUT", &path, &token, Some(json!({"vote":"up"}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    let (status, body) = request(&f.state, "DELETE", &path, &token, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    let org_id = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&org_id, UserType::Org))
+        .await
+        .unwrap();
+    let org_group_id = "nyxg-22222222222222222222222222222222";
+    let org_message_id = "feedback-org-reply";
+    f.state
+        .db
+        .collection::<AssistantGroup>(GROUPS)
+        .insert_one(AssistantGroup {
+            id: org_group_id.into(),
+            user_id: org_id.clone(),
+            participant_user_ids: vec![f.owner.clone()],
+            created_by_user_id: Some(f.owner.clone()),
+            name: "Org feedback".into(),
+            member_agent_ids: vec!["agent".into()],
+            lead_agent_id: "agent".into(),
+            created_by: "user".into(),
+            message_count: 1,
+            pending_agent_ids: vec![],
+            hops_remaining: 0,
+            followers: vec![],
+            pending_checked_at: None,
+            last_message_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<GroupMessage>(GROUP_MESSAGES)
+        .insert_one(GroupMessage {
+            activities: vec![],
+            org_group: true,
+            author_user_id: None,
+            author_display_name: None,
+            request_id: None,
+            attachments: vec![],
+            id: org_message_id.into(),
+            group_id: org_group_id.into(),
+            user_id: org_id,
+            seq: 1,
+            role: "agent".into(),
+            agent_id: Some("agent".into()),
+            agent_name: None,
+            text: "org reply".into(),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    let org_path = format!(
+        "/api/v1/assistant/nyxagent/groups/{org_group_id}/messages/{org_message_id}/feedback"
+    );
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &org_path,
+        &token,
+        Some(json!({"vote":"up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
+    let (status, body) = request(&f.state, "DELETE", &org_path, &token, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"].as_str(), Some("Group not found"));
+}
+
+#[tokio::test]
+async fn feedback_admin_route_rejects_non_admin() {
+    let f = fixture("feedback-admin-acl", false).await;
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"is_admin": false, "role_ids": bson::Bson::Array(vec![])}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/assistant/feedback",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
+    let f = fixture("feedback-other-user", false).await;
+    let conversation_id = "nyxa-00000000000000000000000000000006";
+    let message_id = "owned-reply";
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: message_id.into(),
+            conversation_id: conversation_id.into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let other_id = Uuid::new_v4().to_string();
+    let other = test_utils::test_user(&other_id, UserType::Person);
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(other)
+        .await
+        .unwrap();
+    let token = jwt::generate_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &Uuid::parse_str(&other_id).unwrap(),
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let path = format!(
+        "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
+    );
+    assert_eq!(
+        request(&f.state, "PUT", &path, &token, Some(json!({"vote":"up"})))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&f.state, "DELETE", &path, &token, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn feedback_conversation_delete_purges_existing_rows() {
+    let f = fixture("feedback-conversation-purge", false).await;
+    let id = "nyxa-00000000000000000000000000000007";
+    f.state
+        .db
+        .collection::<Document>("assistant_conversations")
+        .insert_one(doc! {
+            "_id": id, "user_id": &f.owner, "title":"Purge", "model":"test",
+            "credential_api_key_id":"unused", "message_count":0,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+        })
+        .await
+        .unwrap();
+    f.state.db.collection::<Document>(FEEDBACK).insert_one(doc! {
+        "_id":"conversation-feedback", "user_id": &f.owner, "conversation_id":id,
+        "message_id":"reply", "vote":"up", "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+    }).await.unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(FEEDBACK)
+            .count_documents(doc! {"conversation_id":id})
+            .await
+            .unwrap(),
+        1
+    );
+    crate::services::assistant_nyxagent::delete(&f.state.db, &f.owner, id)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(FEEDBACK)
+            .count_documents(doc! {"conversation_id":id})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn feedback_rejects_message_from_another_owned_conversation() {
+    let f = fixture("feedback-cross-conversation", false).await;
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "scoped-reply".into(),
+            conversation_id: "nyxa-00000000000000000000000000000008".into(),
+            user_id: f.owner.clone(),
+            seq: 1,
+            turn_id: "turn".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let actual = "/api/v1/assistant/nyxagent/conversations/nyxa-00000000000000000000000000000008/messages/scoped-reply/feedback";
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            actual,
+            &f.human_token,
+            Some(json!({"vote":"up"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let wrong = "/api/v1/assistant/nyxagent/conversations/other-nyxa-00000000000000000000000000000006/messages/scoped-reply/feedback";
+    for method in ["PUT", "DELETE"] {
+        let input = (method == "PUT").then(|| json!({"vote":"up"}));
+        let (status, body) = request(&f.state, method, wrong, &f.human_token, input).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"].as_str(), Some("message not found"));
+    }
+    assert_eq!(
+        request(&f.state, "DELETE", actual, &f.human_token, None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
+    let f = fixture("feedback-r4-org-revoke", false).await;
+    let org = Uuid::new_v4().to_string();
+    let member = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&member, UserType::Person))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(
+            bson::to_document(&test_utils::test_membership(
+                &org,
+                &member,
+                crate::models::org_membership::OrgRole::Member,
+                None,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let now = bson::DateTime::now();
+    f.state.db.collection::<Document>("assistant_conversations").insert_one(doc! {"_id":"nyxa-0000000000000000000000000000000a","user_id":&member,"title":"Org","model":"test","credential_api_key_id":"unused","message_count":1,"agent_owner_id":&org,"created_at":now,"updated_at":now}).await.unwrap();
+    insert_feedback_message(
+        &f,
+        AssistantMessage {
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "org-reply".into(),
+            conversation_id: "nyxa-0000000000000000000000000000000a".into(),
+            user_id: member.clone(),
+            seq: 1,
+            turn_id: "t".into(),
+            role: "assistant".into(),
+            text: "reply".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: Utc::now(),
+            activities: vec![],
+            attachments: vec![],
+            origin: None,
+            via: None,
+        },
+    )
+    .await
+    .unwrap();
+    let token = jwt::generate_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &Uuid::parse_str(&member).unwrap(),
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let path = "/api/v1/assistant/nyxagent/conversations/nyxa-0000000000000000000000000000000a/messages/org-reply/feedback";
+    assert_eq!(
+        request(&f.state, "PUT", path, &token, Some(json!({"vote":"up"})))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    f.state
+        .db
+        .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+        .delete_many(doc! {"org_user_id":&org,"member_user_id":&member})
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "PUT", path, &token, Some(json!({"vote":"down"}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"].as_str(),
+        Some("Organization agent access was revoked or is no longer permitted")
+    );
+    let (status, body) = request(&f.state, "DELETE", path, &token, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"].as_str(),
+        Some("Organization agent access was revoked or is no longer permitted")
+    );
+}
+
+async fn insert_feedback_message(
+    f: &Fixture,
+    message: AssistantMessage,
+) -> mongodb::error::Result<mongodb::results::InsertOneResult> {
+    f.state.db.collection::<Document>("assistant_conversations").update_one(
+        doc! {"_id": &message.conversation_id},
+        doc! {"$setOnInsert": {"user_id": &message.user_id, "title":"Feedback fixture", "model":"test", "credential_api_key_id":"unused", "message_count":1, "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now()}}
+    ).upsert(true).await?;
+    f.state
+        .db
+        .collection::<AssistantMessage>(ASSISTANT_MESSAGES)
+        .insert_one(message)
+        .await
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
+    crate::db::ensure_indexes(&db).await.unwrap();
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
     crate::services::role_service::seed_system_roles(&db)
         .await
@@ -636,8 +1733,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
 #[tokio::test]
 async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_fence() {
     let mut f = fixture("curation_rotation", true).await;
-    let before = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let before = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(8));
     let issuance = accounts::ISSUANCE_BARRIER.scope(
         (before.clone(), resume.clone()),
         accounts::authenticate_client_credentials(
@@ -1695,7 +2792,7 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
             0
         );
     }
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
     let a = TransactionCollisionHook::new(barrier.clone());
     let b = TransactionCollisionHook::new(barrier);
     let (a, b) = tokio::join!(
@@ -1793,8 +2890,8 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
     let mut input = input;
     input["slug"] = json!("late-slug");
     input["skills_request_id"] = json!(Uuid::new_v4().to_string());
-    let read = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let read = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(8));
     let late = super::services::CREATE_BEFORE_SLUG.scope(
         (read.clone(), resume.clone()),
         request(

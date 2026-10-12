@@ -53,6 +53,7 @@ import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
 import { WorkingContextPanel } from "@/components/assistant/working-context-panel";
+import type { ChatSessionState } from "@/lib/assistant/chat-types";
 import {
   DirectChatControls,
   DirectModeBanner,
@@ -90,6 +91,9 @@ function sidebarConversation(
     llm_model: conversation.llmModel,
   };
 }
+
+export function AevatarAssistantMessageList({ session, bottomInset, footer, notice, projectionVersion, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly footer?: React.ReactNode; readonly notice?: React.ReactNode; readonly projectionVersion?: string; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} footer={footer} notice={notice} projectionVersion={projectionVersion} emptyDescription={emptyDescription} />; }
+export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} />; }
 
 export function AssistantChatPage() {
   const navigate = useNavigate();
@@ -442,7 +446,7 @@ export function DirectAssistantChatPage() {
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <DirectModeBanner />
         <AssistantLinkModalHost>
-        <ChatMessageList
+        <AevatarAssistantMessageList
           session={chat.session}
           bottomInset={composerHeight}
           emptyDescription={DIRECT_MODE_COPY}
@@ -725,7 +729,7 @@ function NyxAgentThreadPage() {
           <AssistantLinkModalHost>
             {chat.isStreaming && chat.continuations > 0 ? <p role="status" className="mx-auto w-full max-w-[758px] px-4 pb-2 text-11 text-muted-foreground">Continuing task…</p> : null}
             {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
-            <ChatMessageList
+            <NyxAgentThreadMessageList
               session={chat.session}
               renderMessage={(message) => {
                 if (message.role === "event") return <NyxBotEventNotice message={message} />;

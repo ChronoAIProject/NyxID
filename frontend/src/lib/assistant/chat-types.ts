@@ -33,6 +33,7 @@ export interface ChatMessage {
   readonly authorizationBlockers?: ChatAuthorizationBlocker[];
   readonly error?: string | null;
   readonly errorDetail?: { readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string } | null;
+  readonly errorCode?: string | null;
   readonly events?: RuntimeEvent[];
   readonly pendingApproval?: RuntimeToolApprovalRequestInfo;
   readonly pendingRunIntervention?: RuntimeRunInterventionInfo;

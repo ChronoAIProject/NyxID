@@ -1008,6 +1008,10 @@ mod tests {
             .insert_one(&session)
             .await
             .unwrap();
+        db.collection::<bson::Document>("assistant_message_feedback")
+            .insert_one(doc! {"_id":"cascade-feedback", "user_id": &target_id, "message_id":"cascade-message", "vote":"up"})
+            .await
+            .unwrap();
         let api_key = crate::services::key_service::create_api_key(
             &db,
             &target_id,
@@ -1101,6 +1105,18 @@ mod tests {
             .await
             .unwrap();
 
+        db.collection::<bson::Document>("assistant_message_feedback")
+            .insert_one(doc! {"_id":"cascade-feedback", "user_id": &target_id, "message_id":"cascade-message", "vote":"up", "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()})
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<bson::Document>("assistant_message_feedback")
+                .find_one(doc! {"_id":"cascade-feedback"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+
         delete_user_cascade(&db, &admin_id, &target_id)
             .await
             .unwrap();
@@ -1118,6 +1134,13 @@ mod tests {
             .await
             .unwrap();
         assert!(sess.is_none());
+        assert!(
+            db.collection::<bson::Document>("assistant_message_feedback")
+                .find_one(doc! {"user_id": &target_id})
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

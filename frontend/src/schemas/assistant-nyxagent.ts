@@ -122,7 +122,7 @@ export const nyxAgentCapabilitiesSchema = z.object({
   steer: z.object({ max_chars: z.number().int().positive(), max_per_turn: z.number().int().positive() }).nullable(),
 });
 export const nyxAgentMessageSchema = z.object({
-  feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string() }).nullish(),
+  feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),
   id: z.string(),
   seq: z.number().int().positive(),

@@ -1,10 +1,16 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as telemetry from "@/lib/telemetry";
+import { api } from "@/lib/api-client";
 import {
   ChatMessageBubble,
   ChatMessageEntry,
   ChatMessageList,
 } from "@/components/assistant/chat-message";
+import {
+  AevatarAssistantMessageList,
+  NyxAgentThreadMessageList,
+} from "@/components/assistant/assistant-chat-page";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 
 const BASE: ChatMessage = {
@@ -16,32 +22,148 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
+  it("shows feedback only in the page-owned NyxAgent message-list composition", () => {
+    const session: ChatSessionState = {
+      clientId: "test-client",
+      conversationId: "nyxagent-page",
+      status: "completed_text",
+      title: "Test",
+      messages: [BASE],
+      expectedTurnCount: 0,
+    };
+    const { rerender } = render(
+      <NyxAgentThreadMessageList session={session} bottomInset={0} />,
+    );
+    expect(screen.getByRole("button", { name: "Helpful" })).toBeVisible();
+
+    rerender(
+      <AevatarAssistantMessageList
+        session={{ ...session, conversationId: "aevatar-page" }}
+        bottomInset={0}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Helpful" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides feedback in replay and without a persisted conversation", () => {
-    const { rerender } = render(<ChatMessageBubble message={BASE} conversationId="conversation-1" feedbackEnabled={false} />);
-    expect(screen.queryByRole("button", { name: "Helpful" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add feedback comment" })).not.toBeInTheDocument();
+    const { rerender } = render(
+      <ChatMessageBubble
+        message={BASE}
+        conversationId="conversation-1"
+        feedbackEnabled={false}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Helpful" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add feedback comment" }),
+    ).not.toBeInTheDocument();
     rerender(<ChatMessageBubble message={BASE} />);
-    expect(screen.queryByRole("group", { name: "Reply feedback" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "Reply feedback" }),
+    ).not.toBeInTheDocument();
+  });
+  it("gates the entire feedback control block behind the page flag", () => {
+    render(
+      <ChatMessageBubble
+        message={BASE}
+        conversationId="conversation-1"
+        feedbackEnabled={false}
+      />,
+    );
+    expect(
+      screen.queryByRole("group", { name: "Reply feedback" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Helpful" }),
+    ).not.toBeInTheDocument();
+  });
+  it("renders stopped replies without an error banner or feedback controls", () => {
+    render(
+      <ChatMessageBubble
+        message={{ ...BASE, errorCode: "cancelled" }}
+        conversationId="conversation-1"
+      />,
+    );
+    expect(
+      screen.queryByText("The assistant could not complete this turn."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Helpful" }),
+    ).not.toBeInTheDocument();
+  });
+  it("keeps feedback controls visibly pressed and blocks duplicate pending clicks", () => {
+    render(
+      <ChatMessageBubble
+        message={{ ...BASE, feedback: { vote: "up" } }}
+        conversationId="conversation-1"
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+  it("does not capture telemetry when feedback submission fails", async () => {
+    const put = vi
+      .spyOn(api, "put")
+      .mockRejectedValueOnce(new Error("offline"));
+    const capture = vi.spyOn(telemetry, "capture");
+    render(
+      <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+    });
+    expect(capture).not.toHaveBeenCalled();
+    capture.mockRestore();
+    put.mockRestore();
   });
   afterEach(() => vi.useRealTimers());
 
   it("opens the optional feedback comment popover without submitting", () => {
-    render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
-    fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
-    expect(screen.getByRole("textbox", { name: "Optional feedback comment" })).toBeVisible();
+    render(
+      <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add feedback comment" }),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Optional feedback comment" }),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: "Send" })).toBeVisible();
+  });
+  it("keeps comment submission optional", () => {
+    render(
+      <ChatMessageBubble message={BASE} conversationId="conversation-1" />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Add feedback comment" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("textbox", { name: "Optional feedback comment" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders an inline context reset as a system note without assistant controls", () => {
-    const content = "Conversation context was reset; the assistant was given a recap of this chat.";
-    render(<ChatMessageEntry message={{
+    const content =
+      "Conversation context was reset; the assistant was given a recap of this chat.";
+    render(
+      <ChatMessageEntry
+        message={{
       ...BASE,
       id: "nyxagent-context-reset:conversation",
       role: "system",
       content,
-    }} />);
-    expect(screen.getByRole("note", { name: "Conversation context reset" }))
-      .toHaveTextContent(content);
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("note", { name: "Conversation context reset" }),
+    ).toHaveTextContent(content);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
@@ -52,26 +174,32 @@ describe("canonical chat presentation", () => {
           ...BASE,
           content: "Before <function_calls>secret()</function_calls> **after**",
           thinking: "Checking state",
-          steps: [{
+          steps: [
+            {
             id: "step-1",
             name: "Inspect",
             status: "done",
             startedAt: 1,
             finishedAt: 2,
-          }],
-          toolCalls: [{
+            },
+          ],
+          toolCalls: [
+            {
             id: "tool-1",
             name: "catalog.read",
             status: "running",
             startedAt: 1,
-          }],
+            },
+          ],
           status: "error",
           error: "Run failed",
         }}
       />,
     );
     expect(container.querySelector("[data-assistant-halo]")).toBeNull();
-    expect(screen.getByRole("status", { name: "Assistant reasoning" })).toBeVisible();
+    expect(
+      screen.getByRole("status", { name: "Assistant reasoning" }),
+    ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /2 actions/i }));
     expect(screen.getByText("Inspect")).toBeVisible();
     expect(screen.getByText("catalog.read")).toBeVisible();
@@ -89,7 +217,9 @@ describe("canonical chat presentation", () => {
 
   it("shows thinking treatment only for a content-free streaming message", () => {
     const { container, rerender } = render(
-      <ChatMessageBubble message={{ ...BASE, content: "", status: "streaming" }} />,
+      <ChatMessageBubble
+        message={{ ...BASE, content: "", status: "streaming" }}
+      />,
     );
     expect(
       screen.getByRole("status", { name: "Assistant is thinking" }),
@@ -97,7 +227,9 @@ describe("canonical chat presentation", () => {
     expect(container.querySelector("[data-assistant-halo]")).not.toBeNull();
     expect(container.querySelector("[data-streaming-dots]")).not.toBeNull();
     rerender(
-      <ChatMessageBubble message={{ ...BASE, content: "Writing", status: "streaming" }} />,
+      <ChatMessageBubble
+        message={{ ...BASE, content: "Writing", status: "streaming" }}
+      />,
     );
     expect(
       screen.queryByRole("status", { name: "Assistant is thinking" }),
@@ -113,31 +245,57 @@ describe("canonical chat presentation", () => {
       content: "",
       status: "streaming",
       toolCalls: [
-        { id: "t1", name: "nyx__search_tools", status: "done" as const, startedAt: 1, finishedAt: 2 },
-        { id: "t2", name: "github__list_issues", status: "running" as const, startedAt: 2 },
+        {
+          id: "t1",
+          name: "nyx__search_tools",
+          status: "done" as const,
+          startedAt: 1,
+          finishedAt: 2,
+        },
+        {
+          id: "t2",
+          name: "github__list_issues",
+          status: "running" as const,
+          startedAt: 2,
+        },
       ],
     };
-    const { container, rerender } = render(<ChatMessageBubble message={running} />);
-    expect(container.querySelector("[data-running-tool]")).toHaveTextContent("github__list_issues");
+    const { container, rerender } = render(
+      <ChatMessageBubble message={running} />,
+    );
+    expect(container.querySelector("[data-running-tool]")).toHaveTextContent(
+      "github__list_issues",
+    );
     expect(screen.getByRole("button", { name: /2 actions/i })).toBeVisible();
-    rerender(<ChatMessageBubble message={{ ...running, content: "Found 3 issues" }} />);
+    rerender(
+      <ChatMessageBubble message={{ ...running, content: "Found 3 issues" }} />,
+    );
     expect(container.querySelector("[data-running-tool]")).toBeNull();
-    rerender(<ChatMessageBubble message={{ ...running, status: "complete" }} />);
+    rerender(
+      <ChatMessageBubble message={{ ...running, status: "complete" }} />,
+    );
     expect(container.querySelector("[data-running-tool]")).toBeNull();
   });
 
   it("renders tool images from the authenticated client and reports failures", async () => {
-    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const png = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
     const seen: string[] = [];
     globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
       seen.push(endpoint);
       return endpoint.endsWith("/missing")
-        ? new Response(JSON.stringify({ message: "Attachment not found" }), { status: 404 })
+        ? new Response(JSON.stringify({ message: "Attachment not found" }), {
+            status: 404,
+          })
         : new Response(png, { headers: { "content-type": "image/png" } });
     };
     const createObjectURL = vi.fn(() => "blob:tool-image");
     const revokeObjectURL = vi.fn();
-    const original = { createObjectURL: URL.createObjectURL, revokeObjectURL: URL.revokeObjectURL };
+    const original = {
+      createObjectURL: URL.createObjectURL,
+      revokeObjectURL: URL.revokeObjectURL,
+    };
     Object.assign(URL, { createObjectURL, revokeObjectURL });
     const image = (id: string) => ({
       id,
@@ -147,10 +305,16 @@ describe("canonical chat presentation", () => {
     });
     const { unmount } = render(
       <ChatMessageBubble
-        message={{ ...BASE, content: "Here is the lobby.", images: [image("ok"), image("missing")] }}
+        message={{
+          ...BASE,
+          content: "Here is the lobby.",
+          images: [image("ok"), image("missing")],
+        }}
       />,
     );
-    const img = await screen.findByRole("img", { name: "Image from lobby-camera__snapshot" });
+    const img = await screen.findByRole("img", {
+      name: "Image from lobby-camera__snapshot",
+    });
     expect(img).toHaveAttribute("src", "blob:tool-image");
     expect(await screen.findByText("Image unavailable")).toBeVisible();
     expect(seen).toEqual([
@@ -189,7 +353,9 @@ describe("canonical chat presentation", () => {
 
     expect(screen.queryByText("catalog.write")).not.toBeInTheDocument();
     expect(screen.queryByText("Supply workflow input")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /approve/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders accumulated media with the shipped artifact block", () => {
@@ -214,10 +380,9 @@ describe("canonical chat presentation", () => {
       />,
     );
     expect(screen.getByText("chart.png")).toBeVisible();
-    expect(screen.getByRole("link", { name: "Download chart.png" })).toHaveAttribute(
-      "href",
-      "data:image/png;base64,aGVsbG8=",
-    );
+    expect(
+      screen.getByRole("link", { name: "Download chart.png" }),
+    ).toHaveAttribute("href", "data:image/png;base64,aGVsbG8=");
     expect(container.querySelector("[data-assistant-halo]")).toBeNull();
   });
 
@@ -231,7 +396,9 @@ describe("canonical chat presentation", () => {
         message={{ ...BASE, role: "auditor", authorName: "Policy agent" }}
       />,
     );
-    expect(screen.getByRole("article", { name: "Policy agent auditor message" })).toBeVisible();
+    expect(
+      screen.getByRole("article", { name: "Policy agent auditor message" }),
+    ).toBeVisible();
     expect(screen.getByText("Answer")).toBeVisible();
   });
 
@@ -342,4 +509,20 @@ describe("canonical chat presentation", () => {
     );
     expect(scroller.scrollTop).toBe(1_200);
   });
+});
+
+it("focuses the comment field and closes it with Escape, showing save failures", async () => {
+  render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
+  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
+  const textarea = screen.getByRole("textbox", {
+    name: "Optional feedback comment",
+  });
+  expect(textarea).toHaveFocus();
+  fireEvent.keyDown(textarea, { key: "Escape" });
+  expect(
+    screen.queryByRole("textbox", { name: "Optional feedback comment" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
+  fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
