@@ -5,7 +5,7 @@ use crate::{
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
-    services::{assistant_team_service::CreateRequest, key_service},
+    services::{assistant_acknowledgement_service as acks, assistant_team_service::CreateRequest, key_service},
     test_utils::{connect_transaction_test_database, test_app_state, test_auth_user, test_user},
 };
 use axum::{
