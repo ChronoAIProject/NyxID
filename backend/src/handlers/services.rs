@@ -6003,28 +6003,56 @@ mod tests {
             .await
         ));
 
-        // Once an Admin links someone else's provider, the destination is fixed
-        // for the manager so those users' tokens cannot be redirected.
-        let Json(relinked) = super::super::providers::link_service(
+        // Once an Admin links someone else's provider to a manager's row, its
+        // destination is fixed for the manager so those users' tokens cannot be
+        // redirected.
+        let (draft_base_url, draft_server) = spawn_empty_docs_server().await;
+        let mut draft = create_http_service_request("draft-svc", "draft-svc", draft_base_url);
+        draft.auth_method = Some("bearer".to_string());
+        let Json(draft) = create_service(
+            State(state.clone()),
+            manager(),
+            Default::default(),
+            Json(draft),
+        )
+        .await
+        .expect("manager creates an unlinked service");
+        draft_server.abort();
+        let Json(linked_by_admin) = super::super::providers::link_service(
             State(state.clone()),
             test_auth_user(&admin_id),
-            Path((foreign.id.clone(), service.id.clone())),
+            Path((foreign.id.clone(), draft.id.clone())),
         )
         .await
         .expect("admin links a foreign provider");
         assert_eq!(
-            relinked.provider_config_id.as_deref(),
+            linked_by_admin.provider_config_id.as_deref(),
             Some(foreign.id.as_str())
         );
+        let update_draft = |value: serde_json::Value| {
+            update_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Path(draft.id.clone()),
+                Json(serde_json::from_value(value).unwrap()),
+            )
+        };
         let moved =
-            update(serde_json::json!({ "base_url": "https://elsewhere.example.com" })).await;
+            update_draft(serde_json::json!({ "base_url": "https://elsewhere.example.com" })).await;
         assert!(
             matches!(moved, Err(AppError::Forbidden(ref message)) if message.contains("base_url"))
         );
-        let Json(still) = update(serde_json::json!({ "description": "still editable" }))
+        let Json(still) = update_draft(serde_json::json!({ "description": "still editable" }))
             .await
             .expect("descriptive edits remain");
         assert_eq!(still.description.as_deref(), Some("still editable"));
+        // On a row carrying only their own provider, the destination stays theirs.
+        let Json(own_moved) =
+            update(serde_json::json!({ "base_url": "https://moved.example.com" }))
+                .await
+                .expect("own provider rows keep an editable destination");
+        assert_eq!(own_moved.base_url, "https://moved.example.com");
 
         // Losing the role removes write access to public rows they created.
         let role = db
