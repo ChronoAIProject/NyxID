@@ -182,21 +182,26 @@ mod tests {
                     == Some(&mongodb::bson::Bson::Null)
             })
             .expect("clear audit row");
-        assert_eq!(
-            last.get_document("event_data")
-                .unwrap()
-                .get_document("default_overdraft_cap_credits")
-                .unwrap()
-                .get_i64("before")
-                .unwrap(),
-            7
+        let before = last
+            .get_document("event_data")
+            .unwrap()
+            .get_document("default_overdraft_cap_credits")
+            .unwrap()
+            .get("before")
+            .cloned();
+        assert!(
+            matches!(
+                before,
+                Some(mongodb::bson::Bson::Int32(7)) | Some(mongodb::bson::Bson::Int64(7))
+            ),
+            "{before:?}"
         );
     }
 
     #[tokio::test]
     async fn config_response_never_contains_secret_values() {
         let f = fixture("admin_billing_redaction", false).await;
-        let mut config = (*f.state.config).clone();
+        let mut config = f.state.config.clone();
         config.lago_api_url = Some("https://lago.example.test".into());
         config.lago_api_key = Some("lago-api-key-SECRET-1234".into());
         config.lago_webhook_secret = Some("lago-webhook-SECRET-5678".into());
@@ -477,7 +482,7 @@ mod tests {
         let billing = json!({
             "platform_charge_nyxid_credentials_only": true,
             "byok_pricing": {"metric": "requests", "credits_per_unit": "0.5",
-                "operations": [{"operation": "send", "credits_per_unit": "0.75"}]}
+                "components": [{"metric": "bytes", "credits_per_unit": "0.000001"}]}
         });
 
         let editor_audit = crate::services::audit_service::notify_on_audit_write_for_user(
