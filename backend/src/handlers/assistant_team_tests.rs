@@ -1106,12 +1106,23 @@ async fn specialist_access_request_denied_by_default_and_allowed_when_routed() {
             .unwrap()
             .unwrap();
     let request = request.expect("routed mode creates a permission request");
-    let messages = transcript(&state, &orchestrator.id).await;
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.role == "event" && m.text.contains(&request.id))
-    );
+    // The MCP caller hands the new request to NyxBot, which is woken with it.
+    permission_requested(&state, &specialist, &request).await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if transcript(&state, &orchestrator.id)
+                .await
+                .iter()
+                .any(|m| m.role == "event" && m.text.contains(&request.id))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("NyxBot woken with the routed request");
+    idle_row(&state, &orchestrator.id).await;
     server.abort();
 }
 
@@ -1209,7 +1220,18 @@ async fn specialist_denial_notice_is_one_event_per_hour_in_nyxbot_home_thread() 
             .count(),
         1
     );
-    state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME).update_many(doc! {"error_code": "specialist_access_denied", "specialist_id": &specialist.agent_id}, doc! {"$set": {"created_at": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::hours(2))}}).await.unwrap();
+    // An hour later the specialist may notify again: the claim on NyxBot's
+    // home thread (one atomic update per specialist) has aged out.
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &chat.conversation_id},
+            doc! {"$set": {format!("specialist_denial_notices.{}", specialist.agent_id):
+            bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::hours(2))}},
+        )
+        .await
+        .unwrap();
     acks::audit_access_request_denied(&state.db, &specialist, Some("svc"), "service").await;
     assert_eq!(
         transcript(&state, &chat.conversation_id)

@@ -4143,10 +4143,23 @@ async fn owner_access_mode_gates_meta_tools_at_dispatch() {
     set_access_mode(&f, AccessMode::AskEveryTime).await;
     let listed =
         text(direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await).await;
-    assert!(!listed.contains("acknowledgement_required"), "{listed}");
+    let card_error = |text: &str| {
+        serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| value["error"].as_str().map(str::to_owned))
+    };
+    assert_ne!(
+        card_error(&listed).as_deref(),
+        Some("acknowledgement_required"),
+        "{listed}"
+    );
     set_access_mode(&f, AccessMode::Autopilot).await;
     let ran = text(direct_call(&f, &auth, "nyx__ssh_exec", args).await).await;
-    assert!(!ran.contains("acknowledgement_required"), "{ran}");
+    assert_ne!(
+        card_error(&ran).as_deref(),
+        Some("acknowledgement_required"),
+        "{ran}"
+    );
     assert_eq!(
         acks::history(&f.state.db, &f.owner, &f.row.id)
             .await
@@ -4237,8 +4250,11 @@ async fn specialist_conversation_key_cannot_call_assistant_management_routes() {
             axum::http::StatusCode::FORBIDDEN,
             "{method} {path}: {body}"
         );
+        // The human-only router refuses every API key, conversation keys
+        // included, before any handler; the extractor (independent of the
+        // live-turn flag) and the handlers' human guards refuse them again.
         assert_eq!(
-            body["message"], "Forbidden: Conversation keys cannot access human management routes",
+            body["message"], "Forbidden: API keys cannot access this endpoint",
             "{method} {path}"
         );
     }
@@ -4255,12 +4271,18 @@ async fn specialist_conversation_key_cannot_call_assistant_management_routes() {
         .unwrap();
     assert!(row.destroyed_at.is_none() && !row.grants.account_read);
     assert!(row.access_mode_override.is_none());
-    // Positive control: with the flag off, the same key still reaches a
-    // non-assistant route exactly as before.
-    let (status, body) = send("GET", "/api/v1/users/me".into(), Value::Null).await;
-    assert_ne!(
-        body["message"], "Forbidden: Conversation keys cannot access human management routes",
-        "{status}"
+    // Positive control: the same key still reaches its execution route.
+    let (status, body) = send(
+        "POST",
+        "/mcp".into(),
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(
+        body["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
     );
     f.state.db.drop().await.unwrap();
 }

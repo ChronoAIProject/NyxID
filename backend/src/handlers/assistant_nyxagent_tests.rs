@@ -1490,7 +1490,25 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
     let metadata = audit.get_document("event_data").unwrap();
     assert_eq!(metadata.get_str("conversation_id").unwrap(), f.row.id);
     assert_eq!(metadata.get_str("decision").unwrap(), "allow");
-    assert_eq!(metadata.len(), 5);
+    // Metadata only: the original five fields plus who asked and who approved
+    // (Issue 1), never arguments or summaries.
+    let mut keys: Vec<&str> = metadata.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "approver_api_key_id",
+            "approver_kind",
+            "approver_user_id",
+            "conversation_id",
+            "decision",
+            "kind",
+            "requester_agent_id",
+            "service_id",
+            "tool_name",
+        ]
+    );
+    assert_eq!(metadata.get_str("approver_kind").unwrap(), "owner");
     let response = crate::handlers::api_keys::list_keys(
         State(f.state.clone()),
         test_auth_user(&f.owner),

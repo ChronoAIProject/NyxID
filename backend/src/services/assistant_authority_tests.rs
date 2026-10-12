@@ -1886,22 +1886,22 @@ async fn specialist_operation_scope_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    assert!(
-        super::assistant_acknowledgement_service::request_tracked(
-            &f.state.db,
-            &f.chat,
-            super::assistant_acknowledgement_service::Request {
-                kind: "operations",
-                service: Some((&service, "operation-service", "Operation service")),
-                tool: None,
-                arguments: None,
-                summary: "Request operation scope",
-                platform: false
-            }
-        )
-        .await
-        .is_ok()
-    );
+    let (row, created) = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "operations",
+            service: Some((&service, "operation-service", "Operation service")),
+            tool: None,
+            arguments: Some(&json!({"expected_revision": 0, "all_operations": false})),
+            summary: "Request operation scope",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(created);
+    assert_eq!(row.decider, "orchestrator");
 }
 
 #[tokio::test]
@@ -1966,20 +1966,20 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    assert!(
-        super::assistant_acknowledgement_service::request_tracked(
-            &f.state.db,
-            &f.chat,
-            super::assistant_acknowledgement_service::Request {
-                kind: "skills",
-                service: None,
-                tool: Some("nyxid__request_agent_skills"),
-                arguments: Some(&args),
-                summary: "Request skill",
-                platform: false
-            }
-        )
-        .await
-        .is_ok()
-    );
+    let (row, created) = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "skills",
+            service: None,
+            tool: Some("nyxid__request_agent_skills"),
+            arguments: Some(&args),
+            summary: "Request skill",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(created);
+    assert_eq!(row.decider, "orchestrator");
 }
