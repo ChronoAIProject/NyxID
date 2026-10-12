@@ -231,9 +231,9 @@ pub async fn get_overview(
                     crate::services::billing::config::BillingConfigSource::Free => "free",
                 };
                 BillingServiceResponse {
-                    id: s.id,
-                    slug: s.slug,
-                    name: s.name,
+                    id: s.id.clone(),
+                    slug: s.slug.clone(),
+                    name: s.name.clone(),
                     has_billing: true,
                     effective_source: source,
                     effective_metric:
@@ -263,7 +263,7 @@ pub async fn get_overview(
                             b.byok_pricing
                                 .as_ref()
                                 .or(b.platform_key_pricing.as_ref())
-                                .map(|p| {
+                                .map(|_| {
                                     crate::services::billing::config::effective_component_sources(b)
                                         .into_iter()
                                         .map(|c| format!("{:?}", c.source).to_lowercase())
