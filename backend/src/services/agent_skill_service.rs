@@ -289,9 +289,19 @@ pub async fn search(reader: &impl OrnnReader, query: &str, page: u32) -> AppResu
     let items = result["items"]
         .as_array()
         .ok_or_else(|| invalid("Invalid Ornn search results"))?;
-    Ok(
-        json!({"items":items.iter().take(20).map(|v| json!({"id":v["guid"],"name":line(v["name"].as_str().unwrap_or_default(),80),"description":line(v["description"].as_str().unwrap_or_default(),200)})).collect::<Vec<_>>(),"page":page,"total_pages":result["totalPages"]}),
-    )
+    let total_pages = result["totalPages"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or_else(|| if items.is_empty() { 0 } else { 1 });
+    Ok(json!({
+        "items": items.iter().take(20).map(|v| json!({
+            "id": v["guid"],
+            "name": line(v["name"].as_str().unwrap_or_default(), 80),
+            "description": line(v["description"].as_str().unwrap_or_default(), 200)
+        })).collect::<Vec<_>>(),
+        "page": page,
+        "total_pages": total_pages
+    }))
 }
 
 pub async fn versions(reader: &impl OrnnReader, id: &str, page: u32) -> AppResult<Value> {
