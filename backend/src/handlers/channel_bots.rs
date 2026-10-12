@@ -286,6 +286,8 @@ pub struct VerifyBotResponse {
 #[derive(Debug, Serialize)]
 pub struct ChannelBotErrorResponse {
     pub code: String,
+    /// Stable failure code; `None` on rows written before codes existed.
+    pub reason: Option<String>,
     pub at: String,
 }
 
@@ -325,7 +327,9 @@ pub struct ChannelBotHealthResponse {
     pub next_poll_at: Option<String>,
     pub error: Option<String>,
     pub recommended_action: &'static str,
-    pub recommended_action_text: &'static str,
+    pub recommended_action_text: String,
+    /// Whether the caller may run the recovery action (owner write access).
+    pub can_write: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -336,6 +340,7 @@ pub struct AdminChannelBotQuery {
     pub offset: Option<i64>,
 }
 
+/// GET /api/v1/admin/channel-bots
 pub async fn admin_list(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -350,13 +355,16 @@ pub async fn admin_list(
         query.offset.unwrap_or(0).max(0),
     )
     .await?;
+    let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
+    let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
     Ok(Json(
         bots.iter()
-            .map(|bot| health_for(bot, state.config.billing_enabled))
+            .map(|bot| health_for(bot, gateway.contains(&bot.id), false))
             .collect(),
     ))
 }
 
+/// GET /api/v1/admin/channel-bots/{id}/health
 pub async fn admin_health(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -364,7 +372,22 @@ pub async fn admin_health(
 ) -> AppResult<Json<ChannelBotHealthResponse>> {
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
     let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
-    Ok(Json(health_for(&bot, state.config.billing_enabled)))
+    let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&bot, gateway, false)))
+}
+
+/// GET /api/v1/admin/channel-bots/webhook-rejections
+///
+/// Per-platform counters of webhook deliveries refused before a bot was
+/// authenticated (signature or target failures). Counters only; no bot ids.
+pub async fn admin_webhook_rejections(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<Vec<crate::services::channel_bot_health::WebhookRejectionCounter>>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    Ok(Json(
+        crate::services::channel_bot_health::list_webhook_rejections(&state.db).await?,
+    ))
 }
 
 fn diagnostics_response(
@@ -372,6 +395,7 @@ fn diagnostics_response(
 ) -> ChannelBotDiagnosticsResponse {
     let error = |e: &crate::models::channel_bot::ChannelBotError| ChannelBotErrorResponse {
         code: e.code.clone(),
+        reason: e.reason.clone(),
         at: e.at.to_rfc3339(),
     };
     ChannelBotDiagnosticsResponse {
@@ -396,44 +420,12 @@ fn diagnostics_response(
 
 pub(crate) fn health_for(
     bot: &crate::models::channel_bot::ChannelBot,
-    billing_enabled: bool,
+    gateway: bool,
+    can_write: bool,
 ) -> ChannelBotHealthResponse {
-    let mode = if bot.webhook_registered {
-        "webhook"
-    } else if bot.platform == "twitter" || bot.platform == "x" {
-        "poll"
-    } else {
-        "webhook"
-    };
-    let (action, text) = if bot.status == "failed" && billing_enabled && !bot.webhook_registered {
-        (
-            "enable_billing",
-            "Enable billing, then verify the X subscription.",
-        )
-    } else if bot.status == "failed" || bot.error.is_some() {
-        (
-            "reconnect",
-            "Reconnect the X account, or verify credentials and resubscribe.",
-        )
-    } else if bot
-        .diagnostics
-        .subscription_state
-        .as_ref()
-        .is_some_and(|state| !state.registered)
-        || (mode == "webhook" && !bot.webhook_registered)
-    {
-        (
-            "resubscribe",
-            "Register the X Activity webhook subscription.",
-        )
-    } else if bot.poll_backoff_until.is_some() {
-        (
-            "wait_rate_limit",
-            "X rate limiting is active; wait until the backoff expires.",
-        )
-    } else {
-        ("verify", "Verify the live X subscription and credentials.")
-    };
+    let facts =
+        crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    let recommendation = crate::services::channel_bot_health::recommend(&facts);
     ChannelBotHealthResponse {
         id: bot.id.clone(),
         platform: bot.platform.clone(),
@@ -441,15 +433,16 @@ pub(crate) fn health_for(
         platform_bot_username: bot.platform_bot_username.clone(),
         user_id: bot.user_id.clone(),
         diagnostics: diagnostics_response(&bot.diagnostics),
-        mode,
+        mode: facts.mode(),
         status: bot.status.clone(),
         webhook_registered: bot.webhook_registered,
         poll_error_count: bot.poll_error_count,
         last_polled_at: bot.last_polled_at.map(|v| v.to_rfc3339()),
         next_poll_at: bot.poll_backoff_until.map(|v| v.to_rfc3339()),
         error: bot.error.clone(),
-        recommended_action: action,
-        recommended_action_text: text,
+        recommended_action: recommendation.action,
+        recommended_action_text: recommendation.text,
+        can_write,
     }
 }
 
@@ -1346,11 +1339,17 @@ pub async fn health(
     Path(bot_id): Path<String>,
 ) -> AppResult<Json<ChannelBotHealthResponse>> {
     let actor = auth_user.user_id.to_string();
-    let (_owner, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
-    Ok(Json(health_for(&bot, state.config.billing_enabled)))
+    let (owner, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
+    let can_write = org_service::resolve_owner_access(&state.db, &actor, &owner)
+        .await?
+        .can_write();
+    let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&bot, gateway, can_write)))
 }
 
 /// POST /api/v1/channel-bots/{id}/resubscribe
+///
+/// Re-registers the platform webhook subscription, then reads it back live.
 pub async fn resubscribe(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -1358,24 +1357,70 @@ pub async fn resubscribe(
 ) -> AppResult<Json<ChannelBotHealthResponse>> {
     let actor = auth_user.user_id.to_string();
     let (_owner, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
-    if bot.platform != "twitter" && bot.platform != "x" {
+    if bot.platform != "x" {
         return Err(AppError::ValidationError(
             "resubscribe is supported only for X bots".into(),
         ));
     }
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-    crate::services::channel_connection_webhook_service::configure(
+    let outcome = resubscribe_with_adapter(&state, &bot, adapter.as_ref()).await;
+    crate::services::audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "channel_bot_resubscribed",
+        Some(serde_json::json!({
+            "bot_id": bot.id,
+            "platform": bot.platform,
+            "outcome": match &outcome {
+                Ok(true) => "registered",
+                Ok(false) => "not_registered",
+                Err(_) => "failed",
+            },
+        })),
+    );
+    outcome?;
+    let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&updated, gateway, true)))
+}
+
+pub(crate) async fn resubscribe_with_adapter(
+    state: &AppState,
+    bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<bool> {
+    let configured = crate::services::channel_connection_webhook_service::configure(
         &state.db,
         &state.billing,
         &state.encryption_keys,
         &state.http_client,
-        adapter.as_ref(),
-        &bot,
+        adapter,
+        bot,
         &state.config.base_url,
     )
     .await?;
-    let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&updated, state.config.billing_enabled)))
+    if !configured {
+        // Platform webhook credentials are missing: only an admin can fix it.
+        channel_bot_service::record_subscription_state(
+            &state.db,
+            &bot.id,
+            false,
+            Some(crate::services::channel_bot_health::codes::WEBHOOK_UNCONFIGURED),
+        )
+        .await?;
+        return Ok(false);
+    }
+    let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    let live = crate::services::channel_connection_webhook_service::check_live(
+        &state.db,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter,
+        &current,
+        &state.config.base_url,
+    )
+    .await?;
+    Ok(live.is_none_or(|status| status.registered))
 }
 
 pub(crate) async fn verify_bot_with_adapter(
@@ -1521,18 +1566,18 @@ pub(crate) async fn verify_bot_with_adapter(
         )
         .await?
         {
-            let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
-            channel_bot_service::record_subscription_state(
+            // Setup reported success; confirm it with a read-only live check.
+            let configured = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+            crate::services::channel_connection_webhook_service::check_live(
                 &state.db,
-                &bot.id,
-                current.webhook_registered,
-                if current.webhook_registered {
-                    None
-                } else {
-                    Some("subscription_missing")
-                },
+                &state.encryption_keys,
+                &state.http_client,
+                adapter,
+                &configured,
+                &state.config.base_url,
             )
             .await?;
+            let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
             return Ok(Json(VerifyBotResponse {
                 last_verification: None,
                 id: current.id,
@@ -1860,19 +1905,6 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
-    }
-
-    #[test]
-    fn health_recommends_recovery_from_failed_poll() {
-        let mut bot = make_lark_bot(false);
-        bot.platform = "twitter".into();
-        bot.status = "failed".into();
-        bot.error = Some("poll failed".into());
-        bot.diagnostics.consecutive_errors = 5;
-        let health = health_for(&bot, false);
-        assert_eq!(health.mode, "poll");
-        assert_eq!(health.recommended_action, "reconnect");
-        assert_eq!(health.diagnostics.consecutive_errors, 5);
     }
 
     #[test]
