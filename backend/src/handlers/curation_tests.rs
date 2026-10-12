@@ -637,8 +637,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
 #[tokio::test]
 async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_fence() {
     let mut f = fixture("curation_rotation", true).await;
-    let before = std::sync::Arc::new(tokio::sync::Barrier::new(8));
-    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let before = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let issuance = accounts::ISSUANCE_BARRIER.scope(
         (before.clone(), resume.clone()),
         accounts::authenticate_client_credentials(
@@ -1696,7 +1696,7 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
             0
         );
     }
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let a = TransactionCollisionHook::new(barrier.clone());
     let b = TransactionCollisionHook::new(barrier);
     let (a, b) = tokio::join!(
@@ -1794,8 +1794,8 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
     let mut input = input;
     input["slug"] = json!("late-slug");
     input["skills_request_id"] = json!(Uuid::new_v4().to_string());
-    let read = std::sync::Arc::new(tokio::sync::Barrier::new(8));
-    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let read = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let late = super::services::CREATE_BEFORE_SLUG.scope(
         (read.clone(), resume.clone()),
         request(
