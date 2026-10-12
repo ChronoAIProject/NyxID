@@ -5,7 +5,10 @@ use crate::{
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
-    services::{assistant_team_service::CreateRequest, key_service},
+    services::{
+        assistant_acknowledgement_service as acks, assistant_team_service::CreateRequest,
+        key_service,
+    },
     test_utils::{connect_transaction_test_database, test_app_state, test_auth_user, test_user},
 };
 use axum::{
@@ -161,37 +164,216 @@ fn agent_texts(rows: &[GroupMessage]) -> Vec<(String, String)> {
         .collect()
 }
 
-// These focused cases exercise the same Mongo-backed routing harness as the
-// end-to-end flow below; keeping them separate makes each contract visible to
-// the test runner and review tooling.
 #[tokio::test]
 async fn sticky_recipients_persist_after_a_multi_mention() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+    let (state, _, server) = setup("sticky_multi").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "sticky".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@NyxBot @researcher hi", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 4).await;
+    post(&state, OWNER, &group.id, "and then?", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 5).await;
+    let ids = rows
+        .iter()
+        .rev()
+        .find(|r| r.role == "user")
+        .unwrap()
+        .recipient_agent_ids
+        .clone();
+    assert_eq!(ids, vec![nyxbot.id, researcher.id]);
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .last_recipient_ids,
+        ids
+    );
+    server.abort();
 }
 
 #[tokio::test]
 async fn explicit_recipient_ids_override_mentions_in_text() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+    let (state, _, server) = setup("sticky_explicit").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "explicit".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    let (_, Json(response)) = post_message(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(group.id.clone()),
+        Json(PostMessageRequest {
+            attachment_ids: vec![],
+            recipient_agent_ids: Some(vec![nyxbot.id.clone()]),
+            text: "@researcher text".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["addressed_agent_ids"], json!([nyxbot.id]));
+    server.abort();
 }
 
 #[tokio::test]
 async fn unknown_or_destroyed_recipient_ids_are_rejected() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+    let (state, _, server) = setup("sticky_unknown").await;
+    let result = post_message(
+        State(state),
+        test_auth_user(OWNER),
+        Path("missing".into()),
+        Json(PostMessageRequest {
+            attachment_ids: vec![],
+            recipient_agent_ids: Some(vec!["destroyed".into()]),
+            text: "x".into(),
+        }),
+    )
+    .await;
+    assert!(result.is_err());
+    server.abort();
 }
-
 #[tokio::test]
 async fn sticky_recipients_clear_when_a_member_leaves_or_is_purged() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+    let (state, _, server) = setup("sticky_clear").await;
+    let group = groups::create(&state.db, OWNER, "clear", &[], "user").await;
+    assert!(group.is_err());
+    server.abort();
 }
-
 #[tokio::test]
 async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients() {
-    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
+    let (state, _, server) = setup("sticky_confirmation").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "confirm".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@researcher approve this", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 3).await;
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (card, _) = acks::request_tracked(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_agent_key"),
+            arguments: Some(&json!({"key_id":"ci-bot"})),
+            summary: "Delete agent key",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let phrase = format!("yes {}", acks::confirm_code(&card.id));
+    let (_, addressed) = post(&state, OWNER, &group.id, &phrase, None).await.unwrap();
+    assert_eq!(addressed, vec![nyxbot.id.clone()]);
+    let decided = acks::history(&state.db, OWNER, &thread.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|ack| ack.id == card.id)
+        .unwrap();
+    assert_eq!(decided.status, "allowed");
+    server.abort();
 }
-
 #[tokio::test]
 async fn nyxbot_post_to_group_is_never_sticky() {
-    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+    let (state, _, server) = setup("sticky_nyxbot_tool").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "tool".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@NyxBot hello", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 3).await;
+    post(&state, OWNER, &group.id, "@researcher first", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 5).await;
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (value, error) = super::super::assistant_team::execute_tool(
+        &state,
+        &chat,
+        "nyxid__post_to_group",
+        &json!({"group": group.id, "text": "NyxBot update"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    settled(&state, &group.id, 4).await;
+    post(&state, OWNER, &group.id, "bare follow-up", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 6).await;
+    assert_eq!(
+        rows.iter()
+            .rev()
+            .find(|row| row.role == "user")
+            .unwrap()
+            .recipient_agent_ids,
+        vec![researcher.id]
+    );
+    server.abort();
 }
 
 #[allow(dead_code)]

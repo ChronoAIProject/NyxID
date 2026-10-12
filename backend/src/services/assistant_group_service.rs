@@ -13,6 +13,50 @@ use mongodb::{
 };
 use uuid::Uuid;
 
+pub async fn persist_last_recipients(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    ids: &[String],
+) -> AppResult<()> {
+    db.collection::<AssistantGroup>(GROUPS)
+        .update_one(
+            doc! {"_id": group_id, "user_id": owner},
+            doc! {"$set": {"last_recipient_ids": ids}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn persist_message_recipients(
+    db: &Database,
+    message_id: &str,
+    ids: &[String],
+) -> AppResult<()> {
+    db.collection::<GroupMessage>(MESSAGES)
+        .update_one(
+            doc! {"_id": message_id},
+            doc! {"$set": {"recipient_agent_ids": ids}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn pending_thread_actions(
+    db: &Database,
+    thread_ids: &[String],
+) -> AppResult<Vec<crate::models::assistant_acknowledgement::AssistantAcknowledgement>> {
+    use crate::models::assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME};
+    Ok(db.collection::<AssistantAcknowledgement>(COLLECTION_NAME).find(doc! {"conversation_id":{"$in":thread_ids},"kind":"action","status":"pending","decider":"user","expires_at":{"$gt":bson::DateTime::now()}}).await?.try_collect().await?)
+}
+
+pub async fn pending_group_approvals(
+    db: &Database,
+    group_id: &str,
+) -> AppResult<Vec<crate::models::approval_request::ApprovalRequest>> {
+    Ok(db.collection::<crate::models::approval_request::ApprovalRequest>(crate::models::approval_request::COLLECTION_NAME).find(doc! {"assistant_group.group_id":group_id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}}).limit(100).await?.try_collect().await?)
+}
+
 use crate::{
     errors::{AppError, AppResult},
     models::{

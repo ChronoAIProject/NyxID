@@ -537,14 +537,7 @@ async fn post_with_uploads(
         addressed.push(group.lead_agent_id.clone());
     }
     if author.is_none() {
-        state
-            .db
-            .collection::<AssistantGroup>(crate::models::assistant_group::COLLECTION_NAME)
-            .update_one(
-                mongodb::bson::doc! {"_id": group_id, "user_id": owner},
-                mongodb::bson::doc! {"$set": {"last_recipient_ids": &addressed}},
-            )
-            .await?;
+        groups::persist_last_recipients(&state.db, owner, group_id, &addressed).await?;
     }
     let mut message = Box::pin(groups::append_with_uploads(
         &state.db,
@@ -557,14 +550,7 @@ async fn post_with_uploads(
     ))
     .await?;
     message.recipient_agent_ids = addressed.clone();
-    state
-        .db
-        .collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
-        .update_one(
-            mongodb::bson::doc! {"_id": &message.id},
-            mongodb::bson::doc! {"$set": {"recipient_agent_ids": &addressed}},
-        )
-        .await?;
+    groups::persist_message_recipients(&state.db, &message.id, &addressed).await?;
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.
@@ -713,9 +699,7 @@ pub(crate) async fn org_pending_actions(
     state: &AppState,
     access: &crate::services::org_group_service::Access,
 ) -> AppResult<Vec<Value>> {
-    use crate::models::assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME};
-    use futures::TryStreamExt;
-    use mongodb::bson::doc;
+    use crate::models::assistant_acknowledgement::AssistantAcknowledgement;
     let mut out = Vec::new();
     let people = crate::services::org_group_service::participants(&state.db, &access.group).await?;
     let threads: std::collections::HashMap<_, _> =
@@ -728,10 +712,7 @@ pub(crate) async fn org_pending_actions(
     let rows: Vec<AssistantAcknowledgement> = if thread_ids.is_empty() {
         Vec::new()
     } else {
-        state.db.collection(COLLECTION_NAME).find(doc! {
-            "conversation_id":{"$in":thread_ids},"kind":"action","status":"pending","decider":"user",
-            "expires_at":{"$gt":mongodb::bson::DateTime::now()}
-        }).await?.try_collect().await?
+        groups::pending_thread_actions(&state.db, &thread_ids).await?
     };
     for ack in rows {
         let Some(thread) = threads
@@ -749,10 +730,7 @@ pub(crate) async fn org_pending_actions(
             "agent_id":thread.agent_id,"summary":ack.summary,"expires_at":ack.expires_at,
             "triggering_person":{"id":thread.user_id,"display_name":name},"can_decide":thread.user_id==access.actor}));
     }
-    let approvals: Vec<crate::models::approval_request::ApprovalRequest> = state.db
-        .collection(crate::models::approval_request::COLLECTION_NAME)
-        .find(doc! {"assistant_group.group_id":&access.group.id,"status":"pending","expires_at":{"$gt":mongodb::bson::DateTime::now()}})
-        .limit(100).await?.try_collect().await?;
+    let approvals = groups::pending_group_approvals(&state.db, &access.group.id).await?;
     for approval in approvals {
         let Some(binding) = &approval.assistant_group else {
             continue;
