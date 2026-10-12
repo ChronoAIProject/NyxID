@@ -1181,7 +1181,15 @@ async fn dispatch_specialists(
                 },
             ))
             .await?;
-            let agent = Box::pin(team::set_grants(db, owner, &agent.id, change)).await?;
+            let agent = Box::pin(team::set_grants_as(
+                db,
+                owner,
+                &chat.user_id,
+                Some(&chat.api_key_id),
+                &agent.id,
+                change,
+            ))
+            .await?;
             let summary = team::summaries(db, owner, false, false, 0)
                 .await?
                 .into_iter()
@@ -1449,9 +1457,11 @@ async fn dispatch_agent_settings(
                     true,
                 ));
             }
-            let agent = Box::pin(team::set_grants(
+            let agent = Box::pin(team::set_grants_as(
                 db,
                 owner,
+                &chat.user_id,
+                Some(&chat.api_key_id),
                 &agent.id,
                 team::GrantChange::Guests(levels),
             ))
