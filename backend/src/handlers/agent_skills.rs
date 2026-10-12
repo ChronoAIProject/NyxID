@@ -12,7 +12,6 @@ use crate::{
     },
 };
 
-const SKILL_HISTORY_LIMIT: i64 = 50;
 use axum::{
     Json,
     body::{Body, to_bytes},
