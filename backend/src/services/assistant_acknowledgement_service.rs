@@ -809,15 +809,6 @@ async fn request_tracked_with_machine_context(
     request: Request<'_>,
     machine_context: Option<crate::models::machine_access::HumanContextAction>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
-    let request_mode = super::assistant_settings_service::get(db, &chat.user_id)
-        .await
-        .map(|s| s.specialist_access_requests)
-        .unwrap_or_default();
-    if request.kind != "action" && !chat.access_request_allowed_with_mode(request_mode) {
-        return Err(AppError::Forbidden(
-            "access_request_denied: only NyxBot can request or grant access; report the need to NyxBot in your reply".into(),
-        ));
-    }
     if request.kind == "operations" {
         Box::pin(
             super::agent_operation_scope_service::require_configuration_enabled(db, &chat.user_id),
