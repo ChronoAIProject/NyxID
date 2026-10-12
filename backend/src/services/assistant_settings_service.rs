@@ -216,6 +216,8 @@ pub async fn audit(
             "max_concurrent_subagent_turns": after.max_concurrent_subagent_turns,
             "max_group_handoffs": after.max_group_handoffs,
             "max_group_handoffs_per_hour": after.max_group_handoffs_per_hour,
+            "specialist_access_requests": format!("{:?}", after.specialist_access_requests),
+            "previous_specialist_access_requests": format!("{:?}", before.specialist_access_requests),
         })),
     )
     .await;
