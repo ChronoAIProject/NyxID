@@ -2051,3 +2051,23 @@ fn model_validation_and_unavailable_copy_are_stable() {
     assert!(!super::valid_model("openai/gpt-4"));
     assert!(!super::valid_model("nyxagent/"));
 }
+
+#[test]
+fn upstream_model_rejections_report_model_unavailable_with_guidance() {
+    for code in [
+        "model_not_found",
+        "model_unavailable",
+        "unknown_model",
+        "invalid_model",
+    ] {
+        let error = super::TurnError::new(code);
+        assert_eq!(error.code, "model_unavailable", "{code}");
+        assert!(error.message.contains("model selector"), "{code}");
+        assert_eq!(error.upstream_code.as_deref(), Some(code));
+    }
+    assert!(
+        super::TurnError::new("model_not_configured")
+            .message
+            .contains("model selector")
+    );
+}

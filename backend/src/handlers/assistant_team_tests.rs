@@ -2236,3 +2236,372 @@ async fn instruction_refresh_guest_audiences_and_context_are_isolated_on_every_t
     );
     server.abort();
 }
+
+async fn set_access_mode(state: &AppState, mode: crate::models::assistant_settings::AccessMode) {
+    crate::services::assistant_settings_service::update(
+        &state.db,
+        OWNER,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(mode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Team tools go through the owner's access mode at their real call site:
+/// grants are sensitive (NyxMode asks), memory is an ordinary change (only
+/// Ask Every Time asks), listings never ask, and one approved card runs once.
+#[tokio::test]
+async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
+    use crate::models::assistant_settings::AccessMode;
+    let (state, _, server) = setup("team_access_mode_gate").await;
+    let (_, chat) = orchestrator(&state).await;
+    let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name": "coder", "description": "Review PRs"}),
+    )
+    .await;
+    let grant = json!({"subagent": "coder", "services": ["github"]});
+    let remember = json!({"text": "The owner prefers short replies"});
+
+    set_access_mode(&state, AccessMode::Nyxmode).await;
+    let (card, error) = execute_tool(&state, &chat, "nyxid__grant_subagent", &grant).await;
+    assert!(error);
+    assert_eq!(card["error"], "acknowledgement_required", "{card}");
+    assert!(
+        team::specialist(&state.db, OWNER, "coder")
+            .await
+            .unwrap()
+            .grants
+            .service_ids
+            .is_empty()
+    );
+    let row = acks::history(&state.db, OWNER, &chat.conversation_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == card["acknowledgement_id"])
+        .unwrap();
+    let confirmation = row.confirmation.unwrap();
+    assert_eq!(confirmation.risk, "sensitive");
+    assert_eq!(confirmation.access_mode, Some(AccessMode::Nyxmode));
+    assert!(
+        row.summary.contains("Grant a specialist more access"),
+        "{}",
+        row.summary
+    );
+    assert!(row.summary.contains("subagent coder"), "{}", row.summary);
+    let (_, error) = execute_tool(&state, &chat, "nyxid__remember", &remember).await;
+    assert!(!error, "an ordinary change runs in NyxMode");
+    let (listed, error) = execute_tool(&state, &chat, "nyxid__list_subagents", &json!({})).await;
+    assert!(!error, "{listed}");
+    acks::decide(
+        &state.db,
+        OWNER,
+        &chat.conversation_id,
+        card["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let mut approved = grant.clone();
+    approved["acknowledgement_id"] = card["acknowledgement_id"].clone();
+    let (value, error) = execute_tool(&state, &chat, "nyxid__grant_subagent", &approved).await;
+    assert!(!error, "{value}");
+    assert_eq!(
+        team::specialist(&state.db, OWNER, "coder")
+            .await
+            .unwrap()
+            .grants
+            .service_ids,
+        vec![github.clone()]
+    );
+    let (reused, error) = execute_tool(&state, &chat, "nyxid__grant_subagent", &approved).await;
+    assert!(error);
+    assert_eq!(reused["error"], "acknowledgement_invalid");
+
+    set_access_mode(&state, AccessMode::AskEveryTime).await;
+    let (card, error) = execute_tool(&state, &chat, "nyxid__remember", &remember).await;
+    assert!(error);
+    assert_eq!(card["error"], "acknowledgement_required", "{card}");
+    let (listed, error) = execute_tool(&state, &chat, "nyxid__list_subagents", &json!({})).await;
+    assert!(!error, "{listed}");
+
+    set_access_mode(&state, AccessMode::Autopilot).await;
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__revoke_subagent",
+        &json!({"subagent": "coder", "services": ["github"]}),
+    )
+    .await;
+    assert!(
+        !error,
+        "Autopilot runs destructive team tools without a card: {value}"
+    );
+    server.abort();
+}
+
+/// A specialist's allowed request, NyxBot's decision and the grant it makes
+/// each record who asked, who approved, the target, scope and decision.
+#[tokio::test]
+async fn access_request_decision_and_grant_audits_name_requester_and_approver() {
+    let (state, _, server) = setup("team_access_audits").await;
+    enable_routed_requests(&state).await;
+    let (_, chat) = orchestrator(&state).await;
+    let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name": "coder", "description": "Review PRs"}),
+    )
+    .await;
+    let home = specialist_home(&state, "coder").await;
+    let specialist = chat_for(&state, &home).await;
+    let (_, request) =
+        acks::service_gate(&state.db, &specialist, &github, "github", "GitHub", false)
+            .await
+            .unwrap()
+            .unwrap();
+    let request = request.expect("routed request card");
+    let logs = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let data = |row: bson::Document| row.get_document("event_data").unwrap().clone();
+    let requested = data(
+        logs.find_one(doc! {"event_type": "assistant_access_requested"})
+            .await
+            .unwrap()
+            .expect("request audit"),
+    );
+    assert_eq!(
+        requested.get_str("requester_agent").unwrap(),
+        specialist.agent_id
+    );
+    assert_eq!(requested.get_str("target").unwrap(), github);
+    assert_eq!(requested.get_str("scope").unwrap(), "service");
+    assert_eq!(requested.get_str("decider").unwrap(), "orchestrator");
+    assert_eq!(requested.get_str("decision").unwrap(), "pending");
+    // NyxBot decides it (Autopilot: no owner card for NyxBot's decision).
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__decide_permission",
+        &json!({"request_id": request.id, "decision": "allow", "reason": "PR review needs it"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    let decided = data(
+        logs.find_one(doc! {"event_type": "assistant_acknowledgement_decided"})
+            .await
+            .unwrap()
+            .expect("decision audit"),
+    );
+    assert_eq!(
+        decided.get_str("requester_agent_id").unwrap(),
+        specialist.agent_id
+    );
+    assert_eq!(decided.get_str("approver_kind").unwrap(), "nyxbot");
+    assert_eq!(
+        decided.get_str("approver_api_key_id").unwrap(),
+        chat.api_key_id
+    );
+    assert_eq!(decided.get_str("service_id").unwrap(), github);
+    assert_eq!(decided.get_str("decision").unwrap(), "allow");
+    // NyxBot's direct grant and the owner's own grant name their approver.
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__set_guest_access",
+        &json!({"subagent": "coder", "access": "read"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    let by_nyxbot = data(
+        logs.find_one(doc! {"event_type": "assistant_agent_grants_changed",
+        "event_data.approver_kind": "nyxbot"})
+            .await
+            .unwrap()
+            .expect("NyxBot grant audit"),
+    );
+    assert_eq!(
+        by_nyxbot.get_str("approver_api_key_id").unwrap(),
+        chat.api_key_id
+    );
+    assert_eq!(by_nyxbot.get_str("agent_id").unwrap(), specialist.agent_id);
+    team::set_grants(
+        &state.db,
+        OWNER,
+        &specialist.agent_id,
+        team::GrantChange::Remove(crate::models::assistant_agent::AgentGrants {
+            service_ids: vec![github.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let by_owner = data(
+        logs.find_one(doc! {"event_type": "assistant_agent_grants_changed",
+        "event_data.approver_kind": "owner"})
+            .await
+            .unwrap()
+            .expect("owner grant audit"),
+    );
+    assert_eq!(by_owner.get_str("approver_user_id").unwrap(), OWNER);
+    assert!(matches!(
+        by_owner.get("approver_api_key_id"),
+        Some(bson::Bson::Null)
+    ));
+    server.abort();
+}
+
+/// The agent page saves a model and an access-mode override through the
+/// human-only PATCH; both come back on the agent, null clears the override,
+/// a malformed model is refused, and conversation keys never reach it.
+#[tokio::test]
+async fn agent_model_and_access_mode_override_round_trip_through_patch() {
+    use crate::models::assistant_settings::AccessMode;
+    let (state, _, server) = setup("team_agent_policy_patch").await;
+    let (_, chat) = orchestrator(&state).await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name": "coder", "description": "Review PRs"}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "coder").await.unwrap();
+    let patch = |body: Value| {
+        update_agent(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(agent.id.clone()),
+            Json(serde_json::from_value::<UpdateAgentRequest>(body).unwrap()),
+        )
+    };
+    let Json(saved) =
+        patch(json!({"model": "nyxagent/research", "access_mode_override": "ask_every_time"}))
+            .await
+            .unwrap();
+    assert_eq!(saved["model"], "nyxagent/research");
+    assert_eq!(saved["access_mode_override"], "ask_every_time");
+    let Json(listed) = list_agents(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Query(AgentsQuery::default()),
+    )
+    .await
+    .unwrap();
+    let row = listed["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == agent.id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(row["model"], "nyxagent/research");
+    assert_eq!(row["access_mode_override"], "ask_every_time");
+    // The override governs this specialist's threads.
+    let home = specialist_home(&state, "coder").await;
+    let specialist = chat_for(&state, &home).await;
+    assert_eq!(
+        acks::effective_access_mode(&state.db, &specialist)
+            .await
+            .unwrap(),
+        AccessMode::AskEveryTime
+    );
+    // A profile-only save leaves both alone; null clears the override.
+    let Json(kept) = patch(json!({"description": "Review pull requests"}))
+        .await
+        .unwrap();
+    assert_eq!(kept["access_mode_override"], "ask_every_time");
+    let Json(cleared) = patch(json!({"access_mode_override": null})).await.unwrap();
+    assert!(cleared["access_mode_override"].is_null());
+    assert_eq!(cleared["model"], "nyxagent/research");
+    assert!(matches!(
+        patch(json!({"model": "openai/gpt-4"})).await,
+        Err(AppError::AssistantModelUnavailable)
+    ));
+    // Conversation keys are not first-party humans.
+    let mut key_auth = test_auth_user(OWNER);
+    key_auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    key_auth.api_key_id = Some(chat.api_key_id.clone());
+    assert!(
+        update_agent(
+            State(state.clone()),
+            key_auth,
+            Path(agent.id.clone()),
+            Json(
+                serde_json::from_value::<UpdateAgentRequest>(
+                    json!({"access_mode_override": "autopilot"})
+                )
+                .unwrap()
+            ),
+        )
+        .await
+        .is_err()
+    );
+    server.abort();
+}
+
+/// NyxBot can change an agent's model only through the owner's access mode:
+/// NyxMode asks first; the approved card applies the exact model once.
+#[tokio::test]
+async fn nyxbot_model_change_follows_the_access_mode() {
+    use crate::models::assistant_settings::AccessMode;
+    let (state, _, server) = setup("team_model_tool").await;
+    let (_, chat) = orchestrator(&state).await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name": "coder", "description": "Review PRs"}),
+    )
+    .await;
+    set_access_mode(&state, AccessMode::Nyxmode).await;
+    let args = json!({"subagent": "coder", "model": "nyxagent/research"});
+    let (card, error) = execute_tool(&state, &chat, "nyxid__update_subagent", &args).await;
+    assert!(error);
+    assert_eq!(card["error"], "acknowledgement_required", "{card}");
+    assert_ne!(
+        team::specialist(&state.db, OWNER, "coder")
+            .await
+            .unwrap()
+            .model,
+        "nyxagent/research"
+    );
+    // A profile edit without a model is an ordinary change in NyxMode.
+    let (_, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__update_subagent",
+        &json!({"subagent": "coder", "display_name": "Cody"}),
+    )
+    .await;
+    assert!(!error);
+    acks::decide(
+        &state.db,
+        OWNER,
+        &chat.conversation_id,
+        card["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let mut approved = args.clone();
+    approved["acknowledgement_id"] = card["acknowledgement_id"].clone();
+    let (value, error) = execute_tool(&state, &chat, "nyxid__update_subagent", &approved).await;
+    assert!(!error, "{value}");
+    assert_eq!(value["model"], "nyxagent/research");
+    let audit = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type": "assistant_model_changed", "event_data.scope": "agent"})
+        .await
+        .unwrap()
+        .expect("model audit");
+    assert_eq!(audit.get_str("api_key_id").unwrap(), chat.api_key_id);
+    server.abort();
+}
