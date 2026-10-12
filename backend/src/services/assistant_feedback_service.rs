@@ -121,6 +121,7 @@ pub async fn upsert_feedback(
     turn_id: Option<String>,
     vote: &str,
     comment: Option<String>,
+    context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
 ) -> mongodb::error::Result<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
     let filter = doc! {"user_id": user_id, "message_id": message_id};
     let existing = db
@@ -131,6 +132,12 @@ pub async fn upsert_feedback(
     let mut set = doc! {"vote": vote, "updated_at": bson::DateTime::from_chrono(now), "conversation_id": conversation_id, "group_id": group_id, "turn_id": turn_id};
     if comment.is_some() {
         set.insert("comment", comment);
+    }
+    if let Some(context) = context {
+        set.insert(
+            "context",
+            bson::to_bson(&context).unwrap_or(bson::Bson::Null),
+        );
     }
     let update = doc! {"$set": set, "$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "created_at": bson::DateTime::from_chrono(now)}};
     let row = db
