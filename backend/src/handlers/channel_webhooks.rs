@@ -227,17 +227,35 @@ pub(super) async fn dispatch_platform_webhook(
             "platform webhook rejected"
         )
     })?;
-    let targets = adapter
+    let targets = match adapter
         .platform_webhook_targets(&credentials, headers, body)
         .await
-        .inspect_err(|error| {
+    {
+        Ok(targets) => targets,
+        Err(error) => {
             tracing::warn!(
                 platform,
                 stage = "signature_or_target",
                 error_code = error.error_code(),
                 "platform webhook rejected"
+            );
+            // Platform-level failures name no bot; count them per platform.
+            crate::services::channel_bot_health::record_webhook_rejection(
+                &state.db,
+                platform,
+                if matches!(
+                    error,
+                    crate::errors::AppError::ChannelWebhookVerificationFailed(_)
+                ) {
+                    "signature"
+                } else {
+                    "target"
+                },
             )
-        })?;
+            .await;
+            return Err(error);
+        }
+    };
     let source = if crate::services::channel_connection_webhook_service::supports(adapter.as_ref())
     {
         "connection"
@@ -390,7 +408,13 @@ async fn handle_webhook_inner_impl(
             actual = %bot.platform,
             "webhook platform mismatch"
         );
-        let _ = channel_bot_service::record_webhook_error(state.db, bot_id, "target").await;
+        // Unauthenticated: count per platform, never on the bot row.
+        crate::services::channel_bot_health::record_webhook_rejection(
+            state.db,
+            expected_platform,
+            "platform_mismatch",
+        )
+        .await;
         return Ok(None);
     }
 
@@ -452,7 +476,13 @@ async fn handle_webhook_inner_impl(
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            channel_bot_service::record_webhook_error(state.db, &bot.id, "signature").await?;
+            // Unauthenticated: a forged POST must not write the bot row.
+            crate::services::channel_bot_health::record_webhook_rejection(
+                state.db,
+                &bot.platform,
+                "signature",
+            )
+            .await;
             return Err(format!("webhook verification failed: {error}").into());
         }
     };
@@ -464,7 +494,12 @@ async fn handle_webhook_inner_impl(
     if bot.credential_source == "connection" {
         if !bot.webhook_registered {
             tracing::warn!(platform = %bot.platform, bot_id, stage = "subscription", "channel webhook is not registered");
-            channel_bot_service::record_webhook_error(state.db, bot_id, "unregistered").await?;
+            channel_bot_service::record_webhook_error(
+                state.db,
+                bot_id,
+                crate::services::channel_bot_health::codes::UNREGISTERED,
+            )
+            .await?;
             return Ok(None);
         }
         crate::services::channel_credentials::resolve_bot_token(
@@ -2002,3 +2037,7 @@ mod whatsapp_activation_tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "channel_webhook_diagnostics_tests.rs"]
+mod diagnostics_tests;

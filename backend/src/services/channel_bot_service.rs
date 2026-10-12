@@ -1712,39 +1712,63 @@ pub async fn find_active_webhook_bot(
         .await?)
 }
 
+/// Persist a subscription check. A missing subscription records its stable
+/// code as the failure reason; a registered one clears webhook failures.
 pub async fn record_subscription_state(
     db: &mongodb::Database,
     bot_id: &str,
     registered: bool,
     error: Option<&str>,
 ) -> AppResult<()> {
-    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(doc! { "_id": bot_id }, doc! { "$set": {
+    let mut set = doc! {
         "diagnostics.subscription_state": { "registered": registered, "checked_at": mongodb::bson::DateTime::now(), "last_error": error },
-        "diagnostics.failure_reason": if registered { mongodb::bson::Bson::Null } else { mongodb::bson::Bson::String("subscription_missing".into()) }
-    }}).await?;
+    };
+    if registered {
+        set.insert("diagnostics.failure_reason", mongodb::bson::Bson::Null);
+        set.insert("diagnostics.last_webhook_error", mongodb::bson::Bson::Null);
+    } else {
+        set.insert(
+            "diagnostics.failure_reason",
+            error.unwrap_or(super::channel_bot_health::codes::SUBSCRIPTION_MISSING),
+        );
+    }
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(doc! { "_id": bot_id }, doc! { "$set": set })
+        .await?;
     Ok(())
 }
 
-pub async fn record_outbound_error(
+/// Best-effort record of one outbound send. Never fails the send path: the
+/// platform outcome is already final when this runs.
+pub async fn record_outbound_outcome(
     db: &mongodb::Database,
     bot_id: &str,
-    code: u32,
-) -> AppResult<()> {
-    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
-        doc! { "_id": bot_id },
-        doc! { "$set": { "diagnostics.last_outbound_error": { "code": code.to_string(), "at": mongodb::bson::DateTime::now() } } },
-    ).await?;
-    Ok(())
+    error: Option<&crate::errors::AppError>,
+) {
+    let update = match error {
+        Some(error) => doc! { "$set": {
+            "diagnostics.last_outbound_error": {
+                "code": error.error_code().to_string(),
+                "reason": super::channel_bot_health::failure_code(error),
+                "at": mongodb::bson::DateTime::now(),
+            },
+        } },
+        None => doc! { "$set": {
+            "diagnostics.last_outbound_at": mongodb::bson::DateTime::now(),
+            "diagnostics.last_outbound_error": mongodb::bson::Bson::Null,
+        } },
+    };
+    if let Err(error) = db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(doc! { "_id": bot_id }, update)
+        .await
+    {
+        tracing::warn!(%error, bot_id, "channel bot outbound diagnostics write failed");
+    }
 }
 
-pub async fn record_outbound_success(db: &mongodb::Database, bot_id: &str) -> AppResult<()> {
-    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
-        doc! { "_id": bot_id },
-        doc! { "$set": { "diagnostics.last_outbound_at": mongodb::bson::DateTime::now(), "diagnostics.last_outbound_error": mongodb::bson::Bson::Null } },
-    ).await?;
-    Ok(())
-}
-
+/// Records a delivery problem found after the bot was authenticated.
+/// Unauthenticated rejections go to `channel_bot_health::record_webhook_rejection`.
 pub async fn record_webhook_error(
     db: &mongodb::Database,
     bot_id: &str,
@@ -1753,13 +1777,83 @@ pub async fn record_webhook_error(
     db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
         doc! { "_id": bot_id },
         doc! { "$set": {
-            "diagnostics.last_webhook_error": { "code": reason, "at": mongodb::bson::DateTime::now() },
+            "diagnostics.last_webhook_error": { "code": reason, "reason": reason, "at": mongodb::bson::DateTime::now() },
             "diagnostics.failure_reason": reason
         } },
     ).await?;
     Ok(())
 }
 
+/// Best-effort liveness stamp after an authenticated, admitted inbound batch.
+/// Clears webhook and failure diagnostics that the delivery disproves.
+pub async fn record_inbound_success(db: &mongodb::Database, bot: &ChannelBot) {
+    let now = mongodb::bson::DateTime::now();
+    let mut set = doc! {
+        "diagnostics.last_inbound_at": now,
+        "diagnostics.last_inbound_source": if bot.webhook_registered { "webhook" } else { "poll" },
+        "diagnostics.consecutive_errors": 0,
+        "diagnostics.last_webhook_error": mongodb::bson::Bson::Null,
+    };
+    if bot.webhook_registered {
+        set.insert("diagnostics.last_webhook_at", now);
+    }
+    // Only delivery-shaped reasons are disproved by a successful delivery.
+    let filter = doc! { "_id": &bot.id };
+    let clear_reason = doc! {
+        "_id": &bot.id,
+        "diagnostics.failure_reason": { "$in": [
+            super::channel_bot_health::codes::UNREGISTERED,
+            super::channel_bot_health::codes::SUBSCRIPTION_MISSING,
+            super::channel_bot_health::codes::WEBHOOK_MISSING,
+            super::channel_bot_health::codes::RATE_LIMITED,
+            super::channel_bot_health::codes::PROVIDER_UNAVAILABLE,
+            super::channel_bot_health::codes::PROVIDER_ERROR,
+        ] },
+    };
+    let collection = db.collection::<mongodb::bson::Document>(COLLECTION_NAME);
+    let result = async {
+        collection.update_one(filter, doc! { "$set": set }).await?;
+        collection
+            .update_one(
+                clear_reason,
+                doc! { "$set": { "diagnostics.failure_reason": mongodb::bson::Bson::Null } },
+            )
+            .await
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, bot_id = %bot.id, "channel bot inbound diagnostics write failed");
+    }
+}
+
+/// Bots whose NyxBot link is delivered by the Agent Event Gateway.
+pub async fn gateway_linked_ids(
+    db: &mongodb::Database,
+    bot_ids: &[String],
+) -> AppResult<std::collections::HashSet<String>> {
+    if bot_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let rows: Vec<mongodb::bson::Document> = db
+        .collection::<mongodb::bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find(doc! { "channel_bot_id": { "$in": bot_ids.to_vec() }, "transport": "gateway", "status": "active" })
+        .projection(doc! { "channel_bot_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get_str("channel_bot_id").ok().map(str::to_string))
+        .collect())
+}
+
+pub async fn gateway_linked(db: &mongodb::Database, bot_id: &str) -> AppResult<bool> {
+    Ok(gateway_linked_ids(db, &[bot_id.to_string()])
+        .await?
+        .contains(bot_id))
+}
+
+/// Admin listing across owners, ordered by id for stable pagination.
 pub async fn list_all_filtered(
     db: &mongodb::Database,
     platform: Option<&str>,
@@ -1769,10 +1863,7 @@ pub async fn list_all_filtered(
 ) -> AppResult<Vec<ChannelBot>> {
     let mut filter = doc! {};
     if let Some(platform) = platform {
-        filter.insert(
-            "platform",
-            if platform == "x" { "twitter" } else { platform },
-        );
+        filter.insert("platform", platform);
     }
     if let Some(status) = status {
         filter.insert("status", status);
@@ -1780,6 +1871,7 @@ pub async fn list_all_filtered(
     Ok(db
         .collection(COLLECTION_NAME)
         .find(filter)
+        .sort(doc! { "_id": 1 })
         .skip(offset as u64)
         .limit(limit)
         .await?
