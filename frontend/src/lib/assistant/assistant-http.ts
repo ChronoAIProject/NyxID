@@ -177,6 +177,7 @@ async function parseError(
       ...(typeof value.consent_url === "string"
         ? { consent_url: value.consent_url }
         : {}),
+      ...(value.details !== undefined ? { details: value.details } : {}),
     };
     return { parsed, raw: value };
   } catch {
