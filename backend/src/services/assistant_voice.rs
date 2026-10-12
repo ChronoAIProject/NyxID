@@ -281,7 +281,6 @@ pub(crate) fn settled_result(
     request: &VoiceRequest,
     mut source: AssistantMessage,
 ) -> AssistantMessage {
-                specialist_id: None,
     if request.async_operation_pending
         && request.state == RequestState::Cancelled
         && source.error_code.is_none()

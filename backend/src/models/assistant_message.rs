@@ -45,7 +45,6 @@ pub struct AssistantMessage {
 }
 
 impl std::fmt::Debug for AssistantMessage {
-                specialist_id: None,
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AssistantMessage")
             .field("id", &self.id)
