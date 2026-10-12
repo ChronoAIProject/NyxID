@@ -667,7 +667,19 @@ async fn apply(api: &mut ApiClient, manifest: &Manifest, dry_run: bool) -> Resul
                 Err(error) => ApplyRow::failed("service", &slug, error),
             },
             Some(current) => {
-                apply_service_update(api, &slug, &body, current, &provider_id, dry_run).await
+                // In a dry run a provider about to be created has no ID yet;
+                // linking to it is still a change.
+                let new_provider = provider_ref.is_some() && provider_id.is_none();
+                apply_service_update(
+                    api,
+                    &slug,
+                    &body,
+                    current,
+                    &provider_id,
+                    new_provider,
+                    dry_run,
+                )
+                .await
             }
         };
         rows.push(row);
@@ -681,6 +693,7 @@ async fn apply_service_update(
     body: &Value,
     current: &Value,
     provider_id: &Option<String>,
+    new_provider: bool,
     dry_run: bool,
 ) -> ApplyRow {
     let fixed: Vec<&str> = SERVICE_CREATE_ONLY
@@ -708,9 +721,10 @@ async fn apply_service_update(
     let mut skip = vec!["slug", "provider_config_id"];
     skip.extend_from_slice(SERVICE_CREATE_ONLY);
     let mut changed = changed_fields(body, current, &skip);
-    let relink = provider_id
-        .as_ref()
-        .is_some_and(|id| current["provider_config_id"].as_str() != Some(id.as_str()));
+    let relink = new_provider
+        || provider_id
+            .as_ref()
+            .is_some_and(|id| current["provider_config_id"].as_str() != Some(id.as_str()));
     let id = text(current, "id");
     if changed.is_empty() && !relink {
         return ApplyRow {
@@ -834,6 +848,7 @@ async fn validate(
         let slug = text(desired, "slug");
         let mut failures = Vec::new();
         let mut pending = Vec::new();
+        let mut notes = Vec::new();
         let service = find_service(api, &slug).await?;
         let provider_ref = desired
             .get("provider")
@@ -906,8 +921,8 @@ async fn validate(
                     Some("oauth2" | "device_code")
                 );
                 if oauth && provider["credential_mode"] == "user" {
-                    failures.push(
-                        "credential_mode is user, so NyxID managed is never offered".to_string(),
+                    notes.push(
+                        "credential_mode is user: each user brings their own OAuth app".to_string(),
                     );
                 } else if oauth && !client_configured(provider) {
                     pending.push(format!(
@@ -942,6 +957,7 @@ async fn validate(
         let provider_slug = provider.as_ref().map(|row| text(row, "slug"));
         let mut issues = failures;
         issues.extend(pending);
+        issues.extend(notes);
         let remarks = format!(
             "NyxID service {slug}; scopes: {}; managed OAuth client: {}; validation: {status}",
             if scopes.is_empty() {
@@ -1597,6 +1613,35 @@ mod tests {
         assert_eq!(rows[1].action, "failed");
         assert!(rows[1].error.as_deref().unwrap().contains("auth_method"));
         assert!(fail_on_errors(&rows).is_err());
+    }
+
+    #[tokio::test]
+    async fn dry_run_plans_the_relink_to_a_provider_it_will_create() {
+        let server = MockServer::start().await;
+        listing(&server, json!([]), json!([service_row()])).await;
+        let manifest = zoho(&[]).unwrap();
+        let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+        let plan = apply(&mut api, &manifest, true).await.unwrap();
+        assert_eq!(plan[0].action, "create");
+        assert_eq!(plan[1].action, "update");
+        assert_eq!(plan[1].changed, ["provider"]);
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_user_supplied_oauth_apps() {
+        let server = MockServer::start().await;
+        let mut provider = provider_row(false);
+        provider["credential_mode"] = "user".into();
+        provider["has_oauth_config"] = true.into();
+        listing(&server, json!([provider]), json!([service_row()])).await;
+        let mut manifest = zoho(&[]).unwrap();
+        manifest.providers[0]["credential_mode"] = "user".into();
+        let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+        let report = validate(&mut api, &manifest, "https://nyx.example/cb")
+            .await
+            .unwrap();
+        assert_eq!(report[0].status, "ready", "{:?}", report[0].issues);
+        assert!(report[0].issues[0].contains("own OAuth app"));
     }
 
     #[tokio::test]

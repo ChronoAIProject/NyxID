@@ -11,6 +11,7 @@ use mongodb::bson::doc;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::DownstreamService;
 use crate::models::provider_config::ProviderConfig;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
@@ -63,6 +64,71 @@ pub async fn require_catalog_writer(
     catalog_authority(state, auth_user)
         .await?
         .ok_or_else(|| AppError::Forbidden("Admin or Catalog Manager access required".to_string()))
+}
+
+/// Gate for writes to a catalog row or its operations, applied after the
+/// creator check. Public rows need catalog authority, so a creator who loses
+/// the Catalog Manager role loses write access; private rows keep the plain
+/// creator rule.
+pub async fn require_public_row_writer(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &DownstreamService,
+) -> AppResult<Option<CatalogAuthority>> {
+    if service.visibility == "private" {
+        return Ok(None);
+    }
+    require_catalog_writer(state, auth_user).await.map(Some)
+}
+
+/// Admin-only sub-resources of a catalog row (for example anonymous no-auth
+/// proxy rules): a creator without Admin rights may not write them on a
+/// public row.
+pub async fn deny_catalog_manager(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &DownstreamService,
+    what: &str,
+) -> AppResult<()> {
+    if require_public_row_writer(state, auth_user, service).await?
+        == Some(CatalogAuthority::CatalogManager)
+    {
+        return Err(AppError::Forbidden(format!(
+            "A Catalog Manager cannot change {what}; ask an Admin"
+        )));
+    }
+    Ok(())
+}
+
+/// A Catalog Manager may move a row's destination only while nothing an
+/// Admin attached would follow it: no shared credential, no platform key,
+/// and no provider someone else created.
+pub async fn check_destination_change(
+    state: &AppState,
+    caller_id: &str,
+    service: &DownstreamService,
+    base_url: Option<&str>,
+) -> AppResult<()> {
+    if base_url.is_none_or(|url| url == service.base_url) {
+        return Ok(());
+    }
+    if !service.credential_encrypted.is_empty() || service.platform_key.is_some() {
+        return Err(AppError::Forbidden(
+            "This service carries an Admin-set credential, so only an Admin can change base_url"
+                .to_string(),
+        ));
+    }
+    if let Some(provider_id) = service.provider_config_id.as_deref() {
+        check_owned_provider(state, caller_id, provider_id)
+            .await
+            .map_err(|_| {
+                AppError::Forbidden(
+                    "This service uses a provider you did not create, so only an Admin can change base_url"
+                        .to_string(),
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn forbid_fields(action: &str, fields: Vec<&'static str>) -> AppResult<()> {

@@ -1026,22 +1026,6 @@ pub async fn create_service(
     Box::pin(create_service_inner(state, auth_user, tele, body)).await
 }
 
-/// A public catalog row may be changed by an Admin, or by its creator while
-/// they still hold the Catalog Manager role. Private rows keep the plain
-/// creator rule. Returns the caller's catalog authority for public rows.
-async fn require_catalog_manager_for_public_row(
-    state: &AppState,
-    auth_user: &AuthUser,
-    service: &DownstreamService,
-) -> AppResult<Option<super::catalog_authority::CatalogAuthority>> {
-    if service.visibility == "private" {
-        return Ok(None);
-    }
-    super::catalog_authority::require_catalog_writer(state, auth_user)
-        .await
-        .map(Some)
-}
-
 pub async fn create_service_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -1815,7 +1799,7 @@ pub async fn delete_service(
         require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
-        require_catalog_manager_for_public_row(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
     }
 
     let now = Utc::now();
@@ -1989,10 +1973,17 @@ async fn update_service_inner(
         require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
-        if require_catalog_manager_for_public_row(&state, &auth_user, &service).await?
+        if super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?
             == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
         {
             super::catalog_authority::check_service_update(&body)?;
+            super::catalog_authority::check_destination_change(
+                &state,
+                &auth_user.user_id.to_string(),
+                &service,
+                body.base_url.as_deref(),
+            )
+            .await?;
         }
     }
 
@@ -5965,6 +5956,72 @@ mod tests {
         assert!(forbidden(
             update(serde_json::json!({ "identity_propagation_mode": "jwt" })).await
         ));
+
+        // Tool twins stay Admin-only.
+        assert!(forbidden(
+            create_service_request(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Json(serde_json::json!({ "name": "Twin", "twin_of_service_id": service.id })),
+            )
+            .await
+        ));
+
+        // Linking: own provider to own service only.
+        let Json(linked) = super::super::providers::link_service(
+            State(state.clone()),
+            manager(),
+            Path((own.id.clone(), service.id.clone())),
+        )
+        .await
+        .expect("own provider to own service");
+        assert_eq!(linked.provider_config_id.as_deref(), Some(own.id.as_str()));
+        let (admin_base_url, admin_server) = spawn_empty_docs_server().await;
+        let Json(admin_service) = create_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Json(create_http_service_request(
+                "admin-svc",
+                "admin-svc",
+                admin_base_url,
+            )),
+        )
+        .await
+        .expect("admin creates service");
+        admin_server.abort();
+        assert!(forbidden(
+            super::super::providers::link_service(
+                State(state.clone()),
+                manager(),
+                Path((own.id.clone(), admin_service.id.clone())),
+            )
+            .await
+        ));
+
+        // Once an Admin links someone else's provider, the destination is fixed
+        // for the manager so those users' tokens cannot be redirected.
+        let Json(relinked) = super::super::providers::link_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path((foreign.id.clone(), service.id.clone())),
+        )
+        .await
+        .expect("admin links a foreign provider");
+        assert_eq!(
+            relinked.provider_config_id.as_deref(),
+            Some(foreign.id.as_str())
+        );
+        let moved =
+            update(serde_json::json!({ "base_url": "https://elsewhere.example.com" })).await;
+        assert!(
+            matches!(moved, Err(AppError::Forbidden(ref message)) if message.contains("base_url"))
+        );
+        let Json(still) = update(serde_json::json!({ "description": "still editable" }))
+            .await
+            .expect("descriptive edits remain");
+        assert_eq!(still.description.as_deref(), Some("still editable"));
 
         // Losing the role removes write access to public rows they created.
         let role = db

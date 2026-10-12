@@ -746,14 +746,29 @@ pub async fn list_linked_services(
     auth_user: AuthUser,
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<super::services::ServiceListResponse>> {
-    catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    let caller_id = auth_user.user_id.to_string();
     let services =
         crate::services::provider_link_service::list_linked(&state.db, &provider_id).await?;
+    // Catalog Managers see public rows and their own, without the Admin-only
+    // credential inspection.
+    let (services, inspection_keys): (Vec<_>, _) = match authority {
+        CatalogAuthority::Admin => (services, Some(state.encryption_keys.as_ref())),
+        CatalogAuthority::CatalogManager => (
+            services
+                .into_iter()
+                .filter(|service| {
+                    service.visibility != "private" || service.created_by == caller_id
+                })
+                .collect(),
+            None,
+        ),
+    };
     let mut responses = Vec::with_capacity(services.len());
     for service in services {
         responses.push(
             super::services_helpers::service_to_response_with_viewer(
-                Some(&state.encryption_keys),
+                inspection_keys,
                 service,
                 None,
             )

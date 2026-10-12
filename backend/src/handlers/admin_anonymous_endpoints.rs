@@ -91,6 +91,13 @@ pub async fn create_anonymous_endpoint(
 ) -> AppResult<Json<AnonymousEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
+    super::catalog_authority::deny_catalog_manager(
+        &state,
+        &auth_user,
+        &service,
+        "anonymous endpoints",
+    )
+    .await?;
 
     let rule =
         anonymous_endpoint_service::build_rule(anonymous_endpoint_service::AnonymousRuleInput {
@@ -129,6 +136,13 @@ pub async fn update_anonymous_endpoint(
 ) -> AppResult<Json<AnonymousEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
+    super::catalog_authority::deny_catalog_manager(
+        &state,
+        &auth_user,
+        &service,
+        "anonymous endpoints",
+    )
+    .await?;
 
     let mut rules = service.anonymous_endpoints.clone();
     let index = rules
@@ -172,6 +186,13 @@ pub async fn delete_anonymous_endpoint(
 ) -> AppResult<Json<AnonymousEndpointListResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
+    super::catalog_authority::deny_catalog_manager(
+        &state,
+        &auth_user,
+        &service,
+        "anonymous endpoints",
+    )
+    .await?;
 
     let mut rules = service.anonymous_endpoints.clone();
     let before = rules.len();
@@ -557,35 +578,84 @@ mod tests {
         assert!(persisted.anonymous_endpoints.is_empty());
     }
 
-    /// The owner (non-admin creator) is allowed to manage rules on their own
-    /// service.
+    fn public_rule() -> Json<CreateAnonymousEndpointRequest> {
+        Json(CreateAnonymousEndpointRequest {
+            enabled: true,
+            method: "GET".to_string(),
+            path_pattern: "/public/**".to_string(),
+            daily_quota: 100,
+        })
+    }
+
+    /// The owner (non-admin creator) manages rules on their own private
+    /// service. On a public catalog row anonymous rules are Admin-only, even
+    /// for a creator holding the Catalog Manager role.
     #[tokio::test]
-    async fn owner_can_manage_own_service() {
+    async fn owner_manages_private_rows_but_public_rows_are_admin_only() {
         let Some(db) = connect_test_database("anon_owner_allowed").await else {
             return;
         };
         let owner_id = insert_user(&db).await;
-        let service = catalog_service(&owner_id, /* identity_propagating */ false);
-        insert_service(&db, &service).await;
-        let service_id = service.id.clone();
+        let mut private = catalog_service(&owner_id, /* identity_propagating */ false);
+        private.visibility = "private".to_string();
+        insert_service(&db, &private).await;
         let state = test_app_state(db.clone());
-
         let _ = create_anonymous_endpoint(
-            State(state),
+            State(state.clone()),
             test_auth_user(&owner_id),
-            Path(service_id.clone()),
-            Json(CreateAnonymousEndpointRequest {
-                enabled: true,
-                method: "GET".to_string(),
-                path_pattern: "/public/**".to_string(),
-                daily_quota: 100,
-            }),
+            Path(private.id.clone()),
+            public_rule(),
         )
         .await
-        .expect("owner may create on own service");
+        .expect("owner may create on own private service");
+        assert_eq!(
+            load_service(&db, &private.id)
+                .await
+                .anonymous_endpoints
+                .len(),
+            1
+        );
 
-        let persisted = load_service(&db, &service_id).await;
-        assert_eq!(persisted.anonymous_endpoints.len(), 1);
+        let public = catalog_service(&owner_id, /* identity_propagating */ false);
+        insert_service(&db, &public).await;
+        let err = create_anonymous_endpoint(
+            State(state.clone()),
+            test_auth_user(&owner_id),
+            Path(public.id.clone()),
+            public_rule(),
+        )
+        .await
+        .expect_err("a creator without catalog authority cannot add rules to a public row");
+        assert!(matches!(err, AppError::Forbidden(_)));
+
+        let role = db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! { "slug": crate::models::role::CATALOG_MANAGER_ROLE_SLUG })
+            .await
+            .unwrap()
+            .expect("catalog manager role is seeded");
+        let role_ids = role_service::get_platform_role_ids(&db).await.unwrap();
+        role_service::assign_role_to_user(&db, &owner_id, &role_ids.operator)
+            .await
+            .unwrap();
+        role_service::assign_role_to_user(&db, &owner_id, &role.id)
+            .await
+            .unwrap();
+        let err = create_anonymous_endpoint(
+            State(state),
+            test_auth_user(&owner_id),
+            Path(public.id.clone()),
+            public_rule(),
+        )
+        .await
+        .expect_err("a Catalog Manager cannot add anonymous rules");
+        assert!(matches!(err, AppError::Forbidden(ref message) if message.contains("anonymous")));
+        assert!(
+            load_service(&db, &public.id)
+                .await
+                .anonymous_endpoints
+                .is_empty()
+        );
     }
 
     /// Deleting an existing rule succeeds and removes it; deleting a missing

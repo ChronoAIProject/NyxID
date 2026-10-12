@@ -31,7 +31,12 @@ A Catalog Manager may:
   seeded connector awaiting app registration);
 - create public HTTP catalog services and link them to providers they created;
 - edit descriptive fields, the destination URL and the active flag of services
-  they created, and deactivate them.
+  they created, manage their operation endpoints, and deactivate them. The
+  destination URL is fixed once an Admin attaches a shared credential, a
+  platform key, or a provider someone else created, so those credentials
+  cannot be redirected;
+- list the services linked to a provider (public rows and their own, without
+  credential inspection).
 
 Only an Admin may:
 
@@ -42,12 +47,19 @@ Only an Admin may:
   borrow an existing OAuth client;
 - set or change a service's shared credential, platform key, billing,
   inference, identity propagation, token forwarding or delegation, token
-  exchange, default headers, WebSocket frame injection, anonymous endpoints,
-  operation policy, developer apps, visibility, category, skills, or tool
-  twins.
+  exchange, default headers, WebSocket frame injection, anonymous (no-auth)
+  endpoint rules on public rows, including through the
+  `/services/{id}/anonymous-endpoints` routes, operation policy, developer
+  apps, visibility, category, skills, or tool twins.
 
-A non-admin may change a public catalog row only while they hold the role, so
-revoking it also revokes write access to rows they created. Private rows keep
+A Catalog Manager owns the providers they create, including the right to
+change the token URL or clear the client. Admins should therefore not place
+a platform-owned OAuth client on a manager-owned provider; create an
+Admin-owned provider instead.
+
+A non-admin may change a public catalog row, or its operation endpoints, only
+while they hold the role, so revoking it also revokes write access to rows
+they created. Private rows keep
 the existing creator rule. Provider and link audit events record
 `"authority": "admin" | "catalog_manager"`; provider updates also record
 whether a client was set, never its value.
