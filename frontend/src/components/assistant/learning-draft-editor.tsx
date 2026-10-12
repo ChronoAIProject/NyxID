@@ -178,11 +178,13 @@ export function LearningDraftEditor({
   proposal,
   readOnly,
   edit,
+  validate,
 }: {
   readonly agentId: string;
   readonly proposal: Proposal & { readonly draft: Draft };
   readonly readOnly: boolean;
   readonly edit: Review["edit"];
+  readonly validate: Review["validate"];
 }) {
   const draft = proposal.draft;
   const form = useAppForm<SkillDraftForm>({
@@ -195,6 +197,12 @@ export function LearningDraftEditor({
     readonly message: string;
     readonly items: readonly SkillDraftDiagnostic[];
   }>();
+  // A passing check describes the values it checked; any edit clears it.
+  const [validBytes, setValidBytes] = useState<number>();
+  useEffect(() => {
+    const subscription = form.watch(() => setValidBytes(undefined));
+    return () => subscription.unsubscribe();
+  }, [form]);
   const kind = form.watch("kind");
   // Only an improve draft needs the agent's pins; an empty id stays idle.
   const attached = useAgentSkills(kind === "improve" ? agentId : "");
@@ -247,11 +255,28 @@ export function LearningDraftEditor({
 
   const save = form.handleSubmit((values) => {
     setBanner(undefined);
+    setValidBytes(undefined);
     edit.mutate({
       proposalId: proposal.id,
       revision: proposal.revision,
       draft: body(values),
     });
+  });
+
+  // Runs the proposal's own validator on the current values without saving.
+  const check = form.handleSubmit(async (values) => {
+    setBanner(undefined);
+    setValidBytes(undefined);
+    try {
+      const result = await validate.mutateAsync({
+        proposalId: proposal.id,
+        draft: body(values),
+      });
+      setValidBytes(result.bytes);
+    } catch (cause) {
+      placeDiagnostics(cause);
+      setBanner(failure(cause));
+    }
   });
 
   const text = (
@@ -422,6 +447,15 @@ export function LearningDraftEditor({
             >
               Add file
             </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={validate.isPending}
+              onClick={() => void check()}
+            >
+              Validate
+            </Button>
             {form.formState.isDirty ? (
               <Button
                 type="submit"
@@ -433,6 +467,13 @@ export function LearningDraftEditor({
               </Button>
             ) : null}
           </div>
+        ) : null}
+        {validBytes !== undefined ? (
+          <p role="status" className="text-11 text-success">
+            The draft passes validation ({validBytes.toLocaleString("en-US")}{" "}
+            bytes).
+            {form.formState.isDirty ? " Save it to keep these changes." : ""}
+          </p>
         ) : null}
         {proposal.source === "authored" ? (
           <p className="text-11 text-muted-foreground">

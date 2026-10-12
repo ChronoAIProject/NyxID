@@ -47,3 +47,17 @@ it("sends the enabled consent body", async () => {
     { method: "PUT", body: { enabled: true, threshold: 1 } },
   );
 });
+
+it("posts the draft to the proposal's validate route and parses the result", async () => {
+  assistantJson.mockResolvedValueOnce({ valid: true, bytes: 87 });
+  const { result } = renderHook(() => useAgentLearningReview("agent", false), { wrapper });
+  const draft = {
+    schema_version: 1, kind: "new", name: "checked", description: "Checked", skill_md: "# Checked",
+    files: [], base_skill: null, rationale: "Reusable", safety_notes: "None",
+  };
+  await expect(result.current.validate.mutateAsync({ proposalId: "proposal", draft })).resolves.toEqual({ valid: true, bytes: 87 });
+  expect(assistantJson).toHaveBeenCalledWith(
+    "/assistant/nyxagent/agents/agent/learning/proposals/proposal/validate",
+    { method: "POST", body: { draft } },
+  );
+});

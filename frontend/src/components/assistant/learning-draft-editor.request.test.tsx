@@ -26,6 +26,7 @@ const draft = {
 };
 let proposal: Record<string, unknown>;
 let errors: Array<{ status: number; body: unknown }>;
+let validateFailures: Array<{ status: number; body: unknown }>;
 let fetchMock: ReturnType<typeof vi.fn>;
 
 const json = (body: unknown, status = 200) =>
@@ -39,6 +40,7 @@ beforeEach(() => {
     updated_at: "2026-01-01T00:00:00Z", draft,
   };
   errors = [];
+  validateFailures = [];
   fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url === `${api}/learning/proposals/proposal` && init?.method === "PUT") {
       const failure = errors.shift();
@@ -46,6 +48,10 @@ beforeEach(() => {
       const sent = JSON.parse(String(init.body)) as { draft: Record<string, unknown> };
       proposal = { ...proposal, revision: 3, draft: sent.draft };
       return json({ status: "updated" });
+    }
+    if (url === `${api}/learning/proposals/proposal/validate`) {
+      const failure = validateFailures.shift();
+      return failure ? json(failure.body, failure.status) : json({ valid: true, bytes: 1234 });
     }
     if (url === `${api}/learning/proposals`) return json({ proposals: [proposal] });
     if (url === `${api}/skills`) return json({ agent_id: "agent", revision: 3, skills: [attachedPin], metadata: {} });
@@ -188,4 +194,44 @@ it("starts from the saved revision after a successful save", async () => {
   expect(within(form).getByRole("textbox", { name: "Skill description" })).toHaveValue("Saved description");
   expect(within(form).getByRole("textbox", { name: "File 2 path" })).toHaveValue("more.md");
   expect(sentDrafts()).toHaveLength(1);
+});
+
+function validated(): Array<Record<string, unknown>> {
+  return fetchMock.mock.calls
+    .filter(([url]) => url === `${api}/learning/proposals/proposal/validate`)
+    .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
+}
+
+it("validates the current values without saving them", async () => {
+  const user = await openEditor();
+  const description = screen.getByRole("textbox", { name: "Skill description" });
+  await user.clear(description);
+  await user.type(description, "Checked");
+  await user.click(screen.getByRole("button", { name: "Validate" }));
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "The draft passes validation (1,234 bytes). Save it to keep these changes.",
+  );
+  expect(validated()).toEqual([{ draft: { ...draft, description: "Checked" } }]);
+  expect(sentDrafts()).toHaveLength(0);
+  // Any later edit makes the result stale.
+  await user.type(description, "!");
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("shows validation diagnostics beside their fields and a gone proposal in the banner", async () => {
+  validateFailures = [
+    validationError({ rule: "too_large", field: "description", limit: 1024, actual: 2000, unit: "characters" }),
+    { status: 404, body: { error: "not_found", error_code: 1004, message: "Learning proposal not found" } },
+  ];
+  const user = await openEditor();
+  await user.click(screen.getByRole("button", { name: "Validate" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Skill description" })).toHaveAccessibleDescription(
+    "Shorten the description to at most 1,024 characters (it has 2,000).",
+  ));
+  expect(screen.getByRole("alert")).toHaveTextContent("Skill draft failed validation");
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Validate" }));
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Learning proposal not found"));
+  expect(screen.getByRole("textbox", { name: "Skill description" })).not.toHaveAccessibleDescription(/Shorten/);
 });

@@ -196,6 +196,7 @@ export function AgentLearningReview({
                 proposal={{ ...proposal, draft }}
                 readOnly={readOnly}
                 edit={review.edit}
+                validate={review.validate}
               />
             ) : null}
 
