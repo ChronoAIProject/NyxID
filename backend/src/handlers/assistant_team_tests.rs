@@ -1075,19 +1075,18 @@ async fn specialist_access_request_denied_by_default_and_allowed_when_routed() {
     .await;
     let home = specialist_home(&state, "coder").await;
     let specialist = chat_for(&state, &home).await;
-    let (denied, no_request) = acks::service_gate(
-        &state.db,
-        &specialist,
-        &github,
-        "github",
-        "GitHub",
-        false,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (denied, no_request) =
+        acks::service_gate(&state.db, &specialist, &github, "github", "GitHub", false)
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(denied["error"], "access_request_denied");
-    assert!(denied["instructions"].as_str().unwrap().contains("Only NyxBot can request or grant access"));
+    assert!(
+        denied["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Only NyxBot can request or grant access")
+    );
     assert!(no_request.is_none());
     assert_eq!(
         state
@@ -1106,7 +1105,11 @@ async fn specialist_access_request_denied_by_default_and_allowed_when_routed() {
             .unwrap();
     let request = request.expect("routed mode creates a permission request");
     let messages = transcript(&state, &orchestrator.id).await;
-    assert!(messages.iter().any(|m| m.role == "event" && m.text.contains(&request.id)));
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.role == "event" && m.text.contains(&request.id))
+    );
     server.abort();
 }
 
