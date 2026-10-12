@@ -27,7 +27,7 @@ import {
 
 const ROOT = "/assistant/nyxagent";
 export const CONTEXT_RESET_NOTICE =
-  "Context was reset; completed actions, attachments, and decided cards were preserved. Review them and rerun any incomplete action.";
+  "The last turn failed, so the assistant continues in a fresh context with a recap of its completed actions, failures and attachments. Rerun only what did not complete.";
 
 interface LiveTurn {
   state: DirectTurnState;
@@ -104,13 +104,13 @@ export function storedError(code: string | null): string {
 export function contextResetCopy(reason: string | null | undefined): string {
   switch (reason) {
     case "turn_failed": return CONTEXT_RESET_NOTICE;
-    case "memory_updated": return "Memory was updated; the next turn will use the new note.";
     case "instructions_changed": return "Instructions changed; the assistant context was refreshed.";
     case "model_changed": return "The model changed; the assistant context was refreshed.";
     case "session_lost": return "The assistant session expired; a fresh context will be used.";
     case "audience_changed": return "The conversation audience changed; the assistant context was refreshed.";
     case "guest_turn": return "This guest turn uses a separate assistant context.";
-    case "stopped": return "The turn was stopped; review pending actions before retrying.";
+    case "stopped": return "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it.";
+    case "credential_replaced": return "The assistant's key was replaced, so it continues in a fresh context with a recap of this chat.";
     case "user_reset": return "You reset the working context.";
     default: return CONTEXT_RESET_NOTICE;
   }
@@ -483,7 +483,7 @@ export class NyxAgentTransport {
         turnId: message.turn_id,
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
-        errorDetail: message.error_detail ? { stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id } : undefined,
+        errorDetail: message.error_detail ? { stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
         errorCode: message.error_code,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
@@ -622,7 +622,7 @@ export class NyxAgentTransport {
   ) {
     const generation = this.identity();
     if (this.isRunning(id)) throw new Error("A turn is already active.");
-    if ((!text.trim() && !options.attachmentIds?.length) || [...text].length > 32768) {
+    if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length) || [...text].length > 32768) {
       throw new Error("Message must contain 1 to 32768 characters.");
     }
     const controller = new AbortController();
@@ -816,17 +816,22 @@ export class NyxAgentTransport {
     }
   }
 
-  /** Retry the most recent failed turn. The server recap is authoritative;
-   * completed activities are listed there and must not be replayed. */
-  async retry(id: string, onAdopt: (id: string) => void) {
+  /** Retry the failed reply `messageId`. The server fences the calls that
+   * failed turn completed and re-attaches its input's uploads (they are
+   * already bound, so their ids are never re-sent). */
+  async retry(id: string, messageId: string, onAdopt: (id: string) => void) {
     const messages = this.histories.get(id)?.messages ?? [];
-    const failed = [...messages].reverse().find((message) => message.role === "assistant" && message.status === "failed");
-    const user = failed && [...messages].reverse().find((message) => message.role === "user" && message.seq < failed.seq && !message.execution_pending);
-    if (!user) throw new Error("No failed turn is available to retry.");
-    return this.send(id, user.text, onAdopt, undefined, {
+    const failed = messages.find(
+      (message) => message.id === messageId && message.role === "assistant" && message.status === "failed",
+    );
+    const input = failed && messages.find(
+      (message) => message.turn_id === failed.turn_id && message.role === "user",
+    );
+    if (!failed || !input) throw new Error("This reply can no longer be retried. Send the request again.");
+    return this.send(id, input.text, onAdopt, undefined, {
       adoptExisting: true,
-      retryOf: failed?.turn_id,
-      attachmentIds: user.attachments?.map((attachment) => attachment.id),
+      retryOf: failed.turn_id,
+      attachments: input.attachments,
     });
   }
 }

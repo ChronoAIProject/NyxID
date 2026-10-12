@@ -176,6 +176,72 @@ it("group message composition toggles pressed state through the feedback handler
   );
 });
 
+it("group replies take an optional comment after a vote without blocking it", async () => {
+  vi.mocked(api.put).mockReset();
+  vi.mocked(api.put).mockResolvedValue({ vote: "down" });
+  render(
+    <GroupMessageRow
+      groupId="g"
+      message={
+        {
+          id: "m2",
+          group_id: "g",
+          seq: 2,
+          role: "agent",
+          text: "reply",
+          created_at: new Date().toISOString(),
+          activities: [],
+          attachments: [],
+        } as never
+      }
+      names={[]}
+      onOpenAgent={() => undefined}
+    />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
+  // Sending a comment needs a vote first; the vote itself never waits for one.
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Not helpful" }));
+  expect(api.put).toHaveBeenLastCalledWith(
+    "/assistant/nyxagent/groups/g/messages/m2/feedback",
+    { vote: "down", comment: undefined },
+  );
+  await userEvent.type(screen.getByLabelText("Optional feedback comment"), "wrong calendar");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(api.put).toHaveBeenLastCalledWith(
+    "/assistant/nyxagent/groups/g/messages/m2/feedback",
+    { vote: "down", comment: "wrong calendar" },
+  );
+  expect(screen.queryByLabelText("Optional feedback comment")).not.toBeInTheDocument();
+});
+
+it("group feedback failures are visible", async () => {
+  vi.mocked(api.put).mockReset();
+  vi.mocked(api.put).mockRejectedValue(new Error("offline"));
+  render(
+    <GroupMessageRow
+      groupId="g"
+      message={
+        {
+          id: "m3",
+          group_id: "g",
+          seq: 3,
+          role: "agent",
+          text: "reply",
+          created_at: new Date().toISOString(),
+          activities: [],
+          attachments: [],
+        } as never
+      }
+      names={[]}
+      onOpenAgent={() => undefined}
+    />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Helpful" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Unable to save feedback");
+  expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "false");
+});
+
 it("links authored drafts to file review without any confirmation buttons", () => {
   const answer = vi.fn();
   render(<GroupPendingActions actions={[{

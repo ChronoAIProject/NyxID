@@ -1,19 +1,50 @@
 import { useMemo, useState } from "react";
 import { useAssistantFeedbackAdmin } from "@/hooks/use-assistant-feedback-admin";
+import type { FeedbackReplyContext } from "@/schemas/assistant-feedback-admin";
+
+/** Reply metadata beside a vote. Never reply or prompt text. */
+function ReplyContext({ context }: { readonly context: FeedbackReplyContext | null | undefined }) {
+  if (!context) {
+    return <span className="text-text-tertiary">No context (pre-A1 row)</span>;
+  }
+  const facts = [
+    context.agent_kind ? `Agent: ${context.agent_kind}` : null,
+    context.model ? `Model: ${context.model}` : null,
+    context.error_code ? `Error: ${context.error_code}` : null,
+    context.latency_ms != null ? `Latency: ${(context.latency_ms / 1000).toFixed(1)} s` : null,
+    context.tool_calls
+      ? `Tools: ${context.tool_calls} (${context.tool_errors ?? 0} failed)`
+      : null,
+  ].filter((fact): fact is string => fact !== null);
+  return (
+    <span className="flex flex-col gap-0.5">
+      <span>{facts.join(" · ") || "No reply metadata"}</span>
+      {context.tool_labels?.length ? (
+        <span className="font-mono text-text-tertiary">{context.tool_labels.join(", ")}</span>
+      ) : null}
+    </span>
+  );
+}
 
 export function AssistantFeedbackPanel() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [vote, setVote] = useState("");
+  const [model, setModel] = useState("");
+  const [agentKind, setAgentKind] = useState("");
+  const [hasError, setHasError] = useState(false);
   const [cursor, setCursor] = useState<string>();
   const params = useMemo(() => {
     const next = new URLSearchParams();
     if (from) next.set("from", new Date(`${from}T00:00:00Z`).toISOString());
     if (to) next.set("to", new Date(`${to}T23:59:59Z`).toISOString());
     if (vote) next.set("vote", vote);
+    if (model.trim()) next.set("model", model.trim());
+    if (agentKind) next.set("agent_kind", agentKind);
+    if (hasError) next.set("has_error", "true");
     if (cursor) next.set("cursor", cursor);
     return next;
-  }, [from, to, vote, cursor]);
+  }, [from, to, vote, model, agentKind, hasError, cursor]);
   const query = useAssistantFeedbackAdmin(params);
   const data = query.data;
   const error = query.error ? "Unable to load assistant feedback." : undefined;
@@ -72,6 +103,43 @@ export function AssistantFeedbackPanel() {
             <option value="down">Not helpful</option>
           </select>
         </label>
+        <label>
+          Model{" "}
+          <input
+            type="text"
+            value={model}
+            placeholder="Any"
+            onChange={(e) => {
+              setCursor(undefined);
+              setModel(e.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Agent{" "}
+          <select
+            value={agentKind}
+            onChange={(e) => {
+              setCursor(undefined);
+              setAgentKind(e.target.value);
+            }}
+          >
+            <option value="">All</option>
+            <option value="nyxbot">NyxBot</option>
+            <option value="specialist">Specialist</option>
+          </select>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={hasError}
+            onChange={(e) => {
+              setCursor(undefined);
+              setHasError(e.target.checked);
+            }}
+          />{" "}
+          Failed replies only
+        </label>
       </div>
       {error ? (
         <p role="alert" className="mt-3 text-11 text-destructive">
@@ -101,12 +169,10 @@ export function AssistantFeedbackPanel() {
               {new Date(row.created_at).toLocaleString()}
             </time>
             <span>
-              {row.vote}
-              {row.comment ? ` ${row.comment}` : ""}
-              {row.context
-                ? ` ${row.context.agent_kind ?? ""} ${row.context.model ?? ""}`
-                : " no context (pre-A1 row)"}
+              {row.vote === "up" ? "Helpful" : "Not helpful"}
+              {row.comment ? `: ${row.comment}` : ""}
             </span>
+            <ReplyContext context={row.context} />
           </div>
         ))}
       </div>

@@ -1,7 +1,7 @@
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    models::assistant_message_feedback::AssistantMessageFeedback,
+    models::assistant_message_feedback::{AssistantMessageFeedback, FeedbackReplyContext},
     mw::auth::AuthUser,
     services::{
         assistant_feedback_service as feedback_service, assistant_nyxagent as engine, audit_service,
@@ -33,6 +33,32 @@ impl From<AssistantMessageFeedback> for FeedbackResponse {
             comment: v.comment,
             updated_at: v.updated_at,
         }
+    }
+}
+
+impl From<feedback_service::FeedbackState> for FeedbackResponse {
+    fn from(v: feedback_service::FeedbackState) -> Self {
+        Self {
+            vote: v.vote,
+            comment: v.comment,
+            updated_at: v.updated_at,
+        }
+    }
+}
+
+/// Attach the acting person's votes to one page of transcript messages.
+pub(crate) fn attach<M>(
+    messages: &mut [M],
+    states: Vec<feedback_service::FeedbackState>,
+    slot: impl Fn(&mut M) -> (&str, &mut Option<FeedbackResponse>),
+) {
+    for message in messages {
+        let (id, feedback) = slot(message);
+        *feedback = states
+            .iter()
+            .find(|state| state.message_id == id)
+            .cloned()
+            .map(Into::into);
     }
 }
 
@@ -108,75 +134,62 @@ async fn upsert(
     let user_id = auth.user_id.to_string();
     enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
-    let mut reply_context = None;
-    let (turn_id, eligible) = if let Some(cid) = conversation_id.as_deref() {
+    let (turn_id, eligible, context) = if let Some(cid) = conversation_id.as_deref() {
         let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
         engine::authorize_thread_read(&state.db, &conversation).await?;
         let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-        reply_context = Some(
-            feedback_service::reply_context(&state.db, "conversation", &row, Some(&conversation))
-                .await
-                .map_err(AppError::from)?,
-        );
-        (
-            Some(row.turn_id),
-            row.role == "assistant" && row.status == "completed",
-        )
+        let eligible = row.role == "assistant" && row.status == "completed";
+        let context = if eligible {
+            Some(feedback_service::reply_context(&state.db, &row, &conversation).await?)
+        } else {
+            None
+        };
+        (Some(row.turn_id), eligible, context)
     } else {
-        let gid = group_id.as_deref().unwrap();
+        let gid = group_id
+            .as_deref()
+            .ok_or_else(|| AppError::NotFound("message not found".into()))?;
         crate::services::org_group_service::get(&state.db, &user_id, gid, None).await?;
         let row = feedback_service::group_message(&state.db, gid, message_id)
             .await?
             .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-        (None, row.role == "agent")
+        let eligible = row.role == "agent";
+        let context = eligible.then(|| feedback_service::group_reply_context(&row));
+        (None, eligible, context)
     };
     if !eligible {
         return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
     }
-    let (row, existing) = feedback_service::upsert_feedback(
+    let (row, previous) = feedback_service::upsert_feedback(
         &state.db,
         feedback_service::FeedbackWrite {
-            user_id: user_id.clone(),
+            user_id,
             message_id: message_id.to_owned(),
-            conversation_id: conversation_id.clone(),
-            group_id: group_id.clone(),
-            turn_id: turn_id.clone(),
-            vote: input.vote.clone(),
-            comment: comment.clone(),
+            conversation_id,
+            group_id,
+            turn_id,
+            vote: input.vote,
+            comment,
             comment_present: input.comment.is_some(),
-            context: reply_context,
+            context,
         },
     )
-    .await
-    .map_err(AppError::from)?;
-    if existing
-        .as_ref()
-        .map(|r| {
-            r.vote.as_str() == input.vote.as_str()
-                && (input.comment.is_none() || r.comment == comment)
-        })
-        .unwrap_or(false)
-    {
-        return Ok(Json(row.into()));
+    .await?;
+    if let Some(event) = feedback_service::classify(previous.as_ref(), &row) {
+        feedback_service::log_event(event, &row, previous.as_ref());
+        audit_service::log_for_user(
+            state.db.clone(),
+            auth,
+            "assistant_feedback_submitted",
+            Some(feedback_service::audit_details(
+                event,
+                &row,
+                previous.as_ref(),
+            )),
+        );
     }
-    let event = if existing.is_none() {
-        "submitted"
-    } else if existing.as_ref().map(|r| r.vote.as_str()) != Some(input.vote.as_str()) {
-        "changed"
-    } else {
-        "comment_updated"
-    };
-    tracing::info!(target: "nyxid::assistant_feedback", event, feedback_id = %row.id, user_id = %user_id, message_id, vote = %input.vote, previous_vote = existing.as_ref().map(|r| r.vote.as_str()).unwrap_or(""), has_comment = input.comment.is_some(), comment_chars = comment.as_ref().map(|v| v.chars().count()).unwrap_or(0), surface = if group_id.is_some() { "group" } else { "conversation" }, conversation_id = ?conversation_id, group_id = ?group_id, context_surface = ?row.context.as_ref().and_then(|c| c.surface.as_deref()), context_agent_id = ?row.context.as_ref().and_then(|c| c.agent_id.as_deref()), context_agent_kind = ?row.context.as_ref().and_then(|c| c.agent_kind.as_deref()), context_model = ?row.context.as_ref().and_then(|c| c.model.as_deref()), context_error_code = ?row.context.as_ref().and_then(|c| c.error_code.as_deref()), latency_ms = ?row.context.as_ref().and_then(|c| c.latency_ms), tool_calls = row.context.as_ref().map(|c| c.tool_calls).unwrap_or(0), tool_errors = row.context.as_ref().map(|c| c.tool_errors).unwrap_or(0), tool_labels = ?row.context.as_ref().map(|c| &c.tool_labels), context = ?row.context, "assistant feedback state changed");
-    audit_service::log_for_user(
-        state.db.clone(),
-        auth,
-        "assistant_feedback_submitted",
-        Some(
-            serde_json::json!({"message_id":message_id,"vote":input.vote,"conversation_id":conversation_id,"group_id":group_id,"previous_vote":existing.as_ref().map(|r| r.vote.clone()),"change":event,"has_comment":input.comment.is_some()}),
-        ),
-    );
     Ok(Json(row.into()))
 }
 pub async fn put_conversation(
@@ -226,19 +239,20 @@ async fn withdraw(
         }
     }
     let deleted = feedback_service::delete_feedback(&state.db, &user_id, &message_id).await?;
-    if deleted.is_none() {
+    let Some(deleted) = deleted else {
         return Ok(StatusCode::NO_CONTENT);
-    }
-    let context = deleted.as_ref().and_then(|row| row.context.as_ref());
-    tracing::info!(target: "nyxid::assistant_feedback", event = "withdrawn", user_id = %user_id, message_id = %message_id,
-        surface = ?context.and_then(|c| c.surface.as_deref()), agent_id = ?context.and_then(|c| c.agent_id.as_deref()), agent_kind = ?context.and_then(|c| c.agent_kind.as_deref()), model = ?context.and_then(|c| c.model.as_deref()), access_mode = ?context.and_then(|c| c.access_mode.as_deref()), reply_status = ?context.and_then(|c| c.reply_status.as_deref()), error_code = ?context.and_then(|c| c.error_code.as_deref()), origin = ?context.and_then(|c| c.origin.as_deref()), via = ?context.and_then(|c| c.via.as_deref()), turn_id = ?context.and_then(|c| c.turn_id.as_deref()), reply_seq = ?context.and_then(|c| c.reply_seq), latency_ms = ?context.and_then(|c| c.latency_ms), tool_calls = context.map(|c| c.tool_calls).unwrap_or(0), tool_errors = context.map(|c| c.tool_errors).unwrap_or(0), machine_used = context.map(|c| c.machine_used).unwrap_or(false), attachments = context.map(|c| c.attachments).unwrap_or(0), steered = context.map(|c| c.steered).unwrap_or(false), voice = context.map(|c| c.voice).unwrap_or(false), reply_chars = context.map(|c| c.reply_chars).unwrap_or(0), context_reset_since_reply = context.map(|c| c.context_reset_since_reply).unwrap_or(false), "assistant feedback state changed");
+    };
+    let event = feedback_service::FeedbackEvent::Withdrawn;
+    feedback_service::log_event(event, &deleted, Some(&deleted));
     audit_service::log_for_user(
         state.db.clone(),
         auth,
         "assistant_feedback_withdrawn",
-        Some(
-            serde_json::json!({"message_id":message_id,"group":group,"conversation_id": if group { serde_json::Value::Null } else { serde_json::Value::String(scope.clone().unwrap_or_default()) },"group_id": if group { serde_json::Value::String(scope.clone().unwrap_or_default()) } else { serde_json::Value::Null }}),
-        ),
+        Some(feedback_service::audit_details(
+            event,
+            &deleted,
+            Some(&deleted),
+        )),
     );
     Ok(StatusCode::NO_CONTENT)
 }
@@ -274,9 +288,67 @@ pub struct AdminResponse {
     pub recent: Vec<AdminFeedbackRow>,
     pub next_cursor: Option<String>,
 }
+/// Admin projection of the stored reply snapshot: metadata only.
+#[derive(Serialize)]
+pub struct FeedbackContextResponse {
+    pub surface: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_kind: Option<String>,
+    pub model: Option<String>,
+    pub access_mode: Option<String>,
+    pub reply_status: Option<String>,
+    pub error_code: Option<String>,
+    pub origin: Option<String>,
+    pub via: Option<String>,
+    pub turn_id: Option<String>,
+    pub reply_seq: Option<i64>,
+    pub reply_created_at: Option<DateTime<Utc>>,
+    pub latency_ms: Option<i64>,
+    pub tool_calls: u32,
+    pub tool_errors: u32,
+    pub tool_labels: Vec<String>,
+    pub machine_used: bool,
+    pub attachments: u32,
+    pub steered: bool,
+    pub voice: bool,
+    pub reply_chars: u32,
+    pub context_reset_since_reply: bool,
+    pub org_group: bool,
+}
+
+impl From<FeedbackReplyContext> for FeedbackContextResponse {
+    fn from(c: FeedbackReplyContext) -> Self {
+        Self {
+            surface: c.surface,
+            agent_id: c.agent_id,
+            agent_kind: c.agent_kind,
+            model: c.model,
+            access_mode: c.access_mode,
+            reply_status: c.reply_status,
+            error_code: c.error_code,
+            origin: c.origin,
+            via: c.via,
+            turn_id: c.turn_id,
+            reply_seq: c.reply_seq,
+            reply_created_at: c.reply_created_at,
+            latency_ms: c.latency_ms,
+            tool_calls: c.tool_calls,
+            tool_errors: c.tool_errors,
+            tool_labels: c.tool_labels,
+            machine_used: c.machine_used,
+            attachments: c.attachments,
+            steered: c.steered,
+            voice: c.voice,
+            reply_chars: c.reply_chars,
+            context_reset_since_reply: c.context_reset_since_reply,
+            org_group: c.org_group,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct AdminFeedbackRow {
-    pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
+    pub context: Option<FeedbackContextResponse>,
     pub message_id: String,
     pub vote: String,
     pub comment: Option<String>,
@@ -339,7 +411,7 @@ pub async fn admin(
     let recent = rows
         .iter()
         .map(|r| AdminFeedbackRow {
-            context: r.context.clone(),
+            context: r.context.clone().map(Into::into),
             message_id: r.message_id.clone(),
             vote: r.vote.clone(),
             comment: r.comment.clone(),

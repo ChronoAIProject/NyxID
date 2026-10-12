@@ -14,6 +14,9 @@ use uuid::Uuid;
 use crate::{
     errors::{AppError, AppResult},
     models::{
+        assistant_checkpoint::{
+            AssistantCheckpoint, COLLECTION_NAME as CHECKPOINTS, CheckpointAction,
+        },
         assistant_conversation::{
             AccessMode, ActiveTurn, AgentEvent, AgentRole, AssistantConversation,
             COLLECTION_NAME as CONVERSATIONS, ChannelOrigin, TurnActivity, TurnOrigin,
@@ -566,7 +569,10 @@ pub fn parse_turn(bytes: &[u8]) -> AppResult<TurnRequest> {
     let request: TurnRequest = serde_json::from_slice(bytes)
         .map_err(|_| AppError::BadRequest("Invalid assistant turn request".into()))?;
     super::assistant_upload_service::validate_ids(&request.attachment_ids)?;
-    if (request.text.trim().is_empty() && request.attachment_ids.is_empty())
+    // A retry re-attaches its failed turn's uploads server-side.
+    if (request.text.trim().is_empty()
+        && request.attachment_ids.is_empty()
+        && request.retry_of.is_none())
         || request.text.chars().count() > MAX_MESSAGE_CHARS
         || request
             .conversation_id
@@ -1247,24 +1253,59 @@ pub async fn messages(
     Ok(rows)
 }
 
+/// The owner's explicit reset: drop the live session binding and the durable
+/// checkpoint, so the next turn starts without a recap. Fenced like a model
+/// change: a turn claimed between the read and the write wins.
 pub async fn reset_context(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
-    let current = get(db, user_id, id).await?;
+    let (current, _) = get_authorized(db, user_id, id).await?;
+    authorize_thread_read(db, &current).await?;
     if live_turn(&current, Utc::now()).is_some() {
         return Err(AppError::AssistantTurnActive);
     }
-    db.collection::<AssistantConversation>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": id, "user_id": user_id},
-            doc! {"$set": {
-                "nyxagent_session_id": bson::Bson::Null,
-                "nyxagent_instruction_binding": bson::Bson::Null,
-                "nyxagent_last_response_id": bson::Bson::Null,
-                "context_reset_at": bson::DateTime::now(),
-                "context_reset_reason": "user_reset",
-            }},
-        )
-        .await?;
-    Ok(())
+    // An expired fence is not live; it is reclaimed by the next send. Match
+    // it exactly so a new claim (a different turn id) still wins.
+    let fence = match current.active_turn.as_ref() {
+        Some(turn) => doc! {"active_turn.turn_id": &turn.turn_id},
+        None => doc! {"active_turn": bson::Bson::Null},
+    };
+    let mut filter = doc! {"_id": id, "user_id": &current.user_id};
+    filter.extend(fence);
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let owner = current.user_id.clone();
+    let id = id.to_owned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<_> = async {
+                let updated = db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .update_one(
+                        filter.clone(),
+                        doc! {"$set": {
+                            "nyxagent_session_id": bson::Bson::Null,
+                            "nyxagent_instruction_binding": bson::Bson::Null,
+                            "nyxagent_last_response_id": bson::Bson::Null,
+                            "context_reset_at": bson::DateTime::now(),
+                            "context_reset_reason": "user_reset",
+                        }},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if updated.matched_count != 1 {
+                    return Err(AppError::AssistantTurnActive);
+                }
+                db.collection::<AssistantCheckpoint>(CHECKPOINTS)
+                    .delete_one(doc! {"_id": &id, "user_id": &owner})
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            transactions::transaction_result(operation)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
 }
 
 /// Read metadata and its page from one MongoDB transaction snapshot so a reload
@@ -1313,35 +1354,123 @@ pub async fn history_page(
         .map_err(transactions::map_transaction_error)
 }
 
-pub async fn context_checkpoint(
+const CHECKPOINT_GOAL_CHARS: usize = 1000;
+const CHECKPOINT_OUTPUT_CHARS: usize = 500;
+const CHECKPOINT_ACTIONS: usize = MAX_TURN_ACTIVITIES as usize;
+
+fn keep_newest(actions: &mut Vec<CheckpointAction>) {
+    let excess = actions.len().saturating_sub(CHECKPOINT_ACTIONS);
+    actions.drain(..excess);
+}
+
+/// Write the conversation's durable checkpoint inside the transaction that
+/// settles `turn`. A failed turn accumulates onto a previous failed
+/// checkpoint (the task is still open); a completed turn starts a new
+/// window. Guest turns never write the owner's checkpoint.
+pub(crate) async fn write_checkpoint_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    row: &AssistantConversation,
+    turn: &ActiveTurn,
+    reply: &AssistantMessage,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    if row.guest_turn {
+        return Ok(());
+    }
+    let collection = db.collection::<AssistantCheckpoint>(CHECKPOINTS);
+    let filter = doc! {"_id": &row.id, "user_id": &row.user_id};
+    let previous = collection
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?;
+    let request = match (turn.origin, turn.initiating_message_seq) {
+        (TurnOrigin::User | TurnOrigin::Channel, Some(seq)) => db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"conversation_id": &row.id, "user_id": &row.user_id, "seq": seq, "role": "user"})
+            .session(&mut *session)
+            .await?
+            .map(|message| excerpt(&message.text, CHECKPOINT_GOAL_CHARS))
+            .filter(|goal| !goal.is_empty()),
+        _ => None,
+    };
+    let goal = request.or_else(|| previous.as_ref().and_then(|p| p.goal.clone()));
+    // A failed turn continues the open window of a previous failure; a
+    // successful turn closes it and records only its own actions.
+    let open = previous
+        .as_ref()
+        .filter(|p| p.status == "failed" && reply.status != "completed");
+    let mut completed_actions = open
+        .map(|p| p.completed_actions.clone())
+        .unwrap_or_default();
+    let mut failed_actions = open.map(|p| p.failed_actions.clone()).unwrap_or_default();
+    for activity in &reply.activities {
+        let action = CheckpointAction {
+            label: activity.label.clone(),
+            turn_id: reply.turn_id.clone(),
+        };
+        if activity.status == "completed" {
+            completed_actions.push(action);
+        } else {
+            failed_actions.push(action);
+        }
+    }
+    keep_newest(&mut completed_actions);
+    keep_newest(&mut failed_actions);
+    let succeeded = reply.status == "completed";
+    let checkpoint = AssistantCheckpoint {
+        conversation_id: row.id.clone(),
+        user_id: row.user_id.clone(),
+        turn_id: reply.turn_id.clone(),
+        status: reply.status.clone(),
+        error_code: reply.error_code.clone(),
+        goal,
+        completed_actions,
+        failed_actions,
+        output: Some(excerpt(&reply.text, CHECKPOINT_OUTPUT_CHARS)).filter(|text| !text.is_empty()),
+        last_successful_turn_id: if succeeded {
+            Some(reply.turn_id.clone())
+        } else {
+            previous
+                .as_ref()
+                .and_then(|p| p.last_successful_turn_id.clone())
+        },
+        last_successful_at: if succeeded {
+            Some(now)
+        } else {
+            previous.as_ref().and_then(|p| p.last_successful_at)
+        },
+        updated_at: now,
+    };
+    collection
+        .replace_one(filter, &checkpoint)
+        .upsert(true)
+        .session(&mut *session)
+        .await?;
+    Ok(())
+}
+
+/// The durable checkpoint of an owned conversation, if any turn has settled
+/// since checkpoints were introduced.
+pub async fn checkpoint(
     db: &Database,
     user_id: &str,
     id: &str,
-) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
-    history_page(db, user_id, id, 100, None).await
+) -> AppResult<Option<AssistantCheckpoint>> {
+    Ok(db
+        .collection::<AssistantCheckpoint>(CHECKPOINTS)
+        .find_one(doc! {"_id": id, "user_id": user_id})
+        .await?)
 }
 
-/// The canonical checkpoint source shared by context inspection and turn
-/// preparation. Callers must project this result rather than rebuilding a
-/// second history window.
-pub async fn checkpoint_for_turn(
-    db: &Database,
-    user_id: &str,
-    id: &str,
-) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
-    context_checkpoint(db, user_id, id).await
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
+/// What `GET …/context` shows: the durable checkpoint plus the live turn's
+/// running actions. Owner and org-thread access are checked first.
+#[derive(Clone, Debug)]
 pub struct CheckpointSummary {
     pub conversation: AssistantConversation,
-    pub messages: Vec<AssistantMessage>,
-    pub goal: Option<String>,
-    pub completed_actions: Vec<String>,
+    pub checkpoint: Option<AssistantCheckpoint>,
     pub pending_actions: Vec<String>,
-    pub failed_actions: Vec<String>,
-    pub last_successful_turn: Option<String>,
-    pub binding_state: String,
+    pub binding_state: &'static str,
 }
 
 pub async fn checkpoint_summary(
@@ -1349,46 +1478,27 @@ pub async fn checkpoint_summary(
     user_id: &str,
     id: &str,
 ) -> AppResult<CheckpointSummary> {
-    let (conversation, messages) = checkpoint_for_turn(db, user_id, id).await?;
-    let mut activities = messages
-        .iter()
-        .flat_map(|message| message.activities.iter().cloned())
-        .collect::<Vec<_>>();
-    if let Some(active) = conversation.active_turn.as_ref() {
-        activities.extend(active.activities.iter().cloned());
-    }
+    let (conversation, _) = get_authorized(db, user_id, id).await?;
+    authorize_thread_read(db, &conversation).await?;
+    let checkpoint = checkpoint(db, user_id, id).await?;
+    let pending_actions = live_turn(&conversation, Utc::now())
+        .map(|turn| {
+            turn.activities
+                .iter()
+                .filter(|activity| activity.status == "running")
+                .map(|activity| activity.label.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(CheckpointSummary {
-        goal: messages
-            .iter()
-            .find(|message| message.role == "user")
-            .map(|message| message.text.clone()),
-        completed_actions: activities
-            .iter()
-            .filter(|a| a.status == "completed")
-            .map(|a| format!("{}=completed", a.label))
-            .collect(),
-        pending_actions: activities
-            .iter()
-            .filter(|a| a.status == "running")
-            .map(|a| format!("{}=running", a.label))
-            .collect(),
-        failed_actions: activities
-            .iter()
-            .filter(|a| a.status == "error")
-            .map(|a| format!("{}=error", a.label))
-            .collect(),
-        last_successful_turn: messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "assistant" && message.status == "completed")
-            .map(|message| message.turn_id.clone()),
         binding_state: if conversation.nyxagent_session_id.is_some() {
-            "bound".into()
+            "bound"
         } else {
-            "reset".into()
+            "reset"
         },
         conversation,
-        messages,
+        checkpoint,
+        pending_actions,
     })
 }
 
@@ -1738,6 +1848,7 @@ pub async fn begin_turn_with_voice(
                     row.context_reset_reason = Some("credential_replaced".into());
                 }
                 if let Some(lost) = row.active_turn.take() {
+                    let lost_turn = lost.clone();
                     row.message_count += 1;
                     let message = AssistantMessage {
                         specialist_id: None,
@@ -1767,6 +1878,10 @@ pub async fn begin_turn_with_voice(
                         origin: Some(lost.origin),
                         via: None,
                     };
+                    Box::pin(write_checkpoint_in_session(
+                        db, session, &row, &lost_turn, &message, now,
+                    ))
+                    .await?;
                     db.collection::<AssistantMessage>(MESSAGES)
                         .insert_one(message)
                         .session(&mut *session)
@@ -1788,7 +1903,38 @@ pub async fn begin_turn_with_voice(
                 let input_seq = voice_request
                     .as_ref().filter(|_| !hidden_voice)
                     .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
+                // Owner Retry: the failed turn's completed actions are fenced
+                // and its attachments are carried over (they are already bound).
+                let retry = match start.retry_of.as_deref() {
+                    Some(retry_of) => {
+                        if start.conversation_id.is_none()
+                            || start.origin != TurnOrigin::User
+                            || start.guest
+                        {
+                            return Err(AppError::BadRequest(RETRY_INVALID.into()));
+                        }
+                        Some(
+                            Box::pin(retry_context_in_session(
+                                db, session, user_id, &id, retry_of,
+                            ))
+                            .await?,
+                        )
+                    }
+                    None => None,
+                };
+                let note = match (start.note.as_deref(), retry.as_ref()) {
+                    (Some(note), Some(retry)) => {
+                        Some(format!("{}\n\n{}", excerpt(note, 1200), retry.note))
+                    }
+                    (Some(note), None) => Some(excerpt(note, 1200)),
+                    (None, Some(retry)) => Some(retry.note.clone()),
+                    (None, None) => None,
+                };
                 row.active_turn = Some(ActiveTurn {
+                    retry_digests: retry
+                        .as_ref()
+                        .map(|retry| retry.digests.clone())
+                        .unwrap_or_default(),
                     retry_of: start.retry_of.clone(),
                     running_response: None,
                     channel_event_id: start.channel_event_id.clone(),
@@ -1807,7 +1953,7 @@ pub async fn begin_turn_with_voice(
                     activities: Vec::new(),
                     attachments: Vec::new(),
                     events,
-                    note: start.note.as_deref().map(|note| excerpt(note, 1200)),
+                    note,
                     question_key: start.question_key.clone().or_else(|| {
                         (start.origin == TurnOrigin::User)
                             .then(|| question_key(&start.text))
@@ -1903,6 +2049,11 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 uploads.extend(start.group_attachments.clone());
+                for carried in retry.iter().flat_map(|retry| retry.attachments.iter()) {
+                    if !uploads.iter().any(|upload| upload.id == carried.id) {
+                        uploads.push(carried.clone());
+                    }
+                }
                 Box::pin(super::assistant_upload_retention::used_in_turn(
                     db,
                     session,
@@ -2297,7 +2448,7 @@ async fn finish_turn_inner(
                     .as_ref()
                     .is_some_and(|t| t.stop_requested)
                 {
-                    Some(TurnError::new("cancelled"))
+                    Some(TurnError::internal("cancelled", "stop"))
                 } else {
                     result.error.clone()
                 };
@@ -2377,17 +2528,18 @@ async fn finish_turn_inner(
                             update)
                         .session(&mut *session).await?;
                 }
-                current.active_turn = None;
+                let continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations);
+                let settled_turn = current.active_turn.take();
                 if error.as_ref().is_some_and(|e| !e.preserves_session()) || !credential_alive {
                     current.nyxagent_session_id = None;
                     current.nyxagent_instruction_binding = None;
                     current.nyxagent_last_response_id = None;
                     current.context_reset_at = Some(now);
                     current.context_reset_reason = Some(
-                        if error.is_some() {
-                            "turn_failed"
-                        } else {
-                            "credential_replaced"
+                        match error.as_ref().map(|e| e.code) {
+                            Some("cancelled") => "stopped",
+                            Some(_) => "turn_failed",
+                            None => "credential_replaced",
                         }
                         .into(),
                     );
@@ -2404,7 +2556,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 if let Some(error) = &error {
-                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations), upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
+                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
                     specialist_id: None,
@@ -2431,7 +2583,7 @@ async fn finish_turn_inner(
                         http_status: error.http_status,
                         upstream_request_id: error.upstream_request_id.as_ref().map(|v| v.to_string()),
                         response_id: error.response_id.as_ref().map(|v| v.to_string()).or_else(|| result.response_id.clone()),
-                        continuations: current.active_turn.as_ref().map_or(0, |t| t.continuations),
+                        continuations,
                         turn_id: turn_id.clone(),
                         occurred_at: now,
                     }),
@@ -2441,6 +2593,12 @@ async fn finish_turn_inner(
                     origin,
                     via: None,
                 };
+                if let Some(turn) = settled_turn.as_ref() {
+                    Box::pin(write_checkpoint_in_session(
+                        &db, session, &current, turn, &message, now,
+                    ))
+                    .await?;
+                }
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
                     .session(&mut *session)
@@ -2479,7 +2637,7 @@ pub async fn force_stop(db: &Database, user_id: &str, id: &str, turn_id: &str) -
             text: String::new(),
             session_id: None,
             response_id: None,
-            error: Some(TurnError::new("cancelled")),
+            error: Some(TurnError::internal("cancelled", "stop")),
         },
         None,
         None,
@@ -2527,7 +2685,7 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
                 text: String::new(),
                 session_id: None,
                 response_id: None,
-                error: Some(TurnError::new("turn_lost")),
+                error: Some(TurnError::internal("turn_lost", "sweep")),
             },
             None,
             Some(stale_before),
@@ -2793,42 +2951,156 @@ pub async fn activity_started_with_digest(
     Ok((result.matched_count == 1).then_some(id))
 }
 
-pub async fn mark_retry_of(
+/// Refusal code for a retry that repeats a completed call of the turn it retries.
+pub const RETRY_DUPLICATE_ACTION: &str = "retry_duplicate_action";
+/// A `retry_of` that is not a failed owner turn of this conversation.
+pub const RETRY_INVALID: &str = "retry_of must name a failed turn of this conversation";
+/// The retry note lists every completed action (up to the activity bound).
+const RETRY_NOTE_CHARS: usize = 6000;
+
+/// What an owner Retry inherits from the failed turn it retries.
+pub struct RetryContext {
+    pub digests: Vec<String>,
+    pub attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+    pub note: String,
+}
+
+/// Load the failed turn a retry names, inside the claim transaction. Its
+/// reply's completed activities (including duplicates it refused, which are
+/// recorded as completed) become the retry's fence, so a retry of a retry
+/// stays fenced; its input's attachments are carried over unchanged.
+pub async fn retry_context_in_session(
     db: &Database,
+    session: &mut mongodb::ClientSession,
     user_id: &str,
     conversation_id: &str,
     retry_of: &str,
-) -> AppResult<()> {
-    db.collection::<AssistantConversation>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": conversation_id, "user_id": user_id, "active_turn.turn_id": {"$exists": true}},
-            doc! {"$set": {"active_turn.retry_of": retry_of}},
-        )
+) -> AppResult<RetryContext> {
+    let messages = db.collection::<AssistantMessage>(MESSAGES);
+    let failed = messages
+        .find_one(doc! {
+            "conversation_id": conversation_id, "user_id": user_id,
+            "turn_id": retry_of, "role": "assistant", "status": "failed",
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::BadRequest(RETRY_INVALID.into()))?;
+    let input = messages
+        .find_one(doc! {
+            "conversation_id": conversation_id, "user_id": user_id,
+            "turn_id": retry_of, "role": {"$ne": "assistant"},
+        })
+        .session(&mut *session)
         .await?;
-    Ok(())
+    let completed: Vec<&TurnActivity> = failed
+        .activities
+        .iter()
+        .filter(|activity| activity.status == "completed")
+        .collect();
+    let mut digests: Vec<String> = Vec::new();
+    for digest in completed.iter().filter_map(|a| a.digest.as_deref()) {
+        if !digests.iter().any(|seen| seen == digest) {
+            digests.push(digest.to_owned());
+        }
+    }
+    let unfinished: Vec<&str> = failed
+        .activities
+        .iter()
+        .filter(|activity| activity.status != "completed")
+        .map(|activity| activity.label.as_str())
+        .collect();
+    let attachments = input.map(|input| input.attachments).unwrap_or_default();
+    let mut note = format!(
+        "[NyxID retry context: the owner is retrying turn {retry_of}, which failed ({}). ",
+        failed
+            .error_code
+            .as_deref()
+            .unwrap_or("assistant_unavailable")
+    );
+    if completed.is_empty() {
+        note.push_str("No action completed in that turn.");
+    } else {
+        note.push_str(
+            "These actions already completed there; use their results. NyxID refuses \
+             repeating any of them with the same arguments: ",
+        );
+        note.push_str(
+            &completed
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        note.push('.');
+    }
+    if !unfinished.is_empty() {
+        note.push_str(" These did not complete; check their effect before running them again: ");
+        note.push_str(&unfinished.join(", "));
+        note.push('.');
+    }
+    if !attachments.is_empty() {
+        note.push_str(" The original message's attachments are attached again.");
+    }
+    note.push(']');
+    Ok(RetryContext {
+        digests,
+        attachments,
+        note: excerpt(&note, RETRY_NOTE_CHARS),
+    })
 }
 
-pub async fn retry_duplicate_digest(
+/// Whether a chat-key call repeats a completed call of the failed turn the
+/// live turn retries. One point read of the conversation.
+pub async fn retry_duplicate(
     db: &Database,
     user_id: &str,
     conversation_id: &str,
     digest: &str,
 ) -> AppResult<bool> {
-    let Some(row) = db.collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one(doc! {"_id": conversation_id, "user_id": user_id, "active_turn.retry_of": {"$exists": true}})
-        .await? else { return Ok(false); };
-    let Some(retry_of) = row.active_turn.and_then(|turn| turn.retry_of) else {
-        return Ok(false);
-    };
-    let messages = messages(db, user_id, conversation_id, 100, None).await?;
-    Ok(messages
-        .iter()
-        .find(|message| message.turn_id == retry_of && message.role == "assistant")
-        .is_some_and(|message| {
-            message.activities.iter().any(|activity| {
-                activity.status == "completed" && activity.digest.as_deref() == Some(digest)
-            })
-        }))
+    Ok(db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find_one(doc! {
+            "_id": conversation_id, "user_id": user_id,
+            "active_turn.retry_digests": digest,
+        })
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some())
+}
+
+/// Record a refused duplicate on the live turn. It is listed as completed:
+/// the action did complete, in the retried turn, and a later retry of this
+/// turn inherits the fence through it.
+pub async fn record_retry_duplicate(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    label: &str,
+    digest: &str,
+) -> AppResult<()> {
+    let now = bson::DateTime::now();
+    let label: String = label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {
+                "_id": conversation_id,
+                "user_id": user_id,
+                "active_turn.turn_id": {"$exists": true},
+            },
+            doc! {"$push": {"active_turn.activities": {
+                "$each": [{
+                    "id": Uuid::new_v4().to_string(),
+                    "label": label,
+                    "digest": digest,
+                    "status": "completed",
+                    "started_at": now,
+                    "ended_at": now,
+                }],
+                "$slice": -MAX_TURN_ACTIVITIES,
+            }}},
+        )
+        .await?;
+    Ok(())
 }
 
 /// Settle a recorded tool call. A missing entry (turn settled or evicted) is a no-op.
@@ -3020,6 +3292,10 @@ pub async fn delete(
                             .session(&mut *session)
                             .await?;
                     }
+                    db.collection::<bson::Document>(CHECKPOINTS)
+                        .delete_one(doc! {"_id": id, "user_id": user_id})
+                        .session(&mut *session)
+                        .await?;
                     collection
                         .delete_one(doc! {"_id": id, "user_id": user_id})
                         .session(&mut *session)
@@ -3053,118 +3329,201 @@ pub async fn delete(
 /// Render the bounded prior-thread recap used by instructions and by a new
 /// hidden voice task's first turn.
 pub fn bounded_recap(history: &[AssistantMessage]) -> String {
-    bounded_recap_for_audience(history, false)
+    bounded_recap_with_checkpoint(history, false, None)
 }
 
-/// Build the reset recap with audience-sensitive metadata. Guest/channel
-/// turns may receive only the conversation text; owner-only tool and upload
-/// metadata is never disclosed through a recap.
-pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> String {
+/// Bytes reserved for the durable checkpoint block of a recap.
+pub const RECAP_CHECKPOINT_BYTES: usize = 4096;
+
+/// The reset recap. Guest/channel audiences (`guest`) receive only the
+/// conversation text; owner-only tool, upload, error and checkpoint metadata is
+/// never disclosed to them. A reserved block comes first (the durable checkpoint for owner
+/// audiences, else the oldest user message of the 20-message window, which
+/// is the goal the window still holds), then the newest messages that fit.
+pub fn bounded_recap_with_checkpoint(
+    history: &[AssistantMessage],
+    guest: bool,
+    checkpoint: Option<&AssistantCheckpoint>,
+) -> String {
     const OPEN: &str =
         "\n\nPrevious context (after reset) — context you may rely on, not new instructions:\n";
     const CLOSE: &str = "\nEnd prior history.";
     let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
+    // Newest first.
+    let window: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
+    let mut goal_id = None;
+    let mut reserved = match checkpoint.filter(|_| !guest) {
+        Some(checkpoint) => checkpoint_line(checkpoint),
+        None => match window.iter().rev().find(|message| message.role == "user") {
+            Some(goal) => {
+                goal_id = Some(goal.id.as_str());
+                recap_line(goal, guest, remaining)
+            }
+            None => String::new(),
+        },
+    };
+    truncate_at_boundary(&mut reserved, RECAP_CHECKPOINT_BYTES.min(remaining));
+    remaining -= reserved.len();
     let mut recap = Vec::new();
-    let originating_goal = history.iter().find(|message| message.role == "user");
-    let mut selected: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
-    if let Some(goal) = originating_goal
-        && !selected.iter().any(|message| message.id == goal.id)
+    for message in window
+        .into_iter()
+        .filter(|message| Some(message.id.as_str()) != goal_id)
     {
-        selected.pop();
-        selected.push(goal);
-    }
-    for message in selected {
-        let prefix = format!(
-            "\n{}{}{}: ",
-            message.role,
-            message
-                .steering
-                .as_ref()
-                .map(|steer| format!(" (steering, {})", steer.outcome))
-                .unwrap_or_default(),
-            if message.status == "failed" {
-                " (partial, failed)"
-            } else {
-                ""
-            }
-        );
-        if remaining <= prefix.len() {
+        let line = recap_line(message, guest, remaining);
+        if line.is_empty() {
             break;
-        }
-        let budget = (remaining - prefix.len()).min(2048);
-        let head = budget / 2;
-        let tail = budget - head;
-        let mut end = message.text.len().min(head);
-        while !message.text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut start = message.text.len().saturating_sub(tail);
-        while start < message.text.len() && !message.text.is_char_boundary(start) {
-            start += 1;
-        }
-        let body = if start > end {
-            format!("{} … {}", &message.text[..end], &message.text[start..])
-        } else {
-            message.text.clone()
-        };
-        let activities = if guest || message.activities.is_empty() {
-            String::new()
-        } else {
-            let omitted = message.activities.len().saturating_sub(10);
-            format!(
-                " [actions: {}{}]",
-                message
-                    .activities
-                    .iter()
-                    .take(10)
-                    .map(|a| format!("{}={}", a.label, a.status))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                if omitted > 0 {
-                    format!(", +{omitted} more")
-                } else {
-                    String::new()
-                }
-            )
-        };
-        let attachments = if guest || message.attachments.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " [attachments: {}]",
-                message
-                    .attachments
-                    .iter()
-                    .map(|a| a.label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
-        let error = if guest {
-            String::new()
-        } else {
-            format!(
-                " [error: {}]",
-                message.error_code.as_deref().unwrap_or("none")
-            )
-        };
-        let mut line = format!("{prefix}{body}{activities}{attachments}{error}");
-        if line.len() > remaining {
-            let mut end = remaining;
-            while !line.is_char_boundary(end) {
-                end -= 1;
-            }
-            line.truncate(end);
         }
         remaining = remaining.saturating_sub(line.len());
         recap.push(line);
     }
     recap.reverse();
-    if recap.is_empty() {
+    if recap.is_empty() && reserved.is_empty() {
         String::new()
     } else {
-        format!("{OPEN}{}{CLOSE}", recap.concat())
+        format!("{OPEN}{reserved}{}{CLOSE}", recap.concat())
     }
+}
+
+fn truncate_at_boundary(text: &mut String, max: usize) {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+}
+
+/// The checkpoint block of a recap: its scope (turn and outcome), the goal,
+/// the actions since the last successful turn, and a bounded output excerpt.
+fn checkpoint_line(checkpoint: &AssistantCheckpoint) -> String {
+    let labels = |actions: &[CheckpointAction]| {
+        actions
+            .iter()
+            .map(|action| action.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut line = format!(
+        "\nCheckpoint (turn {}, {}{}; last successful turn {}):",
+        checkpoint.turn_id,
+        checkpoint.status,
+        checkpoint
+            .error_code
+            .as_deref()
+            .map(|code| format!(": {code}"))
+            .unwrap_or_default(),
+        checkpoint
+            .last_successful_turn_id
+            .as_deref()
+            .unwrap_or("none"),
+    );
+    if let Some(goal) = checkpoint.goal.as_deref() {
+        line.push_str(&format!("\n- goal: {goal}"));
+    }
+    if !checkpoint.completed_actions.is_empty() {
+        line.push_str(&format!(
+            "\n- completed: {}",
+            labels(&checkpoint.completed_actions)
+        ));
+    }
+    if !checkpoint.failed_actions.is_empty() {
+        line.push_str(&format!(
+            "\n- failed or interrupted (check before rerunning): {}",
+            labels(&checkpoint.failed_actions)
+        ));
+    }
+    if let Some(output) = checkpoint.output.as_deref() {
+        line.push_str(&format!("\n- last output: {output}"));
+    }
+    line
+}
+
+/// One recap line within `remaining` bytes, or empty when nothing fits.
+fn recap_line(message: &AssistantMessage, guest: bool, remaining: usize) -> String {
+    let prefix = format!(
+        "\n{}{}{}: ",
+        message.role,
+        message
+            .steering
+            .as_ref()
+            .map(|steer| format!(" (steering, {})", steer.outcome))
+            .unwrap_or_default(),
+        if message.status == "failed" {
+            " (partial, failed)"
+        } else {
+            ""
+        }
+    );
+    if remaining <= prefix.len() {
+        return String::new();
+    }
+    let budget = (remaining - prefix.len()).min(2048);
+    let head = budget / 2;
+    let tail = budget - head;
+    let mut end = message.text.len().min(head);
+    while !message.text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut start = message.text.len().saturating_sub(tail);
+    while start < message.text.len() && !message.text.is_char_boundary(start) {
+        start += 1;
+    }
+    let body = if start > end {
+        format!("{} … {}", &message.text[..end], &message.text[start..])
+    } else {
+        message.text.clone()
+    };
+    let activities = if guest || message.activities.is_empty() {
+        String::new()
+    } else {
+        let omitted = message.activities.len().saturating_sub(10);
+        format!(
+            " [actions: {}{}]",
+            message
+                .activities
+                .iter()
+                .take(10)
+                .map(|a| format!("{}={}", a.label, a.status))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if omitted > 0 {
+                format!(", +{omitted} more")
+            } else {
+                String::new()
+            }
+        )
+    };
+    let attachments = if guest || message.attachments.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " [attachments: {}]",
+            message
+                .attachments
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let error = if guest {
+        String::new()
+    } else {
+        format!(
+            " [error: {}]",
+            message.error_code.as_deref().unwrap_or("none")
+        )
+    };
+    let mut line = format!("{prefix}{body}{activities}{attachments}{error}");
+    if line.len() > remaining {
+        let mut end = remaining;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+    }
+    line
 }
 
 pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instructions: &str) -> Value {
@@ -3193,6 +3552,18 @@ pub struct TurnError {
     pub response_id: Option<Box<str>>,
 }
 impl TurnError {
+    /// A failure NyxID classified itself (preparation, timeouts, Stop, the
+    /// sweep, settlement). It carries no upstream code and names its stage.
+    pub fn internal(code: &str, stage: &'static str) -> Self {
+        let mut error = Self::new(code);
+        error.upstream_code = None;
+        error.stage = stage;
+        error
+    }
+    pub fn at_stage(mut self, stage: &'static str) -> Self {
+        self.stage = stage;
+        self
+    }
     pub fn preserves_session(&self) -> bool {
         matches!(
             self.code,
@@ -3345,12 +3716,16 @@ pub struct ResponseStream {
     pub text: String,
     pub terminal: Option<TurnResult>,
     pub created: Option<crate::models::assistant_conversation::RunningResponse>,
+    /// Every parsed data event, including tool-progress kinds this decoder
+    /// otherwise ignores. Comment-only keepalive frames never count, so this
+    /// is the stream's semantic-progress signal.
+    pub data_events: u64,
 }
 impl ResponseStream {
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), TurnError> {
         self.total += chunk.len();
         if self.total > MAX_STREAM_BYTES {
-            return Err(TurnError::new("output_too_large"));
+            return Err(TurnError::internal("output_too_large", "stream"));
         }
         self.buffer.extend_from_slice(chunk);
         loop {
@@ -3372,8 +3747,8 @@ impl ResponseStream {
                 break;
             };
             let bytes: Vec<_> = self.buffer.drain(..end + separator).collect();
-            let frame =
-                std::str::from_utf8(&bytes).map_err(|_| TurnError::new("invalid_stream"))?;
+            let frame = std::str::from_utf8(&bytes)
+                .map_err(|_| TurnError::internal("invalid_stream", "stream"))?;
             let data = frame
                 .lines()
                 .filter_map(|line| {
@@ -3384,22 +3759,24 @@ impl ResponseStream {
                 .join("\n");
             if !data.is_empty() {
                 self.event(
-                    serde_json::from_str(&data).map_err(|_| TurnError::new("invalid_stream"))?,
+                    serde_json::from_str(&data)
+                        .map_err(|_| TurnError::internal("invalid_stream", "stream"))?,
                 )?;
             }
         }
         if self.buffer.len() > MAX_OUTPUT_BYTES * 2 {
-            return Err(TurnError::new("output_too_large"));
+            return Err(TurnError::internal("output_too_large", "stream"));
         }
         Ok(())
     }
     fn event(&mut self, event: Value) -> Result<(), TurnError> {
         if self.terminal.is_some() {
-            return Err(TurnError::new("invalid_stream"));
+            return Err(TurnError::internal("invalid_stream", "stream"));
         }
         let kind = event["type"]
             .as_str()
-            .ok_or_else(|| TurnError::new("invalid_stream"))?;
+            .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
+        self.data_events += 1;
         if !matches!(
             kind,
             "response.created"
@@ -3411,9 +3788,9 @@ impl ResponseStream {
         }
         let sequence = event["sequence_number"]
             .as_u64()
-            .ok_or_else(|| TurnError::new("invalid_stream"))?;
+            .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
         if self.sequence.is_some_and(|previous| sequence <= previous) {
-            return Err(TurnError::new("invalid_stream"));
+            return Err(TurnError::internal("invalid_stream", "stream"));
         }
         self.sequence = Some(sequence);
         if kind == "response.created" {
@@ -3421,14 +3798,14 @@ impl ResponseStream {
             let session = response["conversation"]["id"]
                 .as_str()
                 .filter(|id| prefixed_hex(id, "conv_"))
-                .ok_or_else(|| TurnError::new("invalid_stream"))?;
+                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
             let id = response["id"]
                 .as_str()
                 .filter(|id| {
                     id.strip_prefix(&format!("resp_{}_", &session[5..]))
                         .is_some_and(|suffix| prefixed_hex(suffix, ""))
                 })
-                .ok_or_else(|| TurnError::new("invalid_stream"))?;
+                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
             self.created = Some(crate::models::assistant_conversation::RunningResponse {
                 credential_api_key_id: String::new(),
                 response_id: id.to_owned(),
@@ -3437,16 +3814,16 @@ impl ResponseStream {
         } else if kind == "response.output_text.delta" {
             let delta = event["delta"]
                 .as_str()
-                .ok_or_else(|| TurnError::new("invalid_stream"))?;
+                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
             if self.text.len().saturating_add(delta.len()) > MAX_OUTPUT_BYTES {
-                return Err(TurnError::new("output_too_large"));
+                return Err(TurnError::internal("output_too_large", "stream"));
             }
             self.text.push_str(delta);
         } else {
             let response = &event["response"];
             let text = response["output"]
                 .as_array()
-                .ok_or_else(|| TurnError::new("invalid_stream"))?
+                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?
                 .iter()
                 .filter(|item| item["type"] == "message" && item["role"] == "assistant")
                 .flat_map(|item| item["content"].as_array().into_iter().flatten())
@@ -3454,7 +3831,7 @@ impl ResponseStream {
                 .map(|part| {
                     part["text"]
                         .as_str()
-                        .ok_or_else(|| TurnError::new("invalid_stream"))
+                        .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .join("\n\n");
@@ -3478,10 +3855,10 @@ impl ResponseStream {
                         "failed"
                     }
             {
-                return Err(TurnError::new("invalid_stream"));
+                return Err(TurnError::internal("invalid_stream", "stream"));
             }
             if text.len() > MAX_OUTPUT_BYTES {
-                return Err(TurnError::new("output_too_large"));
+                return Err(TurnError::internal("output_too_large", "stream"));
             }
             self.text = text;
             self.terminal = Some(TurnResult {
@@ -3489,12 +3866,15 @@ impl ResponseStream {
                 session_id: session.map(str::to_owned),
                 response_id: response_id.map(str::to_owned),
                 error: (kind == "response.failed").then(|| {
-                    TurnError::new(response["error"]["code"].as_str().unwrap_or_default())
+                    let mut error =
+                        TurnError::new(response["error"]["code"].as_str().unwrap_or_default());
+                    error.response_id = response_id.map(Into::into);
+                    error
                 }),
             });
         }
         if self.text.len() > MAX_OUTPUT_BYTES {
-            return Err(TurnError::new("output_too_large"));
+            return Err(TurnError::internal("output_too_large", "stream"));
         }
         Ok(())
     }

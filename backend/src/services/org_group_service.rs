@@ -756,6 +756,10 @@ async fn delete_threads_in_session(
                 .session(&mut *session)
                 .await?;
         }
+        db.collection::<bson::Document>(crate::models::assistant_checkpoint::COLLECTION_NAME)
+            .delete_one(doc! {"_id":&row.id,"user_id":&row.user_id})
+            .session(&mut *session)
+            .await?;
         db.collection::<bson::Document>(assistant_conversation::COLLECTION_NAME)
             .delete_one(doc! {"_id":&row.id,"user_id":&row.user_id})
             .session(&mut *session)

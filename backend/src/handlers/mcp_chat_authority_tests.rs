@@ -989,44 +989,136 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
 async fn b4_duplicate_action_fence_through_tools_call() {
     let f = fixture("mcp_retry_fence").await;
     let auth = authenticate(&f).await;
-    let first = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "issues"})).await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+    let failed_turn = f.row.active_turn.as_ref().unwrap().turn_id.clone();
+    // Turn 1 completes a search, then fails.
+    let first = direct_call(
+        &f,
+        &auth,
+        "nyx__search_tools",
+        json!({"query": "issues", "limit": 3}),
+    )
+    .await;
+    let first = axum::body::to_bytes(first.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+    let first: Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(first["result"]["isError"], false, "{first}");
     assert!(
-        row.active_turn
-            .as_ref()
-            .unwrap()
-            .activities
-            .iter()
-            .any(|activity| activity.digest.is_some())
+        crate::services::assistant_nyxagent::force_stop(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            &failed_turn
+        )
+        .await
+        .unwrap()
     );
-    crate::services::assistant_nyxagent::mark_retry_of(&f.state.db, &f.owner, &f.row.id, &turn_id)
+    // Turn 2 is the owner's Retry of turn 1.
+    let retry = crate::services::assistant_nyxagent::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &crate::services::assistant_nyxagent::TurnRequest {
+            retry_of: Some(failed_turn.clone()),
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(f.row.id.clone()),
+            text: "find the issues".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let refused = |response: Response| async move {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        let text: Value =
+            serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text["error"], "retry_duplicate_action");
+    };
+    // The same call is refused, including with its arguments in another key order.
+    refused(
+        direct_call(
+            &f,
+            &auth,
+            "nyx__search_tools",
+            json!({"query": "issues", "limit": 3}),
+        )
+        .await,
+    )
+    .await;
+    refused(
+        direct_call(
+            &f,
+            &auth,
+            "nyx__search_tools",
+            json!({"limit": 3, "query": "issues"}),
+        )
+        .await,
+    )
+    .await;
+    let live = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
-    let retry = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "issues"})).await;
-    let body = axum::body::to_bytes(retry.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["result"]["isError"], true);
+    let turn = live.active_turn.unwrap();
+    assert_eq!(turn.turn_id, retry.active_turn.as_ref().unwrap().turn_id);
     assert_eq!(
-        value["result"]["content"][0]["text"],
-        "retry_duplicate_action"
+        turn.tool_progress.calls, 0,
+        "a refused duplicate is not progress"
     );
-    let audit = f.state.db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .find_one(doc! {"event_type": "assistant_mcp_tool_call", "event_data.error_code": "retry_duplicate_action"})
-        .await.unwrap();
+    assert_eq!(turn.activities.len(), 2, "each refusal is recorded");
     assert!(
-        audit.is_some(),
-        "duplicate refusal must be metadata-audited"
+        turn.activities
+            .iter()
+            .all(|a| a.label == "nyx__search_tools" && a.status == "completed")
     );
-    let different = direct_call(&f, &auth, "nyx__search_tools", json!({"query": "calendar"})).await;
-    assert_eq!(different.status(), StatusCode::OK);
-    let repeated_read = direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await;
-    assert_eq!(repeated_read.status(), StatusCode::OK);
+    let audits: Vec<mongodb::bson::Document> = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find(doc! {"event_type": "assistant_mcp_tool_call", "event_data.error_code": "retry_duplicate_action"})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 2);
+    let data = audits[0].get_document("event_data").unwrap();
+    assert_eq!(data.get_str("tool").unwrap(), "nyx__search_tools");
+    assert_eq!(data.get_str("conversation_id").unwrap(), f.row.id);
+    assert!(data.get_bool("metadata_only").unwrap());
+    assert!(
+        !audits[0].to_string().contains("issues"),
+        "no arguments in audit"
+    );
+    // A different call, and a call the failed turn never made, still run.
+    let different = direct_call(
+        &f,
+        &auth,
+        "nyx__search_tools",
+        json!({"query": "calendar", "limit": 3}),
+    )
+    .await;
+    let different = axum::body::to_bytes(different.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&different).unwrap()["result"]["isError"],
+        false
+    );
+    let other = direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await;
+    let other = axum::body::to_bytes(other.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&other).unwrap()["result"]["isError"],
+        false
+    );
 }
 
 #[tokio::test]

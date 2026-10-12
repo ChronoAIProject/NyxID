@@ -41,7 +41,7 @@ impl ToolImages {
                 !turn.stop_requested
                     && Some(&turn.turn_id) == row.active_turn.as_ref().map(|t| &t.turn_id)
             })
-            .ok_or_else(|| TurnError::new("cancelled"))?;
+            .ok_or_else(|| TurnError::internal("cancelled", "stop"))?;
         let items: Vec<_> = active
             .attachments
             .iter()
@@ -148,9 +148,9 @@ pub(super) async fn renew(
     let updated = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
         .update_one(doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false},
             doc! {"$set":{"nyxagent_session_id":binding,"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}})
-        .await.map_err(|_| TurnError::new("assistant_unavailable"))?;
+        .await.map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
     if updated.matched_count != 1 {
-        return Err(TurnError::new("cancelled"));
+        return Err(TurnError::internal("cancelled", "stop"));
     }
     events.emit(
         "turn.continuing",

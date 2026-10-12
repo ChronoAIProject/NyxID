@@ -1,35 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
-import { z } from "zod";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-const schema = z.object({
-  counts: z.array(
-    z.object({ day: z.string(), up: z.number(), down: z.number() }),
-  ),
-  recent: z.array(
-    z.object({
-      message_id: z.string(),
-      vote: z.enum(["up", "down"]),
-      comment: z.string().nullable().optional(),
-      context: z
-        .object({
-          agent_kind: z.string().nullable().optional(),
-          model: z.string().nullable().optional(),
-          reply_status: z.string().nullable().optional(),
-          error_code: z.string().nullable().optional(),
-        })
-        .nullable()
-        .optional(),
-      created_at: z.string(),
-      updated_at: z.string(),
-    }),
-  ),
-  next_cursor: z.string().nullable().optional(),
-});
+import { assistantFeedbackAdminSchema } from "@/schemas/assistant-feedback-admin";
+
 export function useAssistantFeedbackAdmin(params: URLSearchParams) {
   return useQuery({
     queryKey: ["admin", "assistant-feedback", params.toString()],
     queryFn: async () =>
-      schema.parse(await api.get(`/admin/assistant/feedback?${params}`)),
+      assistantFeedbackAdminSchema.parse(
+        await api.get(`/admin/assistant/feedback?${params}`),
+      ),
     retry: false,
+    // Keep the filters and the previous page on screen while a new filter loads.
+    placeholderData: keepPreviousData,
   });
 }

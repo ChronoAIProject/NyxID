@@ -4,6 +4,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_agent::AssistantAgent,
+        assistant_checkpoint::AssistantCheckpoint,
         assistant_conversation::{AssistantConversation, InstructionBinding},
         assistant_message::AssistantMessage,
     },
@@ -33,6 +34,8 @@ pub struct Prepared {
     memory: String,
     pub binding: InstructionBinding,
     pub reset: bool,
+    /// The durable checkpoint a recap leads with (owner audiences only).
+    checkpoint: Option<AssistantCheckpoint>,
 }
 
 impl Prepared {
@@ -83,11 +86,18 @@ impl Prepared {
                 guest: row.guest_turn,
             },
             reset,
+            checkpoint: None,
         };
         if reset || row.nyxagent_session_id.is_none() {
             prepared.fresh_session();
         }
         Ok(prepared)
+    }
+
+    /// Lead any recap with the conversation's durable checkpoint. Ignored for
+    /// guest audiences, whose recap holds only what their chat saw.
+    pub fn set_checkpoint(&mut self, checkpoint: Option<AssistantCheckpoint>) {
+        self.checkpoint = checkpoint.filter(|_| !self.binding.guest);
     }
 
     /// Called only before starting a new session, never for an automatic
@@ -104,9 +114,10 @@ impl Prepared {
         }
         if recap {
             // Recap text is untrusted and cannot introduce the current marker.
-            prompt.push_str(&self.redact(&engine::bounded_recap_for_audience(
+            prompt.push_str(&self.redact(&engine::bounded_recap_with_checkpoint(
                 history,
                 self.binding.guest,
+                self.checkpoint.as_ref(),
             )));
         }
         prompt
@@ -202,6 +213,7 @@ mod tests {
                 guest: true,
             },
             reset: false,
+            checkpoint: None,
         }
     }
 
@@ -237,12 +249,13 @@ mod tests {
 
     #[test]
     fn memory_note_is_per_turn_input_and_does_not_change_stable_binding() {
-        let context = prepared();
+        let mut context = prepared();
         let fingerprint = context.binding.fingerprint.clone();
-        let input = context.input_with_memory("new memory note", "continue", true);
+        context.memory = "[memory] new memory note\n".into();
+        let input = context.input_with_memory("turn facts", "continue", true);
         assert!(input.contains("new memory note"));
         assert_eq!(context.binding.fingerprint, fingerprint);
-        assert!(!context.instructions(&[], false).contains("new memory note"));
+        assert!(!context.instructions(&[], true).contains("new memory note"));
     }
 
     #[test]

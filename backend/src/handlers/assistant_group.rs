@@ -6,8 +6,6 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
-use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1008,22 +1006,12 @@ pub async fn list_messages(
         .map(|row| message_response(row, &agents))
         .collect();
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
-    let feedback = state
-        .db
-        .collection::<crate::models::assistant_message_feedback::AssistantMessageFeedback>(
-            crate::models::assistant_message_feedback::COLLECTION_NAME,
-        )
-        .find(doc! {"user_id": &owner, "message_id": {"$in": &ids}})
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
-    for message in &mut messages {
-        message.feedback = feedback
-            .iter()
-            .find(|f| f.message_id == message.id)
-            .cloned()
-            .map(Into::into);
-    }
+    let feedback =
+        crate::services::assistant_feedback_service::states_for_messages(&state.db, &owner, &ids)
+            .await?;
+    super::assistant_feedback::attach(&mut messages, feedback, |m| {
+        (m.id.as_str(), &mut m.feedback)
+    });
     let receipts = messages
         .iter_mut()
         .flat_map(|m| m.activities.iter_mut())

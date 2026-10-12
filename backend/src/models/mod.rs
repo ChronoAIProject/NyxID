@@ -118,6 +118,7 @@ pub mod assistant_agent;
 pub mod assistant_agent_credential;
 pub mod assistant_agent_learning;
 pub mod assistant_attachment;
+pub mod assistant_checkpoint;
 pub mod assistant_conversation;
 pub mod assistant_group;
 pub mod assistant_message;
