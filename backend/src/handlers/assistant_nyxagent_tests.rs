@@ -667,9 +667,11 @@ async fn user_reset_changes_the_next_turn_recap() {
         .await
         .unwrap()
         .context_reset_reason;
-    let next_turn_recap = (reset_reason.as_deref() != Some("user_reset"))
-        .then_some(after.as_str())
-        .unwrap_or("");
+    let next_turn_recap = if reset_reason.as_deref() != Some("user_reset") {
+        after.as_str()
+    } else {
+        ""
+    };
     assert!(!next_turn_recap.contains(&before));
 }
 
