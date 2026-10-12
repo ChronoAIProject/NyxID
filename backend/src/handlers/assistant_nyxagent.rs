@@ -748,6 +748,9 @@ pub struct AcknowledgementResponse {
     decider: String,
     decided_by: Option<String>,
     reason: Option<String>,
+    /// Action cards: risk class, the access mode that asked and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation: Option<crate::models::assistant_acknowledgement::ActionConfirmation>,
     service_slug: Option<String>,
     service_name: Option<String>,
     tool_name: Option<String>,
@@ -771,6 +774,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             decider: row.decider,
             decided_by: row.decided_by,
             reason: row.reason,
+            confirmation: row.confirmation,
             service_slug: row.service_slug,
             service_name: row.service_name,
             tool_name: row.tool_name,
@@ -1137,16 +1141,14 @@ pub async fn models(
     engine::require_enabled(&state.db, &user_id).await?;
     let policy = request.extensions().get::<BillingRoutePolicy>().copied();
     Ok(Json(
-        live_models(&state, &auth, policy)
-            .await
-            .unwrap_or_else(|| {
-                vec![ModelResponse {
-                    id: engine::DEFAULT_MODEL.into(),
-                    label: "chat".into(),
-                    available: true,
-                    description: None,
-                }]
-            }),
+        live_models(&state, &auth, policy).await.unwrap_or_else(|| {
+            vec![ModelResponse {
+                id: engine::DEFAULT_MODEL.into(),
+                label: "chat".into(),
+                available: true,
+                description: None,
+            }]
+        }),
     ))
 }
 

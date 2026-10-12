@@ -827,8 +827,18 @@ fn action_summary(name: &str, args: &Value) -> String {
     };
     let mut details = Vec::new();
     for field in [
-        "subagent", "agent", "name", "request_id", "bot", "channel_agent_id", "group_id", "id",
-        "note_id", "area", "decision", "model",
+        "subagent",
+        "agent",
+        "name",
+        "request_id",
+        "bot",
+        "channel_agent_id",
+        "group_id",
+        "id",
+        "note_id",
+        "area",
+        "decision",
+        "model",
     ] {
         if let Some(value) = args[field].as_str() {
             details.push(format!(

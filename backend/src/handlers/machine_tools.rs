@@ -249,7 +249,8 @@ pub async fn call(
                 | Operation::EditFile
                 | Operation::SaveAttachment
                 | Operation::JobCancel
-        ) || (matches!(operation, Operation::Computer | Operation::Browser) && !read_only),
+        ) || (matches!(operation, Operation::Computer | Operation::Browser)
+            && !read_only),
     };
     let floor = machines::confirmation(&node, operation, &arguments)
         || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);

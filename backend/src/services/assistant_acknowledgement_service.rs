@@ -197,9 +197,17 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
     }
     if let Some(name) = tool.strip_prefix("nyx__") {
         return Some(match name {
-            "search_tools" | "discover_services" | "list_connected_services"
-            | "wait_for_connection" | "ssh_list_services" | "oracle_pools" | "oracle_result"
-            | "oracle_session" | "attachment_read" | "machine_list" | "saved_logins" => Read,
+            "search_tools"
+            | "discover_services"
+            | "list_connected_services"
+            | "wait_for_connection"
+            | "ssh_list_services"
+            | "oracle_pools"
+            | "oracle_result"
+            | "oracle_session"
+            | "attachment_read"
+            | "machine_list"
+            | "saved_logins" => Read,
             "connect_service" | "oracle_ask" | "oracle_attach" | "oracle_extract" => Change,
             // A wrapped service call is classified from the operation it reaches.
             "call_tool" => Read,
@@ -333,12 +341,14 @@ pub async fn confirmation_needed(
         let mode = effective_access_mode(db, chat).await?;
         owner_confirmation_required(mode, facts.class).then_some(mode)
     };
-    Ok((webhook || policy_floor || mode.is_some()).then_some(ConfirmationNeed {
-        class: facts.class,
-        mode,
-        webhook,
-        policy: policy_floor,
-    }))
+    Ok(
+        (webhook || policy_floor || mode.is_some()).then_some(ConfirmationNeed {
+            class: facts.class,
+            mode,
+            webhook,
+            policy: policy_floor,
+        }),
+    )
 }
 
 /// Require the owner's single-use card for an action that needs one.
@@ -378,18 +388,20 @@ pub async fn confirm_action(
             platform: false,
         },
         None,
-        Some(crate::models::assistant_acknowledgement::ActionConfirmation {
-            risk: need.class.as_str().into(),
-            access_mode: need.mode,
-            reason: if need.webhook {
-                "webhook"
-            } else if need.mode.is_some() {
-                "access_mode"
-            } else {
-                "policy"
-            }
-            .into(),
-        }),
+        Some(
+            crate::models::assistant_acknowledgement::ActionConfirmation {
+                risk: need.class.as_str().into(),
+                access_mode: need.mode,
+                reason: if need.webhook {
+                    "webhook"
+                } else if need.mode.is_some() {
+                    "access_mode"
+                } else {
+                    "policy"
+                }
+                .into(),
+            },
+        ),
     )
     .await?;
     Ok(Some(refusal(&card)))
@@ -443,16 +455,28 @@ mod access_mode_tests {
             ("nyxid__list_agent_keys", none.clone(), Read),
             ("nyxid__grant_subagent", none.clone(), Sensitive),
             ("nyxid__spawn_subagent", json!({"name": "a"}), Change),
-            ("nyxid__spawn_subagent", json!({"services": ["github"]}), Sensitive),
+            (
+                "nyxid__spawn_subagent",
+                json!({"services": ["github"]}),
+                Sensitive,
+            ),
             ("nyxid__update_subagent", json!({"persona": "calm"}), Change),
-            ("nyxid__update_subagent", json!({"model": "nyxagent/fast"}), Sensitive),
+            (
+                "nyxid__update_subagent",
+                json!({"model": "nyxagent/fast"}),
+                Sensitive,
+            ),
             ("nyxid__update_group", json!({"name": "x"}), Change),
             ("nyxid__update_group", json!({"leave": true}), Destructive),
             ("nyxid__delete_schedule", none.clone(), Destructive),
             ("nyxid__message_subagent", none.clone(), Change),
             ("nyxid__list_schedules", none.clone(), Read),
         ] {
-            assert_eq!(known_action_class(tool, &args), Some(class), "{tool} {args}");
+            assert_eq!(
+                known_action_class(tool, &args),
+                Some(class),
+                "{tool} {args}"
+            );
         }
         assert_eq!(known_action_class("github__list_repos", &none), None);
         assert_eq!(known_action_class("nyxid__not_a_tool", &none), None);
@@ -675,7 +699,7 @@ pub async fn audit_access_request_denied(
                     {marker.as_str(): {"$lt": cutoff}},
                 ]},
                 doc! {"$set": {marker.as_str(): bson::DateTime::from_chrono(now)},
-                    "$inc": {"message_count": 1}},
+                "$inc": {"message_count": 1}},
             )
             .await;
         let Ok(Some(row)) = claimed else {
@@ -1372,10 +1396,12 @@ async fn audit_access_requested(
             api_key_name: None,
         },
         "assistant_access_requested",
-        Some(json!({"requester_agent": chat.agent_id, "thread": chat.conversation_id,
+        Some(
+            json!({"requester_agent": chat.agent_id, "thread": chat.conversation_id,
             "key": chat.api_key_id, "acknowledgement_id": row.id,
             "target": row.service_id, "scope": row.kind, "decider": row.decider,
-            "decision": "pending"})),
+            "decision": "pending"}),
+        ),
     )
     .await;
 }
@@ -2048,7 +2074,10 @@ pub(crate) async fn consume_action_in_session(
 
 /// Who decided a card: the owner's NyxBot (deciding a specialist's routed
 /// request), the owner in person, or an API key acting for the owner.
-fn approver_kind(row: &AssistantAcknowledgement, actor: &audit_service::AuditActor) -> &'static str {
+fn approver_kind(
+    row: &AssistantAcknowledgement,
+    actor: &audit_service::AuditActor,
+) -> &'static str {
     if row.decided_by.as_deref() == Some("orchestrator") {
         "nyxbot"
     } else if actor.api_key_id.is_some() {

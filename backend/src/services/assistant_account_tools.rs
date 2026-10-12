@@ -824,9 +824,10 @@ impl AccountTools<'_> {
                         .await?;
                         format!(
                             "{} on channel bot '{}'",
-                            args["platform_conversation_id"]
-                                .as_str()
-                                .map_or_else(|| "every chat".to_owned(), |id| format!("chat '{}'", short(id))),
+                            args["platform_conversation_id"].as_str().map_or_else(
+                                || "every chat".to_owned(),
+                                |id| format!("chat '{}'", short(id))
+                            ),
                             short(&bot.label)
                         )
                     }
