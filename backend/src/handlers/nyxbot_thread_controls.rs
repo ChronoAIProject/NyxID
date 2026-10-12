@@ -161,6 +161,7 @@ pub async fn list_threads(
     Path((channel, parent)): Path<(String, String)>,
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     Ok(Json(
@@ -172,6 +173,7 @@ pub async fn stop_thread(
     auth: crate::mw::auth::AuthUser,
     Path((channel, parent, id)): Path<(String, String, String)>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     Ok(Json(stop(&state, &owner, &channel, &parent, &id).await?))
