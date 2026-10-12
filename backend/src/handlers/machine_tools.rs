@@ -271,8 +271,17 @@ pub async fn call(
                 String::new()
             }
         );
-        if let Some(refusal) =
-            acks::confirm_action(&state.db, chat, name, &arguments, &need, &summary).await?
+        // Outside webhook automations a mismatched card id raises a fresh
+        // card for the exact arguments, as machine confirmation always has.
+        let on_invalid = if need.webhook {
+            acks::InvalidCard::Refuse
+        } else {
+            acks::InvalidCard::Reissue
+        };
+        if let Some(refusal) = acks::confirm_action_with(
+            &state.db, chat, name, &arguments, &need, &summary, on_invalid,
+        )
+        .await?
         {
             return Ok(refusal);
         }

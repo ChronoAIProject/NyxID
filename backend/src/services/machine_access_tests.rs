@@ -1959,7 +1959,11 @@ async fn specialist_machine_capability_card_is_denied_audited_and_routed_when_al
         .delete_one(doc! {"_id":&f.owner})
         .await
         .unwrap();
-    let args = json!({"agent":f.chat.agent_id,"machine":n.id,"selection":selection(0,Capabilities{files:true,..Default::default()})});
+    let revision = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap()
+        .revision;
+    let args = json!({"agent":f.chat.agent_id,"machine":n.id,"selection":selection(revision,Capabilities{files:true,..Default::default()})});
     let (denied, pending) = Box::pin(crate::handlers::machine_access::native(
         &f.state, &f.chat, &args,
     ))

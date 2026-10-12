@@ -238,9 +238,9 @@ fn description(name: &str) -> String {
             "Destructive: NyxID shows the user a single-use confirmation card unless their \
             access mode is Autopilot; retry with its acknowledgement_id."
         } else if read_only(name) {
-            "Read-only."
+            "Non-destructive. Read-only."
         } else {
-            "Changes the account: depending on the user's access mode NyxID may first show a \
+            "Non-destructive. Depending on the user's access mode NyxID may first show a \
             single-use confirmation card; retry with its acknowledgement_id."
         }
     )

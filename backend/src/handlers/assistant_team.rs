@@ -1791,6 +1791,25 @@ async fn dispatch_permission_decisions(
             } else {
                 false
             };
+            // Refusals that do not depend on the owner's decision come first,
+            // so a card is never raised for a decision that cannot apply.
+            if !confirmed
+                && db
+                    .collection::<AssistantAcknowledgement>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                    )
+                    .find_one(mongodb::bson::doc! {"_id": request_id, "user_id": owner,
+                    "decider": "orchestrator", "kind": "operations"})
+                    .await?
+                    .is_some()
+            {
+                Box::pin(
+                    crate::services::agent_operation_scope_service::require_configuration_enabled(
+                        db, owner,
+                    ),
+                )
+                .await?;
+            }
             if !confirmed
                 && let Some(need) = acks::confirmation_needed(
                     db,

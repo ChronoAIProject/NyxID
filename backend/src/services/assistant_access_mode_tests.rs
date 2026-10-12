@@ -242,6 +242,15 @@ async fn every_changing_account_tool_has_a_card_summary() {
         })
         .await
         .unwrap();
+    set_mode(&f, AccessMode::Autopilot).await;
+    let route = account(
+        &f,
+        "set_channel_route",
+        &json!({"bot_id": bot, "agent_api_key_id": key, "platform_conversation_id": "c2"}),
+    )
+    .await;
+    assert!(!route.is_error, "{}", route.value);
+    let route = route.value["id"].as_str().unwrap().to_owned();
     let tools = f.tools();
     let cases = [
         (
@@ -273,6 +282,11 @@ async fn every_changing_account_tool_has_a_card_summary() {
             "delete_channel_bot",
             json!({"bot_id": bot}),
             "Delete channel bot 'Build bot'",
+        ),
+        (
+            "delete_channel_route",
+            json!({"route_id": route}),
+            "Delete channel route 'c2'",
         ),
         (
             "set_channel_route",
@@ -541,6 +555,83 @@ async fn access_mode_and_model_changes_are_audited() {
             .await
             .unwrap(),
         3
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+/// The sandbox holds for every kind of specialist turn: owner, event and
+/// channel turns are denied under the default policy and routed to NyxBot
+/// only when the owner allows it; guest turns never raise a request.
+#[tokio::test]
+async fn specialist_access_requests_follow_policy_for_every_turn_kind() {
+    use crate::models::{
+        assistant_conversation::TurnOrigin, assistant_settings::SpecialistAccessRequests,
+    };
+    let f = super::assistant_authority_tests::fixture("mode_turn_kind_matrix").await;
+    let service = connected(&f.state.db, &f.owner, "matrix-docs", "https://docs.example").await;
+    let conversations = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    for policy in [
+        SpecialistAccessRequests::Denied,
+        SpecialistAccessRequests::RoutedToNyxbot,
+    ] {
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                specialist_access_requests: Some(policy),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for (origin, guest) in [
+            (TurnOrigin::User, false),
+            (TurnOrigin::Event, false),
+            (TurnOrigin::Channel, false),
+            (TurnOrigin::Channel, true),
+        ] {
+            conversations
+                .update_one(
+                    doc! {"_id": &f.row.id},
+                    doc! {"$set": {"guest_turn": guest,
+                    "active_turn.origin": bson::to_bson(&origin).unwrap()}},
+                )
+                .await
+                .unwrap();
+            let chat = acks::for_key(&f.state.db, &f.owner, Some(&f.row.credential_api_key_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(chat.guest, guest);
+            let (value, card) =
+                acks::service_gate(&f.state.db, &chat, &service, "matrix-docs", "Docs", false)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let expected = match (guest, policy) {
+                (true, _) => "owner_only",
+                (false, SpecialistAccessRequests::Denied) => "access_request_denied",
+                (false, SpecialistAccessRequests::RoutedToNyxbot) => "acknowledgement_required",
+            };
+            assert_eq!(
+                value["error"], expected,
+                "{origin:?} guest={guest} {policy:?}"
+            );
+            if expected != "acknowledgement_required" {
+                assert!(card.is_none(), "{origin:?} guest={guest} {policy:?}");
+            }
+        }
+    }
+    // Denied turns raised no card at all.
+    let raised = cards(&f).await;
+    assert!(raised.iter().all(|row| row.decider == "orchestrator"));
+    assert_eq!(
+        raised.len(),
+        1,
+        "one routed request, reused across turn kinds"
     );
     f.state.db.drop().await.unwrap();
 }
