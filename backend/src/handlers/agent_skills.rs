@@ -19,7 +19,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{self, Request},
 };
-use futures::TryStreamExt;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -403,11 +403,8 @@ pub async fn history(
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     let _ = team::agent(&state.db, &owner, &id).await?;
-    let rows: Vec<crate::models::audit_log::AuditLog> = state.db.collection(crate::models::audit_log::COLLECTION_NAME)
-        .find(mongodb::bson::doc! {"user_id": &owner, "event_type": "assistant_skills_updated", "event_data.agent_id": &id})
-        .sort(mongodb::bson::doc! {"created_at": -1}).limit(SKILL_HISTORY_LIMIT).await?.try_collect().await?;
     Ok(Json(
-        json!({"items": rows.into_iter().map(|r| json!({"id": r.id, "created_at": r.created_at, "event_data": r.event_data})).collect::<Vec<_>>() }),
+        crate::services::agent_skill_service::history(&state.db, &owner, &id).await?,
     ))
 }
 fn arg<'a>(args: &'a Value, key: &str) -> &'a str {

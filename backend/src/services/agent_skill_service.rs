@@ -6,6 +6,7 @@ use crate::{
         catalog_skill_revision::{SkillPin, SkillReference, SkillState},
     },
 };
+use futures::TryStreamExt;
 use mongodb::{
     Database,
     bson::{self, doc},
@@ -767,3 +768,17 @@ pub fn instructions(agent: &AssistantAgent) -> String {
 #[cfg(test)]
 #[path = "agent_skill_service_tests.rs"]
 mod tests;
+
+pub async fn history(db: &Database, owner: &str, agent_id: &str) -> AppResult<Value> {
+    let rows: Vec<crate::models::audit_log::AuditLog> = db
+        .collection(crate::models::audit_log::COLLECTION_NAME)
+        .find(doc! {"user_id": owner, "event_type": "assistant_skills_updated", "event_data.agent_id": agent_id})
+        .sort(doc! {"created_at": -1})
+        .limit(50)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(
+        json!({"items": rows.into_iter().map(|r| json!({"id": r.id, "created_at": r.created_at, "event_data": r.event_data})).collect::<Vec<_>>() }),
+    )
+}
