@@ -1216,3 +1216,7 @@ authorization; including that virtual catalog does not grant execution access.
 ### User context reset semantics
 
 A human owner reset records `context_reset_reason=user_reset`. The next turn receives the current checkpoint projection without replaying the prior reset recap; completed actions remain visible for audit, while pending or failed actions must be reviewed and explicitly rerun. Guests and delegated identities cannot reset context.
+
+### Detached stream settlement
+
+The turn subscription returns HTTP 200 once the detached execution is accepted. Upstream failures are settled asynchronously: the stream emits the terminal normalized error event, and the failed reply persisted in history carries the sanitized error class, upstream code, and `error_detail` metadata (stage, status, request id, response id, continuations, turn id, and timestamp).

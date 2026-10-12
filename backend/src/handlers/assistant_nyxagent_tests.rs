@@ -319,7 +319,15 @@ async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
     )
     .await
     .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(stream.contains("turn.failed") || stream.contains("assistant_unavailable"));
     let row = settled(&state).await;
     let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
         .await
