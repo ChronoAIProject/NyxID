@@ -11,12 +11,19 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize, Debug, Serialize)]
+pub struct GlobalBillingDefaultsResponse {
+    pub default_lane: Option<String>,
+    pub default_overdraft_cap_credits: Option<i64>,
+    pub source: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 pub struct BillingConfigResponse {
     pub billing_enabled: bool,
     pub lago_configured: bool,
     pub resale_enabled: bool,
-    pub global: Option<BillingSettings>,
+    pub global: Option<GlobalBillingDefaultsResponse>,
     pub precedence: [&'static str; 4],
     pub environment: Vec<ConfigValue>,
 }
@@ -39,7 +46,11 @@ pub async fn get_config(
         billing_enabled: state.billing.billing_enabled(),
         lago_configured: state.billing.lago_configured(),
         resale_enabled: state.billing.resale_enabled(),
-        global,
+        global: global.map(|settings| GlobalBillingDefaultsResponse {
+            default_lane: settings.default_lane,
+            default_overdraft_cap_credits: settings.default_overdraft_cap_credits,
+            source: "db",
+        }),
         precedence: ["env", "global", "service", "legacy/free"],
         environment: vec![
             ConfigValue {
