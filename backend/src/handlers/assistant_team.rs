@@ -2794,7 +2794,7 @@ pub fn spawn_sweeps(state: AppState) {
                             state.clone(),
                             row,
                             String::new(),
-                            Some(TurnError::new("turn_lost")),
+                            Some(TurnError::internal("turn_lost", "sweep")),
                         )
                         .await;
                     }
