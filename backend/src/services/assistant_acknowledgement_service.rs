@@ -831,6 +831,7 @@ async fn request_tracked_with_machine_context(
         .map(|s| s.specialist_access_requests)
         .unwrap_or_default();
     if request.kind != "action" && !chat.access_request_allowed_with_mode(request_mode) {
+        audit_access_request_denied(db, chat, request.service.map(|(id, _, _)| id), request.kind).await;
         return Err(AppError::Forbidden(
             "access_request_denied: only NyxBot can request or grant access; report the need to NyxBot in your reply".into(),
         ));
