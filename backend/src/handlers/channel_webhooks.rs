@@ -15,6 +15,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+#[cfg(test)]
 use mongodb::bson::doc;
 
 use crate::AppState;
@@ -244,7 +245,9 @@ pub(super) async fn dispatch_platform_webhook(
         "platform"
     };
     for target in targets {
-        let bot = channel_bot_service::find_active_webhook_bot(&state.db, platform, source, &target).await?;
+        let bot =
+            channel_bot_service::find_active_webhook_bot(&state.db, platform, source, &target)
+                .await?;
         let Some(bot) = bot else {
             tracing::warn!(
                 platform,
@@ -449,7 +452,9 @@ async fn handle_webhook_inner_impl(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             let db = state.db.clone();
             let id = bot.id.clone();
-            tokio::spawn(async move { let _ = channel_bot_service::record_webhook_error(&db, &id, "signature").await; });
+            tokio::spawn(async move {
+                let _ = channel_bot_service::record_webhook_error(&db, &id, "signature").await;
+            });
             format!("webhook verification failed: {e}").into()
         })?;
 
@@ -520,6 +525,7 @@ mod tests {
     use super::*;
     use axum::{Router, body::Bytes, http::StatusCode, routing::post};
     use chrono::Utc;
+    #[cfg(test)]
     use mongodb::bson::doc;
     use tokio::sync::{Mutex, oneshot};
     use tokio::time::{Duration, timeout};

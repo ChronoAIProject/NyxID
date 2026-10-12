@@ -4,7 +4,6 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -311,8 +310,11 @@ pub async fn admin_list(
 ) -> AppResult<Json<Vec<ChannelBotHealthResponse>>> {
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
     let bots = channel_bot_service::list_all_filtered(
-        &state.db, query.platform.as_deref(), query.status.as_deref(),
-    ).await?;
+        &state.db,
+        query.platform.as_deref(),
+        query.status.as_deref(),
+    )
+    .await?;
     Ok(Json(
         bots.iter()
             .map(|bot| health_for(bot, state.config.billing_enabled))

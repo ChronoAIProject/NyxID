@@ -1702,14 +1702,21 @@ pub async fn find_active_webhook_bot(
     credential_source: &str,
     target: &str,
 ) -> AppResult<Option<ChannelBot>> {
-    Ok(db.collection(COLLECTION_NAME).find_one(doc! {
-        "platform": platform, "credential_source": credential_source,
-        "platform_bot_id": target, "is_active": true,
-        "status": { "$in": ["active", "pending_webhook"] }
-    }).await?)
+    Ok(db
+        .collection(COLLECTION_NAME)
+        .find_one(doc! {
+            "platform": platform, "credential_source": credential_source,
+            "platform_bot_id": target, "is_active": true,
+            "status": { "$in": ["active", "pending_webhook"] }
+        })
+        .await?)
 }
 
-pub async fn record_webhook_error(db: &mongodb::Database, bot_id: &str, reason: &str) -> AppResult<()> {
+pub async fn record_webhook_error(
+    db: &mongodb::Database,
+    bot_id: &str,
+    reason: &str,
+) -> AppResult<()> {
     db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
         doc! { "_id": bot_id },
         doc! { "$set": {
@@ -1726,9 +1733,21 @@ pub async fn list_all_filtered(
     status: Option<&str>,
 ) -> AppResult<Vec<ChannelBot>> {
     let mut filter = doc! {};
-    if let Some(platform) = platform { filter.insert("platform", if platform == "x" { "twitter" } else { platform }); }
-    if let Some(status) = status { filter.insert("status", status); }
-    Ok(db.collection(COLLECTION_NAME).find(filter).await?.try_collect().await?)
+    if let Some(platform) = platform {
+        filter.insert(
+            "platform",
+            if platform == "x" { "twitter" } else { platform },
+        );
+    }
+    if let Some(status) = status {
+        filter.insert("status", status);
+    }
+    Ok(db
+        .collection(COLLECTION_NAME)
+        .find(filter)
+        .await?
+        .try_collect()
+        .await?)
 }
 
 pub async fn get_bot(db: &mongodb::Database, bot_id: &str) -> AppResult<ChannelBot> {
