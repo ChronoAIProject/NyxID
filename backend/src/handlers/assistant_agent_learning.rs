@@ -2,7 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
@@ -116,7 +116,9 @@ pub async fn consent(
     ))
 }
 
-async fn chat(state: &AppState, owner: &str) -> AppResult<acks::ChatAuthority> {
+/// The owner's NyxBot home chat, where learning and authored review cards
+/// raised from the app appear.
+pub(crate) async fn owner_chat(state: &AppState, owner: &str) -> AppResult<acks::ChatAuthority> {
     let bot = team::ensure_nyxbot(&state.db, owner).await?;
     let home = team::home_thread_for(&state.db, &state.encryption_keys, owner, &bot).await?;
     acks::for_key(&state.db, owner, Some(&home.credential_api_key_id))
@@ -173,24 +175,55 @@ pub async fn edit(
         .unwrap_or(0);
     let draft = normalize_edit_draft(body.revision, body.draft);
     review::edit(&state, &owner, &agent_id, &proposal_id, revision, &draft).await?;
-    Ok(Json(json!({"status": "updated"})))
+    // An edited authored draft gets a fresh review card in the conversation
+    // of its last one (else NyxBot's home thread): the old card is bound to
+    // the previous revision.
+    use crate::services::assistant_skill_authoring as authoring;
+    if !authoring::is_authored(&state.db, &agent_id, &proposal_id).await? {
+        return Ok(Json(json!({"status": "updated"})));
+    }
+    let chat = match authoring::latest_card_chat(&state.db, &owner, &proposal_id).await? {
+        Some(chat) => chat,
+        None => owner_chat(&state, &owner).await?,
+    };
+    let reader = super::agent_skills::Reader {
+        state: &state,
+        person: &owner,
+        thread_key: Some(&chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(chat.clone())),
+    };
+    let card =
+        authoring::raise_review_card(&state, &chat, &agent_id, &proposal_id, &reader).await?;
+    Ok(Json(json!({
+        "status": "updated",
+        "acknowledgement_id": card["acknowledgement_id"],
+        "conversation_id": chat.conversation_id,
+    })))
 }
 
+#[derive(Debug, Serialize)]
+pub struct ValidateResponse {
+    pub valid: bool,
+    pub bytes: usize,
+}
+
+/// Check an edited draft against the proposal's own validator without saving
+/// it. Failures are field diagnostics (HTTP 400).
 pub async fn validate(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path((agent_id, _proposal_id)): Path<(String, String)>,
+    Path((agent_id, proposal_id)): Path<(String, String)>,
     Json(body): Json<ValidateBody>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<ValidateResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let _agent = team::agent(&state.db, &owner, &agent_id).await?;
-    let text = serde_json::to_string(&body.draft)
-        .map_err(|_| AppError::ValidationError("Invalid draft JSON".into()))?;
-    let generated = crate::services::assistant_skill_authoring::validation::decode(&text)?;
-    let bytes = crate::services::assistant_skill_authoring::validation::validate(&generated)?;
-    Ok(Json(json!({"valid": true, "bytes": bytes.len()})))
+    // Unreadable agents are not-found before any learning gate.
+    team::agent(&state.db, &owner, &agent_id).await?;
+    let bytes =
+        review::validate_draft(&state, &owner, &agent_id, &proposal_id, &body.draft).await?;
+    Ok(Json(ValidateResponse { valid: true, bytes }))
 }
 
 pub async fn approve(
@@ -242,7 +275,7 @@ pub async fn approve(
     };
     let chat = match &renewal {
         Some((_, original_chat)) => original_chat.clone(),
-        None => chat(&state, &owner).await?,
+        None => owner_chat(&state, &owner).await?,
     };
     let expected_revision = body.revision.unwrap_or(proposal_row.revision);
     let expected_skills_revision = if body.renewal_of.is_some() {
@@ -593,6 +626,15 @@ mod route_tests {
     async fn validate_route_returns_not_found_for_other_owner() {
         let f = orchestrator_fixture("learning_validate_owner_route").await;
         let other = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &other,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         feature_flag_service::set_platform_override(
             &f.state.db,
             feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
@@ -621,6 +663,15 @@ mod route_tests {
     #[tokio::test]
     async fn validate_route_returns_engine_error_when_disabled() {
         let f = orchestrator_fixture("learning_validate_engine_route").await;
+        feature_flag_service::set_platform_override(
+            &f.state.db,
+            feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
+            &feature_flag_service::FlagTarget::User(f.owner.clone()),
+            false,
+            &f.owner,
+        )
+        .await
+        .unwrap();
         let err = validate(
             State(f.state.clone()),
             crate::test_utils::test_auth_user(&f.owner),
@@ -632,7 +683,8 @@ mod route_tests {
         .await
         .unwrap_err();
         assert!(
-            matches!(err, crate::errors::AppError::NotFound(message) if message.contains("Assistant route"))
+            matches!(&err, crate::errors::AppError::NotFound(message) if message == "Assistant route not found."),
+            "{err:?}"
         );
         f.state.db.drop().await.unwrap();
     }
@@ -648,7 +700,15 @@ mod s9_denial_tests {
     };
     use serde_json::json;
 
+    /// A new person with the engine flag on.
     async fn enable(db: &mongodb::Database, user: &str) {
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                user,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         feature_flag_service::set_platform_override(
             db,
             feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
@@ -678,10 +738,24 @@ mod s9_denial_tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Skill unavailable or not visible through your Ornn access"
+        assert!(
+            matches!(&err, crate::errors::AppError::Forbidden(m) if m == "Skill unavailable or not visible through your Ornn access"),
+            "{err:?}"
         );
+        // A live agent with the same request is not refused (positive control).
+        let (live, _) = f.create().await;
+        let Json(saved) = crate::handlers::agent_skills::set(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.admin),
+            Path(live.id.clone()),
+            Json(crate::services::agent_skill_service::Selection {
+                expected_revision: 0,
+                skills: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.agent_id, live.id);
     }
 
     #[tokio::test]
@@ -723,71 +797,14 @@ mod s9_denial_tests {
 
     #[tokio::test]
     async fn viewer_put_refused_but_preview_history_are_owner_scoped() {
-        let f = orchestrator_fixture("s9_viewer_routes").await;
-        let viewer = uuid::Uuid::new_v4().to_string();
-        enable(&f.state.db, &f.owner).await;
-        enable(&f.state.db, &viewer).await;
-        let auth = crate::test_utils::test_auth_user(&viewer);
-        let preview = crate::handlers::agent_skills::preview_attached(
-            State(f.state.clone()),
-            auth.clone(),
-            Path((f.chat.agent_id.clone(), "missing".into())),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(preview.to_string(), "Attached skill not found");
-        let history = crate::handlers::agent_skills::history(
-            State(f.state.clone()),
-            auth,
-            Path(f.chat.agent_id.clone()),
-        )
-        .await
-        .unwrap();
-        assert!(history.0.get("items").is_some());
-    }
-
-    #[tokio::test]
-    async fn viewer_membership_denies_skill_write_but_allows_reads() {
-        let f = orchestrator_fixture("s9_viewer_membership").await;
-        let org = uuid::Uuid::new_v4().to_string();
-        let viewer = uuid::Uuid::new_v4().to_string();
-        f.state
-            .db
-            .collection(crate::models::user::COLLECTION_NAME)
-            .insert_many([
-                crate::test_utils::test_user(&org, crate::models::user::UserType::Org),
-                crate::test_utils::test_user(&viewer, crate::models::user::UserType::Person),
-            ])
-            .await
-            .unwrap();
-        f.state
-            .db
-            .collection(crate::models::org_membership::COLLECTION_NAME)
-            .insert_one(crate::test_utils::test_membership(
-                &org,
-                &viewer,
-                crate::models::org_membership::OrgRole::Viewer,
-                None,
-            ))
-            .await
-            .unwrap();
-        f.state
-            .db
-            .collection::<crate::models::assistant_agent::AssistantAgent>(
-                crate::models::assistant_agent::COLLECTION_NAME,
-            )
-            .update_one(
-                mongodb::bson::doc! {"_id": &f.chat.agent_id},
-                mongodb::bson::doc! {"$set":{"user_id":&org}},
-            )
-            .await
-            .unwrap();
-        enable(&f.state.db, &viewer).await;
-        let auth = crate::test_utils::test_auth_user(&viewer);
+        let f = crate::services::org_agent_tests::Fixture::new("s9_viewer_routes").await;
+        let (agent, _) = f.create().await;
+        let viewer = crate::test_utils::test_auth_user(&f.viewer);
+        // A viewer may read the org agent but never change its skills.
         let put = crate::handlers::agent_skills::set(
             State(f.state.clone()),
-            auth.clone(),
-            Path(f.chat.agent_id.clone()),
+            viewer.clone(),
+            Path(agent.id.clone()),
             Json(crate::services::agent_skill_service::Selection {
                 expected_revision: 0,
                 skills: vec![],
@@ -795,15 +812,92 @@ mod s9_denial_tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(put.to_string(), "Agent skill changes require owner access");
-        let history = crate::handlers::agent_skills::history(
+        assert!(
+            matches!(&put, crate::errors::AppError::Forbidden(m) if m == "Only organization Admins and Members may maintain this agent"),
+            "{put:?}"
+        );
+        // Reads reach the agent: a missing pin is the pin's not-found, not the agent's.
+        let preview = crate::handlers::agent_skills::preview_attached(
             State(f.state.clone()),
-            auth,
-            Path(f.chat.agent_id.clone()),
+            viewer,
+            Path((agent.id.clone(), "missing".into())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&preview, crate::errors::AppError::NotFound(m) if m == "Attached skill not found"),
+            "{preview:?}"
+        );
+        // An outsider cannot see the agent at all.
+        let outsider = crate::handlers::agent_skills::preview_attached(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.outsider),
+            Path((agent.id.clone(), "missing".into())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&outsider, crate::errors::AppError::NotFound(m) if m == "Agent not found"),
+            "{outsider:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn viewer_membership_denies_skill_write_but_allows_reads() {
+        let f = crate::services::org_agent_tests::Fixture::new("s9_viewer_membership").await;
+        let (agent, _) = f.create().await;
+        // An admin's change is the agent's history for every reader of the
+        // agent, not just for the person who made it.
+        crate::services::audit_service::log_actor_event(
+            f.state.db.clone(),
+            &crate::services::audit_service::AuditActor {
+                user_id: f.admin.clone(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+            },
+            "assistant_skills_updated",
+            Some(
+                json!({"owner_id": f.org, "agent_id": agent.id, "revision": 3, "count": 1,
+                "skills": [{"id": "s", "name": "Checklist", "version": "1.0", "disabled": true}]}),
+            ),
         )
         .await
         .unwrap();
-        assert!(history.0.get("items").is_some());
+        let Json(history) = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.viewer),
+            Path(agent.id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(history.items.len(), 1);
+        assert_eq!(history.items[0].revision, Some(3));
+        assert_eq!(history.items[0].skills[0].name, "Checklist");
+        assert!(history.items[0].skills[0].disabled);
+        let write = crate::handlers::agent_skills::improve(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.viewer),
+            Path((agent.id.clone(), "s".into())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&write, crate::errors::AppError::Forbidden(m) if m == "Only organization Admins and Members may maintain this agent"),
+            "{write:?}"
+        );
+        let outsider = crate::handlers::agent_skills::history(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.outsider),
+            Path(agent.id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&outsider, crate::errors::AppError::NotFound(m) if m == "Agent not found"),
+            "{outsider:?}"
+        );
     }
 
     #[tokio::test]
@@ -818,9 +912,9 @@ mod s9_denial_tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "This route requires a first-party human session"
+        assert!(
+            matches!(&err, crate::errors::AppError::ForbiddenWithGuidance { message, .. } if message == "A first-party human account session is required"),
+            "{err:?}"
         );
     }
 }

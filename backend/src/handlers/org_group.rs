@@ -20,6 +20,7 @@ pub(crate) async fn post(
     access: groups::Access,
     text: &str,
     ids: &[String],
+    explicit_recipients: Option<&[String]>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
     let text = text.trim();
     if (text.is_empty() && ids.is_empty()) || text.chars().count() > engine::MAX_MESSAGE_CHARS {
@@ -33,21 +34,32 @@ pub(crate) async fn post(
         &access.group.member_agent_ids,
     )
     .await?;
-    let mut addressed = personal::mentions(text, &agents);
-    if addressed.is_empty() {
-        addressed = access
-            .group
-            .last_recipient_ids_by_actor
-            .get(&access.actor)
-            .cloned()
-            .unwrap_or_default();
-        addressed.retain(|id| agents.iter().any(|agent| &agent.id == id));
-    }
+    // The participant's pills are authoritative; else their mentions, else
+    // their own sticky selection, else the lead.
+    let mut addressed = match explicit_recipients {
+        Some(selected) => personal::explicit_recipients(selected, &agents)?,
+        None => {
+            let mentioned = personal::mentions(text, &agents);
+            if mentioned.is_empty() {
+                let live_ids: Vec<String> = agents.iter().map(|agent| agent.id.clone()).collect();
+                personal::default_recipients(
+                    access
+                        .group
+                        .last_recipient_ids_by_actor
+                        .get(&access.actor)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    &live_ids,
+                    "",
+                )
+            } else {
+                mentioned
+            }
+        }
+    };
     if addressed.is_empty() {
         addressed.push(access.group.lead_agent_id.clone());
     }
-    groups::persist_actor_recipients(&state.db, &access.group.id, &access.actor, &addressed)
-        .await?;
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
         id: id.clone(),
@@ -71,8 +83,11 @@ pub(crate) async fn post(
         Some(&id),
         ids,
         Some(request),
+        &addressed,
     ))
     .await?;
+    groups::persist_actor_recipients(&state.db, &access.group.id, &access.actor, &addressed)
+        .await?;
     Box::pin(advance(state, &access.group)).await;
     Ok((message, addressed))
 }
@@ -229,6 +244,7 @@ pub(crate) async fn member_settled(
                 Some(id),
                 &[],
                 None,
+                &[],
             )
             .await?;
             Box::pin(crate::services::machine_activity_service::publish_group(
@@ -277,6 +293,7 @@ pub(crate) async fn member_settled(
                 Some(id),
                 &[],
                 None,
+                &[],
             )
             .await?;
             Box::pin(crate::services::machine_activity_service::publish_group(

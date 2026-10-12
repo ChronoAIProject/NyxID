@@ -4,6 +4,7 @@ import { transitionAssistantIdentity } from "./identity";
 import { assistantChatSurface } from "./conversation-ids";
 import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 import { nyxAgentMessageSchema } from "@/schemas/assistant-nyxagent";
+import { isAdmittedSendError } from "./send-admission";
 
 const id = `nyxa-${"1".repeat(32)}`;
 const other = `nyxa-${"2".repeat(32)}`;
@@ -1249,5 +1250,168 @@ describe("steering transport", () => {
     });
     controller!.close();
     await sending;
+  });
+});
+
+function sseBytes(...events: Record<string, unknown>[]): Uint8Array {
+  return new TextEncoder().encode(
+    events.map((event, i) => `data: ${JSON.stringify({ ...event, cursor: i + 1 })}\n\n`).join(""),
+  );
+}
+
+function chunked(...parts: Uint8Array[]): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const part of parts) controller.enqueue(part);
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+const runningStatus = { event: "turn.status", conversation_id: id, turn_id: "turn", status: "running" };
+
+describe("send admission", () => {
+  async function sendFailure(turns: () => Response | Promise<Response>): Promise<unknown> {
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) return turns();
+      return endpoint.includes(`/conversations/${id}`)
+        ? json(history())
+        : json({ conversations: [], next_cursor: null });
+    };
+    return new NyxAgentTransport()
+      .send(id, "Question", vi.fn())
+      .then(() => "resolved", (error: unknown) => error);
+  }
+
+  it.each([
+    [
+      "the 12 MiB response limit",
+      () => chunked(sseBytes(runningStatus), new Uint8Array(12 * 1024 * 1024 + 1)),
+      "message",
+      "Assistant response exceeded its limit.",
+    ],
+    ["an SSE payload that is not JSON", () => chunked(new TextEncoder().encode("data: broken\n\n")), "name", "SyntaxError"],
+    ["a body that is not UTF-8", () => chunked(new Uint8Array([0xff, 0xfe, 0x0a])), "name", "TypeError"],
+    [
+      "a turn for another conversation",
+      () => chunked(sseBytes({ ...runningStatus, conversation_id: other })),
+      "message",
+      "Assistant conversation mismatch.",
+    ],
+    [
+      "a stream that ends without a terminal event",
+      () => chunked(sseBytes(runningStatus)),
+      "message",
+      "The connection was interrupted. The assistant may still be working.",
+    ],
+    ["a 2xx without a body", () => new Response(null), "message", "The assistant returned no stream."],
+  ] as const)("marks %s after a 2xx as admitted", async (_label, turns, field, expected) => {
+    const error = await sendFailure(turns);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error)[field]).toBe(expected);
+    expect(isAdmittedSendError(error)).toBe(true);
+  });
+
+  it("marks the 135 second read deadline after a 2xx as admitted", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = sendFailure(
+        () => new Response(new ReadableStream({ start(controller) { controller.enqueue(sseBytes(runningStatus)); } })),
+      );
+      await vi.advanceTimersByTimeAsync(135_001);
+      const error = await pending;
+      expect((error as Error).message).toBe("The connection was interrupted. The assistant may still be working.");
+      expect(isAdmittedSendError(error)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not mark a refused POST as admitted", async () => {
+    const error = await sendFailure(() =>
+      json({ error: "turn_active", error_code: 12100, message: "A turn is already active" }, 409),
+    );
+    expect(error).toMatchObject({ status: 409, message: "A turn is already active" });
+    expect(isAdmittedSendError(error)).toBe(false);
+  });
+
+  it("does not mark a network failure before any response as admitted", async () => {
+    const error = await sendFailure(() => {
+      throw new TypeError("Failed to fetch");
+    });
+    expect((error as Error).message).toBe("Failed to fetch");
+    expect(isAdmittedSendError(error)).toBe(false);
+  });
+});
+
+describe("sent images", () => {
+  const photo = { id: "img-1", content_type: "image/png" as const, size: 4, label: "photo.png", origin: "user_upload" as const };
+  const photoImage = {
+    id: "img-1",
+    endpoint: `/assistant/nyxagent/conversations/${id}/attachments/img-1`,
+    contentType: "image/png",
+    label: "photo.png",
+    origin: "user_upload",
+  };
+
+  it("shows them on the optimistic user message and exactly once after the history reload", async () => {
+    const page = history();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const bodies: unknown[] = [];
+    globalThis.__nyxidAssistantHttpMock = async ({ endpoint, init }) => {
+      if (endpoint.endsWith("/turns")) {
+        bodies.push(JSON.parse(String(init.body)));
+        // Admission stores the user message with its bound upload.
+        page.messages.push({
+          ...page.messages[0]!, id: "u2", seq: 3, turn_id: "turn-2", text: "Look", created_at: afterReset, attachments: [photo],
+        });
+        await gate;
+        page.messages.push({
+          ...page.messages[1]!, id: "a2", seq: 4, turn_id: "turn-2", text: "A photo", created_at: afterReset,
+        });
+        return chunked(sseBytes(
+          { ...runningStatus, turn_id: "turn-2" },
+          { event: "message.started", message_id: "a2", role: "assistant" },
+          { event: "block.started", block_id: "b2", message_id: "a2", index: 0, block: { type: "text", block_id: "b2", text: "" } },
+          { event: "block.delta", block_id: "b2", text: "A photo" },
+          { event: "block.completed", block_id: "b2", block: { type: "text", block_id: "b2", text: "A photo" } },
+          { event: "message.completed", message_id: "a2" },
+          { event: "turn.completed", turn_id: "turn-2", status: "completed", error: null },
+        ));
+      }
+      return endpoint.includes(`/conversations/${id}`)
+        ? json(page)
+        : json({ conversations: [page.conversation], next_cursor: null });
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const imageSets = () =>
+      transport.session(id).messages.filter((message) => message.images?.length);
+    let most = 0;
+    transport.subscribe(() => {
+      most = Math.max(most, imageSets().length);
+    });
+    const sending = transport.send(id, "Look", vi.fn(), undefined, {
+      attachmentIds: [photo.id],
+      attachments: [photo],
+    });
+    await vi.waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toEqual({ conversation_id: id, text: "Look", attachment_ids: ["img-1"] });
+    const optimistic = imageSets();
+    expect(optimistic).toHaveLength(1);
+    expect(optimistic[0]).toMatchObject({ role: "user", content: "Look", images: [photoImage] });
+    // A poll that lands mid-turn already holds the stored message; it must not add a second copy.
+    await transport.history(id);
+    expect(imageSets()).toHaveLength(1);
+    release();
+    await sending;
+    const settled = transport.session(id).messages;
+    expect(settled.map((message) => message.id)).toEqual(["u", "a", "u2", "a2"]);
+    expect(imageSets()).toEqual([expect.objectContaining({ id: "u2", images: [photoImage] })]);
+    expect(most).toBe(1);
   });
 });

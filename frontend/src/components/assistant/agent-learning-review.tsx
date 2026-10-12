@@ -4,63 +4,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { useAgentLearningReview } from "@/hooks/use-agent-learning-review";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
+import { learningDraftEditable } from "@/schemas/agent-skills";
+import { LearningDraftEditor } from "./learning-draft-editor";
 
 function requestFailure(cause: unknown): string {
   return cause instanceof Error && cause.message
     ? cause.message
     : "The request could not be completed. Check the proposal and try again.";
-}
-
-function diagnostics(
-  cause: unknown,
-): Array<{ rule: string; field: string; line?: number; remediation?: string }> {
-  const value = cause as {
-    errorResponse?: { details?: unknown };
-    diagnostics?: unknown;
-  } | null;
-  const details = value?.errorResponse?.details ?? value?.diagnostics;
-  const candidates = Array.isArray(details)
-    ? details
-    : details
-      ? [details]
-      : [];
-  return candidates
-    .filter(
-      (
-        item,
-      ): item is {
-        rule: string;
-        field: string;
-        line?: number;
-        remediation?: string;
-      } =>
-        Boolean(
-          item && typeof item === "object" && "rule" in item && "field" in item,
-        ),
-    )
-    .map((item) => ({
-      ...item,
-      remediation: item.remediation ?? `Fix ${item.field}`,
-    }));
-}
-
-function FieldDiagnostic({
-  item,
-}: {
-  item: { rule: string; field: string; line?: number; remediation?: string };
-}) {
-  return (
-    <p role="alert" className="text-11 text-destructive">
-      {item.field}
-      {item.line ? `:${item.line}` : ""} ({item.rule}):{" "}
-      {item.remediation ?? `Fix ${item.field}`}
-    </p>
-  );
 }
 
 export function AgentLearningReview({
@@ -73,18 +27,6 @@ export function AgentLearningReview({
   const enabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
   const review = useAgentLearningReview(agentId, enabled);
   const [open, setOpen] = useState<string>();
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [draftNames, setDraftNames] = useState<Record<string, string>>({});
-  const [draftDescriptions, setDraftDescriptions] = useState<
-    Record<string, string>
-  >({});
-  const [draftRationales, setDraftRationales] = useState<
-    Record<string, string>
-  >({});
-  const [draftBases, setDraftBases] = useState<Record<string, string>>({});
-  const [draftFiles, setDraftFiles] = useState<
-    Record<string, { path: string; content: string }[]>
-  >({});
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
@@ -135,25 +77,18 @@ export function AgentLearningReview({
           I consent to learning proposals for this organization
         </label>
       ) : null}
+      {/* Draft edit failures render inside the editor, beside their fields. */}
       {[
         review.run.error,
         review.configure.error,
         review.consent?.error,
-        review.edit.error,
         review.reject.error,
       ]
         .filter(Boolean)
         .map((error, index) => (
-          <div key={index} role="alert" className="text-12 text-destructive">
-            <p>{requestFailure(error)}</p>
-            {diagnostics(error).map((item) => (
-              <p key={`${item.rule}-${item.field}-${item.line ?? 0}`}>
-                {item.field}
-                {item.line ? `:${item.line}` : ""} ({item.rule}):{" "}
-                {item.remediation ?? "update this field"}
-              </p>
-            ))}
-          </div>
+          <p key={index} role="alert" className="text-12 text-destructive">
+            {requestFailure(error)}
+          </p>
         ))}
 
       {!readOnly ? (
@@ -202,7 +137,6 @@ export function AgentLearningReview({
 
       {proposals.map((proposal) => {
         const draft = proposal.draft;
-        const draftText = drafts[proposal.id] ?? draft?.skill_md ?? "";
         const isOpen = open === proposal.id;
         const card = cards[proposal.id];
         const checkOnly = proposal.evidence_available === false;
@@ -215,6 +149,18 @@ export function AgentLearningReview({
           proposal.status === "published_unpinned" &&
           (proposal.failure_code === "evidence_unavailable" ||
             proposal.failure_code === "base_changed");
+        // A publication that reached Ornn but is not attached yet resumes
+        // through the same confirmed approve route.
+        const recovering =
+          !settled &&
+          (proposal.status === "published_unpinned" ||
+            proposal.status === "publishing");
+        const approvable =
+          !settled &&
+          (checkOnly ||
+            recovering ||
+            proposal.status === "pending" ||
+            proposal.status === "publication_failed");
         return (
           <article
             key={proposal.id}
@@ -257,203 +203,14 @@ export function AgentLearningReview({
             ) : null}
 
             {isOpen && draft ? (
-              <div className="space-y-2">
-                {diagnostics(review.edit.error)
-                  .filter((item) => item.field === "skill_md")
-                  .map((item) => (
-                    <FieldDiagnostic
-                      key={`${item.rule}-${item.line ?? 0}`}
-                      item={item}
-                    />
-                  ))}
-                <p className="text-11 text-text-tertiary">
-                  Generated guidance is untrusted and is shown as plain text.
-                </p>
-                <Textarea
-                  aria-label="Skill draft"
-                  className="min-h-40 font-mono text-11"
-                  value={draftText}
-                  readOnly={readOnly}
-                  onChange={(event) =>
-                    setDrafts((current) => ({
-                      ...current,
-                      [proposal.id]: event.target.value,
-                    }))
-                  }
-                />
-                <Textarea
-                  aria-label="Rationale"
-                  placeholder="Why this skill should be published"
-                  value={draftRationales[proposal.id] ?? draft.rationale ?? ""}
-                  readOnly={readOnly}
-                  onChange={(event) =>
-                    setDraftRationales((current) => ({
-                      ...current,
-                      [proposal.id]: event.target.value,
-                    }))
-                  }
-                />
-                {diagnostics(review.edit.error)
-                  .filter((item) => item.field === "rationale")
-                  .map((item) => (
-                    <FieldDiagnostic
-                      key={`${item.rule}-${item.line ?? 0}`}
-                      item={item}
-                    />
-                  ))}
-                <Input
-                  aria-label="Base skill"
-                  placeholder="Base skill id@version (optional)"
-                  value={
-                    draftBases[proposal.id] ??
-                    (draft.base_skill &&
-                    typeof draft.base_skill === "object" &&
-                    "skill_id" in draft.base_skill &&
-                    "version" in draft.base_skill
-                      ? `${String(draft.base_skill.skill_id)}@${String(draft.base_skill.version)}`
-                      : "")
-                  }
-                  readOnly={readOnly}
-                  onChange={(event) =>
-                    setDraftBases((current) => ({
-                      ...current,
-                      [proposal.id]: event.target.value,
-                    }))
-                  }
-                />
-                <Input aria-label="Skill kind" value={draft.kind} readOnly={readOnly} onChange={() => undefined} />
-                <Input
-                  aria-label="Skill name"
-                  value={draftNames[proposal.id] ?? draft.name}
-                  readOnly={readOnly}
-                  onChange={(event) =>
-                    setDraftNames((current) => ({
-                      ...current,
-                      [proposal.id]: event.target.value,
-                    }))
-                  }
-                />
-                <Textarea
-                  aria-label="Skill description"
-                  value={draftDescriptions[proposal.id] ?? draft.description}
-                  readOnly={readOnly}
-                  onChange={(event) =>
-                    setDraftDescriptions((current) => ({
-                      ...current,
-                      [proposal.id]: event.target.value,
-                    }))
-                  }
-                />
-                {(draftFiles[proposal.id] ?? draft.files).map((file, index) => (
-                  <div
-                    key={`${proposal.id}-${file.path}`}
-                    className="space-y-1 rounded border border-border/50 p-2"
-                  >
-                    <Input
-                      aria-label={`File ${index + 1} path`}
-                      value={file.path}
-                      readOnly={readOnly}
-                      onChange={(event) =>
-                        setDraftFiles((current) => ({
-                          ...current,
-                          [proposal.id]: (
-                            current[proposal.id] ?? draft.files
-                          ).map((f, i) =>
-                            i === index
-                              ? { ...f, path: event.target.value }
-                              : f,
-                          ),
-                        }))
-                      }
-                    />
-                    <Textarea
-                      aria-label={`File ${index + 1} content`}
-                      value={file.content}
-                      readOnly={readOnly}
-                      onChange={(event) =>
-                        setDraftFiles((current) => ({
-                          ...current,
-                          [proposal.id]: (
-                            current[proposal.id] ?? draft.files
-                          ).map((f, i) =>
-                            i === index
-                              ? { ...f, content: event.target.value }
-                              : f,
-                          ),
-                        }))
-                      }
-                    />
-                    {!readOnly ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          setDraftFiles((current) => ({
-                            ...current,
-                            [proposal.id]: (
-                              current[proposal.id] ?? draft.files
-                            ).filter((_, i) => i !== index),
-                          }))
-                        }
-                      >{`Remove file ${file.path}`}</Button>
-                    ) : null}
-                  </div>
-                ))}
-                {!readOnly ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      setDraftFiles((current) => ({
-                        ...current,
-                        [proposal.id]: [
-                          ...(current[proposal.id] ?? draft.files),
-                          { path: "", content: "" },
-                        ],
-                      }))
-                    }
-                  >
-                    Add file
-                  </Button>
-                ) : null}
-                <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2 text-11">
-                  {draft.safety_notes}
-                </pre>
-                {!readOnly &&
-                (drafts[proposal.id] !== undefined ||
-                  draftRationales[proposal.id] !== undefined ||
-                  draftBases[proposal.id] !== undefined ||
-                  draftNames[proposal.id] !== undefined ||
-                  draftDescriptions[proposal.id] !== undefined ||
-                  draftFiles[proposal.id] !== undefined) ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={review.edit.isPending}
-                    onClick={() =>
-                      review.edit.mutate({
-                        proposalId: proposal.id,
-                        revision: proposal.revision,
-                        draft: {
-                          ...draft,
-                          name: draftNames[proposal.id] ?? draft.name,
-                          description:
-                            draftDescriptions[proposal.id] ?? draft.description,
-                          skill_md: drafts[proposal.id],
-                          kind: draft.kind,
-                          base_skill:
-                            draftBases[proposal.id] ?? draft.base_skill,
-                          rationale:
-                            draftRationales[proposal.id] ?? draft.rationale,
-                          files: draftFiles[proposal.id] ?? draft.files,
-                        },
-                      })
-                    }
-                  >
-                    Save draft
-                  </Button>
-                ) : null}
-              </div>
+              <LearningDraftEditor
+                key={`${proposal.id}:${proposal.revision}`}
+                agentId={agentId}
+                proposal={{ ...proposal, draft }}
+                readOnly={readOnly || !learningDraftEditable(proposal.status)}
+                edit={review.edit}
+                validate={review.validate}
+              />
             ) : null}
 
             <div className="flex flex-wrap gap-2">
@@ -497,10 +254,7 @@ export function AgentLearningReview({
                 >
                   Review updated package
                 </Button>
-              ) : settled ||
-                (!checkOnly &&
-                  proposal.status !== "pending" &&
-                  proposal.status !== "publication_failed") ? null : (
+              ) : !approvable ? null : (
                 <Button
                   size="sm"
                   disabled={readOnly || review.approve.isPending}
@@ -534,11 +288,15 @@ export function AgentLearningReview({
                     ? card
                       ? "Confirm check"
                       : "Check publication"
-                    : proposal.status === "publication_failed"
-                      ? "Retry publication"
-                      : card
-                        ? "Confirm publish & attach"
-                        : "Publish & request confirmation"}
+                    : recovering
+                      ? card
+                        ? "Confirm finish publishing"
+                        : "Finish publishing"
+                      : proposal.status === "publication_failed"
+                        ? "Retry publication"
+                        : card
+                          ? "Confirm publish & attach"
+                          : "Publish & request confirmation"}
                 </Button>
               )}
               {/* The server rejects only pending or failed drafts. A failed
@@ -568,12 +326,15 @@ export function AgentLearningReview({
                 </Button>
               ) : null}
             </div>
-            {card && proposal.source !== "authored" && !checkOnly ? (
+            {approvable &&
+            proposal.source !== "authored" &&
+            !legacyPackage &&
+            !checkOnly &&
+            !readOnly ? (
               <p className="text-11 text-warning">
-                This is a two-step approval: first request the owner
-                confirmation card, then confirm that exact card. Confirming this
-                exact card will publish the private skill and attach its pinned
-                version. The card expires if the draft or agent changes.
+                {card
+                  ? "Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes."
+                  : "Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm."}
               </p>
             ) : null}
           </article>

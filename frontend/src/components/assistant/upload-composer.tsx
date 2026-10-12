@@ -2,17 +2,25 @@ import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { FileText, Paperclip, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import {
   createUploadDraft,
+  isSupportedAttachment,
   removeUpload,
+  UNSUPPORTED_FORMAT_MESSAGE,
   uploadFile,
   type UploadedMessage,
   type UploadScope,
 } from "@/lib/assistant/uploads";
+import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import type { NyxAgentAttachment } from "@/schemas/assistant-nyxagent";
-
-const UNSUPPORTED_FORMAT_MESSAGE = "Format not supported. Please try again.";
 
 type Pending = {
   key: string;
@@ -34,12 +42,6 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
-  useEffect(() => {
-    if (!preview) return;
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setPreview(undefined); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [preview]);
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
@@ -91,7 +93,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         progress: 0,
         controller: new AbortController(),
       };
-      if (["image/svg+xml", "video/mp4", "audio/mpeg"].includes(file.type)) {
+      if (!isSupportedAttachment(file)) {
         entry.error = UNSUPPORTED_FORMAT_MESSAGE;
         pending.current.set(entry.key, entry);
         refresh();
@@ -172,12 +174,17 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                   className="flex min-w-0 items-center gap-2 rounded-lg border border-hairline bg-card p-2 text-xs"
                 >
                   {file.preview ? (
-                    <button type="button" className="shrink-0" aria-label={`Preview ${file.name}`} onClick={() => file.preview && setPreview(file)} onKeyDown={(event) => { if (event.key === "Enter") setPreview(file); }}>
-                    <img
-                      src={file.preview}
+                    <button
+                      type="button"
+                      className="shrink-0"
+                      aria-label={`Preview ${file.name}`}
+                      onClick={() => setPreview(file)}
+                    >
+                      <img
+                        src={file.preview}
                         alt={file.name}
-                      className="h-16 w-16 shrink-0 rounded object-cover"
-                    />
+                        className="h-16 w-16 shrink-0 rounded object-cover"
+                      />
                     </button>
                   ) : (
                     <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
@@ -217,20 +224,37 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               {notice}
             </p>
           )}
-          {preview?.preview && (
-            <div role="dialog" aria-label={`Preview ${preview.name}`} className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={() => setPreview(undefined)}>
-              <div className="relative max-h-full max-w-full rounded-xl bg-card p-3" onClick={(event) => event.stopPropagation()}>
-                <img src={preview.preview} alt={preview.name} className="max-h-[80vh] max-w-[90vw] object-contain" />
-                <Button type="button" variant="secondary" className="mt-3" onClick={() => setPreview(undefined)}>Close preview</Button>
-              </div>
-            </div>
-          )}
+          <Dialog
+            open={Boolean(preview?.preview)}
+            onOpenChange={(open) => {
+              if (!open) setPreview(undefined);
+            }}
+          >
+            <DialogContent aria-describedby={undefined} className="md:max-w-3xl">
+              <DialogTitle className="truncate pr-8">{preview?.name}</DialogTitle>
+              {preview?.preview && (
+                <img
+                  src={preview.preview}
+                  alt={preview.name}
+                  className="max-h-[70vh] w-full rounded object-contain"
+                />
+              )}
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button type="button" variant="secondary">
+                    Close preview
+                  </Button>
+                </DialogClose>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       }
       attachmentButton={
         <>
-          {/* No picker MIME filter: extensionless text and browser MIME guesses
-              must reach the same server sniffing/validation as paste and drop. */}
+          {/* No picker MIME filter: it would hide extensionless text and files
+              with unusual browser MIME guesses. `add` applies the same allowlist
+              to picker, paste and drop, and the server still sniffs every file. */}
           <input
             ref={input}
             type="file"
@@ -289,11 +313,12 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                 }
               : undefined,
           );
-          } catch (error) {
-            const admitted = error instanceof Error && (error as Error & { admitted?: boolean }).admitted;
-            for (const file of items) {
-              if (alive.current && !admitted) pending.current.set(file.key, file);
-              else if (file.preview) URL.revokeObjectURL(file.preview);
+        } catch (error) {
+          // Admitted uploads are bound to the stored message: never offer them again.
+          const admitted = isAdmittedSendError(error);
+          for (const file of items) {
+            if (alive.current && !admitted) pending.current.set(file.key, file);
+            else if (file.preview) URL.revokeObjectURL(file.preview);
           }
           refresh();
           throw error;

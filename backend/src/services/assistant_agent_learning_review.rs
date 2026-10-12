@@ -1187,6 +1187,55 @@ async fn defer_publication_error<T>(
     }
 }
 
+/// Check an edited draft with its source's validator. Failures name the
+/// field and rule (`SkillDraftValidation`), including the base skill choice.
+async fn encode_draft(
+    db: &Database,
+    agent: &AssistantAgent,
+    row: &AssistantAgentLearningProposal,
+    value: &Value,
+) -> AppResult<Vec<u8>> {
+    use crate::errors::skill_draft::SkillDraftValidation as Diagnostic;
+    let encoded = if row.source == ProposalSource::Authored {
+        let body = super::assistant_skill_authoring::decode_body(&value.to_string())?;
+        super::assistant_skill_authoring::validate_body(&body)?
+    } else {
+        learning::validate_generated(&value.to_string())?
+            .ok_or_else(|| Diagnostic::at("invalid_kind", "kind"))?
+    };
+    let body: GeneratedProposal = serde_json::from_slice(&encoded).map_err(|_| conflict())?;
+    if let Some(base) = &body.base_skill {
+        let attached = agent.skills.iter().any(|pin| {
+            pin.source == base.source
+                && pin.skill_id == base.skill_id
+                && pin.version == base.version
+                && pin.sha256 == base.sha256
+                && pin.name == base.name
+                && pin.dependencies.is_empty()
+        });
+        if !attached {
+            return Err(Diagnostic::at("base_skill_not_attached", "base_skill").into());
+        }
+        if row.source == ProposalSource::Authored && body.name != base.name {
+            return Err(Diagnostic::at("base_skill_name_mismatch", "name").into());
+        }
+    }
+    validate_proposal_base(db, agent, &body, row.source).await?;
+    Ok(encoded)
+}
+
+/// Validate an edited draft without saving it; returns its encoded size.
+pub async fn validate_draft(
+    state: &AppState,
+    actor: &str,
+    agent_id: &str,
+    id: &str,
+    value: &Value,
+) -> AppResult<usize> {
+    let (agent, row) = load(&state.db, actor, agent_id, id).await?;
+    Ok(encode_draft(&state.db, &agent, &row, value).await?.len())
+}
+
 pub async fn edit(
     state: &AppState,
     actor: &str,
@@ -1209,14 +1258,7 @@ pub async fn edit(
     {
         return Err(must_reconcile());
     }
-    let encoded = if row.source == ProposalSource::Authored {
-        let body = super::assistant_skill_authoring::decode_body(&value.to_string())?;
-        super::assistant_skill_authoring::validate_body(&body)?
-    } else {
-        learning::validate_generated(&value.to_string())?.ok_or_else(conflict)?
-    };
-    let value: GeneratedProposal = serde_json::from_slice(&encoded).map_err(|_| conflict())?;
-    validate_proposal_base(&state.db, &agent, &value, row.source).await?;
+    let encoded = encode_draft(&state.db, &agent, &row, value).await?;
     let encrypted = state.encryption_keys.encrypt(&encoded).await?;
     let fingerprint = super::assistant_action_receipts::fingerprint_sensitive_material(&format!(
         "{}:{}:{}",
@@ -2231,12 +2273,19 @@ async fn execute(
         expected_revision: p.skills_revision,
         skills: agent.skills.clone(),
     };
+    // The improved version replaces its base and keeps the base's disabled
+    // state: re-enabling stays an explicit owner change.
+    let mut pinned = preview.reference.clone();
     if let Some(base) = &body.base_skill {
+        pinned.disabled = selection
+            .skills
+            .iter()
+            .any(|s| s.skill_id == base.skill_id && s.source == base.source && s.disabled);
         selection
             .skills
             .retain(|s| s.skill_id != base.skill_id || s.source != base.source);
     }
-    selection.skills.push(preview.reference.clone());
+    selection.skills.push(pinned);
     skills::validate(&selection)?;
     let mut metadata = agent.skill_metadata.clone();
     metadata.insert(

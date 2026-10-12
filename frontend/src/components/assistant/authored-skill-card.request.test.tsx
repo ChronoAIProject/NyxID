@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { AuthoredSkillCard } from "./authored-skill-card";
+import { AuthoredSkillCard, SAVED_EDIT_NOTICE } from "./authored-skill-card";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
 // Exercises the real request path (assistantJson -> fetch); only fetch is stubbed.
@@ -127,4 +127,45 @@ it("points to Show updated draft when the rebuilt package's card was not posted"
   expect(await screen.findByText(/review card was not posted\. Use Show updated draft to post it\./)).toBeVisible();
   expect(await screen.findByRole("button", { name: "Show updated draft" })).toBeVisible();
   expect(screen.queryByText(/could not be rebuilt/)).not.toBeInTheDocument();
+});
+
+it("edits the draft before publishing and re-reads the card after saving", async () => {
+  const draft = {
+    schema_version: 1, kind: "new", name: "weekly-review", description: "Weekly", skill_md: "# Weekly review",
+    files: [], base_skill: null, rationale: "Owner request", safety_notes: "None",
+  };
+  const proposal = {
+    source: "authored", id: "proposal", agent_id: "agent", status: "pending", revision: 4, config_revision: 0,
+    agent_skills_revision: 3, evidence_count: 0, body_bytes: 15, created_at: "2026-10-06T00:00:00Z",
+    updated_at: "2026-10-06T00:00:00Z", card_conversation_id: "home", draft,
+  };
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (url === "/api/v1/assistant/nyxagent/agents/agent/learning/proposals") return respond(200, { proposals: [proposal] });
+    if (url === proposalPath && init?.method === "PUT") return respond(200, { status: "updated" });
+    return respond(200, { ...preview, status: "pending", failure_code: null, actions: ["deny", "publish"] });
+  });
+  const cardReads = () => fetchMock.mock.calls.filter(([url]) => String(url).startsWith(`${proposalPath}?acknowledgement_id=card`)).length;
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit before publishing" }));
+  const markdown = await screen.findByRole("textbox", { name: "Skill draft" });
+  // The editor does not link elsewhere; publishing waits for the saved version's new card.
+  expect(screen.queryByRole("link", { name: "Open the confirmation card" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Allow and publish" })).toBeVisible();
+  const readsBeforeSave = cardReads();
+  fireEvent.change(markdown, { target: { value: "# Weekly review\nAdd a summary" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === proposalPath && (init as RequestInit | undefined)?.method === "PUT")).toBe(true));
+  const put = fetchMock.mock.calls.find(([url, init]) => url === proposalPath && (init as RequestInit | undefined)?.method === "PUT")!;
+  expect(JSON.parse(String((put[1] as RequestInit).body))).toEqual({ revision: 4, draft: { ...draft, skill_md: "# Weekly review\nAdd a summary" } });
+  await waitFor(() => expect(cardReads()).toBeGreaterThan(readsBeforeSave));
+  // The saved revision gets a fresh card (the server raises it); this one says where to go.
+  expect(await screen.findByText(SAVED_EDIT_NOTICE)).toBeVisible();
+  expect(screen.queryByRole("textbox", { name: "Skill draft" })).not.toBeInTheDocument();
+});
+
+it("offers no editing once the draft is no longer editable", async () => {
+  fetchMock.mockImplementation(async () => respond(200, { ...preview, status: "publishing", lease_live: true, actions: [] }));
+  show();
+  expect(await screen.findByText("Publication is in progress.")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Edit before publishing" })).not.toBeInTheDocument();
 });

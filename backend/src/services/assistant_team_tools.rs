@@ -803,8 +803,10 @@ fn endpoints_for(names: &[&str]) -> Vec<McpToolEndpoint> {
 }
 
 fn skill_reference_schema() -> Value {
-    let pin = json!({"source":{"type":"string","enum":["ornn"]},"skill_id":string(64),"name":string(256),"version":string(32),"sha256":string(64),"disabled":{"type":"boolean"}});
+    // Dependencies are exact `SkillPin`s; only an attached root can be disabled.
+    let pin = json!({"source":{"type":"string","enum":["ornn"]},"skill_id":string(64),"name":string(256),"version":string(32),"sha256":string(64)});
     let mut properties = pin.clone();
+    properties["disabled"] = json!({"type":"boolean"});
     properties["dependencies"] = json!({"type":"array","maxItems":16,"items":{"type":"object","properties":pin,"required":["source","skill_id","name","version","sha256"],"additionalProperties":false}});
     json!({"type":"object","properties":properties,"required":["source","skill_id","name","version","sha256"],"additionalProperties":false})
 }

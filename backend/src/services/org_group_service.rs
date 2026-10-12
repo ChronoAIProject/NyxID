@@ -521,13 +521,14 @@ pub async fn update(
                     "member_agent_ids": &before.member_agent_ids,
                     "name": &before.name, "lead_agent_id": &before.lead_agent_id,
                 };
-                let update = doc! {"$set": {
+                let mut update = doc! {"$set": {
                     "name": &next.name,
                     "member_agent_ids": &next.member_agent_ids,
                     "participant_user_ids": &next.participant_user_ids,
                     "lead_agent_id": &next.lead_agent_id,
                     "updated_at": bson::DateTime::now(),
                 }};
+                update.extend(sticky_cleanup(&before, &next));
                 let changed = db.collection::<AssistantGroup>(GROUPS)
                     .update_one(filter, update).session(&mut *session).await?;
                 if changed.matched_count != 1 {
@@ -556,6 +557,31 @@ pub async fn update(
     )
     .await;
     Ok(access)
+}
+
+/// Departed participants lose their sticky selection; the others keep only
+/// agents still in the group.
+fn sticky_cleanup(before: &AssistantGroup, next: &AssistantGroup) -> bson::Document {
+    let mut unset = bson::Document::new();
+    let mut pull = bson::Document::new();
+    for actor in before.last_recipient_ids_by_actor.keys() {
+        let path = format!("last_recipient_ids_by_actor.{actor}");
+        if next.participant_user_ids.contains(actor) {
+            if before.member_agent_ids != next.member_agent_ids {
+                pull.insert(path, doc! {"$nin": &next.member_agent_ids});
+            }
+        } else {
+            unset.insert(path, "");
+        }
+    }
+    let mut update = bson::Document::new();
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
+    }
+    if !pull.is_empty() {
+        update.insert("$pull", pull);
+    }
+    update
 }
 
 async fn require_manager_remains(db: &Database, access: &Access) -> AppResult<()> {
@@ -775,6 +801,7 @@ pub async fn append(
     request: Option<&str>,
     ids: &[String],
     enqueue: Option<crate::models::assistant_group::GroupRequest>,
+    recipients: &[String],
 ) -> AppResult<crate::models::assistant_group::GroupMessage> {
     use crate::models::assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME as MESSAGES};
     let name = display_name(db, &access.actor).await?;
@@ -804,7 +831,7 @@ pub async fn append(
         agent_id: agent.map(|a| a.id.clone()),
         agent_name: agent.map(|a| a.name.clone()),
         text: text.into(),
-        recipient_agent_ids: Vec::new(),
+        recipient_agent_ids: recipients.to_vec(),
         created_at: now,
         attachments,
     };

@@ -2,6 +2,7 @@ import type { ComponentProps } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLearningReview } from "./agent-learning-review";
+import { ApiError } from "@/lib/api-client";
 
 const mocks = vi.hoisted(() => ({
   feature: vi.fn(),
@@ -9,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   approve: vi.fn(),
   configure: vi.fn(),
   edit: vi.fn(),
+  validate: vi.fn(),
   reject: vi.fn(),
   run: vi.fn(),
   consent: vi.fn(),
@@ -21,6 +23,10 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("@/hooks/use-agent-learning-review", () => ({
   useAgentLearningReview: mocks.review,
+}));
+// The draft editor reads attached pins only for improve drafts.
+vi.mock("@/hooks/use-agent-skills", () => ({
+  useAgentSkills: () => ({ data: undefined, error: null }),
 }));
 
 const proposal = {
@@ -55,6 +61,7 @@ beforeEach(() => {
     configure: { mutate: mocks.configure, isPending: false },
     approve: { mutateAsync: mocks.approve, isPending: false },
     edit: { mutate: mocks.edit, isPending: false },
+    validate: { mutateAsync: mocks.validate, isPending: false },
     reject: { mutateAsync: mocks.reject, isPending: false },
     run: { mutate: mocks.run, isPending: false },
     consent: { mutate: mocks.consent, isPending: false },
@@ -108,7 +115,12 @@ describe("AgentLearningReview", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Skill name" }), { target: { value: "Renamed" } });
     fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
-    await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith(expect.objectContaining({ draft: expect.objectContaining({ name: "Renamed" }) })));
+    // The full draft is sent, including the unchanged SKILL.md.
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith({
+      proposalId: "proposal",
+      revision: 2,
+      draft: { ...proposal.draft, name: "Renamed", base_skill: null },
+    }));
   });
 
   it("renders organization consent and sends the PUT learning consent mutation", () => {
@@ -129,15 +141,19 @@ describe("AgentLearningReview", () => {
     expect(mocks.consent).toHaveBeenCalledWith(true);
   });
 
-  it("renders validation diagnostics at their field and line", () => {
+  it("renders validation diagnostics at their field and line", async () => {
     mocks.feature.mockReturnValue(true);
-    const error = Object.assign(new Error("validation failed"), {
-      errorResponse: { details: { rule: "frontmatter.required", field: "name", line: 3 } },
+    const error = new ApiError(400, {
+      error: "validation_error",
+      error_code: 1008,
+      message: "Skill draft failed validation",
+      details: { rule: "required", field: "name", line: 3 },
     });
     mocks.review.mockReturnValue({
-      data: { proposals: [] },
+      data: { proposals: [proposal] },
       status: { data: { enabled: true } },
-      edit: { error, isPending: false },
+      edit: { mutate: mocks.edit, error, variables: { proposalId: "proposal" }, isPending: false },
+      validate: { mutateAsync: mocks.validate, isPending: false },
       configure: { mutate: mocks.configure, isPending: false },
       approve: { mutateAsync: mocks.approve, isPending: false },
       reject: { mutateAsync: mocks.reject, isPending: false },
@@ -145,7 +161,13 @@ describe("AgentLearningReview", () => {
       consent: { mutate: mocks.consent, isPending: false },
     });
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.getByText(/name:3 \(frontmatter.required\): Fix name/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Skill name" })).toHaveAccessibleDescription(
+        "Line 3: Fill in the skill name.",
+      ),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Skill draft failed validation");
   });
 
   it("renders the published version on status rows", () => {

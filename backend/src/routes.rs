@@ -2217,6 +2217,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::preview_attached),
         )
         .route(
+            "/nyxagent/agents/{id}/skills/{skill_id}/improve",
+            post(handlers::agent_skills::improve),
+        )
+        .route(
             "/nyxagent/agents/{id}/learning",
             get(handlers::assistant_agent_learning::status)
                 .put(handlers::assistant_agent_learning::configure),

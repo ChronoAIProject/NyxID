@@ -3,20 +3,33 @@ import { ArrowRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
-import { useAgentSkills, useSetAgentSkills, useSkillSearch } from "@/hooks/use-agent-skills";
+import {
+  useAgentSkills,
+  useAttachLatestSkill,
+  useSetAgentSkills,
+  useSkillSearch,
+} from "@/hooks/use-agent-skills";
+import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { agentTitle } from "@/lib/assistant/nyxbot-labels";
+import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 import {
   deriveConnectorItems,
   matchesPluginQuery,
   type ConnectorCardItem,
   type PluginKind,
 } from "@/lib/assistant/plugins";
-import type { AgentSkill } from "@/schemas/agent-skills";
 
 interface PluginCardShape {
   readonly id: string;
@@ -70,7 +83,7 @@ function PluginCard({
   onActivate,
 }: {
   readonly item: PluginCardShape;
-  readonly addedBadge: "Connected" | "Installed";
+  readonly addedBadge: "Connected" | "Installed" | "Attached";
   /** Extra mono note next to the added badge (e.g. "2 connections"). */
   readonly addedMeta?: string;
   readonly actionLabel: string;
@@ -393,56 +406,189 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   );
 }
 
-function SkillsTab({ query, agentId }: { readonly query: string; readonly agentId?: string }) {
-  const search = useSkillSearch(query.trim() || null, 1);
-  const attached = useAgentSkills(agentId ?? "");
-  const setSkills = useSetAgentSkills(agentId ?? "");
-  const items = (search.data?.items ?? []).map((skill) => ({ id: skill.id, name: skill.name, initial: skill.name.slice(0, 2).toUpperCase(), category: "Skill", description: skill.description, meta: "Ornn catalog", added: false }));
+/** The agent whose skills the tab manages: NyxBot unless the owner picks another. */
+function SkillAgentPicker({
+  agents,
+  value,
+  onChange,
+}: {
+  readonly agents: readonly AssistantAgent[];
+  readonly value: string;
+  readonly onChange: (id: string) => void;
+}) {
+  return (
+    <label className="flex max-w-[300px] flex-col gap-1 text-11 text-text-tertiary">
+      Agent
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger aria-label="Agent for skills">
+          <SelectValue placeholder="Choose an agent" />
+        </SelectTrigger>
+        <SelectContent>
+          {agents.map((agent) => (
+            <SelectItem key={agent.id} value={agent.id}>
+              {agentTitle(agent)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </label>
+  );
+}
 
-  if (query.trim() && items.length === 0) {
-    return (
-      <p className="py-14 text-center text-11 text-text-tertiary">
-        No plugins match this search.
-      </p>
-    );
-  }
+function SkillsTab({
+  query,
+  agentId: initialAgentId,
+}: {
+  readonly query: string;
+  readonly agentId?: string;
+}) {
+  const agents = useNyxBotAgents();
+  // Destroyed agents and agents the owner cannot maintain keep their skills.
+  const manageable = (agents.data?.agents ?? []).filter(
+    (agent) => agent.status !== "destroyed" && agent.can_maintain !== false,
+  );
+  const [chosen, setChosen] = useState(initialAgentId ?? "");
+  const agent =
+    manageable.find((item) => item.id === chosen) ??
+    manageable.find((item) => item.kind === "nyxbot") ??
+    manageable[0];
+  const agentId = agent?.id ?? "";
+  const search = useSkillSearch(query.trim() || null, 1);
+  const attached = useAgentSkills(agentId);
+  const detach = useSetAgentSkills(agentId);
+  const attach = useAttachLatestSkill(agentId);
+  const pins = attached.data?.skills ?? [];
+  const busy = !attached.data || detach.isPending || attach.isPending;
+  const full = pins.length >= 16;
+  const items: PluginCardShape[] = (search.data?.items ?? []).map((skill) => ({
+    id: skill.id,
+    name: skill.name,
+    initial: skill.name.slice(0, 2).toUpperCase(),
+    category: "Skill",
+    description: skill.description,
+    meta: "Ornn catalog",
+    added: pins.some((pin) => pin.skill_id === skill.id),
+  }));
+  const errors = [
+    agents.error,
+    attached.error,
+    search.error,
+    attach.error,
+    detach.error,
+  ].filter((error): error is Error => Boolean(error));
 
   function card(item: PluginCardShape) {
     return (
       <PluginCard
         key={item.id}
         item={item}
-        addedBadge="Installed"
-        actionLabel={item.added ? "Manage" : "Install"}
-        onActivate={() => {
-          if (!agentId || !attached.data) return toast.info("Select an agent to attach this skill.");
-          const existing = attached.data.skills.find((pin) => pin.skill_id === item.id);
-          const skills: AgentSkill[] = existing
-            ? attached.data.skills.map((pin) => pin.skill_id === item.id ? { ...pin, disabled: !pin.disabled } : pin)
-            : [...attached.data.skills, { source: "ornn", skill_id: item.id, name: item.name, version: "latest", sha256: "", dependencies: [], disabled: false }];
-          setSkills.mutate({ expected_revision: attached.data.revision, skills });
-        }}
+        addedBadge="Attached"
+        actionLabel={item.added ? "Attached" : "Attach"}
+        onActivate={
+          item.added
+            ? undefined
+            : () => {
+                if (busy || !attached.data) return;
+                if (full) {
+                  toast.info(
+                    "This agent already has 16 skills. Detach one first.",
+                  );
+                  return;
+                }
+                attach.mutate({ skillId: item.id, current: attached.data });
+              }
+        }
       />
     );
   }
 
   return (
-    <>
+    <div className="space-y-5">
+      {agents.isPending ? (
+        <Skeleton className="h-8 w-[300px]" />
+      ) : manageable.length === 0 && !agents.error ? (
+        <p className="text-12 text-muted-foreground">
+          No agent you can maintain is available.
+        </p>
+      ) : agent ? (
+        <SkillAgentPicker
+          agents={manageable}
+          value={agent.id}
+          onChange={setChosen}
+        />
+      ) : null}
+      {errors.map((error, index) => (
+        <p key={index} role="alert" className="text-12 text-destructive">
+          {error.message}
+        </p>
+      ))}
+      {agent && attached.data ? (
+        <section aria-label="Attached skills" className="space-y-2">
+          <SectionHeading>
+            {`Attached to ${agentTitle(agent)} · ${pins.length}/16`}
+          </SectionHeading>
+          {pins.length === 0 ? (
+            <p className="text-12 text-muted-foreground">
+              No skills attached. Search the catalog to attach one.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {pins.map((pin) => (
+                <li
+                  key={pin.skill_id}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-border/50 px-3 py-2"
+                >
+                  <span className="min-w-0 text-12">
+                    <span className="font-medium">{pin.name}</span>{" "}
+                    <span className="font-mono text-text-tertiary">
+                      {pin.version}
+                    </span>
+                    {pin.disabled ? (
+                      <span className="text-text-tertiary"> · Disabled</span>
+                    ) : null}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() =>
+                      detach.mutate({
+                        expected_revision: attached.data.revision,
+                        skills: pins.filter(
+                          (item) => item.skill_id !== pin.skill_id,
+                        ),
+                      })
+                    }
+                  >
+                    {`Detach ${pin.name}`}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-11 text-text-tertiary">
+            Versions, tests and edits live in the agent&apos;s settings.
+          </p>
+        </section>
+      ) : null}
+      {query.trim() && items.length === 0 && search.data ? (
+        <p className="py-14 text-center text-11 text-text-tertiary">
+          No plugins match this search.
+        </p>
+      ) : null}
       {items.length > 0 && (
-        <>
+        <div>
           <SectionHeading>Ornn catalog</SectionHeading>
           <CardGrid>{items.map(card)}</CardGrid>
-        </>
+        </div>
       )}
-    </>
+    </div>
   );
 }
-
 
 export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
   const [tab, setTab] = useState<PluginKind>("connector");
   const [query, setQuery] = useState("");
-  const [selectedAgent, setSelectedAgent] = useState(agentId ?? "");
 
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
@@ -495,10 +641,7 @@ export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
         {tab === "connector" ? (
           <ConnectorsTab query={query} />
         ) : (
-          <>
-            {tab === "skill" && !selectedAgent ? <Input aria-label="Agent id for skill management" placeholder="Agent ID to manage skills" value={selectedAgent} onChange={(event) => setSelectedAgent(event.target.value)} /> : null}
-            <SkillsTab query={query} agentId={selectedAgent || undefined} />
-          </>
+          <SkillsTab query={query} agentId={agentId} />
         )}
       </div>
     </div>

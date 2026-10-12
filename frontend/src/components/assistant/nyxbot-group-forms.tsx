@@ -51,8 +51,9 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 export const GROUP_ROUTING_COPY =
-  "Messages go to NyxBot (or the first agent) unless you @mention someone. " +
-  "Agents hand work to each other the same way.";
+  "Messages go to the recipients shown above the composer: the agents you " +
+  "@mention or pick, else whoever you last addressed, else NyxBot (or the first " +
+  "agent). Agents hand work to each other by @mentioning them.";
 
 interface PickerRow {
   readonly id: string;

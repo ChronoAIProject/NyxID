@@ -1,5 +1,5 @@
 import type { UploadedMessage } from "@/lib/assistant/uploads";
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type {
@@ -109,6 +109,14 @@ export function useNyxAgentAssistantChat({
     nyxAgentTransport.getRevision,
   );
   const streaming = nyxAgentTransport.isRunning(selectedConversationId);
+  // A new thread's first send with uploads goes to the server draft that holds
+  // them. Show that draft's live turn (and its images) at once, as a new thread
+  // without uploads is shown, rather than only once the page adopts the id.
+  const [sendingDraft, setSendingDraft] = useState<string>();
+  const viewId =
+    selectedConversationId ??
+    (sendingDraft && nyxAgentTransport.isRunning(sendingDraft) ? sendingDraft : undefined);
+  const viewSession = nyxAgentTransport.session(viewId);
   useNyxAgentLive(enabled);
   const live = useNyxAgentLiveConnected();
   const threadsKey = nyxBotQueryKeys.threads(userId);
@@ -166,13 +174,19 @@ export function useNyxAgentAssistantChat({
   });
   const send = useCallback(
     async (text: string, uploads?: UploadedMessage) => {
+      let draft: string | undefined;
       try {
         const id = selectedConversationId ?? uploads?.conversationId;
+        if (id && !selectedConversationId) {
+          draft = id;
+          setSendingDraft(id);
+        }
         await liveSend(
           id, text, onConversationAdopted, draftAgent,
           uploads?.attachmentIds, uploads?.attachments, Boolean(id && !selectedConversationId),
         );
       } finally {
+        if (draft) setSendingDraft((current) => (current === draft ? undefined : current));
         // A new thread changes its agent's summary. (Model routing is
         // server-side, so there is no profile list to refresh.)
         await queryClient.invalidateQueries({ queryKey: agentsKey });
@@ -320,9 +334,12 @@ export function useNyxAgentAssistantChat({
     threadsLoaded: threads.isSuccess,
     /** The selected thread's row, once loaded. */
     conversation: selected,
-    session: nyxAgentTransport.session(selectedConversationId),
-    continuations: nyxAgentTransport.continuations(selectedConversationId),
-    isStreaming: nyxAgentTransport.isRunning(selectedConversationId),
+    // Until adoption the page treats the draft as a new thread (no conversation id).
+    session: viewId === selectedConversationId
+      ? viewSession
+      : { ...viewSession, clientId: "nyxagent-draft", conversationId: undefined },
+    continuations: nyxAgentTransport.continuations(viewId),
+    isStreaming: nyxAgentTransport.isRunning(viewId),
     isLoading: history.isLoading,
     error: history.error?.message ?? threads.error?.message ?? agents.error?.message,
     send,
