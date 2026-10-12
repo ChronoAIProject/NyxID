@@ -329,7 +329,7 @@ pub async fn resync_service(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BillingOnlyRequest {
+pub struct BillingOnlyRequest {
     billing: crate::handlers::services::BillingUpdate,
 }
 
