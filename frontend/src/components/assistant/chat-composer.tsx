@@ -26,6 +26,22 @@ import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 const DRAFT_DEBOUNCE_MS = 300;
 const MAX_ROWS = 4;
 const MULTILINE_THRESHOLD = 0.95;
+const PASTED_EXTENSIONS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+/** Clipboard images arrive unnamed or with a generic `image.<ext>` name. */
+function isGenericPasteName(name: string): boolean {
+  return !name || /^image\.[a-z0-9]+$/i.test(name);
+}
+
+/** Keeps the clipboard's own format: a JPEG stays `.jpg`, a GIF `.gif`. */
+function pastedExtension(type: string): string {
+  return PASTED_EXTENSIONS[type] ?? (type.split("/")[1]?.split("+")[0]?.replace(/[^a-z0-9]/gi, "") || "png");
+}
 
 type ScrollEdges = {
   readonly top: boolean;
@@ -181,6 +197,8 @@ function DraftedChatComposer({
   const locked = active && !allowActiveInput;
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
+  // Unique across pastes so each chip's Remove/Preview label names one file.
+  const pastedImages = useRef(0);
   const mentionListId = `${useId()}-mentions`;
   const [mention, setMention] = useState<MentionQuery>();
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -695,11 +713,12 @@ function DraftedChatComposer({
             if (onFiles && files.length) {
               event.preventDefault();
               if (!locked && !disabled && !sending) {
-                onFiles(files.map((file, index) =>
-                  file.name && file.name !== "image.png"
-                    ? file
-                    : new File([file], `pasted-image-${index + 1}.png`, { type: file.type || "image/png" }),
-                ));
+                onFiles(files.map((file) => {
+                  if (!isGenericPasteName(file.name)) return file;
+                  pastedImages.current += 1;
+                  const type = file.type || "image/png";
+                  return new File([file], `pasted-image-${pastedImages.current}.${pastedExtension(type)}`, { type });
+                }));
               }
             }
           }}

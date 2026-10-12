@@ -323,6 +323,22 @@ describe("Assistant uploads composer", () => {
     expect(uploadFile).toHaveBeenCalledTimes(2);
     expect(createUploadDraft).not.toHaveBeenCalled();
   });
+  it("gives two separately pasted images distinct chip labels", async () => {
+    vi.mocked(uploadFile).mockImplementation(async (_scope, file) => ({
+      ...item, id: file.name, label: file.name, content_type: "image/jpeg",
+    }));
+    render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+    for (let i = 0; i < 2; i++) {
+      fireEvent.paste(screen.getByRole("textbox"), {
+        clipboardData: { files: [new File(["jpg"], "image.jpeg", { type: "image/jpeg" })] },
+      });
+      await waitFor(() => expect(screen.getAllByText("Ready")).toHaveLength(i + 1));
+    }
+    for (const name of ["pasted-image-1.jpg", "pasted-image-2.jpg"]) {
+      expect(screen.getByRole("button", { name: `Remove ${name}` })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: `Preview ${name}` })).toBeInTheDocument();
+    }
+  });
   it("aborts pending uploads on conversation change without attaching them to the next", async () => {
     vi.mocked(uploadFile).mockImplementation(() => new Promise(() => {}));
     const { rerender } = render(

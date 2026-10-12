@@ -28,6 +28,27 @@ describe("ChatComposer drafts", () => {
     });
     expect(onFiles).toHaveBeenCalledWith([expect.objectContaining({ name: "pasted-image-1.png" })]);
   });
+  it("names each pasted image uniquely across pastes and keeps its format", () => {
+    const onFiles = vi.fn();
+    render(<ChatComposer {...baseProps} onFiles={onFiles} />);
+    const paste = (file: File) =>
+      fireEvent.paste(screen.getByRole("textbox"), {
+        clipboardData: { files: [], items: [{ getAsFile: () => file }] },
+      });
+    paste(new File(["jpg"], "", { type: "image/jpeg" }));
+    paste(new File(["jpg"], "image.jpeg", { type: "image/jpeg" }));
+    paste(new File(["gif"], "image.gif", { type: "image/gif" }));
+    paste(new File(["webp"], "", { type: "image/webp" }));
+    paste(new File(["named"], "diagram.png", { type: "image/png" }));
+    const pasted = onFiles.mock.calls.map(([files]: [File[]]) => files.map((file) => [file.name, file.type]));
+    expect(pasted).toEqual([
+      [["pasted-image-1.jpg", "image/jpeg"]],
+      [["pasted-image-2.jpg", "image/jpeg"]],
+      [["pasted-image-3.gif", "image/gif"]],
+      [["pasted-image-4.webp", "image/webp"]],
+      [["diagram.png", "image/png"]],
+    ]);
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
