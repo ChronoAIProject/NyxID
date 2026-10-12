@@ -139,6 +139,16 @@ pub fn owner_confirmation_required(
     }
 }
 
+pub async fn owner_gate_required(
+    db: &mongodb::Database,
+    chat: &ChatAuthority,
+    class: OwnerActionClass,
+    policy_floor: bool,
+) -> AppResult<bool> {
+    let settings = crate::services::assistant_settings_service::get(db, &chat.user_id).await?;
+    Ok(!chat.guest && owner_confirmation_required(settings.access_mode, class, policy_floor))
+}
+
 pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionClass {
     let name = tool.strip_prefix("nyxid__").unwrap_or(tool);
     let destructive = [
