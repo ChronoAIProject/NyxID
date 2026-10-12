@@ -749,7 +749,6 @@ async fn settle_lost_in_session(
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             retry_of: None,
-            retry_of: None,
             specialist_id: None,
             steering: None,
             id: Uuid::new_v4().to_string(),

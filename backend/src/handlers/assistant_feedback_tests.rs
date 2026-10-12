@@ -54,7 +54,6 @@ mod fixtures {
             attachments: vec![],
             origin: None,
             via: None,
-            retry_of: None,
         }
     }
 

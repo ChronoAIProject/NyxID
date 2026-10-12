@@ -112,7 +112,6 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             retry_of: None,
-            retry_of: None,
             specialist_id: None,
             steering: None,
             id: id.clone(),

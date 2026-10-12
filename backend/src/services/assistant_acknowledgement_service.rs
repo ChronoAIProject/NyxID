@@ -536,7 +536,6 @@ pub async fn audit_access_request_denied(
                 attachments: Vec::new(),
                 origin: None,
                 via: None,
-                retry_of: None,
             };
             let _ = db
                 .collection::<crate::models::assistant_message::AssistantMessage>(
