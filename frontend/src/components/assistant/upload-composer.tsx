@@ -2,6 +2,13 @@ import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { FileText, Paperclip, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import {
   createUploadDraft,
@@ -36,12 +43,6 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
-  useEffect(() => {
-    if (!preview) return;
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setPreview(undefined); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [preview]);
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
@@ -219,14 +220,30 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               {notice}
             </p>
           )}
-          {preview?.preview && (
-            <div role="dialog" aria-label={`Preview ${preview.name}`} className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={() => setPreview(undefined)}>
-              <div className="relative max-h-full max-w-full rounded-xl bg-card p-3" onClick={(event) => event.stopPropagation()}>
-                <img src={preview.preview} alt={preview.name} className="max-h-[80vh] max-w-[90vw] object-contain" />
-                <Button type="button" variant="secondary" className="mt-3" onClick={() => setPreview(undefined)}>Close preview</Button>
-              </div>
-            </div>
-          )}
+          <Dialog
+            open={Boolean(preview?.preview)}
+            onOpenChange={(open) => {
+              if (!open) setPreview(undefined);
+            }}
+          >
+            <DialogContent aria-describedby={undefined} className="md:max-w-3xl">
+              <DialogTitle className="truncate pr-8">{preview?.name}</DialogTitle>
+              {preview?.preview && (
+                <img
+                  src={preview.preview}
+                  alt={preview.name}
+                  className="max-h-[70vh] w-full rounded object-contain"
+                />
+              )}
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button type="button" variant="secondary">
+                    Close preview
+                  </Button>
+                </DialogClose>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       }
       attachmentButton={

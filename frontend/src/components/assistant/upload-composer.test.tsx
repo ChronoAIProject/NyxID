@@ -102,10 +102,16 @@ describe("Assistant uploads composer", () => {
     render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
     choose(new File(["png"], "photo.png", { type: "image/png" }));
     await screen.findByText("Ready");
-    fireEvent.click(screen.getByRole("button", { name: "Preview photo.png" }));
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    const thumbnail = screen.getByRole("button", { name: "Preview photo.png" });
+    fireEvent.click(thumbnail);
+    const dialog = screen.getByRole("dialog", { name: "photo.png" });
+    // Modal: focus moves inside and the composer behind it is hidden from assistive tech.
+    await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(dialog.querySelector("img")).toHaveAttribute("alt", "photo.png");
     fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
   });
 
   it("closes the image preview with Escape", async () => {
@@ -114,7 +120,9 @@ describe("Assistant uploads composer", () => {
     choose(new File(["png"], "photo.png", { type: "image/png" }));
     await screen.findByText("Ready");
     fireEvent.click(screen.getByRole("button", { name: "Preview photo.png" }));
-    fireEvent.keyDown(window, { key: "Escape" });
+    const dialog = screen.getByRole("dialog", { name: "photo.png" });
+    // Radix closes on Escape pressed inside the focus-trapped dialog.
+    fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
