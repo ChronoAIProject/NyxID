@@ -3625,3 +3625,128 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
 }
 #[path = "async_service_operation_tests.rs"]
 mod async_service_operation_tests;
+
+#[tokio::test]
+async fn specialist_request_tool_is_denied_audited_and_routed_when_allowed() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::{assistant_settings_service as settings, assistant_team_service as team};
+    let f = fixture("strict_request_tool_audit").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let id = connected(
+        &f.state.db,
+        &f.owner,
+        "requested-operations",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let specialist = authenticate(&f).await;
+    let args = json!({"subagent":"worker","service_id":id,"selection":{"expected_revision":0,"all_operations":true}});
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let denied = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__request_agent_operations",
+            args.clone(),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(denied, acks::access_request_denied());
+    let audits = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let audit = audits
+        .find_one(doc! {"event_type":"assistant_access_request_denied"})
+        .await
+        .unwrap()
+        .expect("denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(data.get_str("key").unwrap(), f.row.credential_api_key_id);
+    assert_eq!(data.get_str("target").unwrap(), id);
+    assert_eq!(data.get_str("scope").unwrap(), "operations");
+    assert_eq!(data.get_str("decision").unwrap(), "denied");
+    let cards = f.state.db.collection::<mongodb::bson::Document>(
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    );
+    assert_eq!(
+        cards
+            .count_documents(doc! {"conversation_id": &f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let routed = result(
+        call(&f, &specialist, "nyxid__request_agent_operations", args).await,
+        true,
+    )
+    .await;
+    assert_eq!(routed["error"], "acknowledgement_required");
+    assert_eq!(routed["decider"], "orchestrator");
+    let ack = routed["acknowledgement_id"].as_str().unwrap();
+    assert!(
+        cards
+            .find_one(doc! {"_id":ack,"conversation_id":&f.row.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let messages = f
+                .state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(
+                    crate::models::assistant_message::COLLECTION_NAME,
+                );
+            if messages
+                .find_one(
+                    doc! {"conversation_id": &f.nyxbot_thread,"role":"event","text":{"$regex":ack}},
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("NyxBot receives exact request event");
+}

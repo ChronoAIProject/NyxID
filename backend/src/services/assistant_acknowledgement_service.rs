@@ -519,20 +519,13 @@ mod access_authority_tests {
     }
 
     #[test]
-    fn specialist_request_tool_is_denied_audited_and_routed_when_allowed() {
-        use crate::models::assistant_settings::SpecialistAccessRequests;
-        let specialist = chat(AgentRole::Subagent, false);
-        assert!(!specialist.access_request_allowed_with_mode(SpecialistAccessRequests::Denied));
-        assert!(specialist.access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot));
-        assert_eq!(access_request_denied()["error"], "access_request_denied");
-    }
-
-    #[test]
     fn specialist_machine_login_request_is_denied_audited_and_routed_when_allowed() {
         use crate::models::assistant_settings::SpecialistAccessRequests;
         let specialist = chat(AgentRole::Subagent, false);
         assert!(!specialist.access_request_allowed_with_mode(SpecialistAccessRequests::Denied));
-        assert!(specialist.access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot));
+        assert!(
+            specialist.access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot)
+        );
     }
 
     #[test]
@@ -540,7 +533,9 @@ mod access_authority_tests {
         use crate::models::assistant_settings::SpecialistAccessRequests;
         let specialist = chat(AgentRole::Subagent, false);
         assert!(!specialist.access_request_allowed_with_mode(SpecialistAccessRequests::Denied));
-        assert!(specialist.access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot));
+        assert!(
+            specialist.access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot)
+        );
     }
 
     #[test]

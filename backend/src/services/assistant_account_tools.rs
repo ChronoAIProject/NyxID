@@ -445,6 +445,13 @@ pub fn error_result(error: AppError) -> ToolResult {
                     "message": message}),
             };
         }
+        AppError::Forbidden(message) if message.starts_with("access_request_denied:") => {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: super::assistant_acknowledgement_service::access_request_denied(),
+            };
+        }
         error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
             "This operation requires a conversation key and human acknowledgement."
         }
