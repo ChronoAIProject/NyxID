@@ -40,7 +40,7 @@ describe("ChatComposer drafts", () => {
     paste(new File(["gif"], "image.gif", { type: "image/gif" }));
     paste(new File(["webp"], "", { type: "image/webp" }));
     paste(new File(["named"], "diagram.png", { type: "image/png" }));
-    const pasted = onFiles.mock.calls.map(([files]: [File[]]) => files.map((file) => [file.name, file.type]));
+    const pasted = onFiles.mock.calls.map((call) => (call[0] as File[]).map((file) => [file.name, file.type]));
     expect(pasted).toEqual([
       [["pasted-image-1.jpg", "image/jpeg"]],
       [["pasted-image-2.jpg", "image/jpeg"]],
