@@ -79,8 +79,10 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
       </a>
       {image.imageInput === "unavailable" && (
         <p role="status" className="max-w-sm text-xs text-muted-foreground">
-          Image received. This agent version cannot view it, or it exceeds its
-          image limits. Ask your agent to save it to a machine, or try a smaller image.
+          {image.origin === "tool" ? "The agent couldn't view this image." : <>
+            Image received. This agent version cannot view it, or it exceeds its
+            image limits. Ask your agent to save it to a machine, or try a smaller image.
+          </>}
         </p>
       )}
     </div>
