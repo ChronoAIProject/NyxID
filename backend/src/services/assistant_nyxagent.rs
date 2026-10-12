@@ -2992,17 +2992,37 @@ pub async fn retry_context_in_session(
         })
         .session(&mut *session)
         .await?;
+    let mut digests: Vec<String> = Vec::new();
+    let mut completed_labels = Vec::new();
+    let mut chain = vec![failed.clone()];
+    let mut prior = chain[0].retry_of.clone();
+    while let Some(turn_id) = prior {
+        let ancestor = messages
+            .find_one(doc! {
+                "conversation_id": conversation_id, "user_id": user_id,
+                "turn_id": &turn_id, "role": "assistant", "status": "failed",
+            })
+            .session(&mut *session)
+            .await?;
+        let Some(ancestor) = ancestor else { break };
+        prior = ancestor.retry_of.clone();
+        chain.push(ancestor);
+    }
+    for turn in &chain {
+        for activity in turn.activities.iter().filter(|a| a.status == "completed") {
+            if let Some(digest) = activity.digest.as_deref()
+                && !digests.iter().any(|seen| seen == digest)
+            {
+                digests.push(digest.to_owned());
+            }
+            completed_labels.push(activity.label.as_str());
+        }
+    }
     let completed: Vec<&TurnActivity> = failed
         .activities
         .iter()
         .filter(|activity| activity.status == "completed")
         .collect();
-    let mut digests: Vec<String> = Vec::new();
-    for digest in completed.iter().filter_map(|a| a.digest.as_deref()) {
-        if !digests.iter().any(|seen| seen == digest) {
-            digests.push(digest.to_owned());
-        }
-    }
     let unfinished: Vec<&str> = failed
         .activities
         .iter()
@@ -3028,6 +3048,7 @@ pub async fn retry_context_in_session(
             &completed
                 .iter()
                 .map(|a| a.label.as_str())
+                .chain(completed_labels.iter().copied())
                 .collect::<Vec<_>>()
                 .join(", "),
         );

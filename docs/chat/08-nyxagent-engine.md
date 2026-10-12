@@ -778,7 +778,7 @@ malformed or wrong-owner requests do not consume the user's turn allowance.
 
 Stop sets a durable flag on the exact active turn. Its worker polls every 250 ms,
 drops the upstream stream, saves partial text as failed/error `cancelled`, clears
-the binding with `turn_failed`, then emits `turn.completed(cancelled)`. A Stop
+the binding with `stopped`, then emits `turn.completed(cancelled)`. A Stop
 committed before settlement wins the transaction race. If the worker is gone, or has
 not settled within five seconds, NyxID runs the same fenced settlement itself; a stale
 heartbeat can trigger that settlement immediately. This keeps voice acknowledgement
@@ -931,7 +931,8 @@ error is null or a stable `{code,message}`. The additive `turn.notice` carries
 | `insufficient_credits` (typed `AppError::InsufficientCredits`, nested `error.code`, NyxID's flat 402 `{"error":"insufficient_credits"}`, or `response.failed`) | Fail without credential replacement, retry, backoff or rebind, with the fixed message "There aren't enough credits to run this turn." During a rolling deploy old replicas keep reporting `assistant_unavailable`; existing failed rows are not backfilled |
 | `tool_budget_exhausted`, `turn_timeout` | Continue automatically on the same session, with the same grants/TriggerRun, up to `max_auto_continuations` (default 8, hard cap 32). Preserve context if the bound is reached |
 | Identical full call/result sequence and unchanged reply text | Stop with `continuation_no_progress`; preserve the session |
-| Other failed turn, invalid stream or cancellation | Persist failed partial reply; discard binding immediately with `turn_failed` |
+| Other failed turn or invalid stream | Persist failed partial reply; discard binding immediately with `turn_failed` |
+| User Stop | Persist the partial reply; discard the binding with `stopped` and continue with a recap |
 
 The transcript displays one inline system note for the latest reset, before the
 first message whose `created_at` is strictly greater than `context_reset_at`, or
