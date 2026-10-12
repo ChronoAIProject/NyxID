@@ -446,17 +446,16 @@ async fn handle_webhook_inner_impl(
         format!("failed to prepare webhook secrets: {e}").into()
     })?;
 
-    let prepared = adapter
+    let prepared = match adapter
         .prepare_webhook(&bot, Some(&verify_secrets), headers, body)
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            let db = state.db.clone();
-            let id = bot.id.clone();
-            tokio::spawn(async move {
-                let _ = channel_bot_service::record_webhook_error(&db, &id, "signature").await;
-            });
-            format!("webhook verification failed: {e}").into()
-        })?;
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            channel_bot_service::record_webhook_error(&state.db, &bot.id, "signature").await?;
+            return Err(format!("webhook verification failed: {error}").into());
+        }
+    };
 
     if let Some(challenge_response) = prepared.challenge_response {
         return Ok(Some(challenge_response));
