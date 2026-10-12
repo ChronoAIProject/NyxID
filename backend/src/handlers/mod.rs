@@ -128,6 +128,8 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod assistant_feedback;
+#[cfg(test)]
+mod assistant_feedback_tests;
 pub mod assistant_group;
 pub mod assistant_nyxagent;
 pub mod assistant_team;
