@@ -131,27 +131,19 @@ async fn upsert(
     if !eligible {
         return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
     }
-    let now = Utc::now();
-    // Parent deletion wins: eligibility is checked before writes and parent cascades purge rows.
-    let filter = doc! {"user_id":&user_id,"message_id":message_id};
-    let existing = state
-        .db
-        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find_one(filter.clone())
-        .await?;
-    let mut set = doc! {"vote":&input.vote,"updated_at":bson::DateTime::from_chrono(now),"conversation_id":conversation_id.clone(),"group_id":group_id.clone(),"turn_id":turn_id.clone()};
-    if input.comment.is_some() {
-        set.insert("comment", comment.clone());
-    }
-    let update = doc! {"$set":set,"$setOnInsert":{"_id":Uuid::new_v4().to_string(),"created_at":bson::DateTime::from_chrono(now)}};
-    let row = state
-        .db
-        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find_one_and_update(filter, update)
-        .upsert(true)
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::Internal("feedback write failed".into()))?;
+    let (row, existing) = feedback_service::upsert_feedback(
+        &state.db,
+        &user_id,
+        message_id,
+        conversation_id.clone(),
+        group_id.clone(),
+        turn_id.clone(),
+        &input.vote,
+        comment.clone(),
+        None,
+    )
+    .await
+    .map_err(AppError::from)?;
     if existing
         .as_ref()
         .map(|r| {
@@ -219,12 +211,8 @@ async fn withdraw(
         }
     }
     let filter = doc! {"user_id":&user_id,"message_id":&message_id};
-    let result = state
-        .db
-        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .delete_one(filter)
-        .await?;
-    if result.deleted_count == 0 {
+    let deleted = feedback_service::delete_feedback(&state.db, &user_id, &message_id).await?;
+    if !deleted {
         return Ok(StatusCode::NO_CONTENT);
     }
     audit_service::log_for_user(
