@@ -68,3 +68,17 @@ mod fixtures {
         }
     }
 }
+
+#[cfg(test)]
+mod a1_tests {
+    use crate::models::assistant_message_feedback::AssistantMessageFeedback;
+    #[test]
+    fn legacy_feedback_row_without_context_deserializes() {
+        let row: AssistantMessageFeedback = bson::from_document(bson::doc! {
+            "_id":"legacy", "user_id":"u", "message_id":"m", "vote":"up",
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+        })
+        .unwrap();
+        assert!(row.context.is_none());
+    }
+}
