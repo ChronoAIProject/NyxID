@@ -28,7 +28,10 @@ it("rejects the proposal at its current revision", async () => {
 
 it("sends the revision and draft when editing a proposal", async () => {
   const { result } = renderHook(() => useAgentLearningReview("agent", false), { wrapper });
-  const draft = { name: "Updated" };
+  const draft = {
+    schema_version: 1, kind: "new", name: "updated", description: "Updated", skill_md: "# Updated",
+    files: [], base_skill: null, rationale: "Reusable", safety_notes: "None",
+  };
   await result.current.edit.mutateAsync({ proposalId: "proposal", revision: 4, draft });
   expect(assistantJson).toHaveBeenCalledWith(
     "/assistant/nyxagent/agents/agent/learning/proposals/proposal",
