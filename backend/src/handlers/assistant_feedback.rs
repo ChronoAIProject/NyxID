@@ -263,6 +263,9 @@ pub struct AdminQuery {
     pub to: Option<DateTime<Utc>>,
     pub vote: Option<String>,
     pub cursor: Option<String>,
+    pub model: Option<String>,
+    pub agent_kind: Option<String>,
+    pub has_error: Option<bool>,
 }
 #[derive(Serialize)]
 pub struct AdminResponse {
@@ -289,6 +292,15 @@ pub async fn admin(
     let mut filter = doc! {};
     if let Some(v) = q.vote {
         filter.insert("vote", v);
+    }
+    if let Some(v) = q.model {
+        filter.insert("context.model", v);
+    }
+    if let Some(v) = q.agent_kind {
+        filter.insert("context.agent_kind", v);
+    }
+    if q.has_error == Some(true) {
+        filter.insert("context.error_code", doc! {"$nin": [bson::Bson::Null, ""]});
     }
     if let Some(f) = q.from {
         filter.insert("created_at", doc! {"$gte":bson::DateTime::from_chrono(f)});
