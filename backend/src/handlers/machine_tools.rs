@@ -764,7 +764,9 @@ async fn attach_computer_images(
             *item = json!({
                 "type":"text",
                 "text":if attached.is_some(){
-                    "Image displayed to the owner in this conversation. Pixels are not in the model context."
+                    "Image displayed to the owner in this conversation. NyxID shows the image to you \
+                    after this response when this agent can view images. Do not describe its \
+                    contents before you have seen it."
                 }else{
                     "The image could not be attached: no live turn or attachment limit reached."
                 }

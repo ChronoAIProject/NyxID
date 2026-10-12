@@ -347,7 +347,7 @@ async fn announce(
             doc! {"$set":{"publication.review_card_pending":false}},
         )
         .await?;
-    let mut result = acks::refusal(&card);
+    let mut result = acks::refusal_with_frontend(&card, &state.config.frontend_url);
     result["status"] = "reprepared".into();
     result["proposal_id"] = row.id.clone().into();
     result["agent_id"] = row.agent_id.clone().into();
