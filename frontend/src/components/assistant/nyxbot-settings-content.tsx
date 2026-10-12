@@ -256,7 +256,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
           />
         ))}
         <FormField control={form.control} name="specialist_access_requests" render={({ field }) => (
-          <FormItem className="rounded-lg border border-border p-4"><FormLabel>Specialist access requests</FormLabel><FormDescription>Only NyxBot can request or grant access for a specialist.</FormDescription><FormControl><select className="mt-2 h-10 rounded-md border bg-background px-3" {...field}><option value="denied">Deny requests</option><option value="routed_to_nyxbot">Route to NyxBot</option></select></FormControl></FormItem>
+          <FormItem className="rounded-lg border border-border p-4"><FormLabel>Specialist access requests</FormLabel><FormDescription>Specialists are sandboxed and cannot grant access. NyxBot reviews requests; routed mode lets NyxBot approve them.</FormDescription><FormControl><select className="mt-2 h-10 rounded-md border bg-background px-3" {...field}><option value="denied">Deny requests</option><option value="routed_to_nyxbot">Route to NyxBot</option></select></FormControl></FormItem>
         )} />
         <p className="text-11 text-muted-foreground">
           Every specialist turn and group hand-off is billed to your credits

@@ -388,3 +388,10 @@ it("lets an organization Member edit shared memory with the privacy note and bac
     screen.queryByRole("list", { name: "Guest access" }),
   ).not.toBeInTheDocument();
 });
+
+it("explains the specialist sandbox and NyxBot approval authority", async () => {
+  agent = agentRow({ owner_kind: "person", can_maintain: true, can_use: true });
+  renderSheet();
+  expect((await screen.findAllByText(/specialist is sandboxed/i)).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/NyxBot reviews and approves/i).length).toBeGreaterThan(0);
+});

@@ -450,6 +450,23 @@ pub async fn audit_access_request_denied(
             .find(|a| a.is_nyxbot())
             .and_then(|a| a.home_conversation_id)
     {
+        let messages = db.collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        );
+        let cutoff = Utc::now() - chrono::Duration::hours(1);
+        let already_notified = messages
+            .count_documents(doc! {
+                "user_id": &chat.user_id,
+                "role": "event",
+                "error_code": "specialist_access_denied",
+                "specialist_id": &chat.agent_id,
+                "created_at": {"$gte": cutoff},
+            })
+            .await
+            .unwrap_or(1);
+        if already_notified > 0 {
+            return;
+        }
         let conversations = db
             .collection::<crate::models::assistant_conversation::AssistantConversation>(
                 crate::models::assistant_conversation::COLLECTION_NAME,
@@ -472,7 +489,7 @@ pub async fn audit_access_request_denied(
                 user_id: chat.user_id.clone(),
                 seq: row.message_count + 1,
                 turn_id: format!("access-denied-{}", Uuid::new_v4()),
-                role: "notice".into(),
+                role: "event".into(),
                 text: format!(
                     "specialist_access_denied: {} needs {} for {}",
                     chat.agent_name,
@@ -664,65 +681,6 @@ mod access_authority_tests {
             guest,
             confirmation_policy: None,
         }
-    }
-
-    #[test]
-    fn specialist_access_matrix_denies_all_requesting_turn_kinds() {
-        let gates = [
-            "service",
-            "account",
-            "operations",
-            "skills",
-            "machine",
-            "connect",
-            "channel",
-        ];
-        let turns = [
-            ("owner", false),
-            ("guest", true),
-            ("event", false),
-            ("channel", true),
-        ];
-        for tool in crate::services::assistant_team_tools::TOOL_NAMES
-            .iter()
-            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES.iter())
-        {
-            for gate in gates {
-                for (turn, guest) in turns {
-                    let authority = chat(AgentRole::Subagent, guest);
-                    assert!(!authority.access_request_allowed(), "{tool}/{gate}/{turn}");
-                }
-            }
-        }
-        assert!(chat(AgentRole::Orchestrator, false).access_request_allowed());
-        assert!(!chat(AgentRole::Orchestrator, true).access_request_allowed());
-        assert_eq!(access_request_denied()["error"], "access_request_denied");
-    }
-
-    #[test]
-    fn routed_mode_is_explicitly_distinct_from_strict_default() {
-        use crate::models::assistant_settings::SpecialistAccessRequests;
-        assert_eq!(
-            SpecialistAccessRequests::default(),
-            SpecialistAccessRequests::Denied
-        );
-        assert_ne!(
-            SpecialistAccessRequests::Denied,
-            SpecialistAccessRequests::RoutedToNyxbot
-        );
-        assert!(
-            chat(AgentRole::Subagent, false)
-                .access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot)
-        );
-        assert!(
-            !chat(AgentRole::Subagent, false)
-                .access_request_allowed_with_mode(SpecialistAccessRequests::Denied)
-        );
-        let mut org_specialist = chat(AgentRole::Subagent, false);
-        org_specialist.user_id = "org-owner".into();
-        org_specialist.agent_id = "org-specialist".into();
-        assert!(!org_specialist.access_request_allowed());
-        assert!(chat(AgentRole::Orchestrator, false).access_request_allowed());
     }
 }
 
@@ -1012,6 +970,8 @@ async fn request_tracked_with_machine_context(
         .map(|s| s.specialist_access_requests)
         .unwrap_or_default();
     if request.kind != "action" && !chat.access_request_allowed_with_mode(request_mode) {
+        audit_access_request_denied(db, chat, request.service.map(|(id, _, _)| id), request.kind)
+            .await;
         return Err(AppError::Forbidden(
             "access_request_denied: only NyxBot can request or grant access; report the need to NyxBot in your reply".into(),
         ));
@@ -1434,14 +1394,6 @@ pub async fn account_gate(
     if chat.is_orchestrator() {
         return Ok(None);
     }
-    let routed = super::assistant_settings_service::get(db, &chat.user_id)
-        .await
-        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
-        .unwrap_or(false);
-    if !routed {
-        audit_access_request_denied(db, chat, None, "account").await;
-        return Ok(Some((access_request_denied(), None)));
-    }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
     if key
         .scopes
@@ -1449,6 +1401,14 @@ pub async fn account_gate(
         .any(|scope| scope == ASSISTANT_ACCOUNT_SCOPE)
     {
         return Ok(None);
+    }
+    let routed = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
+        .unwrap_or(false);
+    if !routed {
+        audit_access_request_denied(db, chat, None, "account").await;
+        return Ok(Some((access_request_denied(), None)));
     }
     let access = super::org_agent_service::key_access_with_snapshot(
         db,
@@ -1869,6 +1829,9 @@ pub async fn audit_decision(
             "conversation_id": row.conversation_id, "kind": row.kind,
             "service_id": row.service_id, "tool_name": row.tool_name,
             "decision": if row.status == "allowed" {"allow"} else {"deny"},
+            "approver_user_id": actor.user_id,
+            "approver_api_key_id": actor.api_key_id,
+            "approver_kind": if actor.api_key_id.is_some() {"nyxbot_or_key"} else {"owner"},
         })),
     )
     .await;

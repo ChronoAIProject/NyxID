@@ -146,10 +146,7 @@ credential shapes.
 
 ## 8. Permission requests (specialist → NyxBot)
 
-A personal specialist's ungranted service or account call creates an acknowledgement with
-`decider: orchestrator` and a bounded excerpt of the message that started the
-work (the owner's own words when they talked to the specialist directly). The
-specialist gets `acknowledgement_required` with instructions to end its turn.
+By default (`specialist_access_requests: Denied`), a personal specialist's ungranted service or account call returns `access_request_denied`, records requester/target/scope/decision audit metadata, and creates no acknowledgement. The owner may opt into `RoutedToNyxbot`; only then does this section's acknowledgement flow apply: the call creates an acknowledgement with `decider: orchestrator` and a bounded excerpt of the message that started the work.
 NyxID queues a `permission_requested` event on the NyxBot thread that assigned
 the work, or NyxBot's home thread, and wakes it. NyxBot decides with
 `decide_permission` from any of its threads (or the owner decides on the card in
@@ -801,8 +798,7 @@ Specialists require `AssistantAgent.machine_node_ids`; saved website logins
 use `saved_login_ids`. Both fields live beside `grants` for rolling compatibility,
 like `guest_access`. Spawn/grant/revoke accept `machines` and `logins` by name
 or ID; omitted fields on the Grants API remain unchanged. Unavailable resources
-can still be revoked by ID. Unapproved specialist access raises existing
-orchestrator-decided permission requests of kind `machine` or `saved_login`.
+can still be revoked by ID. Specialist access defaults to `Denied`. Granted account reads remain available; new requests return `access_request_denied` with requester/target/scope audit metadata. Owner opt-in `RoutedToNyxbot` routes service, operation, skill, machine and saved-login requests to NyxBot. Hosted connect links and channel-bot setup/link tools remain denied from specialist chat keys in both modes. For org-owned specialists, the acting member's setting controls routing.
 Guests, ordinary API keys, delegated tokens, relay tokens and service accounts
 have no machine tools. Every operation rechecks live ownership, grants,
 connectivity and capability.
@@ -1085,6 +1081,8 @@ poll cannot recreate a deleted watch or overwrite cancellation. Services without
 a trusted contract and legacy event behavior remain unchanged.
 
 ### Specialist access boundary
+
+Settings rollout order is all backend replicas first, then the frontend; old replicas reject the new settings field because `SettingsRequest` denies unknown fields.
 
 Specialist threads are sandboxed. Only the owner's NyxBot may request or grant access; specialists report missing access to NyxBot. Card and hosted connection-link creation from specialist chat keys is refused with `access_request_denied`.
 # Access modes

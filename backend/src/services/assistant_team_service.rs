@@ -1527,6 +1527,8 @@ pub async fn set_grants(
         "assistant_agent_grants_changed",
         serde_json::json!({
             "agent_id": &agent.id, "owner_id": &agent.user_id,
+            "approver_user_id": owner,
+            "approver_kind": "owner",
             "service_ids": &agent.grants.service_ids,
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,

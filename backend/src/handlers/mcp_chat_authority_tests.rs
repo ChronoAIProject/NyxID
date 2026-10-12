@@ -753,7 +753,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
             assert_eq!(rows.len(), 1);
             assert!(rows[0].platform);
             assert_eq!(rows[0].service_id.as_deref(), Some(service.id.as_str()));
-            // The chat may also mint a hosted connect link in Ask mode.
+            // Specialist chat keys cannot mint hosted connect links, even in routed mode.
             let connect = handle_meta_connect(
                 &f.state,
                 &auth,
@@ -766,11 +766,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
             let bytes = axum::body::to_bytes(connect.into_body(), 1024 * 1024)
                 .await
                 .unwrap();
-            assert!(
-                !String::from_utf8_lossy(&bytes).contains("does not have access"),
-                "{}",
-                String::from_utf8_lossy(&bytes)
-            );
+            assert!(String::from_utf8_lossy(&bytes).contains("access_request_denied"));
             acks::decide(&f.state.db, &f.owner, &f.row.id, &ids[0], true)
                 .await
                 .unwrap();
@@ -3626,3 +3622,331 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
 }
 #[path = "async_service_operation_tests.rs"]
 mod async_service_operation_tests;
+
+#[tokio::test]
+async fn specialist_request_tool_is_denied_audited_and_routed_when_allowed() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::{assistant_settings_service as settings, assistant_team_service as team};
+    let f = fixture("strict_request_tool_audit").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let id = connected(
+        &f.state.db,
+        &f.owner,
+        "requested-operations",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let specialist = authenticate(&f).await;
+    let args = json!({"subagent":"worker","service_id":id,"selection":{"expected_revision":0,"all_operations":true}});
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let denied = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__request_agent_operations",
+            args.clone(),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(denied, acks::access_request_denied());
+    let audits = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let audit = audits
+        .find_one(doc! {"event_type":"assistant_access_request_denied"})
+        .await
+        .unwrap()
+        .expect("denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(data.get_str("key").unwrap(), f.row.credential_api_key_id);
+    assert_eq!(data.get_str("target").unwrap(), id);
+    assert_eq!(data.get_str("scope").unwrap(), "operations");
+    assert_eq!(data.get_str("decision").unwrap(), "denied");
+    let cards = f.state.db.collection::<mongodb::bson::Document>(
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    );
+    assert_eq!(
+        cards
+            .count_documents(doc! {"conversation_id": &f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let routed = result(
+        call(&f, &specialist, "nyxid__request_agent_operations", args).await,
+        true,
+    )
+    .await;
+    assert_eq!(routed["error"], "acknowledgement_required");
+    assert_eq!(routed["decider"], "orchestrator");
+    let ack = routed["acknowledgement_id"].as_str().unwrap();
+    assert!(
+        cards
+            .find_one(doc! {"_id":ack,"conversation_id":&f.row.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let messages = f
+                .state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(
+                    crate::models::assistant_message::COLLECTION_NAME,
+                );
+            if messages
+                .find_one(
+                    doc! {"conversation_id": &f.nyxbot_thread,"role":"event","text":{"$regex":ack}},
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("NyxBot receives exact request event");
+}
+
+#[tokio::test]
+async fn specialist_service_card_request_denied_audited_and_routed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_service_gate_card").await;
+    let specialist = authenticate(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "strict-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (denied, card) = service_gate(
+        &f.state.db,
+        &f.chat,
+        &service,
+        "strict-service",
+        "Strict service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(denied["error"], "access_request_denied");
+    assert!(card.is_none());
+    assert!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"service"})
+            .await
+            .unwrap()
+            .expect("service denial audit");
+    let audit_data = audit.get_document("event_data").unwrap();
+    assert_eq!(audit_data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(audit_data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(audit_data.get_str("key").unwrap(), f.row.credential_api_key_id);
+    assert_eq!(audit_data.get_str("target").unwrap(), service);
+    assert_eq!(audit_data.get_str("scope").unwrap(), "service");
+    assert_eq!(audit_data.get_str("decision").unwrap(), "denied")
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (_, card) = service_gate(
+        &f.state.db,
+        &f.chat,
+        &service,
+        "strict-service",
+        "Strict service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(card.is_some());
+    let _ = specialist;
+}
+
+#[tokio::test]
+async fn specialist_connect_service_is_denied_audited_and_routed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_connect_link").await;
+    let auth = authenticate(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "connect-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let response = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":service}),
+        None,
+        false,
+    )
+    .await;
+    let body = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("access_request_denied"));
+    assert!(f.state.db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"connect_service"}).await.unwrap().is_some());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let routed = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":service}),
+        None,
+        false,
+    )
+    .await;
+    let routed_body = String::from_utf8(
+        axum::body::to_bytes(routed.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!routed_body.contains("access_request_denied"));
+}
+
+#[tokio::test]
+async fn specialist_channel_bot_tools_are_denied_audited_and_routed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_channel_bot_tools").await;
+    let specialist = authenticate(&f).await;
+    for tool in [
+        "nyxid__channel_bot_setup_link",
+        "nyxid__connect_channel_bot",
+        "nyxid__link_channel_bot",
+    ] {
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let denied = result(call(&f, &specialist, tool, json!({})).await, true).await;
+        assert_eq!(denied["error"], "access_request_denied", "{tool}");
+        assert!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .find_one(doc! {"event_type":"assistant_access_request_denied"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let routed = result(call(&f, &specialist, tool, json!({})).await, true).await;
+        assert!(routed["error"] != "access_request_denied", "{tool}");
+    }
+}

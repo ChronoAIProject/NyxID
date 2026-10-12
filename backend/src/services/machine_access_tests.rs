@@ -1848,3 +1848,163 @@ async fn machine_access_separated_login_binding_and_delete_quarantine_are_atomic
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn specialist_machine_login_request_is_denied_audited_and_routed_when_allowed() {
+    use super::{
+        assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+    };
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = fixture("strict_machine_login_permission").await;
+    for kind in ["machine", "saved_login"] {
+        let target = uuid::Uuid::new_v4().to_string();
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let error = crate::handlers::machine_tools::permission(
+            &f.state,
+            &f.chat,
+            kind,
+            &target,
+            "Requested resource",
+        )
+        .await
+        .expect_err("strict permission request refused");
+        let denied = super::assistant_account_tools::error_result(error);
+        assert!(denied.is_error);
+        assert_eq!(denied.value, acks::access_request_denied());
+        let audit = f
+            .state
+            .db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(
+                doc! {"event_type":"assistant_access_request_denied", "event_data.target": &target},
+            )
+            .await
+            .unwrap()
+            .expect("resource-specific denial audit");
+        let data = audit.get_document("event_data").unwrap();
+        assert_eq!(data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+        assert_eq!(data.get_str("thread").unwrap(), f.row.id);
+        assert_eq!(data.get_str("key").unwrap(), f.row.credential_api_key_id);
+        assert_eq!(data.get_str("target").unwrap(), target);
+        assert_eq!(data.get_str("scope").unwrap(), kind);
+        assert_eq!(data.get_str("decision").unwrap(), "denied");
+        let cards = f
+            .state
+            .db
+            .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+        assert_eq!(
+            cards
+                .count_documents(doc! {"conversation_id": &f.row.id,"service_id": &target})
+                .await
+                .unwrap(),
+            0
+        );
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let routed = crate::handlers::machine_tools::permission(
+            &f.state,
+            &f.chat,
+            kind,
+            &target,
+            "Requested resource",
+        )
+        .await
+        .unwrap();
+        assert_eq!(routed["error"], "acknowledgement_required");
+        assert_eq!(routed["decider"], "orchestrator");
+        let id = routed["acknowledgement_id"].as_str().unwrap();
+        assert!(
+            cards
+                .find_one(doc! {"_id":id,"conversation_id":&f.row.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let messages = f.state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
+                if messages.find_one(doc! {"conversation_id":&f.nyxbot_thread,"role":"event","text":{"$regex":id}}).await.unwrap().is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.expect("NyxBot receives resource permission request");
+    }
+}
+
+#[tokio::test]
+async fn specialist_machine_capability_card_is_denied_audited_and_routed_when_allowed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_machine_capability_card").await;
+    enable(&f).await;
+    let n = v2(&f).await;
+    f.state
+        .db
+        .collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .delete_one(doc! {"_id":&f.owner})
+        .await
+        .unwrap();
+    let args = json!({"agent":f.chat.agent_id,"machine":n.id,"selection":selection(0,Capabilities{files:true,..Default::default()})});
+    let (denied, pending) = Box::pin(crate::handlers::machine_access::native(
+        &f.state, &f.chat, &args,
+    ))
+    .await
+    .unwrap();
+    assert!(pending);
+    assert_eq!(denied["error"], "access_request_denied");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    let audit = f
+        .state
+        .db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_access_request_denied"})
+        .await
+        .unwrap()
+        .expect("capability denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("target").unwrap(), n.id);
+    assert_eq!(data.get_str("scope").unwrap(), "machine_capabilities");
+    assert_eq!(data.get_str("decision").unwrap(), "denied");
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (routed, pending) = Box::pin(crate::handlers::machine_access::native(
+        &f.state, &f.chat, &args,
+    ))
+    .await
+    .unwrap();
+    assert!(pending);
+    assert_eq!(routed["decider"], "orchestrator");
+    assert!(routed["acknowledgement_id"].is_string());
+}

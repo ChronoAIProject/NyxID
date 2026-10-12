@@ -155,10 +155,18 @@ impl Fixture {
                 .await
                 .unwrap();
         }
-        for id in &ids {
+        // These tests exercise the legacy permission-card contract explicitly:
+        // Autopilot keeps card assertions independent of access-mode prompts, and
+        // routed mode keeps the specialist request cards (production defaults to denied).
+        for (i, id) in ids.iter().enumerate() {
             db.collection(crate::models::assistant_settings::COLLECTION_NAME)
                 .insert_one(crate::models::assistant_settings::AssistantSettings {
                     access_mode: crate::models::assistant_settings::AccessMode::Autopilot,
+                    specialist_access_requests: if i < 4 {
+                        crate::models::assistant_settings::SpecialistAccessRequests::RoutedToNyxbot
+                    } else {
+                        crate::models::assistant_settings::SpecialistAccessRequests::Denied
+                    },
                     ..crate::models::assistant_settings::AssistantSettings::defaults(id)
                 })
                 .await

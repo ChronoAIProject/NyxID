@@ -29,6 +29,9 @@ pub struct AssistantMessage {
     /// Metadata-only failure diagnostics; never contains prompt or credential data.
     #[serde(default)]
     pub error_detail: Option<AssistantErrorDetail>,
+    /// Specialist identity for bounded access-denial notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialist_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     /// Tool calls observed during the turn that produced this reply (assistant rows only).
