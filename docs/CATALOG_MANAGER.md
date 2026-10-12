@@ -118,11 +118,20 @@ All commands accept the usual `--base-url`, `--profile` and `--output json`.
   a test command, and values for the Lark Platform Accounts row.
 - `nyxid admin provider create` and `nyxid admin provider update <provider>`
   run a provider wizard when given no `--file`: type, authorization, token
-  and device URLs, scopes (matching the vendor's CLI), whether users may add
-  scopes, extra authorization parameters, token endpoint authentication,
-  PKCE, who supplies the OAuth app, revocation and documentation URLs. Update
-  offers the stored values and sends only what changed. Both then offer to
-  set the OAuth client.
+  and device URLs, whether the vendor uses OAuth scopes (`no` means NyxID
+  never sends a `scope` parameter), the scopes (matching the vendor's CLI),
+  extra authorization parameters, token endpoint authentication, PKCE, who
+  supplies the OAuth app, revocation and documentation URLs. Update offers
+  the stored values and sends only what changed. Both then offer to set the
+  OAuth client.
+
+A provider in `credential_mode: admin` (NyxID managed only, the default)
+needs its OAuth client when it is created; `both` and `user` providers can be
+created without one. The wizard asks for it before creating the provider, and
+`provider create --file` takes `--client-id-env/--client-secret-env`.
+`catalog apply` reads it from environment variables named after the provider
+slug, for example `ZOHO_MAIL_CLIENT_ID` and `ZOHO_MAIL_CLIENT_SECRET` for
+`zoho-mail`; a dry run notes which providers still need one.
 - `nyxid admin provider list | show | link | delete` manage single providers. `set-credentials <provider>` sets the NyxID-managed
   client; it is unrelated to `nyxid service credentials`, which stores a
   user's own OAuth app.

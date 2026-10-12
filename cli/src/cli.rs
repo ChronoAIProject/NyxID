@@ -366,6 +366,12 @@ pub enum AdminProviderCommands {
         /// Provider definition file (JSON or YAML, no secrets)
         #[arg(long)]
         file: Option<std::path::PathBuf>,
+        /// Read the client ID from this environment variable (managed providers need it at creation)
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long)]
+        client_secret_env: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

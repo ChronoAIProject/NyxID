@@ -5777,6 +5777,9 @@ mod tests {
             "name": slug,
             "slug": slug,
             "provider_type": "oauth2",
+            // Admin mode needs its client at creation; `both`, like the seeded
+            // connectors, starts without one.
+            "credential_mode": "both",
             "authorization_url": "https://accounts.example.com/oauth/v2/auth",
             "token_url": "https://accounts.example.com/oauth/v2/token",
             "default_scopes": ["Mail.messages.READ"],

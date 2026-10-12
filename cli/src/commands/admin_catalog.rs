@@ -61,9 +61,14 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
             print_provider(&provider, &auth)?;
             Ok(())
         }
-        AdminProviderCommands::Create { file, auth } => {
+        AdminProviderCommands::Create {
+            file,
+            client_id_env,
+            client_secret_env,
+            auth,
+        } => {
             let wizard = file.is_none();
-            let body = match file {
+            let mut body = match file {
                 Some(path) => read_document(&path)?,
                 None => {
                     require_terminal("Pass --file without a terminal")?;
@@ -72,10 +77,28 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
+            if client_required_at_creation(&body) {
+                if client_id_env.is_none() {
+                    require_terminal(
+                        "A managed (credential_mode admin) provider needs its OAuth client at creation; pass --client-id-env and --client-secret-env",
+                    )?;
+                }
+                let (id, secret) = read_client(
+                    &text(&body, "slug"),
+                    body["provider_type"] != "device_code",
+                    &redirect_uri(&auth)?,
+                    client_id_env.as_deref(),
+                    client_secret_env.as_deref(),
+                )?;
+                body["client_id"] = id.into();
+                if let Some(secret) = secret {
+                    body["client_secret"] = secret.into();
+                }
+            }
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let created: Value = api.post("/providers", &body).await?;
             print_provider(&created, &auth)?;
-            if wizard {
+            if wizard && !client_configured(&created) {
                 offer_client(&mut api, &created, &auth).await?;
             }
             Ok(())
@@ -194,8 +217,9 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
             auth,
         } => {
             let manifest = Manifest::load(&manifest.file, &manifest.vars, false)?;
+            let clients = clients_from_env(&manifest)?;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let rows = apply(&mut api, &manifest, dry_run).await?;
+            let rows = apply(&mut api, &manifest, dry_run, &clients).await?;
             print_apply(&rows, dry_run, auth.output)?;
             fail_on_errors(&rows)
         }
@@ -246,8 +270,21 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                 bail!("--client-id-env and --client-secret-env need a manifest with one provider");
             }
 
+            let mut clients = clients_from_env(&manifest)?;
+            if let Some(id_env) = client_id_env.as_deref() {
+                let desired = &manifest.providers[0];
+                let needs_secret = desired["provider_type"] != "device_code";
+                let secret = match (client_secret_env.as_deref(), needs_secret) {
+                    (Some(name), _) => Some(env_secret(name)?),
+                    (None, true) => bail!("--client-id-env needs --client-secret-env"),
+                    (None, false) => None,
+                };
+                clients.insert(text(desired, "slug"), (env_secret(id_env)?, secret));
+            }
+            let redirect = redirect_uri(&auth)?;
+
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let plan = apply(&mut api, &manifest, true).await?;
+            let plan = apply(&mut api, &manifest, true, &clients).await?;
             print_apply(&plan, true, OutputFormat::Table)?;
             fail_on_errors(&plan)?;
             if !yes {
@@ -258,11 +295,28 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                     bail!("Cancelled");
                 }
             }
-            let rows = apply(&mut api, &manifest, false).await?;
+            // Managed (admin-mode) providers need their client before they
+            // can be created.
+            for row in plan
+                .iter()
+                .filter(|row| row.kind == "provider" && row.note.is_some())
+            {
+                if skip_credentials || !interactive {
+                    bail!("{}: {}", row.slug, row.note.as_deref().unwrap_or_default());
+                }
+                let desired = manifest
+                    .providers
+                    .iter()
+                    .find(|provider| provider["slug"] == row.slug.as_str())
+                    .ok_or_else(|| anyhow!("Provider {} is not in the manifest", row.slug))?;
+                let needs_secret = desired["provider_type"] != "device_code";
+                let client = read_client(&row.slug, needs_secret, &redirect, None, None)?;
+                clients.insert(row.slug.clone(), client);
+            }
+            let rows = apply(&mut api, &manifest, false, &clients).await?;
             print_apply(&rows, false, OutputFormat::Table)?;
             fail_on_errors(&rows)?;
 
-            let redirect = redirect_uri(&auth)?;
             if !skip_credentials {
                 for desired in &manifest.providers {
                     if !matches!(
@@ -531,6 +585,8 @@ struct ApplyRow {
     changed: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 impl ApplyRow {
@@ -542,6 +598,7 @@ impl ApplyRow {
             id: None,
             changed: Vec::new(),
             error: None,
+            note: None,
         }
     }
 
@@ -553,7 +610,12 @@ impl ApplyRow {
     }
 }
 
-async fn apply(api: &mut ApiClient, manifest: &Manifest, dry_run: bool) -> Result<Vec<ApplyRow>> {
+async fn apply(
+    api: &mut ApiClient,
+    manifest: &Manifest,
+    dry_run: bool,
+    clients: &Clients,
+) -> Result<Vec<ApplyRow>> {
     let mut rows = Vec::new();
     let mut provider_ids: BTreeMap<String, Option<String>> = BTreeMap::new();
     let existing_providers = list_providers(api).await?;
@@ -564,14 +626,39 @@ async fn apply(api: &mut ApiClient, manifest: &Manifest, dry_run: bool) -> Resul
             .iter()
             .find(|provider| provider["slug"] == desired["slug"]);
         let row = match current {
-            None if dry_run => ApplyRow::new("provider", &slug, "create"),
-            None => match api.post::<Value, _>("/providers", desired).await {
-                Ok(created) => ApplyRow {
-                    id: created["id"].as_str().map(str::to_string),
-                    ..ApplyRow::new("provider", &slug, "created")
-                },
-                Err(error) => ApplyRow::failed("provider", &slug, error),
-            },
+            None => {
+                let client = clients.get(&slug);
+                let missing = client_required_at_creation(desired) && client.is_none();
+                let hint = || {
+                    let (id_env, secret_env) = client_env_names(&slug);
+                    format!(
+                        "needs its OAuth client at creation (credential_mode admin): set {id_env} and {secret_env}, or run `nyxid admin catalog add`"
+                    )
+                };
+                match (dry_run, missing) {
+                    (true, _) => ApplyRow {
+                        note: missing.then(hint),
+                        ..ApplyRow::new("provider", &slug, "create")
+                    },
+                    (false, true) => ApplyRow::failed("provider", &slug, hint()),
+                    (false, false) => {
+                        let mut body = desired.clone();
+                        if let Some((id, secret)) = client {
+                            body["client_id"] = id.clone().into();
+                            if let Some(secret) = secret {
+                                body["client_secret"] = secret.clone().into();
+                            }
+                        }
+                        match api.post::<Value, _>("/providers", &body).await {
+                            Ok(created) => ApplyRow {
+                                id: created["id"].as_str().map(str::to_string),
+                                ..ApplyRow::new("provider", &slug, "created")
+                            },
+                            Err(error) => ApplyRow::failed("provider", &slug, error),
+                        }
+                    }
+                }
+            }
             Some(current) => {
                 if desired.get("provider_type").is_some()
                     && desired["provider_type"] != current["provider_type"]
@@ -813,7 +900,11 @@ fn print_apply(rows: &[ApplyRow], dry_run: bool, output: OutputFormat) -> Result
             table.load_preset(UTF8_FULL_CONDENSED);
             table.set_header(["Kind", "Slug", "Action", "Details"]);
             for row in rows {
-                let details = row.error.clone().unwrap_or_else(|| row.changed.join(", "));
+                let details = row
+                    .error
+                    .clone()
+                    .or_else(|| row.note.clone())
+                    .unwrap_or_else(|| row.changed.join(", "));
                 table.add_row([row.kind, row.slug.as_str(), row.action, details.as_str()]);
             }
             eprintln!("{table}");
@@ -1021,25 +1112,16 @@ async fn set_client(
 ) -> Result<Value> {
     let slug = text(provider, "slug");
     let needs_secret = provider["provider_type"] != "device_code";
-    eprintln!("{slug}: register this redirect URI in the vendor's OAuth app: {redirect}");
-    let client_id = match client_id_env {
-        Some(name) => env_secret(name)?,
-        None => ask("Client ID", None)?,
-    };
-    let client_secret = match (client_secret_env, needs_secret) {
-        (Some(name), _) => Some(env_secret(name)?),
-        (None, true) => Some(
-            rpassword::prompt_password("Client secret (hidden): ")
-                .context("Failed to read the client secret")?,
-        ),
-        (None, false) => None,
-    };
-    let mut body = json!({ "client_id": client_id.trim() });
+    let (client_id, client_secret) = read_client(
+        &slug,
+        needs_secret,
+        redirect,
+        client_id_env,
+        client_secret_env,
+    )?;
+    let mut body = json!({ "client_id": client_id });
     if let Some(secret) = client_secret {
-        if secret.trim().is_empty() {
-            bail!("The client secret is empty");
-        }
-        body["client_secret"] = secret.trim().into();
+        body["client_secret"] = secret.into();
     }
     let updated: Value = api
         .put(&format!("/providers/{}", text(provider, "id")), &body)
@@ -1053,6 +1135,94 @@ async fn set_client(
         }
     );
     Ok(updated)
+}
+
+/// OAuth client values for providers created in this run, keyed by provider
+/// slug. They are sent to the API only, never written to a file or printed.
+type Clients = BTreeMap<String, (String, Option<String>)>;
+
+/// The server refuses to create an OAuth or device-code provider in admin
+/// mode (the default) without its client.
+fn client_required_at_creation(desired: &Value) -> bool {
+    matches!(
+        desired["provider_type"].as_str(),
+        Some("oauth2" | "device_code")
+    ) && desired
+        .get("credential_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("admin")
+        == "admin"
+}
+
+/// `zoho-mail` reads `ZOHO_MAIL_CLIENT_ID` and `ZOHO_MAIL_CLIENT_SECRET`.
+fn client_env_names(slug: &str) -> (String, String) {
+    let base: String = slug
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    (format!("{base}_CLIENT_ID"), format!("{base}_CLIENT_SECRET"))
+}
+
+fn clients_from_env(manifest: &Manifest) -> Result<Clients> {
+    let mut clients = Clients::new();
+    for desired in manifest
+        .providers
+        .iter()
+        .filter(|desired| client_required_at_creation(desired))
+    {
+        let slug = text(desired, "slug");
+        let (id_env, secret_env) = client_env_names(&slug);
+        if std::env::var_os(&id_env).is_none() {
+            continue;
+        }
+        let secret = if desired["provider_type"] == "device_code" {
+            None
+        } else {
+            Some(env_secret(&secret_env)?)
+        };
+        clients.insert(slug, (env_secret(&id_env)?, secret));
+    }
+    Ok(clients)
+}
+
+/// Read a client ID and (unless the provider is device-code) a secret from
+/// environment variables, or ask: the ID visibly, the secret hidden.
+fn read_client(
+    slug: &str,
+    needs_secret: bool,
+    redirect: &str,
+    client_id_env: Option<&str>,
+    client_secret_env: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    eprintln!("{slug}: register this redirect URI in the vendor's OAuth app: {redirect}");
+    let client_id = match client_id_env {
+        Some(name) => env_secret(name)?,
+        None => ask_required("Client ID", None)?,
+    };
+    let client_secret = match (client_secret_env, needs_secret) {
+        (Some(name), _) => Some(env_secret(name)?),
+        (None, true) => Some(
+            rpassword::prompt_password("Client secret (hidden): ")
+                .context("Failed to read the client secret")?,
+        ),
+        (None, false) => None,
+    };
+    if client_secret
+        .as_deref()
+        .is_some_and(|secret| secret.trim().is_empty())
+    {
+        bail!("The client secret is empty");
+    }
+    Ok((
+        client_id.trim().to_string(),
+        client_secret.map(|secret| secret.trim().to_string()),
+    ))
 }
 
 fn env_secret(name: &str) -> Result<String> {
@@ -1177,29 +1347,31 @@ fn provider_wizard(current: Option<&Value>) -> Result<Value> {
             "Device verification URL (optional)",
         )?;
     }
-    let scopes_now = current
-        .and_then(|row| row["default_scopes"].as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" ")
-        });
-    let scopes = ask(
-        "Scopes, matching the vendor's own CLI (space separated)",
-        scopes_now.as_deref().filter(|value| !value.is_empty()),
-    )?;
-    provider["default_scopes"] = json!(scopes.split_whitespace().collect::<Vec<_>>());
-    let pick_now = current
+    let uses_now = current
         .and_then(|row| row["supports_oauth_scopes"].as_bool())
-        .map_or("no", |on| if on { "yes" } else { "no" });
-    provider["supports_oauth_scopes"] = (ask_choice(
-        "Let users request scopes beyond these",
+        .map_or("yes", |on| if on { "yes" } else { "no" });
+    let uses_scopes = ask_choice(
+        "Does the vendor use OAuth scopes (no = never send a scope parameter)",
         &["yes", "no"],
-        pick_now,
-    )? == "yes")
-        .into();
+        uses_now,
+    )? == "yes";
+    provider["supports_oauth_scopes"] = uses_scopes.into();
+    if uses_scopes {
+        let scopes_now = current
+            .and_then(|row| row["default_scopes"].as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+        let scopes = ask(
+            "Scopes, matching the vendor's own CLI (space separated)",
+            scopes_now.as_deref().filter(|value| !value.is_empty()),
+        )?;
+        provider["default_scopes"] = json!(scopes.split_whitespace().collect::<Vec<_>>());
+    }
     let params_now = current
         .and_then(|row| row["extra_auth_params"].as_object())
         .map(|params| {
@@ -1491,7 +1663,7 @@ mod tests {
             "authorization_url": "https://accounts.zoho.com/oauth/v2/auth",
             "token_url": "https://accounts.zoho.com/oauth/v2/token",
             "default_scopes": ["ZohoMail.accounts.READ,ZohoMail.folders.READ,ZohoMail.messages.READ"],
-            "supports_oauth_scopes": false,
+            "supports_oauth_scopes": true,
             "supports_pkce": false,
             "token_endpoint_auth_method": "client_secret_post",
             "extra_auth_params": { "access_type": "offline", "prompt": "consent" },
@@ -1539,10 +1711,13 @@ mod tests {
         let server = MockServer::start().await;
         listing(&server, json!([]), json!([])).await;
         let manifest = zoho(&[]).unwrap();
+        let mut provider_body = manifest.providers[0].clone();
+        provider_body["client_id"] = "zoho-id".into();
+        provider_body["client_secret"] = "zoho-secret".into();
         Mock::given(method("POST"))
             .and(path("/api/v1/providers"))
-            .and(body_json(&manifest.providers[0]))
-            .respond_with(ResponseTemplate::new(200).set_body_json(provider_row(false)))
+            .and(body_json(&provider_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(provider_row(true)))
             .expect(1)
             .mount(&server)
             .await;
@@ -1558,15 +1733,71 @@ mod tests {
             .await;
 
         let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
-        let plan = apply(&mut api, &manifest, true).await.unwrap();
+        // Without a client the managed provider is planned with a note and
+        // refused on a real run.
+        let plan = apply(&mut api, &manifest, true, &Clients::new())
+            .await
+            .unwrap();
         assert_eq!(
             plan.iter().map(|row| row.action).collect::<Vec<_>>(),
             ["create", "create"]
         );
-        let rows = apply(&mut api, &manifest, false).await.unwrap();
+        assert!(
+            plan[0]
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("ZOHO_MAIL_CLIENT_ID")
+        );
+        let refused = apply(&mut api, &manifest, false, &Clients::new())
+            .await
+            .unwrap();
+        assert_eq!(refused[0].action, "failed");
+        assert_eq!(refused[1].action, "failed");
+
+        let clients = Clients::from([(
+            "zoho-mail".to_string(),
+            ("zoho-id".to_string(), Some("zoho-secret".to_string())),
+        )]);
+        let rows = apply(&mut api, &manifest, false, &clients).await.unwrap();
         assert_eq!(
             rows.iter().map(|row| row.action).collect::<Vec<_>>(),
             ["created", "created"]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn clients_come_from_slug_named_environment_variables() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        assert_eq!(
+            client_env_names("zoho-mail"),
+            (
+                "ZOHO_MAIL_CLIENT_ID".to_string(),
+                "ZOHO_MAIL_CLIENT_SECRET".to_string()
+            )
+        );
+        let manifest = zoho(&[]).unwrap();
+        assert!(clients_from_env(&manifest).unwrap().is_empty());
+        unsafe {
+            std::env::set_var("ZOHO_MAIL_CLIENT_ID", "id-from-env");
+        }
+        let missing_secret = clients_from_env(&manifest);
+        unsafe {
+            std::env::set_var("ZOHO_MAIL_CLIENT_SECRET", "secret-from-env");
+        }
+        let clients = clients_from_env(&manifest);
+        unsafe {
+            std::env::remove_var("ZOHO_MAIL_CLIENT_ID");
+            std::env::remove_var("ZOHO_MAIL_CLIENT_SECRET");
+        }
+        assert!(missing_secret.is_err());
+        assert_eq!(
+            clients.unwrap()["zoho-mail"],
+            (
+                "id-from-env".to_string(),
+                Some("secret-from-env".to_string())
+            )
         );
     }
 
@@ -1594,7 +1825,9 @@ mod tests {
             .await;
         let manifest = zoho(&[]).unwrap();
         let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
-        let rows = apply(&mut api, &manifest, false).await.unwrap();
+        let rows = apply(&mut api, &manifest, false, &Clients::new())
+            .await
+            .unwrap();
         assert_eq!(rows[0].action, "unchanged");
         assert_eq!(rows[1].action, "updated");
         assert_eq!(rows[1].changed, ["description"]);
@@ -1609,7 +1842,9 @@ mod tests {
         listing(&server, json!([provider_row(true)]), json!([other_auth])).await;
         let manifest = zoho(&[]).unwrap();
         let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
-        let rows = apply(&mut api, &manifest, true).await.unwrap();
+        let rows = apply(&mut api, &manifest, true, &Clients::new())
+            .await
+            .unwrap();
         assert_eq!(rows[1].action, "failed");
         assert!(rows[1].error.as_deref().unwrap().contains("auth_method"));
         assert!(fail_on_errors(&rows).is_err());
@@ -1621,7 +1856,9 @@ mod tests {
         listing(&server, json!([]), json!([service_row()])).await;
         let manifest = zoho(&[]).unwrap();
         let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
-        let plan = apply(&mut api, &manifest, true).await.unwrap();
+        let plan = apply(&mut api, &manifest, true, &Clients::new())
+            .await
+            .unwrap();
         assert_eq!(plan[0].action, "create");
         assert_eq!(plan[1].action, "update");
         assert_eq!(plan[1].changed, ["provider"]);
