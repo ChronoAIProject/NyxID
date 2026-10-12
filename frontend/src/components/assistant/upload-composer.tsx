@@ -10,6 +10,7 @@ import {
   type UploadedMessage,
   type UploadScope,
 } from "@/lib/assistant/uploads";
+import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import type { NyxAgentAttachment } from "@/schemas/assistant-nyxagent";
 
 const UNSUPPORTED_FORMAT_MESSAGE = "Format not supported. Please try again.";
@@ -289,11 +290,12 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                 }
               : undefined,
           );
-          } catch (error) {
-            const admitted = error instanceof Error && (error as Error & { admitted?: boolean }).admitted;
-            for (const file of items) {
-              if (alive.current && !admitted) pending.current.set(file.key, file);
-              else if (file.preview) URL.revokeObjectURL(file.preview);
+        } catch (error) {
+          // Admitted uploads are bound to the stored message: never offer them again.
+          const admitted = isAdmittedSendError(error);
+          for (const file of items) {
+            if (alive.current && !admitted) pending.current.set(file.key, file);
+            else if (file.preview) URL.revokeObjectURL(file.preview);
           }
           refresh();
           throw error;

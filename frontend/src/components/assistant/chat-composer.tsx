@@ -18,6 +18,7 @@ import {
   mentionCandidates,
   type MentionQuery,
 } from "@/lib/assistant/nyxbot-mentions";
+import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -590,7 +591,10 @@ function DraftedChatComposer({
     updateContent("");
     try {
       await onSend(message);
-    } catch {
+    } catch (error) {
+      // An admitted message is already in the transcript; restoring it would
+      // invite a duplicate send.
+      if (isAdmittedSendError(error)) return;
       // Guidance can be sent while the field remains editable. Preserve any
       // newer draft typed while the request was in flight.
       if (!contentRef.current) updateContent(message);

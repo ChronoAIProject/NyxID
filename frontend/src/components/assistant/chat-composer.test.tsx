@@ -144,6 +144,23 @@ describe("ChatComposer drafts", () => {
     expect(screen.getByRole("textbox")).toBeEnabled();
   });
 
+  it.each([
+    [true, ""],
+    [false, "Keep me"],
+  ])("after a send failure admitted by the server (%s) leaves the field with %j", async (admitted, expected) => {
+    const failure = Object.assign(new Error("The connection was interrupted."), admitted ? { admitted: true } : {});
+    const onSend = vi.fn().mockRejectedValue(failure);
+    render(<ChatComposer {...baseProps} onSend={onSend} draftKey="conv:one" />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep me" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    });
+    act(() => vi.advanceTimersByTime(300));
+    expect(onSend).toHaveBeenCalledWith("Keep me");
+    expect(screen.getByRole("textbox")).toHaveValue(expected);
+    expect(useAssistantDraftStore.getState().getDraft("conv:one")).toBe(expected);
+  });
+
   it("flushes immediately on unmount", () => {
     const { unmount } = render(
       <ChatComposer {...baseProps} draftKey="screen:/keys" />,

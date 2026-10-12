@@ -6,6 +6,7 @@ import {
 } from "@/lib/assistant/direct-transport";
 import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
+import { markAdmitted } from "@/lib/assistant/send-admission";
 import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import {
@@ -656,6 +657,7 @@ export class NyxAgentTransport {
     this.changed();
     let adopted = Boolean(id) && !options.adoptExisting;
     let terminal = false;
+    let responded = false;
     try {
       const response = await subscriptionDeadline(
         assistantHttp(`${ROOT}/turns`, {
@@ -678,6 +680,7 @@ export class NyxAgentTransport {
         45_000,
         controller,
       );
+      responded = true;
       this.current(generation);
       if (!response.body) throw new Error("The assistant returned no stream.");
       const reader = response.body.getReader();
@@ -772,10 +775,12 @@ export class NyxAgentTransport {
         reader.releaseLock();
       }
       if (!terminal) {
-        const error = new Error("The connection was interrupted. The assistant may still be working.");
-        (error as Error & { admitted?: boolean }).admitted = true;
-        throw error;
+        throw new Error("The connection was interrupted. The assistant may still be working.");
       }
+    } catch (error) {
+      // After a 2xx the server has stored the message and bound its uploads:
+      // every later failure (deadline, size, parse, mismatch, early end) is admitted.
+      throw responded ? markAdmitted(error) : error;
     } finally {
       this.requests.delete(controller);
       if (generation === this.generation) {

@@ -4,6 +4,7 @@ import { transitionAssistantIdentity } from "./identity";
 import { assistantChatSurface } from "./conversation-ids";
 import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 import { nyxAgentMessageSchema } from "@/schemas/assistant-nyxagent";
+import { isAdmittedSendError } from "./send-admission";
 
 const id = `nyxa-${"1".repeat(32)}`;
 const other = `nyxa-${"2".repeat(32)}`;
@@ -1183,5 +1184,99 @@ describe("steering transport", () => {
     });
     controller!.close();
     await sending;
+  });
+});
+
+function sseBytes(...events: Record<string, unknown>[]): Uint8Array {
+  return new TextEncoder().encode(
+    events.map((event, i) => `data: ${JSON.stringify({ ...event, cursor: i + 1 })}\n\n`).join(""),
+  );
+}
+
+function chunked(...parts: Uint8Array[]): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const part of parts) controller.enqueue(part);
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+const runningStatus = { event: "turn.status", conversation_id: id, turn_id: "turn", status: "running" };
+
+describe("send admission", () => {
+  async function sendFailure(turns: () => Response | Promise<Response>): Promise<unknown> {
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) return turns();
+      return endpoint.includes(`/conversations/${id}`)
+        ? json(history())
+        : json({ conversations: [], next_cursor: null });
+    };
+    return new NyxAgentTransport()
+      .send(id, "Question", vi.fn())
+      .then(() => "resolved", (error: unknown) => error);
+  }
+
+  it.each([
+    [
+      "the 12 MiB response limit",
+      () => chunked(sseBytes(runningStatus), new Uint8Array(12 * 1024 * 1024 + 1)),
+      "message",
+      "Assistant response exceeded its limit.",
+    ],
+    ["an SSE payload that is not JSON", () => chunked(new TextEncoder().encode("data: broken\n\n")), "name", "SyntaxError"],
+    ["a body that is not UTF-8", () => chunked(new Uint8Array([0xff, 0xfe, 0x0a])), "name", "TypeError"],
+    [
+      "a turn for another conversation",
+      () => chunked(sseBytes({ ...runningStatus, conversation_id: other })),
+      "message",
+      "Assistant conversation mismatch.",
+    ],
+    [
+      "a stream that ends without a terminal event",
+      () => chunked(sseBytes(runningStatus)),
+      "message",
+      "The connection was interrupted. The assistant may still be working.",
+    ],
+    ["a 2xx without a body", () => new Response(null), "message", "The assistant returned no stream."],
+  ] as const)("marks %s after a 2xx as admitted", async (_label, turns, field, expected) => {
+    const error = await sendFailure(turns);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error)[field]).toBe(expected);
+    expect(isAdmittedSendError(error)).toBe(true);
+  });
+
+  it("marks the 135 second read deadline after a 2xx as admitted", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = sendFailure(
+        () => new Response(new ReadableStream({ start(controller) { controller.enqueue(sseBytes(runningStatus)); } })),
+      );
+      await vi.advanceTimersByTimeAsync(135_001);
+      const error = await pending;
+      expect((error as Error).message).toBe("The connection was interrupted. The assistant may still be working.");
+      expect(isAdmittedSendError(error)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not mark a refused POST as admitted", async () => {
+    const error = await sendFailure(() =>
+      json({ error: "turn_active", error_code: 12100, message: "A turn is already active" }, 409),
+    );
+    expect(error).toMatchObject({ status: 409, message: "A turn is already active" });
+    expect(isAdmittedSendError(error)).toBe(false);
+  });
+
+  it("does not mark a network failure before any response as admitted", async () => {
+    const error = await sendFailure(() => {
+      throw new TypeError("Failed to fetch");
+    });
+    expect((error as Error).message).toBe("Failed to fetch");
+    expect(isAdmittedSendError(error)).toBe(false);
   });
 });
