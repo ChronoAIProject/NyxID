@@ -6012,7 +6012,7 @@ mod tests {
             .expect("mint refresh token");
         // No active `oauth_clients` row exists for this client id.
         db.collection::<RefreshToken>(REFRESH_TOKENS)
-            .insert_one(&stored_refresh_token(
+            .insert_one(stored_refresh_token(
                 &jti,
                 &Uuid::new_v4().to_string(),
                 &user.to_string(),
