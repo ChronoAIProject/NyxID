@@ -319,7 +319,7 @@ async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
     )
     .await
     .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let row = settled(&state).await;
     let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
         .await
@@ -371,8 +371,13 @@ async fn retried_turn_does_not_re_run_completed_actions() {
         .await
         .unwrap();
     let calls = calls.lock().await;
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].body["input"].is_string());
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[1].body["input"]
+            .as_str()
+            .unwrap()
+            .contains("must not be repeated")
+    );
     server.abort();
 }
 
@@ -532,10 +537,12 @@ async fn user_reset_changes_the_next_turn_recap() {
             .await
             .unwrap(),
     );
-    db.collection::<crate::models::assistant_conversation::AssistantConversation>(
-        engine::CONVERSATIONS,
+    engine::force_stop(
+        &db,
+        OWNER,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
     )
-    .update_one(doc! {"_id": &row.id}, doc! {"$unset": {"active_turn": ""}})
     .await
     .unwrap();
     engine::reset_context(&db, OWNER, &row.id).await.unwrap();
