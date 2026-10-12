@@ -382,10 +382,16 @@ pub async fn native(
                 .unwrap_or(false);
             if !routed {
                 crate::services::assistant_acknowledgement_service::audit_access_request_denied(
-                    &state.db, chat, Some(node), "machine_capabilities",
+                    &state.db,
+                    chat,
+                    Some(node),
+                    "machine_capabilities",
                 )
                 .await;
-                return Ok((crate::services::assistant_acknowledgement_service::access_request_denied(), true));
+                return Ok((
+                    crate::services::assistant_acknowledgement_service::access_request_denied(),
+                    true,
+                ));
             }
             let login_scope = selection.saved_login_ids.as_ref().map_or_else(
                 || "inherit the agent's saved-login grants".to_owned(),
