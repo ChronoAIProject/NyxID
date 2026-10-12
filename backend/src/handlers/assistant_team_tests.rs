@@ -1063,6 +1063,27 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
 }
 
 #[tokio::test]
+async fn specialist_access_request_denied_by_default_and_allowed_when_routed() {
+    let (state, _, server) = setup("team_default_access_mode").await;
+    let (orchestrator, chat) = orchestrator(&state).await;
+    let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
+    spawn(&state, &chat, json!({"name": "coder", "description": "Review PRs"})).await;
+    let home = specialist_home(&state, "coder").await;
+    let specialist = chat_for(&state, &home).await;
+    let denied = acks::service_gate(&state.db, &specialist, &github, "github", "GitHub", false)
+        .await
+        .expect_err("default specialist access must be refused");
+    assert!(denied.to_string().contains("access_request_denied: only NyxBot can request or grant access"));
+    assert_eq!(state.db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).count_documents(doc! {"conversation_id": &home.id}).await.unwrap(), 0);
+    enable_routed_requests(&state).await;
+    let (_, request) = acks::service_gate(&state.db, &specialist, &github, "github", "GitHub", false)
+        .await.unwrap().unwrap();
+    assert!(request.is_some());
+    assert!(transcript(&state, &orchestrator.id).await.iter().any(|m| m.role == "event"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialist() {
     let (state, _, server) = setup("team_permissions").await;
     enable_routed_requests(&state).await;
