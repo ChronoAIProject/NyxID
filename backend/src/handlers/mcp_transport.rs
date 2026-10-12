@@ -23,7 +23,6 @@ use crate::services::{
     proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
-use sha2::{Digest, Sha256};
 
 use super::services_helpers::fetch_service;
 
@@ -1695,18 +1694,82 @@ fn chat_activity_label(params: &serde_json::Value) -> String {
     name.to_owned()
 }
 
+/// Key-order independent identity of a call: the tool name and its canonical
+/// arguments. `nyx__call_tool` carries its inner arguments as a JSON string,
+/// which is parsed so reordered inner keys digest identically too.
 fn chat_activity_digest(params: &serde_json::Value) -> String {
     let name = params
         .get("name")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let arguments = params
+    let mut arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let canonical = serde_json::to_vec(&serde_json::json!({"name": name, "arguments": arguments}))
-        .unwrap_or_default();
-    format!("{:x}", Sha256::digest(canonical))
+    if let Some(inner) = arguments
+        .get("arguments_json")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    {
+        arguments["arguments_json"] = inner;
+    }
+    crate::services::assistant_continuation::canonical_digest(
+        &serde_json::json!({"name": name, "arguments": arguments}),
+    )
+}
+
+/// Refuse a retried turn's repeat of a completed call: an MCP `isError`
+/// result the model can act on, recorded on the live turn (so a retry of this
+/// retry stays fenced) and audited with metadata only.
+async fn refuse_retry_duplicate(
+    state: &AppState,
+    auth: &McpAuthContext,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+    request: &JsonRpcRequest,
+    params: &serde_json::Value,
+    digest: &str,
+) -> Response {
+    let label = chat_activity_label(params);
+    if crate::services::assistant_nyxagent::record_retry_duplicate(
+        &state.db,
+        &chat.user_id,
+        &chat.conversation_id,
+        &label,
+        digest,
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(conversation_id = %chat.conversation_id, "Could not record a refused duplicate");
+    }
+    let _ = audit_service::log_actor_event(
+        state.db.clone(),
+        &audit_service::AuditActor {
+            user_id: auth.user_id.clone(),
+            ip_address: auth.ip_address.clone(),
+            user_agent: auth.user_agent.clone(),
+            api_key_id: auth.api_key_id.clone(),
+            api_key_name: auth.api_key_name.clone(),
+        },
+        "assistant_mcp_tool_call",
+        Some(serde_json::json!({
+            "conversation_id": chat.conversation_id,
+            "tool": label,
+            "error_code": crate::services::assistant_nyxagent::RETRY_DUPLICATE_ACTION,
+            "metadata_only": true,
+        })),
+    )
+    .await;
+    rpc_success(
+        request.id.clone(),
+        serde_json::json!({
+            "content": [{"type": "text", "text": serde_json::json!({
+                "error": crate::services::assistant_nyxagent::RETRY_DUPLICATE_ACTION,
+                "message": "This exact call already completed in the failed turn this turn retries. Use that result instead of repeating it; change the arguments only if a different action is intended.",
+            }).to_string()}],
+            "isError": true,
+        }),
+    )
 }
 
 /// Chat-key tool calls are recorded on the live turn as metadata-only activity
@@ -1741,6 +1804,33 @@ async fn handle_tools_call(
     {
         return app_error_to_rpc(request.id.clone(), &error);
     }
+    // A retried turn may not repeat a call its failed turn completed. Checked
+    // before the call counts as continuation progress or is dispatched.
+    if let Some(chat) = &auth.chat
+        && let Some(params) = request.params.as_ref()
+    {
+        let digest = chat_activity_digest(params);
+        match crate::services::assistant_nyxagent::retry_duplicate(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            &digest,
+        )
+        .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                return refuse_retry_duplicate(state, auth, chat, request, params, &digest).await;
+            }
+            Err(_) => {
+                return rpc_error(
+                    request.id.clone(),
+                    -32603,
+                    "Tool execution could not be recorded; retry shortly",
+                );
+            }
+        }
+    }
     let window = if let Some(chat) = &auth.chat {
         match crate::services::assistant_continuation::started(
             &state.db,
@@ -1761,40 +1851,6 @@ async fn handle_tools_call(
     } else {
         None
     };
-    if let Some(chat) = &auth.chat
-        && let Some(params) = request.params.as_ref()
-        && crate::services::assistant_nyxagent::retry_duplicate_digest(
-            &state.db,
-            &chat.user_id,
-            &chat.conversation_id,
-            &chat_activity_digest(params),
-        )
-        .await
-        .unwrap_or(false)
-    {
-        let _ = audit_service::log_actor_event(
-            state.db.clone(),
-            &audit_service::AuditActor {
-                user_id: auth.user_id.clone(),
-                ip_address: auth.ip_address.clone(),
-                user_agent: auth.user_agent.clone(),
-                api_key_id: auth.api_key_id.clone(),
-                api_key_name: auth.api_key_name.clone(),
-            },
-            "assistant_mcp_tool_call",
-            Some(
-                serde_json::json!({"error_code": "retry_duplicate_action", "metadata_only": true}),
-            ),
-        )
-        .await;
-        return rpc_success(
-            request.id.clone(),
-            serde_json::json!({
-                "content": [{"type": "text", "text": "retry_duplicate_action"}],
-                "isError": true,
-            }),
-        );
-    }
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
             match crate::services::assistant_nyxagent::activity_started_with_digest(
