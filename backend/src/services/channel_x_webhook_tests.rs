@@ -1253,12 +1253,15 @@ async fn resubscribe_keeps_success_when_post_write_readback_is_unavailable() {
             .and(path("/2/activity/subscriptions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
             .expect(1)
+            .up_to_n_times(1)
+            .with_priority(1)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/2/activity/subscriptions"))
             .respond_with(ResponseTemplate::new(status))
             .expect(1)
+            .with_priority(2)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
