@@ -111,7 +111,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
-                specialist_id: None,
+            specialist_id: None,
             steering: None,
             id: id.clone(),
             conversation_id: call.conversation_id.clone(),

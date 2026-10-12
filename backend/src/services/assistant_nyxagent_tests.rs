@@ -260,7 +260,7 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
-                specialist_id: None,
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,

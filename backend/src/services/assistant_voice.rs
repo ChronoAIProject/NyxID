@@ -742,7 +742,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
-                specialist_id: None,
+            specialist_id: None,
             steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,

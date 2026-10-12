@@ -486,7 +486,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
-                specialist_id: None,
+            specialist_id: None,
             steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: task_id,
