@@ -112,28 +112,32 @@ pub async fn group_message(
         .await
 }
 
+pub struct FeedbackWrite {
+    pub user_id: String,
+    pub message_id: String,
+    pub conversation_id: Option<String>,
+    pub group_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub vote: String,
+    pub comment: Option<String>,
+    pub context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
+}
+
 pub async fn upsert_feedback(
     db: &Database,
-    user_id: &str,
-    message_id: &str,
-    conversation_id: Option<String>,
-    group_id: Option<String>,
-    turn_id: Option<String>,
-    vote: &str,
-    comment: Option<String>,
-    context: Option<crate::models::assistant_message_feedback::FeedbackReplyContext>,
+    write: FeedbackWrite,
 ) -> mongodb::error::Result<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
-    let filter = doc! {"user_id": user_id, "message_id": message_id};
+    let filter = doc! {"user_id": &write.user_id, "message_id": &write.message_id};
     let existing = db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
         .find_one(filter.clone())
         .await?;
     let now = chrono::Utc::now();
-    let mut set = doc! {"vote": vote, "updated_at": bson::DateTime::from_chrono(now), "conversation_id": conversation_id, "group_id": group_id, "turn_id": turn_id};
-    if comment.is_some() {
-        set.insert("comment", comment);
+    let mut set = doc! {"vote": &write.vote, "updated_at": bson::DateTime::from_chrono(now), "conversation_id": write.conversation_id.clone(), "group_id": write.group_id.clone(), "turn_id": write.turn_id.clone()};
+    if write.comment.is_some() {
+        set.insert("comment", write.comment.clone());
     }
-    if let Some(context) = context {
+    if let Some(context) = write.context {
         set.insert(
             "context",
             bson::to_bson(&context).unwrap_or(bson::Bson::Null),
@@ -157,6 +161,6 @@ pub async fn delete_feedback(
 ) -> mongodb::error::Result<Option<AssistantMessageFeedback>> {
     Ok(db
         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find_one_and_delete(doc! {"user_id": user_id, "message_id": message_id})
+        .find_one_and_delete(doc! {"user_id": &write.user_id, "message_id": &write.message_id})
         .await?)
 }

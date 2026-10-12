@@ -132,14 +132,16 @@ async fn upsert(
     }
     let (row, existing) = feedback_service::upsert_feedback(
         &state.db,
-        &user_id,
-        message_id,
-        conversation_id.clone(),
-        group_id.clone(),
-        turn_id.clone(),
-        &input.vote,
-        comment.clone(),
-        None,
+        feedback_service::FeedbackWrite {
+            user_id: user_id.clone(),
+            message_id: message_id.to_owned(),
+            conversation_id: conversation_id.clone(),
+            group_id: group_id.clone(),
+            turn_id: turn_id.clone(),
+            vote: input.vote.clone(),
+            comment: comment.clone(),
+            context: None,
+        },
     )
     .await
     .map_err(AppError::from)?;
