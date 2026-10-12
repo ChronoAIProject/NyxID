@@ -1202,3 +1202,5 @@ deletion, and user deletion, purge feedback rows.
 
 
 A1 feedback rows may include a metadata-only reply context snapshot (agent/model/status, tool counts and labels, latency, and reply flags). The `nyxid::assistant_feedback` structured events (`submitted`, `changed`, `comment_updated`, `withdrawn`) contain identifiers and metadata only; comment, prompt, and reply text are never logged.
+
+A1 admin feedback filters accept `model`, `agent_kind`, and `has_error`; legacy rows without a context snapshot remain readable and are displayed as having no context. Context is recomputed on vote/comment changes and includes effective access metadata, latency, tool labels/errors, and reply timestamps.
