@@ -1236,14 +1236,6 @@ pub async fn account_gate(
     if chat.is_orchestrator() {
         return Ok(None);
     }
-    let routed = super::assistant_settings_service::get(db, &chat.user_id)
-        .await
-        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
-        .unwrap_or(false);
-    if !routed {
-        audit_access_request_denied(db, chat, None, "account").await;
-        return Ok(Some((access_request_denied(), None)));
-    }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
     if key
         .scopes
@@ -1251,6 +1243,14 @@ pub async fn account_gate(
         .any(|scope| scope == ASSISTANT_ACCOUNT_SCOPE)
     {
         return Ok(None);
+    }
+    let routed = super::assistant_settings_service::get(db, &chat.user_id)
+        .await
+        .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
+        .unwrap_or(false);
+    if !routed {
+        audit_access_request_denied(db, chat, None, "account").await;
+        return Ok(Some((access_request_denied(), None)));
     }
     let access = super::org_agent_service::key_access_with_snapshot(
         db,
