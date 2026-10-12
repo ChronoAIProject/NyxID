@@ -969,6 +969,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                    retry_of: None,
                         specialist_id: None,
                         steering: None,
                         voice: None,
@@ -989,6 +990,7 @@ pub(crate) async fn webhook(
                         attachments: vec![],
                         origin: Some(TurnOrigin::Trigger),
                         via: None,
+                    retry_of: None,
                     })
                     .session(&mut *session)
                     .await?;

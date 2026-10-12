@@ -510,6 +510,7 @@ pub async fn audit_access_request_denied(
             .await
         {
             let message = crate::models::assistant_message::AssistantMessage {
+                retry_of: None,
                 specialist_id: Some(chat.agent_id.clone()),
                 steering: None,
                 error_detail: None,
@@ -535,6 +536,7 @@ pub async fn audit_access_request_denied(
                 attachments: Vec::new(),
                 origin: None,
                 via: None,
+                retry_of: None,
             };
             let _ = db
                 .collection::<crate::models::assistant_message::AssistantMessage>(

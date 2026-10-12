@@ -1851,6 +1851,7 @@ pub async fn begin_turn_with_voice(
                     let lost_turn = lost.clone();
                     row.message_count += 1;
                     let message = AssistantMessage {
+                    retry_of: None,
                         specialist_id: None,
                         steering: None,
                         voice: None,
@@ -2065,6 +2066,7 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
+                    retry_of: None,
                     specialist_id: None,
                     steering: None,
                     voice: None,
@@ -2524,6 +2526,7 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    retry_of: None,
                     specialist_id: None,
                     steering: None,
                     voice: None,
