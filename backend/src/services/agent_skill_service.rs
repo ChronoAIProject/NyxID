@@ -292,7 +292,7 @@ pub async fn search(reader: &impl OrnnReader, query: &str, page: u32) -> AppResu
     let total_pages = result["totalPages"]
         .as_u64()
         .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or_else(|| if items.is_empty() { 0 } else { 1 });
+        .unwrap_or(if items.is_empty() { 0 } else { 1 });
     Ok(json!({
         "items": items.iter().take(20).map(|v| json!({
             "id": v["guid"],
