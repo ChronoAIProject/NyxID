@@ -1114,6 +1114,43 @@ async fn specialist_access_request_denied_by_default_and_allowed_when_routed() {
 }
 
 #[tokio::test]
+async fn granted_specialist_account_read_succeeds_under_strict_default() {
+    let (state, _, server) = setup("team_strict_account_read").await;
+    let (_, chat) = orchestrator(&state).await;
+    spawn(&state, &chat, json!({"name": "reader", "description": "Read account"})).await;
+    let home = specialist_home(&state, "reader").await;
+    let agent = team::specialist(&state.db, OWNER, "reader").await.unwrap();
+    team::set_grants(&state.db, OWNER, &agent.id, team::GrantChange::Add(AgentGrants { account_read: true, ..Default::default() })).await.unwrap();
+    state.db.collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME).delete_one(doc! {"_id": OWNER}).await.unwrap();
+    let specialist = chat_for(&state, &home).await;
+    assert!(acks::account_gate(&state.db, &specialist).await.unwrap().is_none());
+    team::set_grants(&state.db, OWNER, &agent.id, team::GrantChange::Remove(AgentGrants { account_read: true, ..Default::default() })).await.unwrap();
+    let (refusal, card) = acks::account_gate(&state.db, &specialist).await.unwrap().unwrap();
+    assert_eq!(refusal["error"], "access_request_denied");
+    assert!(card.is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn specialist_denial_notice_is_one_event_per_hour_in_nyxbot_home_thread() {
+    let (state, _, server) = setup("team_denial_notice_window").await;
+    let (_, chat) = orchestrator(&state).await;
+    spawn(&state, &chat, json!({"name": "noticer", "description": "Need access"})).await;
+    let home = specialist_home(&state, "noticer").await;
+    let specialist = chat_for(&state, &home).await;
+    acks::audit_access_request_denied(&state.db, &specialist, Some("svc"), "service").await;
+    let messages = transcript(&state, &chat.conversation_id).await;
+    assert_eq!(messages.iter().filter(|m| m.error_code.as_deref() == Some("specialist_access_denied")).count(), 1);
+    assert_eq!(messages.iter().find(|m| m.error_code.as_deref() == Some("specialist_access_denied")).unwrap().role, "event");
+    acks::audit_access_request_denied(&state.db, &specialist, Some("svc"), "service").await;
+    assert_eq!(transcript(&state, &chat.conversation_id).await.iter().filter(|m| m.error_code.as_deref() == Some("specialist_access_denied")).count(), 1);
+    state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME).update_many(doc! {"error_code": "specialist_access_denied", "specialist_id": &specialist.agent_id}, doc! {"$set": {"created_at": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::hours(2))}}).await.unwrap();
+    acks::audit_access_request_denied(&state.db, &specialist, Some("svc"), "service").await;
+    assert_eq!(transcript(&state, &chat.conversation_id).await.iter().filter(|m| m.error_code.as_deref() == Some("specialist_access_denied")).count(), 2);
+    server.abort();
+}
+
+#[tokio::test]
 async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialist() {
     let (state, _, server) = setup("team_permissions").await;
     enable_routed_requests(&state).await;
