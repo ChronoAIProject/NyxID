@@ -154,10 +154,10 @@ describe("canonical chat presentation", () => {
     render(
       <ChatMessageEntry
         message={{
-      ...BASE,
-      id: "nyxagent-context-reset:conversation",
-      role: "system",
-      content,
+          ...BASE,
+          id: "nyxagent-context-reset:conversation",
+          role: "system",
+          content,
         }}
       />,
     );
@@ -176,19 +176,19 @@ describe("canonical chat presentation", () => {
           thinking: "Checking state",
           steps: [
             {
-            id: "step-1",
-            name: "Inspect",
-            status: "done",
-            startedAt: 1,
-            finishedAt: 2,
+              id: "step-1",
+              name: "Inspect",
+              status: "done",
+              startedAt: 1,
+              finishedAt: 2,
             },
           ],
           toolCalls: [
             {
-            id: "tool-1",
-            name: "catalog.read",
-            status: "running",
-            startedAt: 1,
+              id: "tool-1",
+              name: "catalog.read",
+              status: "running",
+              startedAt: 1,
             },
           ],
           status: "error",
@@ -208,9 +208,41 @@ describe("canonical chat presentation", () => {
     expect(screen.getByText("Run failed")).toBeVisible();
   });
 
+  it("ChatMessageEntry keeps feedback controls and forwards Retry (page renderMessage contract)", () => {
+    const retry = vi.fn();
+    const { unmount } = render(
+      <ChatMessageEntry
+        message={{ ...BASE, authorName: "NyxBot" }}
+        conversationId="conversation-1"
+        feedbackEnabled
+        onRetry={undefined}
+      />,
+    );
+    expect(screen.getByText("NyxBot")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Add feedback comment" }),
+    ).toBeVisible();
+    unmount();
+    render(
+      <ChatMessageEntry
+        message={{ ...BASE, status: "error", error: "Turn lost" }}
+        conversationId="conversation-1"
+        feedbackEnabled
+        onRetry={retry}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
   it("exposes Retry for a failed reply", async () => {
     const retry = vi.fn();
-    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Turn lost" }} onRetry={retry} />);
+    render(
+      <ChatMessageBubble
+        message={{ ...BASE, status: "error", error: "Turn lost" }}
+        onRetry={retry}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
   });

@@ -14,7 +14,6 @@ use axum::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct FeedbackInput {
@@ -346,6 +345,7 @@ pub async fn admin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn per_user_feedback_burst_is_limited_independently() {

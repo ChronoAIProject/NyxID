@@ -51,7 +51,7 @@ import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-lo
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
-import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
+import { ChatMessageBubble, ChatMessageEntry, ChatMessageList } from "@/components/assistant/chat-message";
 import { WorkingContextPanel } from "@/components/assistant/working-context-panel";
 import type { ChatSessionState } from "@/lib/assistant/chat-types";
 import {
@@ -747,7 +747,16 @@ function NyxAgentThreadPage() {
                   );
                 }
                 if (message.role === "assistant") {
-                  return <ChatMessageBubble message={message} onRetry={message.status === "error" ? () => retryFailedMessage(message.id) : undefined} />;
+                  // Keep Issue 9's feedback-enabled entry (author header, thumbs) while
+                  // wiring Issue 7+8's Retry; a bare bubble here hides the feedback controls.
+                  return (
+                    <ChatMessageEntry
+                      message={message}
+                      conversationId={chat.session.conversationId}
+                      feedbackEnabled
+                      onRetry={message.status === "error" ? () => retryFailedMessage(message.id) : undefined}
+                    />
+                  );
                 }
                 const approval = chat.approvals.find(
                   (row) => message.id === `nyxagent-approval:${row.id}`,
