@@ -14,7 +14,6 @@ use axum::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct FeedbackInput {
@@ -425,7 +424,7 @@ mod tests {
     fn response_does_not_expose_owner_or_message_text() {
         let now = Utc::now();
         let response: FeedbackResponse = AssistantMessageFeedback {
-            id: Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
             user_id: "u".into(),
             conversation_id: Some("c".into()),
             group_id: None,
