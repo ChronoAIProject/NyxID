@@ -322,7 +322,7 @@ export function ChatMessageBubble({
         conversationId &&
         !streaming &&
         message.status === "complete" &&
-        message.errorCode !== "cancelled" &&
+        !message.errorCode &&
         message.id ? (
           <div
             role="group"
