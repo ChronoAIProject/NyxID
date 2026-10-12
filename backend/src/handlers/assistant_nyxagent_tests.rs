@@ -327,13 +327,18 @@ async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
             .to_vec(),
     )
     .unwrap();
-    assert!(stream.contains("turn.failed") || stream.contains("assistant_unavailable"));
+    assert!(stream.contains("\"event\":\"turn.completed\""));
+    assert!(stream.contains("\"code\":\"assistant_unavailable\""));
     let row = settled(&state).await;
     let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
         .await
         .unwrap();
     let failed = messages.last().expect("failed reply");
     assert_eq!(failed.error_code.as_deref(), Some("assistant_unavailable"));
+    let detail = failed.error_detail.as_ref().expect("error detail");
+    assert_eq!(detail.stage, "upstream_response");
+    assert_eq!(detail.http_status, Some(503));
+    assert_eq!(detail.upstream_request_id.as_deref(), Some("req-5xx"));
     assert_eq!(failed.upstream_error_code, None);
     let detail = failed.error_detail.as_ref().expect("diagnostic detail");
     assert_eq!(detail.http_status, Some(503));
