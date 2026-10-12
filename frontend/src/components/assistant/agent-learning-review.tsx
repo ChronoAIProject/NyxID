@@ -149,6 +149,18 @@ export function AgentLearningReview({
           proposal.status === "published_unpinned" &&
           (proposal.failure_code === "evidence_unavailable" ||
             proposal.failure_code === "base_changed");
+        // A publication that reached Ornn but is not attached yet resumes
+        // through the same confirmed approve route.
+        const recovering =
+          !settled &&
+          (proposal.status === "published_unpinned" ||
+            proposal.status === "publishing");
+        const approvable =
+          !settled &&
+          (checkOnly ||
+            recovering ||
+            proposal.status === "pending" ||
+            proposal.status === "publication_failed");
         return (
           <article
             key={proposal.id}
@@ -242,10 +254,7 @@ export function AgentLearningReview({
                 >
                   Review updated package
                 </Button>
-              ) : settled ||
-                (!checkOnly &&
-                  proposal.status !== "pending" &&
-                  proposal.status !== "publication_failed") ? null : (
+              ) : !approvable ? null : (
                 <Button
                   size="sm"
                   disabled={readOnly || review.approve.isPending}
@@ -279,11 +288,15 @@ export function AgentLearningReview({
                     ? card
                       ? "Confirm check"
                       : "Check publication"
-                    : proposal.status === "publication_failed"
-                      ? "Retry publication"
-                      : card
-                        ? "Confirm publish & attach"
-                        : "Publish & request confirmation"}
+                    : recovering
+                      ? card
+                        ? "Confirm finish publishing"
+                        : "Finish publishing"
+                      : proposal.status === "publication_failed"
+                        ? "Retry publication"
+                        : card
+                          ? "Confirm publish & attach"
+                          : "Publish & request confirmation"}
                 </Button>
               )}
               {/* The server rejects only pending or failed drafts. A failed
@@ -313,12 +326,15 @@ export function AgentLearningReview({
                 </Button>
               ) : null}
             </div>
-            {card && proposal.source !== "authored" && !checkOnly ? (
+            {approvable &&
+            proposal.source !== "authored" &&
+            !legacyPackage &&
+            !checkOnly &&
+            !readOnly ? (
               <p className="text-11 text-warning">
-                This is a two-step approval: first request the owner
-                confirmation card, then confirm that exact card. Confirming this
-                exact card will publish the private skill and attach its pinned
-                version. The card expires if the draft or agent changes.
+                {card
+                  ? "Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes."
+                  : "Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm."}
               </p>
             ) : null}
           </article>
