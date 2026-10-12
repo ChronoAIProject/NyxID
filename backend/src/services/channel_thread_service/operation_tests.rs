@@ -435,6 +435,25 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
         1
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    let loaded = crate::services::channel_bot_service::get_bot(&db, "bot")
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded.diagnostics.last_outbound_error.unwrap().code,
+        "10005"
+    );
+    let owner_rows = crate::services::channel_bot_service::list_bots(&db, "owner")
+        .await
+        .unwrap();
+    assert_eq!(owner_rows.len(), 1);
+    let admin_rows = crate::services::channel_bot_service::list_all_filtered(
+        &db,
+        Some("telegram"),
+        Some("active"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(admin_rows.len(), 1);
     db.collection::<bson::Document>(CHANNELS)
         .update_one(doc! {"_id":"link"}, doc! {"$set":{"transport":"gateway"}})
         .await
