@@ -3827,3 +3827,82 @@ async fn specialist_service_card_request_denied_audited_and_routed() {
     assert!(card.is_some());
     let _ = specialist;
 }
+
+#[tokio::test]
+async fn specialist_connect_service_is_denied_audited_and_routed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_connect_link").await;
+    let auth = authenticate(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "connect-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let response = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":service}),
+        None,
+        false,
+    )
+    .await;
+    let body = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("access_request_denied"));
+    assert!(f.state.db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"connect_service"}).await.unwrap().is_some());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let routed = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":service}),
+        None,
+        false,
+    )
+    .await;
+    let routed_body = String::from_utf8(
+        axum::body::to_bytes(routed.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!routed_body.contains("access_request_denied"));
+}
