@@ -362,14 +362,39 @@ pub async fn confirm_action(
     need: &ConfirmationNeed,
     summary: &str,
 ) -> AppResult<Option<Value>> {
+    confirm_action_with(db, chat, tool, args, need, summary, InvalidCard::Refuse).await
+}
+
+/// What a call presenting an unusable card id gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidCard {
+    /// `acknowledgement_invalid`: the agent must ask before a new card.
+    Refuse,
+    /// A fresh card for these exact arguments (machine confirmation's
+    /// contract outside webhook automations).
+    Reissue,
+}
+
+pub async fn confirm_action_with(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    need: &ConfirmationNeed,
+    summary: &str,
+    on_invalid: InvalidCard,
+) -> AppResult<Option<Value>> {
     if let Some(id) = args["acknowledgement_id"].as_str() {
-        return Ok((!consume_action(db, chat, id, tool, args).await?).then(|| {
-            json!({
+        if consume_action(db, chat, id, tool, args).await? {
+            return Ok(None);
+        }
+        if on_invalid == InvalidCard::Refuse {
+            return Ok(Some(json!({
                 "error": "acknowledgement_invalid", "kind": "action",
                 "instructions": "This action card is missing, expired, used or does not match \
                     the call. Ask the user before requesting a new action card.",
-            })
-        }));
+            })));
+        }
     }
     let summary = if need.webhook {
         format!("Webhook automation requests: {summary}. Review this action before allowing it.")

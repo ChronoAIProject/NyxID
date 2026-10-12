@@ -628,10 +628,12 @@ async fn ask_every_time_cards_machine_changes_once() {
         0
     );
     requests.recv().await.unwrap();
-    assert_eq!(
-        machine_mcp_call(&f, &auth, "nyx__machine_exec", approved).await["error"],
-        "acknowledgement_invalid"
-    );
+    // The used card never runs the command again: machine confirmation asks
+    // with a fresh card for the same arguments.
+    let again = machine_mcp_call(&f, &auth, "nyx__machine_exec", approved).await;
+    assert_eq!(again["error"], "acknowledgement_required");
+    assert_ne!(again["acknowledgement_id"], card["acknowledgement_id"]);
+    assert!(requests.try_recv().is_err());
     task.abort();
     f.state.db.drop().await.unwrap();
 }
