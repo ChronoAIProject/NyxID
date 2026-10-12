@@ -2748,7 +2748,7 @@ pub async fn retry_duplicate_digest(
     let messages = messages(db, user_id, conversation_id, 100, None).await?;
     Ok(messages
         .iter()
-        .find(|message| message.turn_id == retry_of)
+        .find(|message| message.turn_id == retry_of && message.role == "assistant")
         .is_some_and(|message| {
             message.activities.iter().any(|activity| {
                 activity.status == "completed" && activity.digest.as_deref() == Some(digest)

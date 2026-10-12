@@ -1158,7 +1158,7 @@ pub async fn turns(
         let history = engine::messages(&state.db, &user_id, conversation_id, 100, None).await?;
         let completed = history
             .iter()
-            .find(|message| message.turn_id == *retry_of)
+            .find(|message| message.turn_id == *retry_of && message.role == "assistant")
             .map(|message| engine::bounded_recap(std::slice::from_ref(message)))
             .unwrap_or_default();
         input.text = format!(
