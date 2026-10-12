@@ -53,7 +53,6 @@ fn normalize_edit_draft(revision: Option<i64>, mut draft: Value) -> Value {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateBody {
-    pub revision: Option<i64>,
     pub draft: Value,
 }
 
@@ -608,7 +607,6 @@ mod route_tests {
             crate::test_utils::test_auth_user(&other),
             Path((f.chat.agent_id.clone(), "proposal".into())),
             Json(ValidateBody {
-                revision: None,
                 draft: json!({"name":"candidate"}),
             }),
         )
@@ -628,7 +626,6 @@ mod route_tests {
             crate::test_utils::test_auth_user(&f.owner),
             Path((f.chat.agent_id.clone(), "proposal".into())),
             Json(ValidateBody {
-                revision: None,
                 draft: json!({"name":"candidate"}),
             }),
         )
@@ -712,7 +709,6 @@ mod s9_denial_tests {
             auth,
             Path((f.chat.agent_id.clone(), "p".into())),
             Json(ValidateBody {
-                revision: None,
                 draft: json!({"name":"x"}),
             }),
         )
