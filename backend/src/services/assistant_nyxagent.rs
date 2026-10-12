@@ -577,6 +577,13 @@ pub fn parse_turn(bytes: &[u8]) -> AppResult<TurnRequest> {
             .model
             .as_deref()
             .is_some_and(|model| !valid_model(model))
+        || request.retry_of.as_deref().is_some_and(|id| {
+            id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+        })
     {
         return Err(AppError::BadRequest(
             "Invalid assistant text, conversation, or profile".into(),
