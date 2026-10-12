@@ -1246,3 +1246,7 @@ deletion, and user deletion, purge feedback rows.
 
 
 A1 feedback rows may include a metadata-only reply context snapshot (agent/model/status, tool counts and labels, latency, and reply flags). The `nyxid::assistant_feedback` structured events (`submitted`, `changed`, `comment_updated`, `withdrawn`) contain identifiers and metadata only; comment, prompt, and reply text are never logged.
+
+### Detached stream settlement
+
+The turn subscription returns HTTP 200 once the detached execution is accepted. Upstream failures are settled asynchronously: the stream emits the terminal normalized error event, and the failed reply persisted in history carries the sanitized error class, upstream code, and `error_detail` metadata (stage, status, request id, response id, continuations, turn id, and timestamp).

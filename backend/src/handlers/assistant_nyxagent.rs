@@ -1199,17 +1199,18 @@ pub async fn turns(
     let bytes =
         super::body_limit::read_body(body, engine::MAX_REQUEST_BYTES, "Assistant turn").await?;
     let mut input = engine::parse_turn(&bytes)?;
+    let mut retry_note = None;
     if let (Some(retry_of), Some(conversation_id)) = (&input.retry_of, &input.conversation_id) {
         let history = engine::messages(&state.db, &user_id, conversation_id, 100, None).await?;
         let completed = history
             .iter()
-            .find(|message| message.turn_id == *retry_of)
+            .find(|message| message.turn_id == *retry_of && message.role == "assistant")
             .map(|message| engine::bounded_recap(std::slice::from_ref(message)))
             .unwrap_or_default();
-        input.text = format!(
-            "{}\n\n[NyxID retry context: completed actions from turn {} must not be repeated.]\n{}",
-            input.text, retry_of, completed
-        );
+        retry_note = Some(format!(
+            "[NyxID retry context: completed actions from turn {} must not be repeated.]\n{}",
+            retry_of, completed
+        ));
     }
     if !input.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
@@ -1223,6 +1224,7 @@ pub async fn turns(
     let permit = state.direct_chat_limiter.try_acquire(&user_id).await?;
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
+    start.note = retry_note;
     start.org_access = org_access;
     if start.conversation_id.is_none() && start.model.is_none() {
         start.model = Some(
@@ -1235,9 +1237,6 @@ pub async fn turns(
         );
     }
     let (_, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
-    if let (Some(conversation_id), Some(retry_of)) = (&input.conversation_id, &input.retry_of) {
-        engine::mark_retry_of(&state.db, &user_id, conversation_id, retry_of).await?;
-    }
     Ok(subscribe_events(receiver))
 }
 

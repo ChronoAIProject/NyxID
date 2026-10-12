@@ -103,6 +103,10 @@ export function contextResetCopy(reason: string | null | undefined): string {
     case "turn_failed": return CONTEXT_RESET_NOTICE;
     case "memory_updated": return "Memory was updated; the next turn will use the new note.";
     case "instructions_changed": return "Instructions changed; the assistant context was refreshed.";
+    case "model_changed": return "The model changed; the assistant context was refreshed.";
+    case "session_lost": return "The assistant session expired; a fresh context will be used.";
+    case "audience_changed": return "The conversation audience changed; the assistant context was refreshed.";
+    case "guest_turn": return "This guest turn uses a separate assistant context.";
     case "stopped": return "The turn was stopped; review pending actions before retrying.";
     case "user_reset": return "You reset the working context.";
     default: return CONTEXT_RESET_NOTICE;
@@ -792,7 +796,11 @@ export class NyxAgentTransport {
     const failed = [...messages].reverse().find((message) => message.role === "assistant" && message.status === "failed");
     const user = failed && [...messages].reverse().find((message) => message.role === "user" && message.seq < failed.seq && !message.execution_pending);
     if (!user) throw new Error("No failed turn is available to retry.");
-    return this.send(id, user.text, onAdopt, undefined, { adoptExisting: true, retryOf: failed?.turn_id });
+    return this.send(id, user.text, onAdopt, undefined, {
+      adoptExisting: true,
+      retryOf: failed?.turn_id,
+      attachmentIds: user.attachments?.map((attachment) => attachment.id),
+    });
   }
 }
 

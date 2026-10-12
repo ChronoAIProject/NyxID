@@ -577,6 +577,13 @@ pub fn parse_turn(bytes: &[u8]) -> AppResult<TurnRequest> {
             .model
             .as_deref()
             .is_some_and(|model| !valid_model(model))
+        || request.retry_of.as_deref().is_some_and(|id| {
+            id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+        })
     {
         return Err(AppError::BadRequest(
             "Invalid assistant text, conversation, or profile".into(),
@@ -2765,17 +2772,10 @@ pub async fn retry_duplicate_digest(
     let Some(retry_of) = row.active_turn.and_then(|turn| turn.retry_of) else {
         return Ok(false);
     };
-    if let Some(active) = get(db, user_id, conversation_id).await?.active_turn
-        && active.activities.iter().any(|activity| {
-            activity.status == "completed" && activity.digest.as_deref() == Some(digest)
-        })
-    {
-        return Ok(true);
-    }
     let messages = messages(db, user_id, conversation_id, 100, None).await?;
     Ok(messages
         .iter()
-        .find(|message| message.turn_id == retry_of)
+        .find(|message| message.turn_id == retry_of && message.role == "assistant")
         .is_some_and(|message| {
             message.activities.iter().any(|activity| {
                 activity.status == "completed" && activity.digest.as_deref() == Some(digest)
