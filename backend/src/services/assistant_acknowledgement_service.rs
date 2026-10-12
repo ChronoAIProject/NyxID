@@ -1785,3 +1785,40 @@ mod sensitive_tool_policy_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod closed_classifier_tests {
+    use super::*;
+    #[test]
+    fn every_registered_mutating_tool_is_classified() {
+        let names = crate::services::assistant_account_tools::TOOL_NAMES
+            .iter()
+            .chain(crate::services::assistant_team_tools::TOOL_NAMES)
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES);
+        for name in names {
+            let class = classify_owner_action(&format!("nyxid__{name}"), None);
+            if [
+                "update_agent_key",
+                "set_approval_mode",
+                "set_channel_route",
+                "update_channel_bot",
+                "delete_agent_key",
+                "delete_service",
+                "spawn_subagent",
+                "grant_subagent",
+                "set_guest_access",
+                "update_settings",
+                "destroy_subagent",
+                "revoke_subagent",
+                "delete_schedule",
+            ]
+            .contains(name)
+            {
+                assert!(
+                    !matches!(class, OwnerActionClass::Read),
+                    "unclassified tool: {name}"
+                );
+            }
+        }
+    }
+}
