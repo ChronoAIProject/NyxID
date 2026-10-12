@@ -1595,6 +1595,19 @@ async fn orchestrator_keys_are_full_and_rotation_and_replacement_preserve_role_a
         "https://api.github.com",
     )
     .await;
+    super::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        super::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
     let refusal = service_gate(
         &sub.state.db,
         &sub.chat,
@@ -1919,7 +1932,7 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    let args = serde_json::json!({"skills":[{"skill_id":"strict-skill","version":"1"}]});
+    let args = serde_json::json!({"expected_revision":0,"skills":[{"source":"ornn","skill_id":"strict-skill","name":"Strict skill","version":"1","sha256":"00","dependencies":[]}]});
     let err = super::assistant_acknowledgement_service::request_tracked(
         &f.state.db,
         &f.chat,
