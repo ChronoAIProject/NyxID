@@ -1946,3 +1946,65 @@ async fn specialist_machine_login_request_is_denied_audited_and_routed_when_allo
         }).await.expect("NyxBot receives resource permission request");
     }
 }
+
+#[tokio::test]
+async fn specialist_machine_capability_card_is_denied_audited_and_routed_when_allowed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_machine_capability_card").await;
+    enable(&f).await;
+    let n = v2(&f).await;
+    f.state
+        .db
+        .collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .delete_one(doc! {"_id":&f.owner})
+        .await
+        .unwrap();
+    let args = json!({"agent":f.chat.agent_id,"machine":n.id,"selection":selection(0,Capabilities{files:true,..Default::default()})});
+    let (denied, pending) = Box::pin(crate::handlers::machine_access::native(
+        &f.state, &f.chat, &args,
+    ))
+    .await
+    .unwrap();
+    assert!(pending);
+    assert_eq!(denied["error"], "access_request_denied");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    let audit = f
+        .state
+        .db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_access_request_denied"})
+        .await
+        .unwrap()
+        .expect("capability denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("target").unwrap(), n.id);
+    assert_eq!(data.get_str("scope").unwrap(), "machine_capabilities");
+    assert_eq!(data.get_str("decision").unwrap(), "denied");
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (routed, pending) = Box::pin(crate::handlers::machine_access::native(
+        &f.state, &f.chat, &args,
+    ))
+    .await
+    .unwrap();
+    assert!(pending);
+    assert_eq!(routed["decider"], "orchestrator");
+    assert!(routed["acknowledgement_id"].is_string());
+}

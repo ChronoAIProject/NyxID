@@ -519,16 +519,6 @@ mod access_authority_tests {
     }
 
     #[test]
-    fn specialist_machine_capability_card_is_denied_audited_and_routed_when_allowed() {
-        use crate::models::assistant_settings::SpecialistAccessRequests;
-        let specialist = chat(AgentRole::Subagent, false);
-        assert!(!specialist.access_request_allowed_with_mode(SpecialistAccessRequests::Denied));
-        assert!(
-            specialist.access_request_allowed_with_mode(SpecialistAccessRequests::RoutedToNyxbot)
-        );
-    }
-
-    #[test]
     fn routed_mode_is_explicitly_distinct_from_strict_default() {
         use crate::models::assistant_settings::SpecialistAccessRequests;
         assert_eq!(
