@@ -128,7 +128,26 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
     if let Some(Some(voice)) = &update.voice {
         super::assistant_voice::validate_preferences(voice)?;
     }
+    let legacy = db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id": user_id})
+        .await?
+        .filter(|row| {
+            !row.contains_key("access_mode")
+                && row
+                    .get_bool("skip_destructive_confirmation")
+                    .unwrap_or(false)
+        })
+        .is_some();
     let mut set = doc! {"updated_at":mongodb::bson::DateTime::from_chrono(Utc::now())};
+    if legacy {
+        set.insert(
+            "access_mode",
+            bson::to_bson(&crate::models::assistant_settings::AccessMode::Autopilot)
+                .map_err(|_| AppError::Internal("Access mode serialization failed".into()))?,
+        );
+    }
+
     let mut defaults = mongodb::bson::to_document(&AssistantSettings::defaults(user_id))
         .map_err(|_| AppError::Internal("Settings serialization failed".into()))?;
     defaults.remove("_id");
