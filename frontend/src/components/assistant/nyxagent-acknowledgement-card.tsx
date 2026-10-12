@@ -101,7 +101,7 @@ export function NyxAgentAcknowledgementCard({
       ) : null}
       <p className="text-12 text-muted-foreground">
         {acknowledgement.kind === "skills"
-          ? "This proposal does not attach content. NyxBot must request your confirmation before adding or re-pinning skills."
+          ? "Allowing this proposal asks NyxBot to resolve the exact version. You will get a separate card to confirm adding or re-pinning the skill."
           : acknowledgement.kind === "operations"
           ? "This changes the specialist's operations on every thread. Widening requires your confirmation."
           : routed

@@ -13,6 +13,7 @@ import {
   nyxAgentChannelListSchema,
   nyxAgentConversationSchema,
   nyxAgentHistorySchema,
+  nyxAgentEventSchema,
   nyxAgentMessageSchema,
   nyxAgentModelSchema,
   nyxAgentSettingsFormSchema,
@@ -488,4 +489,16 @@ describe("agent display name and persona", () => {
       nyxbot.safeParse({ name: "NyxBot", display_name: " Nyx ", description: "", persona: "" }).data,
     ).toEqual({ name: "NyxBot", display_name: "Nyx", description: "", persona: "" });
   });
+});
+
+it("parses tool-image continuation events with the legacy required counter", () => {
+  const event = {
+    cursor: 1,
+    event: "turn.continuing",
+    turn_id: "turn",
+    continuation: 1,
+    reason: "tool_images",
+    image_round: 1,
+  };
+  expect(nyxAgentEventSchema.parse(event)).toMatchObject({ event: "turn.continuing", continuation: 1 });
 });

@@ -59,18 +59,25 @@ pub async fn card_authority(
     actor: &str,
     card: &AssistantAcknowledgement,
 ) -> AppResult<ChatAuthority> {
+    source_authority(db, actor, &card.api_key_id, &card.conversation_id).await
+}
+
+async fn source_authority(
+    db: &Database,
+    actor: &str,
+    key: &str,
+    conversation: &str,
+) -> AppResult<ChatAuthority> {
     let live = db
         .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
-        .find_one(
-            doc! {"_id":&card.api_key_id,"user_id":actor,"is_active":true,
-            "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
-        )
+        .find_one(doc! {"_id":key,"user_id":actor,"is_active":true,
+        "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]})
         .await?
         .is_some();
     let chat = if live {
-        acks::for_key(db, actor, Some(&card.api_key_id))
+        acks::for_key(db, actor, Some(key))
             .await?
-            .filter(|chat| chat.conversation_id == card.conversation_id)
+            .filter(|chat| chat.conversation_id == conversation)
     } else {
         None
     }
@@ -223,70 +230,44 @@ pub async fn create(
     mac.update(agent.id.as_bytes());
     mac.update(&encoded);
     let fingerprint = hex::encode(mac.finalize().into_bytes());
-    // Tool retries within the same turn reuse the encrypted proposal and card.
-    let turn = chat
-        .turn_id
-        .as_deref()
-        .ok_or_else(|| AppError::Forbidden("Draft from an active owner turn".into()))?;
-    let id = Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("skill-draft:{}:{turn}:{fingerprint}", chat.conversation_id).as_bytes(),
-    )
-    .to_string();
-    let collection = state
-        .db
-        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
-    let mut inserted = false;
-    if collection.find_one(doc! {"_id":&id}).await?.is_none() {
-        if collection
-            .count_documents(doc! {"agent_id":&agent.id,"status":"pending"})
-            .await?
-            >= 16
-        {
-            return Err(AppError::Conflict(
-                "Review pending skill drafts before creating more".into(),
-            ));
-        }
-        let now = Utc::now();
-        let row = AssistantAgentLearningProposal {
-            source: ProposalSource::Authored,
-            id: id.clone(),
-            agent_id: agent.id.clone(),
-            owner_id: agent.user_id.clone(),
-            run_id: String::new(),
-            status: "pending".into(),
-            revision: 0,
-            config_revision: 0,
-            agent_skills_revision: agent.skills_revision,
-            fingerprint,
-            input_digest: String::new(),
-            model_contract: "authored-skill-v1".into(),
-            publication: None,
-            failure_code: None,
-            evidence: Vec::new(),
-            body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
-            body_bytes: encoded.len() as i64,
-            created_at: now,
-            updated_at: now,
-        };
-        inserted = state
-            .db
-            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
-            .update_one(
-                doc! {"_id":&id},
-                doc! {"$setOnInsert": bson::to_document(&row).map_err(|_| AppError::Internal("Skill proposal encoding failed".into()))?},
-            )
-            .upsert(true)
-            .await?
-            .upserted_id
-            .is_some();
+    let now = Utc::now();
+    let candidate = AssistantAgentLearningProposal {
+        source: ProposalSource::Authored,
+        id: Uuid::new_v4().to_string(),
+        agent_id: agent.id.clone(),
+        owner_id: agent.user_id.clone(),
+        run_id: String::new(),
+        status: "pending".into(),
+        revision: 0,
+        config_revision: 0,
+        agent_skills_revision: agent.skills_revision,
+        fingerprint,
+        input_digest: String::new(),
+        model_contract: "authored-skill-v1".into(),
+        publication: None,
+        failure_code: None,
+        evidence: Vec::new(),
+        body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+        body_bytes: encoded.len() as i64,
+        created_at: now,
+        updated_at: now,
+    };
+    let reservation = claims::reserve(state, chat, &candidate).await?;
+    if let Some(card) = &reservation.card {
+        return Ok(reused_result(
+            state,
+            card,
+            &reservation.proposal.id,
+            &agent.id,
+        ));
     }
+    let id = &reservation.proposal.id;
     let binding = review::approval_binding_typed(
         state,
         &chat.user_id,
         &agent.id,
-        &id,
-        0,
+        id,
+        reservation.proposal.revision,
         agent.skills_revision,
         reader,
     )
@@ -294,11 +275,8 @@ pub async fn create(
     let binding = match binding {
         Ok(binding) => binding,
         Err(failure) => {
-            if inserted {
-                collection
-                    .delete_one(doc! {"_id":&id,"status":"pending","revision":0,"publication":bson::Bson::Null})
-                    .await?;
-            }
+            // Keep the reserved proposal retryable: another caller may be
+            // preparing the same generation, or this worker may be retried.
             if body.base_skill.is_some()
                 && matches!(
                     failure.code,
@@ -313,16 +291,41 @@ pub async fn create(
             return Err(failure.error);
         }
     };
-    let card = acks::request(&state.db, chat, acks::Request {
-        kind: "action", service: None, tool: Some(review::TOOL), arguments: Some(&binding),
-        summary: "Review the complete skill draft, publish it privately to Ornn and attach its exact version to this agent.", platform: false,
-    }).await?;
-    let mut result = acks::refusal(&card);
-    result["proposal_id"] = id.into();
-    result["agent_id"] = agent.id.into();
+    let card = claims::finalize(state, &reservation, &binding).await?;
+    Ok(reused_result(state, &card, id, &agent.id))
+}
+
+#[path = "assistant_skill_authoring_claims.rs"]
+mod claims;
+
+fn reused_result(
+    state: &AppState,
+    card: &AssistantAcknowledgement,
+    proposal: &str,
+    agent: &str,
+) -> Value {
+    let mut result = draft_result(state, card, proposal, agent);
+    if card.status == "expired" || card.expires_at <= Utc::now() {
+        result["status"] = "expired".into();
+        result["instructions"] = "This draft already has an expired review card in the NyxID app. Send review_url as a full URL; the owner can press Request a new confirmation there and review all files. A chat reply never approves publication.".into();
+    } else if card.status == "allowed" {
+        result["status"] = "waiting_publication".into();
+        result["instructions"] = "The owner already allowed this exact draft. Publication is pending on the existing review card; send review_url as a full URL to inspect its status. Do not create another draft or confirmation, renew it, or dispatch publication again.".into();
+    }
+    result
+}
+
+fn draft_result(
+    state: &AppState,
+    card: &AssistantAcknowledgement,
+    proposal: &str,
+    agent: &str,
+) -> Value {
+    let mut result = acks::refusal_with_frontend(card, &state.config.frontend_url);
+    result["proposal_id"] = proposal.into();
+    result["agent_id"] = agent.into();
     result["source"] = "authored".into();
-    result["instructions"] = "End your turn. The owner reviews all files on this card; NyxID publishes and pins after approval without a tool retry. Never confirm publication yourself.".into();
-    Ok(result)
+    result
 }
 
 #[cfg(test)]
