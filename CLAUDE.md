@@ -707,4 +707,3 @@ rendered commands for 0.41.0 compatibility. Failures expose fixed stage/reason
 codes and guidance only. Production-image verification tests must exercise real
 TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions.
 
-Specialist requests are sandboxed: only the owner's NyxBot may request or grant access. Specialists report missing access to NyxBot rather than creating cards or connection links.
