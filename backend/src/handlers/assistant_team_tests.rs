@@ -2605,3 +2605,41 @@ async fn nyxbot_model_change_follows_the_access_mode() {
     assert_eq!(audit.get_str("api_key_id").unwrap(), chat.api_key_id);
     server.abort();
 }
+
+/// The owner's settings PUT audits a mode change with the actor and wire
+/// values, and writes nothing when the mode is unchanged.
+#[tokio::test]
+async fn owner_settings_put_audits_access_mode_changes() {
+    let (state, _, server) = setup("team_settings_mode_audit").await;
+    let put = |body: Value| {
+        update_settings(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Json(serde_json::from_value::<SettingsRequest>(body).unwrap()),
+        )
+    };
+    let Json(saved) = put(json!({"access_mode": "ask_every_time"})).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["access_mode"],
+        "ask_every_time"
+    );
+    put(json!({"timezone": "Asia/Singapore"})).await.unwrap();
+    let logs = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let rows: Vec<bson::Document> = futures::TryStreamExt::try_collect(
+        logs.find(doc! {"event_type": "assistant_access_mode_changed"})
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get_str("user_id").unwrap(), OWNER);
+    let data = rows[0].get_document("event_data").unwrap();
+    assert_eq!(data.get_str("scope").unwrap(), "workspace");
+    // The team fixture starts in Autopilot.
+    assert_eq!(data.get_str("old").unwrap(), "autopilot");
+    assert_eq!(data.get_str("new").unwrap(), "ask_every_time");
+    server.abort();
+}

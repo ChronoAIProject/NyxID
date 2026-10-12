@@ -635,3 +635,52 @@ async fn ask_every_time_cards_machine_changes_once() {
     task.abort();
     f.state.db.drop().await.unwrap();
 }
+
+/// Autopilot never bypasses a machine's own confirmation setting.
+#[tokio::test]
+async fn autopilot_keeps_the_machine_confirmation_floor() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = orchestrator_fixture("machine_autopilot_floor").await;
+    let node = node(&f, &f.owner).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &node.id},
+            doc! {"$set": {"machine_confirm": "changes"}},
+        )
+        .await
+        .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = authenticated_machine_chat(&f).await;
+    let (task, mut requests) = peer(&f, &node, json!({"exit_code":0,"status":"finished"})).await;
+    let card = machine_mcp_call(
+        &f,
+        &auth,
+        "nyx__machine_exec",
+        json!({"machine":node.id,"command":"true"}),
+    )
+    .await;
+    assert_eq!(card["error"], "acknowledgement_required");
+    assert!(requests.try_recv().is_err());
+    let confirmation = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+        .confirmation
+        .unwrap();
+    assert_eq!(confirmation.reason, "policy");
+    assert_eq!(confirmation.access_mode, None);
+    task.abort();
+    f.state.db.drop().await.unwrap();
+}
