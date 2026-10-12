@@ -50,6 +50,8 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -105,6 +107,8 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -290,6 +294,8 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -369,6 +375,8 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -428,6 +436,8 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -532,6 +542,8 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -616,6 +628,8 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                error_detail: None,
+                upstream_error_code: None,
                 specialist_id: None,
                 steering: None,
                 voice: None,
@@ -686,6 +700,8 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            last_recipient_ids: Vec::new(),
+            last_recipient_ids_by_actor: std::collections::HashMap::new(),
             id: group_id.into(),
             user_id: f.owner.clone(),
             participant_user_ids: vec![f.owner.clone()],
@@ -709,6 +725,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            recipient_agent_ids: Vec::new(),
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -782,6 +799,8 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            last_recipient_ids: Vec::new(),
+            last_recipient_ids_by_actor: std::collections::HashMap::new(),
             id: org_group_id.into(),
             user_id: org_id.clone(),
             participant_user_ids: vec![f.owner.clone()],
@@ -805,6 +824,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            recipient_agent_ids: Vec::new(),
             activities: vec![],
             org_group: true,
             author_user_id: None,
@@ -875,6 +895,8 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -979,6 +1001,8 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -1065,6 +1089,8 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            error_detail: None,
+            upstream_error_code: None,
             specialist_id: None,
             steering: None,
             voice: None,

@@ -1791,7 +1791,10 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
         .delete_one(doc! {"_id":&f.owner})
         .await
         .unwrap();
-    let (denied, card) = account_gate(&f.state.db, &f.chat).await.unwrap().unwrap();
+    let (denied, card) = acks::account_gate(&f.state.db, &f.chat)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(denied["error"], "access_request_denied");
     assert!(card.is_none());
     let audit = f
@@ -1827,7 +1830,10 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    let (_, card) = account_gate(&f.state.db, &f.chat).await.unwrap().unwrap();
+    let (_, card) = acks::account_gate(&f.state.db, &f.chat)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(card.is_some());
 }
 

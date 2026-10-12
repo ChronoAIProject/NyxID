@@ -3840,7 +3840,7 @@ async fn specialist_service_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    let (denied, card) = service_gate(
+    let (denied, card) = acks::service_gate(
         &f.state.db,
         &f.chat,
         &service,
@@ -3879,7 +3879,7 @@ async fn specialist_service_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    let (_, card) = service_gate(
+    let (_, card) = acks::service_gate(
         &f.state.db,
         &f.chat,
         &service,
