@@ -182,7 +182,7 @@ export function AgentDetailsSheet({
               />
               {agent.kind === "specialist" ? (
                 <>
-                  <Section title="Access authority" description="Only NyxBot can request or grant access for this agent." />
+                  <Section title="Access authority" description="This specialist is sandboxed: it cannot grant access itself. NyxBot reviews and approves its requests." />
                   <GrantsForm
                     key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
                     agent={agent}
@@ -414,7 +414,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
   return (
     <Section
       title="Grants"
-      description="Only NyxBot can request or grant access for this agent. Saving replaces the current grants. Anything else, the agent asks NyxBot for."
+      description="This specialist is sandboxed: it cannot grant access itself. NyxBot reviews and approves its requests. Saving replaces the current grants. Anything else, the agent asks NyxBot for."
     >
       <Form {...form}>
         <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
