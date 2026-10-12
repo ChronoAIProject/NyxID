@@ -232,3 +232,42 @@ pub async fn reply_context(
         },
     )
 }
+
+pub fn group_reply_context(
+    reply: &GroupMessage,
+) -> crate::models::assistant_message_feedback::FeedbackReplyContext {
+    crate::models::assistant_message_feedback::FeedbackReplyContext {
+        surface: Some("group".into()),
+        agent_id: reply.agent_id.clone(),
+        agent_kind: None,
+        model: None,
+        access_mode: None,
+        reply_status: None,
+        error_code: None,
+        origin: None,
+        via: None,
+        turn_id: None,
+        reply_seq: Some(reply.seq),
+        reply_created_at: Some(reply.created_at),
+        latency_ms: None,
+        tool_calls: reply.activities.len() as u32,
+        tool_errors: reply
+            .activities
+            .iter()
+            .filter(|a| a.status == "error")
+            .count() as u32,
+        tool_labels: reply
+            .activities
+            .iter()
+            .map(|a| a.label.clone())
+            .take(20)
+            .collect(),
+        machine_used: reply.activities.iter().any(|a| a.machine.is_some()),
+        attachments: reply.attachments.len() as u32,
+        steered: false,
+        voice: false,
+        reply_chars: reply.text.chars().count() as u32,
+        context_reset_since_reply: false,
+        org_group: reply.org_group,
+    }
+}
