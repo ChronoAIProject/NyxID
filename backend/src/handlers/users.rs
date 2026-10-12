@@ -186,6 +186,9 @@ pub struct UserCapabilitiesResponse {
     /// Whether the caller may issue and revoke one-off credit grants
     /// (Admin, or Operator with the Credits Manager role).
     pub manage_credit_grants: bool,
+    /// Whether the caller may create providers and catalog services
+    /// (Admin, or Operator with the Catalog Manager role).
+    pub manage_catalog: bool,
     /// Feature-flag keys enabled for this user on personal (non-org)
     /// surfaces, resolved server-side with specificity precedence:
     /// default -> global -> matching org -> user. Org-scoped pages
@@ -293,6 +296,8 @@ pub async fn get_me(
     let (is_admin, is_operator) = platform_role.legacy_flags();
     let manage_credit_grants =
         role_service::can_manage_credit_grants(&state.db, &user_model, platform_role).await?;
+    let manage_catalog =
+        role_service::can_manage_catalog(&state.db, &user_model, platform_role).await?;
     // Personal-surface feature-flag resolution: org-aware specificity, so an
     // org override can override the global baseline for its members
     // (sidebar, /assistant guard).
@@ -332,6 +337,7 @@ pub async fn get_me(
                     .iter()
                     .any(|key| key == crate::services::feature_flag_service::BILLING_FLAG_KEY),
             manage_credit_grants,
+            manage_catalog,
             enabled_features,
         },
     }))
@@ -1106,6 +1112,7 @@ mod tests {
             capabilities: UserCapabilitiesResponse {
                 billing_available: true,
                 manage_credit_grants: false,
+                manage_catalog: false,
                 enabled_features: vec![],
             },
         };
@@ -1158,6 +1165,7 @@ mod tests {
             capabilities: UserCapabilitiesResponse {
                 billing_available: false,
                 manage_credit_grants: false,
+                manage_catalog: false,
                 enabled_features: vec![],
             },
         };
@@ -1201,6 +1209,7 @@ mod tests {
             capabilities: UserCapabilitiesResponse {
                 billing_available: false,
                 manage_credit_grants: false,
+                manage_catalog: false,
                 enabled_features: vec![],
             },
         };
@@ -1384,6 +1393,7 @@ mod tests {
             capabilities: UserCapabilitiesResponse {
                 billing_available: false,
                 manage_credit_grants: false,
+                manage_catalog: false,
                 enabled_features: vec![],
             },
         };

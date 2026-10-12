@@ -1026,13 +1026,38 @@ pub async fn create_service(
     Box::pin(create_service_inner(state, auth_user, tele, body)).await
 }
 
+/// A public catalog row may be changed by an Admin, or by its creator while
+/// they still hold the Catalog Manager role. Private rows keep the plain
+/// creator rule. Returns the caller's catalog authority for public rows.
+async fn require_catalog_manager_for_public_row(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &DownstreamService,
+) -> AppResult<Option<super::catalog_authority::CatalogAuthority>> {
+    if service.visibility == "private" {
+        return Ok(None);
+    }
+    super::catalog_authority::require_catalog_writer(state, auth_user)
+        .await
+        .map(Some)
+}
+
 pub async fn create_service_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
     Json(body): Json<serde_json::Value>,
 ) -> AppResult<Json<ServiceResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = super::catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == super::catalog_authority::CatalogAuthority::CatalogManager
+        && body
+            .get("twin_of_service_id")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::Forbidden(
+            "A Catalog Manager cannot create tool twins; ask an Admin".to_string(),
+        ));
+    }
     let prepared = crate::services::tool_twin_service::prepare_create(&state.db, body).await?;
     let body =
         serde_json::from_value(prepared).map_err(|e| AppError::ValidationError(e.to_string()))?;
@@ -1052,7 +1077,18 @@ async fn create_service_inner(
         inference.realtime |= inference.voice.is_some();
     }
 
-    require_admin(&state, &auth_user).await?;
+    let authority = super::catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == super::catalog_authority::CatalogAuthority::CatalogManager {
+        super::catalog_authority::check_service_create(&body)?;
+        if let Some(provider_id) = body.provider_config_id.as_deref() {
+            super::catalog_authority::check_owned_provider(
+                &state,
+                &auth_user.user_id.to_string(),
+                provider_id,
+            )
+            .await?;
+        }
+    }
 
     let create_fingerprint = crate::services::catalog_skill_service::create_fingerprint(
         &serde_json::to_value(&body).map_err(|e| AppError::Internal(e.to_string()))?,
@@ -1779,6 +1815,7 @@ pub async fn delete_service(
         require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        require_catalog_manager_for_public_row(&state, &auth_user, &service).await?;
     }
 
     let now = Utc::now();
@@ -1952,6 +1989,11 @@ async fn update_service_inner(
         require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
+        if require_catalog_manager_for_public_row(&state, &auth_user, &service).await?
+            == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
+        {
+            super::catalog_authority::check_service_update(&body)?;
+        }
     }
 
     if body.destination_targets.is_some() {
@@ -5709,6 +5751,236 @@ mod tests {
                 &serde_json::from_value(value).unwrap()
             ));
         }
+    }
+
+    async fn seed_operator(db: &mongodb::Database, catalog_manager: bool) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(role_ids.operator);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert operator");
+        if catalog_manager {
+            let role = db
+                .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+                .find_one(doc! { "slug": crate::models::role::CATALOG_MANAGER_ROLE_SLUG })
+                .await
+                .unwrap()
+                .expect("catalog manager role is seeded");
+            role_service::assign_role_to_user(db, &id, &role.id)
+                .await
+                .expect("assign catalog manager");
+        }
+        id
+    }
+
+    fn oauth_provider_request(slug: &str) -> super::super::providers::CreateProviderRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": slug,
+            "slug": slug,
+            "provider_type": "oauth2",
+            "authorization_url": "https://accounts.example.com/oauth/v2/auth",
+            "token_url": "https://accounts.example.com/oauth/v2/token",
+            "default_scopes": ["Mail.messages.READ"],
+            "extra_auth_params": { "access_type": "offline", "prompt": "consent" },
+            "token_endpoint_auth_method": "client_secret_post",
+            "supports_pkce": false,
+        }))
+        .unwrap()
+    }
+
+    fn provider_update(
+        value: serde_json::Value,
+    ) -> Json<super::super::providers::UpdateProviderRequest> {
+        Json(serde_json::from_value(value).unwrap())
+    }
+
+    #[tokio::test]
+    async fn catalog_manager_builds_owned_provider_and_service_within_limits() {
+        use super::super::providers::{create_provider, delete_provider, update_provider};
+        let Some(db) = connect_test_database("h_catalog_manager_flow").await else {
+            eprintln!("skipping catalog manager test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let manager_id = seed_operator(&db, true).await;
+        let plain_operator_id = seed_operator(&db, false).await;
+        let state = test_app_state(db.clone());
+        let manager = || test_auth_user(&manager_id);
+        fn forbidden<T>(result: AppResult<T>) -> bool {
+            matches!(result, Err(AppError::Forbidden(_)))
+        }
+
+        // Operators without the role keep read-only authority.
+        assert!(forbidden(
+            create_provider(
+                State(state.clone()),
+                test_auth_user(&plain_operator_id),
+                Json(oauth_provider_request("plain-operator")),
+            )
+            .await
+        ));
+
+        // Own provider: created without a client, then the client is set.
+        let Json(own) = create_provider(
+            State(state.clone()),
+            manager(),
+            Json(oauth_provider_request("zoho-mail-test")),
+        )
+        .await
+        .expect("catalog manager creates provider");
+        assert!(!own.has_client_id);
+        let Json(own) = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(own.id.clone()),
+            provider_update(serde_json::json!({
+                "client_id": "zoho-client-id",
+                "client_secret": "zoho-client-secret",
+            })),
+        )
+        .await
+        .expect("catalog manager sets client on own provider");
+        assert!(own.has_client_id && own.has_client_secret && own.has_oauth_config);
+
+        // Someone else's provider: only the first client, never other fields.
+        let Json(foreign) = create_provider(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(oauth_provider_request("admin-owned")),
+        )
+        .await
+        .expect("admin creates provider");
+        assert!(forbidden(
+            update_provider(
+                State(state.clone()),
+                manager(),
+                Path(foreign.id.clone()),
+                provider_update(serde_json::json!({
+                    "token_url": "https://attacker.example.com/token",
+                })),
+            )
+            .await
+        ));
+        let partial = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(foreign.id.clone()),
+            provider_update(serde_json::json!({ "client_id": "only-id" })),
+        )
+        .await;
+        assert!(matches!(partial, Err(AppError::ValidationError(_))));
+        update_provider(
+            State(state.clone()),
+            manager(),
+            Path(foreign.id.clone()),
+            provider_update(serde_json::json!({
+                "client_id": "first-id",
+                "client_secret": "first-secret",
+            })),
+        )
+        .await
+        .expect("first client on a provider without one");
+        assert!(forbidden(
+            update_provider(
+                State(state.clone()),
+                manager(),
+                Path(foreign.id.clone()),
+                provider_update(serde_json::json!({
+                    "client_id": "replacement-id",
+                    "client_secret": "replacement-secret",
+                })),
+            )
+            .await
+        ));
+        assert!(forbidden(
+            delete_provider(State(state.clone()), manager(), Path(own.id.clone())).await
+        ));
+
+        // Services: own provider only, descriptive fields only.
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let service_request = |slug: &str, provider: &str| {
+            let mut request = create_http_service_request(slug, slug, base_url.clone());
+            request.provider_config_id = Some(provider.to_string());
+            request.auth_method = Some("bearer".to_string());
+            request
+        };
+        assert!(forbidden(
+            create_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Json(service_request("borrowed-client", &foreign.id)),
+            )
+            .await
+        ));
+        let mut with_credential = service_request("shared-key", &own.id);
+        with_credential.credential = Some("platform-secret".to_string());
+        let denied = create_service(
+            State(state.clone()),
+            manager(),
+            Default::default(),
+            Json(with_credential),
+        )
+        .await;
+        assert!(
+            matches!(denied, Err(AppError::Forbidden(ref message)) if message.contains("credential"))
+        );
+        let Json(service) = create_service(
+            State(state.clone()),
+            manager(),
+            Default::default(),
+            Json(service_request("api-zoho-mail-test", &own.id)),
+        )
+        .await
+        .expect("catalog manager creates linked service");
+        server.abort();
+        assert_eq!(service.provider_config_id.as_deref(), Some(own.id.as_str()));
+        assert_eq!(service.created_by, manager_id);
+
+        let update = |value: serde_json::Value| {
+            update_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(serde_json::from_value(value).unwrap()),
+            )
+        };
+        update(serde_json::json!({ "description": "Zoho Mail (US)" }))
+            .await
+            .expect("descriptive edit");
+        assert!(forbidden(
+            update(serde_json::json!({ "forward_access_token": true })).await
+        ));
+        assert!(forbidden(
+            update(serde_json::json!({ "identity_propagation_mode": "jwt" })).await
+        ));
+
+        // Losing the role removes write access to public rows they created.
+        let role = db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! { "slug": crate::models::role::CATALOG_MANAGER_ROLE_SLUG })
+            .await
+            .unwrap()
+            .unwrap();
+        role_service::revoke_role_from_user(&db, &manager_id, &role.id)
+            .await
+            .unwrap();
+        assert!(forbidden(
+            update(serde_json::json!({ "description": "after revoke" })).await
+        ));
+        assert!(forbidden(
+            super::delete_service(State(state.clone()), manager(), Path(service.id.clone())).await
+        ));
+        db.drop().await.unwrap();
     }
 }
 

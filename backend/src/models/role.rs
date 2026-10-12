@@ -12,6 +12,13 @@ pub const CREDITS_MANAGER_ROLE_SLUG: &str = "credits_manager";
 /// anyone who is not an Operator; Admins already hold every permission.
 pub const CREDIT_GRANTS_WRITE_PERMISSION: &str = "nyxid:billing:credit_grants:write";
 
+pub const CATALOG_MANAGER_ROLE_SLUG: &str = "catalog_manager";
+
+/// Lets an Operator create providers and catalog services, edit the rows they
+/// created, and set initial OAuth client credentials. Ignored for anyone who
+/// is not an Operator; Admins already hold every permission.
+pub const CATALOG_SERVICES_WRITE_PERMISSION: &str = "nyxid:catalog:services:write";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     #[serde(rename = "_id")]

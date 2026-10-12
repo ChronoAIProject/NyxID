@@ -150,6 +150,8 @@ Platform-admin service account create/update with explicit `catalog:skills:read/
 
 Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
+Catalog Manager (`catalog_manager`, `nyxid:catalog:services:write`) lets an Operator create providers and public HTTP catalog services, edit rows they created, and set the first OAuth client on a provider that has none; replacing others' clients, deletes, and credential/identity/billing/policy fields stay Admin-only. A non-admin may change public catalog rows only while holding the role. Classify every new provider/service request field in `handlers/catalog_authority.rs` (exhaustive destructuring). CLI: `nyxid admin provider ...`, `nyxid admin catalog add|apply|validate` with secret-free manifests (`cli/templates/catalog/`). See `docs/CATALOG_MANAGER.md`.
+
 CatalogEditor `PUT /keys/{catalog_uuid}` accepts only `recommended_skill_refs` with live/token catalog write authority (plus the existing role for legacy editors). It uses the shared skill transaction against one server-observed revision, returns safe metadata without requiring read scope, and never rebases conflicts. Explicit revision/replay clients use `/catalog-curation/services/{id}/skills`. Human key writes keep their original handler; other SA purposes, API-key, delegated, and relay writes remain denied.
 
 ### 9. Agent Isolation
@@ -580,6 +582,13 @@ nyxid oracle worker forget <pool> <label> [--force]   # remove a stale worker ro
 nyxid oracle worker cancel-command <pool> <label> <command-id>   # withdraw a queued/delivered-but-unexecuted command (e.g. a bad upgrade)
 nyxid oracle worker upgrade --pool <pool> [--label <label>]
 nyxid oracle login <pool> [--worker-token-file <path>]
+
+# Catalog administration (Admin or Catalog Manager)
+nyxid admin user grant-role <EMAIL|ID> catalog_manager
+nyxid admin catalog add --template zoho-mail       # wizard: provider + service + OAuth client + validate
+nyxid admin catalog apply --file m.yaml [--dry-run] | validate --file m.yaml
+nyxid admin provider create | update <SLUG>            # wizard without --file; then offers the OAuth client
+nyxid admin provider list | show | set-credentials <SLUG>
 
 # Agent isolation
 nyxid api-key create --name "coding-agent" --platform claude-code

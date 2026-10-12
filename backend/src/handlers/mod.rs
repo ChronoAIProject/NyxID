@@ -37,6 +37,7 @@ pub(crate) mod body_limit;
 pub mod brand_icons;
 pub mod broker_bindings;
 pub mod catalog;
+pub(crate) mod catalog_authority;
 pub mod channel_bots;
 pub mod channel_connect_links;
 pub mod channel_conversations;

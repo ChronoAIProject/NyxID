@@ -6,8 +6,9 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
 use crate::models::role::{
-    COLLECTION_NAME as ROLES, CREDIT_GRANTS_WRITE_PERMISSION, CREDITS_MANAGER_ROLE_SLUG,
-    PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG, PLATFORM_USER_ROLE_SLUG, Role,
+    CATALOG_MANAGER_ROLE_SLUG, CATALOG_SERVICES_WRITE_PERMISSION, COLLECTION_NAME as ROLES,
+    CREDIT_GRANTS_WRITE_PERMISSION, CREDITS_MANAGER_ROLE_SLUG, PLATFORM_ADMIN_ROLE_SLUG,
+    PLATFORM_OPERATOR_ROLE_SLUG, PLATFORM_USER_ROLE_SLUG, Role,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 
@@ -24,6 +25,10 @@ const CREDITS_MANAGER_ROLE_NAME: &str = "Credits Manager";
 const CREDITS_MANAGER_ROLE_DESCRIPTION: &str =
     "Lets an Operator issue and revoke one-off credit grants";
 const CREDITS_MANAGER_PERMISSIONS: &[&str] = &[CREDIT_GRANTS_WRITE_PERMISSION];
+const CATALOG_MANAGER_ROLE_NAME: &str = "Catalog Manager";
+const CATALOG_MANAGER_ROLE_DESCRIPTION: &str =
+    "Lets an Operator create providers and catalog services and set their initial OAuth client";
+const CATALOG_MANAGER_PERMISSIONS: &[&str] = &[CATALOG_SERVICES_WRITE_PERMISSION];
 
 #[derive(Clone, Debug)]
 pub struct PlatformRoleIds {
@@ -153,6 +158,26 @@ pub async fn can_manage_credit_grants(
     user: &User,
     platform_role: PlatformRole,
 ) -> AppResult<bool> {
+    operator_holds(db, user, platform_role, CREDIT_GRANTS_WRITE_PERMISSION).await
+}
+
+/// Admins, and Operators holding the Catalog Manager role, may create
+/// providers and catalog services. Callers must still apply the per-row and
+/// per-field limits that bind a Catalog Manager.
+pub async fn can_manage_catalog(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<bool> {
+    operator_holds(db, user, platform_role, CATALOG_SERVICES_WRITE_PERMISSION).await
+}
+
+async fn operator_holds(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+    permission: &str,
+) -> AppResult<bool> {
     match platform_role {
         PlatformRole::Admin => Ok(true),
         PlatformRole::User => Ok(false),
@@ -163,10 +188,7 @@ pub async fn can_manage_credit_grants(
                 &user.group_ids,
             )
             .await?;
-            Ok(rbac
-                .permissions
-                .iter()
-                .any(|permission| permission == CREDIT_GRANTS_WRITE_PERMISSION))
+            Ok(rbac.permissions.iter().any(|held| held == permission))
         }
     }
 }
@@ -574,6 +596,15 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
         is_default: false,
     };
     ensure_system_role(db, &credits_manager).await?;
+
+    let catalog_manager = SystemRoleSpec {
+        name: CATALOG_MANAGER_ROLE_NAME,
+        slug: CATALOG_MANAGER_ROLE_SLUG,
+        description: CATALOG_MANAGER_ROLE_DESCRIPTION,
+        permissions: CATALOG_MANAGER_PERMISSIONS,
+        is_default: false,
+    };
+    ensure_system_role(db, &catalog_manager).await?;
 
     Ok(())
 }
