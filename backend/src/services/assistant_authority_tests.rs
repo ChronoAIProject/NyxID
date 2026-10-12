@@ -1832,3 +1832,40 @@ async fn mongodb_gate_autopilot_preserves_webhook_floor() {
     .unwrap();
     assert!(result.is_some());
 }
+
+#[tokio::test]
+async fn mongodb_gate_service_and_meta_modes() {
+    let f = orchestrator_fixture("gate_family_service_meta").await;
+    super::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        super::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let result = super::assistant_acknowledgement_service::webhook_action_gate(
+        &f.state.db,
+        &f.chat,
+        "nyx__set_approval_mode",
+        &json!({}),
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(result.is_some());
+    let result = super::assistant_acknowledgement_service::webhook_action_gate(
+        &f.state.db,
+        &f.chat,
+        "nyx__machine_exec",
+        &json!({}),
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(result.is_some());
+}
