@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
+#[path = "nyxbot_x_bus_tests.rs"]
+mod x_bus_tests;
+
 const OWNER: &str = "12345678-1234-4123-8123-1234567890ab";
 const PARTITION: &str = "conv_0123456789abcdef0123456789abcdef";
 
