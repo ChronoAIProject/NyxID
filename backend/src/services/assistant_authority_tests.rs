@@ -125,6 +125,7 @@ pub(crate) async fn new_orchestrator(
         &state.db,
         owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -175,6 +176,7 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.db,
         &owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
@@ -475,6 +477,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
@@ -568,6 +571,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -924,7 +928,11 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
         if !tools::read_only(name) {
             assert_eq!(result.value["error"], "orchestrator_only", "{name}");
         } else if name.starts_with("list_") && *name != "list_agent_key_bindings" {
-            assert!(!result.is_error, "{name}: unexpected error result");
+            assert!(
+                !result.is_error,
+                "{name}: unexpected error result: {}",
+                result.value
+            );
         } else {
             assert!(result.is_error, "{name}");
             assert!(
@@ -985,7 +993,9 @@ pub(crate) async fn ordinary_key(f: &Fixture) -> String {
 async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
     let name = format!("nyxid__{name}");
     let mut result = f.tools().execute(&f.auth, &name, &args).await;
-    if result.value["error"] == "acknowledgement_required" && result.value["kind"] == "action" {
+    if result.value["error"] == "acknowledgement_required"
+        && result.value["acknowledgement_id"].is_string()
+    {
         let id = result.value["acknowledgement_id"].as_str().unwrap();
         acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
             .await
@@ -993,7 +1003,11 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
         args["acknowledgement_id"] = json!(id);
         result = f.tools().execute(&f.auth, &name, &args).await;
     }
-    assert!(!result.is_error, "{name}: unexpected error result");
+    assert!(
+        !result.is_error,
+        "{name}: unexpected error result: {}",
+        result.value
+    );
     let serialized = result.value.to_string();
     for secret_field in [
         "key_hash",
@@ -1031,6 +1045,7 @@ async fn native_inventory(full: bool) {
             &f.owner,
             super::assistant_settings_service::Update {
                 skip_destructive_confirmation: Some(true),
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
                 ..Default::default()
             },
         )
@@ -1317,6 +1332,7 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
@@ -1384,6 +1400,7 @@ async fn assert_assistant_key_boundaries(f: &Fixture) {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1678,6 +1695,7 @@ async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_can
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1773,11 +1791,10 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
         .delete_one(doc! {"_id":&f.owner})
         .await
         .unwrap();
-    let (denied, card) =
-        super::assistant_acknowledgement_service::account_gate(&f.state.db, &f.chat)
-            .await
-            .unwrap()
-            .unwrap();
+    let (denied, card) = acks::account_gate(&f.state.db, &f.chat)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(denied["error"], "access_request_denied");
     assert!(card.is_none());
     let audit = f
@@ -1815,7 +1832,7 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
     )
     .await
     .unwrap();
-    let (_, card) = super::assistant_acknowledgement_service::account_gate(&f.state.db, &f.chat)
+    let (_, card) = acks::account_gate(&f.state.db, &f.chat)
         .await
         .unwrap()
         .unwrap();
@@ -1967,4 +1984,39 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
         .await
         .is_ok()
     );
+}
+
+#[tokio::test]
+async fn action_summary_succeeds_for_every_sensitive_or_destructive_tool() {
+    let f = orchestrator_fixture("card_summary_coverage").await;
+    let key = ordinary_key(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "summary-service",
+        "https://summary.example",
+    )
+    .await;
+    let tools = f.tools();
+    for (name, args) in [
+        ("delete_agent_key", json!({"api_key_id": key.clone()})),
+        (
+            "bind_agent_key_credential",
+            json!({"api_key_id": key.clone(), "binding_id": Uuid::new_v4().to_string()}),
+        ),
+        (
+            "unbind_agent_key_credential",
+            json!({"api_key_id": key.clone(), "binding_id": Uuid::new_v4().to_string()}),
+        ),
+        ("delete_service", json!({"service_id": service.clone()})),
+        (
+            "set_service_enabled",
+            json!({"service_id": service.clone()}),
+        ),
+    ] {
+        assert!(
+            tools.action_summary(&f.owner, name, &args).await.is_ok(),
+            "{name}"
+        );
+    }
 }

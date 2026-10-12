@@ -39,6 +39,13 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
         .insert_one(test_user(OWNER, UserType::Person))
         .await
         .unwrap();
+    db.collection(crate::models::assistant_settings::COLLECTION_NAME)
+        .insert_one(crate::models::assistant_settings::AssistantSettings {
+            access_mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            ..crate::models::assistant_settings::AssistantSettings::defaults(OWNER)
+        })
+        .await
+        .unwrap();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(
@@ -98,7 +105,10 @@ async fn enable_routed_requests(state: &AppState) {
         .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
         .update_one(
             doc! {"_id": OWNER},
-            doc! {"$set": {"specialist_access_requests": "routed_to_nyxbot", "updated_at": bson::DateTime::now()}},
+            doc! {"$set": {
+                "specialist_access_requests": "routed_to_nyxbot",
+                "updated_at": bson::DateTime::now(),
+            }},
         )
         .upsert(true)
         .await
@@ -165,6 +175,7 @@ async fn server_started_turn_preserves_picocredits_and_obeys_cutover() {
                 .unwrap();
         }
         let start = TurnStart::from(&engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -233,6 +244,7 @@ async fn user_turn(
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: agent_id.map(str::to_owned),
             conversation_id: conversation_id.map(str::to_owned),
@@ -261,6 +273,7 @@ async fn orchestrator(state: &AppState) -> (AssistantConversation, ChatAuthority
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -314,7 +327,7 @@ async fn nyxbot_is_one_persistent_agent_whose_memory_spans_its_threads() {
         agents[0].home_conversation_id.as_deref(),
         Some(first.id.as_str())
     );
-    // Memory saved in one thread reaches every thread's instructions.
+    // Memory saved in one thread reaches every thread's per-turn input.
     let chat = chat_for(&state, &first).await;
     let (value, error) = execute_tool(
         &state,
@@ -333,28 +346,16 @@ async fn nyxbot_is_one_persistent_agent_whose_memory_spans_its_threads() {
     .await;
     assert!(error, "{value}");
     let refreshed = user_turn(&state, Some(&second.id), None, "When should we meet?").await;
-    assert_eq!(
+    assert_ne!(
         refreshed.context_reset_reason.as_deref(),
         Some("instructions_changed")
     );
-    assert!(
-        refreshed
-            .nyxagent_instruction_binding
-            .as_ref()
-            .unwrap()
-            .fingerprint
-            != second
-                .nyxagent_instruction_binding
-                .as_ref()
-                .unwrap()
-                .fingerprint
-    );
     {
         let calls = calls.lock().await;
-        assert!(calls.last().unwrap().body.get("conversation").is_none());
-        let instructions = calls.last().unwrap().body["instructions"].as_str().unwrap();
-        assert!(instructions.contains("The user prefers morning meetings"));
-        assert!(!instructions.contains("nyxid_ag_secretvalue"));
+        assert!(calls.last().unwrap().body.get("conversation").is_some());
+        let input = calls.last().unwrap().body["input"].as_str().unwrap();
+        assert!(input.contains("The user prefers morning meetings"));
+        assert!(!input.contains("nyxid_ag_secretvalue"));
     }
     // Deleting a thread leaves the agent and its memory.
     engine::delete(&state.db, OWNER, &first.id).await.unwrap();
@@ -723,6 +724,7 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
@@ -1238,6 +1240,7 @@ async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialis
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
@@ -1778,6 +1781,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
 // path. Captured prompts contain a private marker: never print request bodies.
 fn refresh_start(id: Option<&str>, agent_id: Option<&str>, text: &str) -> TurnStart {
     TurnStart::from(&engine::TurnRequest {
+        retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: agent_id.map(str::to_owned),
         conversation_id: id.map(str::to_owned),
@@ -2141,7 +2145,7 @@ async fn instruction_refresh_legacy_memory_timestamp_proves_change() {
     let body = &calls.last().unwrap().body;
     assert!(body.get("conversation").is_none());
     assert!(
-        body["instructions"]
+        body["input"]
             .as_str()
             .unwrap()
             .contains("Prefer morning meetings")
@@ -2219,7 +2223,7 @@ async fn instruction_refresh_guest_audiences_and_context_are_isolated_on_every_t
     let body = &calls.last().unwrap().body;
     assert!(body.get("conversation").is_none());
     assert!(
-        body["instructions"]
+        body["input"]
             .as_str()
             .unwrap()
             .contains("PRIVATE owner memory")

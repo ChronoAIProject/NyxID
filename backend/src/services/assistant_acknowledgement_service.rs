@@ -109,6 +109,204 @@ pub async fn enforce_turn_gate(
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerActionClass {
+    Read,
+    Change,
+    Sensitive,
+    Destructive,
+}
+
+/// Central owner-turn approval policy. A policy floor is supplied by the
+/// service/webhook/machine gate and can never be bypassed by Autopilot.
+pub fn owner_confirmation_required(
+    mode: crate::models::assistant_settings::AccessMode,
+    class: OwnerActionClass,
+    policy_floor: bool,
+) -> bool {
+    if policy_floor {
+        return true;
+    }
+    match mode {
+        crate::models::assistant_settings::AccessMode::AskEveryTime => {
+            !matches!(class, OwnerActionClass::Read)
+        }
+        crate::models::assistant_settings::AccessMode::Nyxmode => matches!(
+            class,
+            OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+        ),
+        crate::models::assistant_settings::AccessMode::Autopilot => false,
+    }
+}
+
+pub fn classify_owner_action(tool: &str, method: Option<&str>) -> OwnerActionClass {
+    let lower = tool.to_ascii_lowercase();
+    if method.is_some_and(|m| matches!(m, "DELETE" | "PUT" | "PATCH"))
+        || [
+            "delete",
+            "destroy",
+            "revoke",
+            "disconnect",
+            "forget",
+            "machine_",
+            "set_guest_access",
+            "grant_subagent",
+            "spawn_subagent",
+            "create_schedule",
+            "enable",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+    {
+        return if [
+            "delete",
+            "destroy",
+            "revoke",
+            "disconnect",
+            "forget",
+            "machine_",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+        {
+            OwnerActionClass::Destructive
+        } else {
+            OwnerActionClass::Sensitive
+        };
+    }
+    if [
+        "update_settings",
+        "set_agent_model",
+        "bind_agent_key",
+        "connect_channel_bot",
+        "mint",
+        "credential",
+        "link",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+    {
+        return OwnerActionClass::Sensitive;
+    }
+    if method.is_some_and(|m| matches!(m, "POST")) {
+        return OwnerActionClass::Change;
+    }
+    OwnerActionClass::Read
+}
+
+#[cfg(test)]
+mod access_mode_tests {
+    use super::*;
+    use crate::models::assistant_settings::AccessMode::*;
+
+    #[test]
+    fn mode_class_matrix() {
+        let cases = [
+            (OwnerActionClass::Read, false),
+            (OwnerActionClass::Change, true),
+            (OwnerActionClass::Sensitive, true),
+            (OwnerActionClass::Destructive, true),
+        ];
+        for mode in [Autopilot, Nyxmode, AskEveryTime] {
+            for (class, expected) in cases {
+                let want = match mode {
+                    Autopilot => false,
+                    Nyxmode => matches!(
+                        class,
+                        OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+                    ),
+                    AskEveryTime => expected,
+                };
+                assert_eq!(owner_confirmation_required(mode, class, false), want);
+                assert!(owner_confirmation_required(mode, class, true));
+            }
+        }
+    }
+
+    #[test]
+    fn classifier_covers_tool_families() {
+        assert_eq!(
+            classify_owner_action("nyx__machine_exec", None),
+            OwnerActionClass::Destructive
+        );
+        assert_eq!(
+            classify_owner_action("grant_subagent", None),
+            OwnerActionClass::Sensitive
+        );
+        assert_eq!(
+            classify_owner_action("delete_agent_key", None),
+            OwnerActionClass::Destructive
+        );
+        assert_eq!(
+            classify_owner_action("list_services", Some("GET")),
+            OwnerActionClass::Read
+        );
+        assert_eq!(
+            classify_owner_action("create_schedule", None),
+            OwnerActionClass::Sensitive
+        );
+    }
+
+    #[test]
+    fn full_mode_class_family_matrix() {
+        let families = [
+            ("delete_agent_key", OwnerActionClass::Destructive),
+            ("delete_schedule", OwnerActionClass::Destructive),
+            ("DELETE /v1/items", OwnerActionClass::Destructive),
+            ("nyx__machine_exec", OwnerActionClass::Destructive),
+            ("grant_subagent", OwnerActionClass::Sensitive),
+            ("update_settings", OwnerActionClass::Sensitive),
+            ("nyx__set_agent_model", OwnerActionClass::Sensitive),
+            ("service_operation", OwnerActionClass::Read),
+        ];
+        for mode in [
+            crate::models::assistant_settings::AccessMode::Autopilot,
+            crate::models::assistant_settings::AccessMode::Nyxmode,
+            crate::models::assistant_settings::AccessMode::AskEveryTime,
+        ] {
+            for (_, class) in families {
+                let expected = match mode {
+                    crate::models::assistant_settings::AccessMode::Autopilot => false,
+                    crate::models::assistant_settings::AccessMode::Nyxmode => matches!(
+                        class,
+                        OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+                    ),
+                    crate::models::assistant_settings::AccessMode::AskEveryTime => {
+                        !matches!(class, OwnerActionClass::Read)
+                    }
+                };
+                assert_eq!(owner_confirmation_required(mode, class, false), expected);
+                assert!(owner_confirmation_required(mode, class, true));
+            }
+        }
+    }
+
+    #[test]
+    fn webhook_policy_floor_remains_independent_of_owner_mode() {
+        let mut chat = ChatAuthority {
+            org_agent_access: None,
+            turn_id: None,
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            api_key_id: "k".into(),
+            role: AgentRole::Orchestrator,
+            agent_id: "a".into(),
+            agent_name: "NyxBot".into(),
+            guest: false,
+            confirmation_policy: Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes),
+        };
+        assert!(webhook_confirmation_required(&chat, false, false));
+        chat.confirmation_policy =
+            Some(crate::models::trigger_schedule::ConfirmationPolicy::Destructive);
+        assert!(!webhook_confirmation_required(&chat, false, false));
+        assert!(webhook_confirmation_required(&chat, false, true));
+    }
+}
+
 #[derive(Clone)]
 pub struct ChatAuthority {
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
@@ -301,6 +499,8 @@ pub async fn audit_access_request_denied(
             let message = crate::models::assistant_message::AssistantMessage {
                 specialist_id: Some(chat.agent_id.clone()),
                 steering: None,
+                error_detail: None,
+                upstream_error_code: None,
                 voice: None,
                 execution_pending: false,
                 id: Uuid::new_v4().to_string(),
@@ -1655,6 +1855,15 @@ pub async fn webhook_action_gate(
     read_only: bool,
     destructive: bool,
 ) -> AppResult<Option<Value>> {
+    if !chat.guest && tool.starts_with("nyxid__") {
+        // Native account tools own their card lifecycle and audit.
+        return Ok(None);
+    }
+    if chat.confirmation_policy.is_none() && !chat.guest && tool.starts_with("nyxid__") {
+        // Native account tools own their per-tool card summaries. The shared gate
+        // only classifies service/team actions and must not emit a duplicate card.
+        return Ok(None);
+    }
     if !webhook_confirmation_required(chat, read_only, destructive) {
         return Ok(None);
     }
@@ -1695,4 +1904,69 @@ pub async fn webhook_action_gate(
     )
     .await?;
     Ok(Some(refusal(&card)))
+}
+
+#[cfg(test)]
+mod sensitive_tool_policy_tests {
+    use super::*;
+    use crate::models::assistant_settings::AccessMode;
+
+    #[test]
+    fn sensitive_tools_raise_cards_in_nyxmode_and_proceed_after_decision() {
+        for tool in [
+            "spawn_subagent",
+            "grant_subagent",
+            "update_settings",
+            "bind_agent_key",
+            "delete_agent_key",
+            "set_agent_model",
+        ] {
+            let class = classify_owner_action(tool, None);
+            assert!(matches!(
+                class,
+                OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+            ));
+            assert!(owner_confirmation_required(
+                AccessMode::Nyxmode,
+                class,
+                false
+            ));
+            // A decided single-use card permits the operation; the gate predicate is
+            // only the pre-decision check and does not alter the operation itself.
+        }
+    }
+
+    #[test]
+    fn sensitive_tools_are_card_free_under_autopilot_without_a_policy_floor() {
+        for tool in [
+            "spawn_subagent",
+            "grant_subagent",
+            "update_settings",
+            "bind_agent_key",
+            "delete_agent_key",
+            "set_agent_model",
+        ] {
+            let class = classify_owner_action(tool, None);
+            assert!(!owner_confirmation_required(
+                AccessMode::Autopilot,
+                class,
+                false
+            ));
+        }
+    }
+
+    #[test]
+    fn autopilot_never_bypasses_proxy_machine_or_webhook_floor() {
+        for class in [
+            OwnerActionClass::Change,
+            OwnerActionClass::Sensitive,
+            OwnerActionClass::Destructive,
+        ] {
+            assert!(owner_confirmation_required(
+                AccessMode::Autopilot,
+                class,
+                true
+            ));
+        }
+    }
 }

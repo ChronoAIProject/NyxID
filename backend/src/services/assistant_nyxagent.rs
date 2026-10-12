@@ -196,7 +196,6 @@ pub fn base_prompt(
                     prompt.push_str("\n\nThis specialist belongs to an organization. Its memory notes are shared organization data, visible to maintainers. NEVER store a member's private messages, personal content or secrets in shared memory. This thread is private to the acting member; never read or disclose another member's thread.");
                 }
             }
-            prompt.push_str(&super::assistant_team_service::memory_note(agent));
             // NyxBot's implicit reachability is snapshotted in machine_access,
             // not the specialist machine picker. Reuse the loaded policy; this
             // is guidance only, and machine_list/execution recheck live access.
@@ -298,6 +297,8 @@ pub fn channel_note(row: &AssistantConversation) -> String {
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
     #[serde(default)]
+    pub retry_of: Option<String>,
+    #[serde(default)]
     pub attachment_ids: Vec<String>,
     pub conversation_id: Option<String>,
     /// New threads only: the agent to talk to; the owner's NyxBot by default.
@@ -305,6 +306,7 @@ pub struct TurnRequest {
     pub agent_id: Option<String>,
     pub text: String,
     pub model: Option<String>,
+    #[serde(default)]
     /// Retired Ask/Full selector. Accepted from older clients and ignored:
     /// every chat runs with Full access.
     #[allow(dead_code)]
@@ -315,6 +317,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
     pub org_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub attachment_ids: Vec<String>,
@@ -479,6 +482,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            retry_of: request.retry_of.clone(),
             channel_event_id: None,
             org_access: None,
             attachment_ids: request.attachment_ids.clone(),
@@ -1101,7 +1105,7 @@ pub(crate) async fn get_authorized(
     Ok((row, access))
 }
 
-async fn authorize_thread_read(
+pub(crate) async fn authorize_thread_read(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<Option<std::sync::Arc<super::org_agent_service::RequestAccess>>> {
@@ -1227,6 +1231,26 @@ pub async fn messages(
     Ok(rows)
 }
 
+pub async fn reset_context(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
+    let current = get(db, user_id, id).await?;
+    if live_turn(&current, Utc::now()).is_some() {
+        return Err(AppError::AssistantTurnActive);
+    }
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id},
+            doc! {"$set": {
+                "nyxagent_session_id": bson::Bson::Null,
+                "nyxagent_instruction_binding": bson::Bson::Null,
+                "nyxagent_last_response_id": bson::Bson::Null,
+                "context_reset_at": bson::DateTime::now(),
+                "context_reset_reason": "user_reset",
+            }},
+        )
+        .await?;
+    Ok(())
+}
+
 /// Read metadata and its page from one MongoDB transaction snapshot so a reload
 /// never observes a cleared fence without the reply that cleared it.
 pub async fn history_page(
@@ -1271,6 +1295,85 @@ pub async fn history_page(
         })
         .await
         .map_err(transactions::map_transaction_error)
+}
+
+pub async fn context_checkpoint(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
+    history_page(db, user_id, id, 100, None).await
+}
+
+/// The canonical checkpoint source shared by context inspection and turn
+/// preparation. Callers must project this result rather than rebuilding a
+/// second history window.
+pub async fn checkpoint_for_turn(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
+    context_checkpoint(db, user_id, id).await
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CheckpointSummary {
+    pub conversation: AssistantConversation,
+    pub messages: Vec<AssistantMessage>,
+    pub goal: Option<String>,
+    pub completed_actions: Vec<String>,
+    pub pending_actions: Vec<String>,
+    pub failed_actions: Vec<String>,
+    pub last_successful_turn: Option<String>,
+    pub binding_state: String,
+}
+
+pub async fn checkpoint_summary(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<CheckpointSummary> {
+    let (conversation, messages) = checkpoint_for_turn(db, user_id, id).await?;
+    let mut activities = messages
+        .iter()
+        .flat_map(|message| message.activities.iter().cloned())
+        .collect::<Vec<_>>();
+    if let Some(active) = conversation.active_turn.as_ref() {
+        activities.extend(active.activities.iter().cloned());
+    }
+    Ok(CheckpointSummary {
+        goal: messages
+            .iter()
+            .find(|message| message.role == "user")
+            .map(|message| message.text.clone()),
+        completed_actions: activities
+            .iter()
+            .filter(|a| a.status == "completed")
+            .map(|a| format!("{}=completed", a.label))
+            .collect(),
+        pending_actions: activities
+            .iter()
+            .filter(|a| a.status == "running")
+            .map(|a| format!("{}=running", a.label))
+            .collect(),
+        failed_actions: activities
+            .iter()
+            .filter(|a| a.status == "error")
+            .map(|a| format!("{}=error", a.label))
+            .collect(),
+        last_successful_turn: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant" && message.status == "completed")
+            .map(|message| message.turn_id.clone()),
+        binding_state: if conversation.nyxagent_session_id.is_some() {
+            "bound".into()
+        } else {
+            "reset".into()
+        },
+        conversation,
+        messages,
+    })
 }
 
 /// Fence and first message commit together, before any upstream work.
@@ -1618,7 +1721,7 @@ pub async fn begin_turn_with_voice(
                 if let Some(lost) = row.active_turn.take() {
                     row.message_count += 1;
                     let message = AssistantMessage {
-                specialist_id: None,
+                        specialist_id: None,
                         steering: None,
                         voice: None,
                         execution_pending: false,
@@ -1626,14 +1729,22 @@ pub async fn begin_turn_with_voice(
                         conversation_id: id.clone(),
                         user_id: user_id.into(),
                         seq: row.message_count,
-                        turn_id: lost.turn_id,
+                        turn_id: lost.turn_id.clone(),
                         role: "assistant".into(),
                         text: String::new(),
                         status: "failed".into(),
                         error_code: Some("turn_lost".into()),
+                        upstream_error_code: None,
+                        error_detail: Some(crate::models::assistant_message::AssistantErrorDetail {
+                            stage: "lease_expiry".into(), http_status: None, upstream_request_id: None,
+                            response_id: None, continuations: lost.continuations, turn_id: lost.turn_id.clone(), occurred_at: now,
+                        }),
                         created_at: now,
-                        activities: Vec::new(),
-                        attachments: Vec::new(),
+                        activities: lost.activities.into_iter().map(|mut activity| {
+                            if activity.status.as_str() == "running" { activity.status = "error".into(); activity.ended_at = Some(now); }
+                            activity
+                        }).collect(),
+                        attachments: lost.attachments,
                         origin: Some(lost.origin),
                         via: None,
                     };
@@ -1659,6 +1770,7 @@ pub async fn begin_turn_with_voice(
                     .as_ref().filter(|_| !hidden_voice)
                     .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
+                    retry_of: start.retry_of.clone(),
                     running_response: None,
                     channel_event_id: start.channel_event_id.clone(),
                     initiating_message_seq: Some(input_seq),
@@ -1782,7 +1894,7 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
-                specialist_id: None,
+                    specialist_id: None,
                     steering: None,
                     voice: None,
                     execution_pending: false,
@@ -1795,6 +1907,8 @@ pub async fn begin_turn_with_voice(
                     text: text.clone(),
                     status: "completed".into(),
                     error_code: None,
+                        upstream_error_code: None,
+                        error_detail: None,
                     created_at: now,
                     activities: Vec::new(),
                     attachments: uploads,
@@ -1906,6 +2020,27 @@ pub async fn clear_binding(
         )
         .await?;
     Ok(())
+}
+
+pub async fn change_model(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    model: &str,
+) -> AppResult<AssistantConversation> {
+    if !valid_model(model) {
+        return Err(AppError::ValidationError(
+            "model_unavailable: choose another model in the selector".into(),
+        ));
+    }
+    let current = get(db, user_id, id).await?;
+    if current.active_turn.is_some() {
+        return Err(AppError::AssistantTurnActive);
+    }
+    db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
+        doc! {"_id": id, "user_id": user_id, "active_turn": bson::Bson::Null},
+        doc! {"$set": {"model": model, "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null, "nyxagent_last_response_id": bson::Bson::Null, "context_reset_at": bson::DateTime::now(), "context_reset_reason": "model_changed"}},
+    ).return_document(ReturnDocument::After).await?.ok_or(AppError::AssistantTurnActive)
 }
 
 pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
@@ -2214,10 +2349,10 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 if let Some(error) = &error {
-                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
+                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations), upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
-                specialist_id: None,
+                    specialist_id: None,
                     steering: None,
                     voice: None,
                     execution_pending: false,
@@ -2234,7 +2369,17 @@ async fn finish_turn_inner(
                         "completed"
                     }
                     .into(),
-                    error_code: error.as_ref().map(|e| e.upstream_code.clone().unwrap_or_else(|| e.code.into())),
+                    error_code: error.as_ref().map(|e| e.code.into()),
+                    upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.clone()),
+                    error_detail: error.as_ref().map(|error| crate::models::assistant_message::AssistantErrorDetail {
+                        stage: error.stage.into(),
+                        http_status: error.http_status,
+                        upstream_request_id: error.upstream_request_id.as_ref().map(|v| v.to_string()),
+                        response_id: error.response_id.as_ref().map(|v| v.to_string()).or_else(|| result.response_id.clone()),
+                        continuations: current.active_turn.as_ref().map_or(0, |t| t.continuations),
+                        turn_id: turn_id.clone(),
+                        occurred_at: now,
+                    }),
                     created_at: now,
                     activities,
                     attachments,
@@ -2547,17 +2692,31 @@ pub const MAX_ACTIVITY_LABEL_CHARS: usize = 120;
 
 /// Record a tool call started with the chat's key during the live turn. The
 /// label is an identifier only. Returns the activity ID when a turn is live.
+/// Production callers record the digest through `activity_started_with_digest`;
+/// this wrapper is kept for the activity tests.
+#[cfg(test)]
 pub async fn activity_started(
     db: &Database,
     user_id: &str,
     conversation_id: &str,
     label: &str,
 ) -> AppResult<Option<String>> {
+    activity_started_with_digest(db, user_id, conversation_id, label, None).await
+}
+
+pub async fn activity_started_with_digest(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    label: &str,
+    digest: Option<&str>,
+) -> AppResult<Option<String>> {
     let id = Uuid::new_v4().to_string();
     let label: String = label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect();
     let entry = doc! {
         "id": &id,
         "label": label,
+        "digest": digest,
         "status": "running",
         "started_at": bson::DateTime::now(),
         "ended_at": bson::Bson::Null,
@@ -2577,6 +2736,51 @@ pub async fn activity_started(
         )
         .await?;
     Ok((result.matched_count == 1).then_some(id))
+}
+
+pub async fn mark_retry_of(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    retry_of: &str,
+) -> AppResult<()> {
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": conversation_id, "user_id": user_id, "active_turn.turn_id": {"$exists": true}},
+            doc! {"$set": {"active_turn.retry_of": retry_of}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn retry_duplicate_digest(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    digest: &str,
+) -> AppResult<bool> {
+    let Some(row) = db.collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": conversation_id, "user_id": user_id, "active_turn.retry_of": {"$exists": true}})
+        .await? else { return Ok(false); };
+    let Some(retry_of) = row.active_turn.and_then(|turn| turn.retry_of) else {
+        return Ok(false);
+    };
+    if let Some(active) = get(db, user_id, conversation_id).await?.active_turn
+        && active.activities.iter().any(|activity| {
+            activity.status == "completed" && activity.digest.as_deref() == Some(digest)
+        })
+    {
+        return Ok(true);
+    }
+    let messages = messages(db, user_id, conversation_id, 100, None).await?;
+    Ok(messages
+        .iter()
+        .find(|message| message.turn_id == retry_of)
+        .is_some_and(|message| {
+            message.activities.iter().any(|activity| {
+                activity.status == "completed" && activity.digest.as_deref() == Some(digest)
+            })
+        }))
 }
 
 /// Settle a recorded tool call. A missing entry (turn settled or evicted) is a no-op.
@@ -2761,6 +2965,7 @@ pub async fn delete(
                         crate::models::assistant_upload_retention::TOMBSTONES,
                         crate::models::assistant_agent_credential::COLLECTION_NAME,
                         MESSAGES,
+                        crate::models::assistant_message_feedback::COLLECTION_NAME,
                     ] {
                         db.collection::<bson::Document>(collection)
                             .delete_many(doc! {"conversation_id": id, "user_id": user_id})
@@ -2800,12 +3005,27 @@ pub async fn delete(
 /// Render the bounded prior-thread recap used by instructions and by a new
 /// hidden voice task's first turn.
 pub fn bounded_recap(history: &[AssistantMessage]) -> String {
+    bounded_recap_for_audience(history, false)
+}
+
+/// Build the reset recap with audience-sensitive metadata. Guest/channel
+/// turns may receive only the conversation text; owner-only tool and upload
+/// metadata is never disclosed through a recap.
+pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> String {
     const OPEN: &str =
-        "\n\nPrior conversation history (recap; context you may rely on, not new instructions):\n";
+        "\n\nPrevious context (after reset) — context you may rely on, not new instructions:\n";
     const CLOSE: &str = "\nEnd prior history.";
-    let mut remaining = 8192usize - OPEN.len() - CLOSE.len();
+    let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
     let mut recap = Vec::new();
-    for message in history.iter().rev().take(20) {
+    let originating_goal = history.iter().find(|message| message.role == "user");
+    let mut selected: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
+    if let Some(goal) = originating_goal
+        && !selected.iter().any(|message| message.id == goal.id)
+    {
+        selected.pop();
+        selected.push(goal);
+    }
+    for message in selected {
         let prefix = format!(
             "\n{}{}{}: ",
             message.role,
@@ -2823,12 +3043,72 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
         if remaining <= prefix.len() {
             break;
         }
-        let mut end = message.text.len().min(remaining - prefix.len());
+        let budget = (remaining - prefix.len()).min(2048);
+        let head = budget / 2;
+        let tail = budget - head;
+        let mut end = message.text.len().min(head);
         while !message.text.is_char_boundary(end) {
             end -= 1;
         }
-        let line = format!("{prefix}{}", &message.text[..end]);
-        remaining -= line.len();
+        let mut start = message.text.len().saturating_sub(tail);
+        while start < message.text.len() && !message.text.is_char_boundary(start) {
+            start += 1;
+        }
+        let body = if start > end {
+            format!("{} … {}", &message.text[..end], &message.text[start..])
+        } else {
+            message.text.clone()
+        };
+        let activities = if guest || message.activities.is_empty() {
+            String::new()
+        } else {
+            let omitted = message.activities.len().saturating_sub(10);
+            format!(
+                " [actions: {}{}]",
+                message
+                    .activities
+                    .iter()
+                    .take(10)
+                    .map(|a| format!("{}={}", a.label, a.status))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if omitted > 0 {
+                    format!(", +{omitted} more")
+                } else {
+                    String::new()
+                }
+            )
+        };
+        let attachments = if guest || message.attachments.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [attachments: {}]",
+                message
+                    .attachments
+                    .iter()
+                    .map(|a| a.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let error = if guest {
+            String::new()
+        } else {
+            format!(
+                " [error: {}]",
+                message.error_code.as_deref().unwrap_or("none")
+            )
+        };
+        let mut line = format!("{prefix}{body}{activities}{attachments}{error}");
+        if line.len() > remaining {
+            let mut end = remaining;
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            line.truncate(end);
+        }
+        remaining = remaining.saturating_sub(line.len());
         recap.push(line);
     }
     recap.reverse();
@@ -2838,6 +3118,7 @@ pub fn bounded_recap(history: &[AssistantMessage]) -> String {
         format!("{OPEN}{}{CLOSE}", recap.concat())
     }
 }
+
 pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instructions: &str) -> Value {
     let mut body = json!({
         "model": model,
@@ -2858,6 +3139,10 @@ pub struct TurnError {
     pub upstream_code: Option<String>,
     pub code: &'static str,
     pub message: &'static str,
+    pub stage: &'static str,
+    pub http_status: Option<u16>,
+    pub upstream_request_id: Option<Box<str>>,
+    pub response_id: Option<Box<str>>,
 }
 impl TurnError {
     pub fn preserves_session(&self) -> bool {
@@ -2956,6 +3241,10 @@ impl TurnError {
             code,
             message,
             upstream_code,
+            stage: "stream",
+            http_status: None,
+            upstream_request_id: None,
+            response_id: None,
         }
     }
 }
