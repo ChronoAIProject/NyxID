@@ -5,7 +5,10 @@ use crate::{
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
-    services::{assistant_acknowledgement_service as acks, assistant_team_service::CreateRequest, key_service},
+    services::{
+        assistant_acknowledgement_service as acks, assistant_team_service::CreateRequest,
+        key_service,
+    },
     test_utils::{connect_transaction_test_database, test_app_state, test_auth_user, test_user},
 };
 use axum::{
@@ -333,10 +336,12 @@ async fn nyxbot_post_to_group_is_never_sticky() {
     )
     .await
     .unwrap();
+    post(&state, OWNER, &group.id, "hello", None).await.unwrap();
+    settled(&state, &group.id, 3).await;
     post(&state, OWNER, &group.id, "@researcher first", None)
         .await
         .unwrap();
-    settled(&state, &group.id, 3).await;
+    settled(&state, &group.id, 5).await;
     let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
         .await
         .unwrap()
