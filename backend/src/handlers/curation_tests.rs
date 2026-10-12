@@ -1131,6 +1131,22 @@ async fn insert_feedback_message(
         .await
 }
 
+#[tokio::test]
+async fn feedback_admin_filters_context_metadata() {
+    let f = fixture("feedback-a1-admin-filter", false).await;
+    f.state.db.collection::<Document>(FEEDBACK).insert_one(doc! {"_id":"a1-filter","user_id":&f.owner,"message_id":"m","vote":"down","context":{"model":"model-a","agent_kind":"specialist","error_code":"failed"},"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let (status, body) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback?model=model-a&agent_kind=specialist&has_error=true",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(body["recent"].as_array().unwrap().len(), 1);
+}
+
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
     crate::db::ensure_indexes(&db).await.unwrap();
