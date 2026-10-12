@@ -172,12 +172,25 @@ pub async fn resolve_bot_token(
         Err(reconnect("Bot is missing its OAuth connection"))
     };
     if let Err(AppError::ValidationError(cause)) = &result {
-        fail_bot(db, bot, cause).await?;
+        fail_bot(
+            db,
+            bot,
+            super::channel_bot_health::codes::RECONNECT_REQUIRED,
+            cause,
+        )
+        .await?;
     }
     result
 }
 
-pub async fn fail_bot(db: &mongodb::Database, bot: &ChannelBot, cause: &str) -> AppResult<()> {
+/// Moves a bot to `failed` once. `code` is a stable
+/// `channel_bot_health::codes` value; `cause` is the user-facing text.
+pub async fn fail_bot(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    code: &'static str,
+    cause: &str,
+) -> AppResult<()> {
     let mut filter = doc! { "_id": &bot.id, "is_active": true, "status": { "$ne": "failed" }, "connection_id": &bot.connection_id, "updated_at": bson::DateTime::from_chrono(bot.updated_at) };
     if bot.platform == "x" {
         // Incomplete setup pauses delivery before failure is known. The first
@@ -188,31 +201,46 @@ pub async fn fail_bot(db: &mongodb::Database, bot: &ChannelBot, cause: &str) -> 
             doc! {"status": "failed", "error": super::channel_connection_webhook_service::SETUP_PENDING_ERROR},
         ]);
     }
-    let result = db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-        .update_one(filter,
-            doc! { "$set": { "status": "failed", "error": cause, "failure_reason": cause, "diagnostics.failure_reason": cause, "updated_at": bson::DateTime::now() } }).await?;
+    let result = db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            filter,
+            doc! {
+                "$set": { "status": "failed", "error": cause, "diagnostics.failure_reason": code, "updated_at": bson::DateTime::now() },
+                "$unset": { "failure_reason": "" },
+            },
+        )
+        .await?;
     if result.modified_count > 0 {
-        audit_failure(db, bot, cause).await?;
+        audit_failure(db, bot, code, cause).await;
     }
     Ok(())
 }
 
+/// Audit and owner notice for one failure transition. Both are best-effort:
+/// the status change has already committed and must not be reported as failed.
 pub(crate) async fn audit_failure(
     db: &mongodb::Database,
     bot: &ChannelBot,
+    code: &'static str,
     cause: &str,
-) -> AppResult<()> {
-    super::audit_service::log_system_event(db.clone(), "channel_bot_failed", Some(serde_json::json!({
+) {
+    let mut failed = bot.clone();
+    failed.status = "failed".into();
+    failed.diagnostics.failure_reason = Some(code.into());
+    let gateway = super::channel_bot_service::gateway_linked(db, &bot.id)
+        .await
+        .unwrap_or(false);
+    let recommendation = super::channel_bot_health::recommend(
+        &super::channel_bot_health::HealthFacts::for_bot(&failed, chrono::Utc::now(), gateway),
+    );
+    if let Err(error) = super::audit_service::log_system_event(db.clone(), "channel_bot_failed", Some(serde_json::json!({
         "bot_id": bot.id, "owner_user_id": bot.user_id, "platform": bot.platform, "cause": cause,
-        "recommended_action": if cause.contains("credit") { "enable_billing" } else { "reconnect" },
-    }))).await?;
-    // Metadata-only owner notification: the notification service owns the
-    // channel row, and the transition filter above makes this idempotent.
-    let channel = super::notification_service::get_or_create_channel(db, &bot.user_id).await?;
-    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
-        .update_one(doc! {"_id": &channel.id}, doc! {"$set": {"channel_bot_failure_notice": {"bot_id": &bot.id, "reason": cause, "recommended_action": if cause.contains("credit") { "enable_billing" } else { "reconnect" }, "at": bson::DateTime::now()}}})
-        .await?;
-    Ok(())
+        "failure_reason": code, "recommended_action": recommendation.action,
+    }))).await {
+        tracing::warn!(%error, bot_id = %bot.id, "channel bot failure audit failed");
+    }
+    super::channel_bot_health::notify_failure(db, bot, &recommendation);
 }
 
 pub struct ConnectionStart {

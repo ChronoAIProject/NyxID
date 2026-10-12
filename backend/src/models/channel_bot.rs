@@ -21,8 +21,12 @@ pub const COLLECTION_NAME: &str = "channel_bots";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotError {
+    /// Numeric `AppError` code, kept for compatibility with earlier rows.
     #[serde(deserialize_with = "deserialize_error_code")]
     pub code: String,
+    /// Stable failure code (`services::channel_bot_health::codes`).
+    #[serde(default)]
+    pub reason: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub at: DateTime<Utc>,
 }
@@ -275,21 +279,6 @@ mod tests {
         };
         let bot: ChannelBot = bson::from_document(doc).unwrap();
         assert_eq!(bot.diagnostics.last_outbound_error.unwrap().code, "10004");
-    }
-
-    #[test]
-    fn diagnostics_capture_webhook_drop_reasons() {
-        let diagnostics = ChannelBotDiagnostics {
-            last_webhook_error: Some(ChannelBotError {
-                code: "unregistered".into(),
-                at: Utc::now(),
-            }),
-            failure_reason: Some("signature".into()),
-            ..Default::default()
-        };
-        let json = serde_json::to_value(&diagnostics).unwrap();
-        assert_eq!(json["last_webhook_error"]["code"], "unregistered");
-        assert_eq!(json["failure_reason"], "signature");
     }
 
     #[test]

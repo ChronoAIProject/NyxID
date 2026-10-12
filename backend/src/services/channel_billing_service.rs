@@ -356,7 +356,7 @@ pub(crate) async fn suspend(
     bot: &ChannelBot,
     adapter: &dyn super::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
-    super::channel_credentials::fail_bot(state.db, bot, "Channel billing needs attention. Restore credits or billing configuration, then select Verify.").await?;
+    super::channel_credentials::fail_bot(state.db, bot, super::channel_bot_health::codes::BILLING_SUSPENDED, "Channel billing needs attention. Restore credits or billing configuration, then select Verify.").await?;
     cleanup(
         state.db,
         state.encryption_keys,
