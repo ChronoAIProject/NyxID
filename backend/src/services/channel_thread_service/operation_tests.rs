@@ -450,6 +450,8 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
         &db,
         Some("telegram"),
         Some("active"),
+        100,
+        0,
     )
     .await
     .unwrap();

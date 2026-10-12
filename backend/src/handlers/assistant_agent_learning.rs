@@ -641,10 +641,7 @@ mod route_tests {
 #[cfg(test)]
 mod s9_denial_tests {
     use super::*;
-    use crate::services::{
-        assistant_authority_tests::orchestrator_fixture, assistant_team_service as team,
-        feature_flag_service,
-    };
+    use crate::services::{assistant_authority_tests::orchestrator_fixture, feature_flag_service};
     use axum::{
         Json,
         extract::{Path, State},

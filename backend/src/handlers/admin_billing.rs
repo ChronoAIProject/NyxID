@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct GlobalBillingDefaultsResponse {
     pub default_lane: Option<String>,
     pub default_overdraft_cap_credits: Option<i64>,
@@ -378,6 +378,14 @@ pub async fn update_service_billing(
         recommended_skill_refs: None,
         clear_skill_refs: false,
         skills_request_id: None,
+        skills_revision: None,
+        developer_app_ids: None,
+        custom_user_agent: None,
+        default_request_headers: None,
+        token_exchange_config: None,
+        ws_frame_injections: None,
+        anonymous_endpoints: None,
+        proxy_operation_policy: None,
     };
     crate::handlers::services::update_service_inner(state, auth_user, tele, service_id, body).await
 }

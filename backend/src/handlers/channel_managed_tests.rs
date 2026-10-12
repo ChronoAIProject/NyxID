@@ -1550,6 +1550,7 @@ async fn admin_channel_bot_list_filters_platform_and_status_and_requires_admin()
         axum::extract::Query(super::channel_bots::AdminChannelBotQuery {
             platform: Some("x".into()),
             status: Some("failed".into()),
+            ..Default::default()
         }),
     )
     .await
