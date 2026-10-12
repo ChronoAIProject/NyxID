@@ -336,7 +336,9 @@ async fn nyxbot_post_to_group_is_never_sticky() {
     )
     .await
     .unwrap();
-    post(&state, OWNER, &group.id, "hello", None).await.unwrap();
+    post(&state, OWNER, &group.id, "@NyxBot hello", None)
+        .await
+        .unwrap();
     settled(&state, &group.id, 3).await;
     post(&state, OWNER, &group.id, "@researcher first", None)
         .await
