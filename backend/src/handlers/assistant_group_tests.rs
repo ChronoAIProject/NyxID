@@ -301,6 +301,10 @@ async fn unknown_or_destroyed_recipient_ids_are_rejected() {
     let writer = specialist(&state, "writer").await;
     let group = group_of(&state, "refuse", &[&nyxbot, &researcher, &writer]).await;
     team::destroy(&state.db, OWNER, &writer.id).await.unwrap();
+    let before = groups::messages(&state.db, OWNER, &group.id, 50, None)
+        .await
+        .unwrap()
+        .len();
     for ids in [
         vec![writer.id.clone()],
         vec![Uuid::new_v4().to_string()],
@@ -316,11 +320,12 @@ async fn unknown_or_destroyed_recipient_ids_are_rejected() {
         );
     }
     // Nothing was appended for a refused selection.
-    assert!(
-        groups::messages(&state.db, OWNER, &group.id, 10, None)
+    assert_eq!(
+        groups::messages(&state.db, OWNER, &group.id, 50, None)
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        before
     );
     // A duplicated live selection is accepted once.
     let body = send(

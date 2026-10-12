@@ -236,10 +236,21 @@ pub fn validate(selection: &Selection) -> AppResult<()> {
             "At most 16 skills and a nonnegative revision are required",
         ));
     }
+    // Catalog recommendations can never be disabled, but an agent's pins can:
+    // reuse the catalog's pin checks on the pins without that agent-only state.
+    let pins: Vec<SkillReference> = selection
+        .skills
+        .iter()
+        .cloned()
+        .map(|mut pin| {
+            pin.disabled = false;
+            pin
+        })
+        .collect();
     super::catalog_skill_service::resolve_update(
         &SkillState::default(),
         &super::catalog_skill_service::SkillUpdate {
-            recommended_skill_refs: Some(selection.skills.clone()),
+            recommended_skill_refs: Some(pins),
             ..Default::default()
         },
     )?;

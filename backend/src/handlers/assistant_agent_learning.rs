@@ -626,6 +626,15 @@ mod route_tests {
     async fn validate_route_returns_not_found_for_other_owner() {
         let f = orchestrator_fixture("learning_validate_owner_route").await;
         let other = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &other,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         feature_flag_service::set_platform_override(
             &f.state.db,
             feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
@@ -691,7 +700,15 @@ mod s9_denial_tests {
     };
     use serde_json::json;
 
+    /// A new person with the engine flag on.
     async fn enable(db: &mongodb::Database, user: &str) {
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                user,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         feature_flag_service::set_platform_override(
             db,
             feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
