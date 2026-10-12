@@ -1135,7 +1135,8 @@ pub(crate) async fn require_available_model(
     if !engine::valid_model(model) {
         return Err(AppError::AssistantModelUnavailable);
     }
-    match live_models(state, auth, None).await {
+    // The same metered proxy classification as the models route itself.
+    match live_models(state, auth, Some(SERVER_TURN_POLICY)).await {
         Some(rows) if !rows.iter().any(|row| row.id == model && row.available) => {
             Err(AppError::AssistantModelUnavailable)
         }
