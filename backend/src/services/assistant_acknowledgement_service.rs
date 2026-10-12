@@ -254,6 +254,23 @@ pub async fn audit_access_request_denied(
             .find(|a| a.is_nyxbot())
             .and_then(|a| a.home_conversation_id)
     {
+        let messages = db.collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        );
+        let cutoff = Utc::now() - chrono::Duration::hours(1);
+        let already_notified = messages
+            .count_documents(doc! {
+                "user_id": &chat.user_id,
+                "role": "event",
+                "error_code": "specialist_access_denied",
+                "created_at": {"$gte": cutoff},
+                "text": {"$regex": format!("^specialist_access_denied: {} ", chat.agent_id)},
+            })
+            .await
+            .unwrap_or(1);
+        if already_notified > 0 {
+            return;
+        }
         let conversations = db
             .collection::<crate::models::assistant_conversation::AssistantConversation>(
                 crate::models::assistant_conversation::COLLECTION_NAME,
@@ -274,7 +291,7 @@ pub async fn audit_access_request_denied(
                 user_id: chat.user_id.clone(),
                 seq: row.message_count + 1,
                 turn_id: format!("access-denied-{}", Uuid::new_v4()),
-                role: "notice".into(),
+                role: "event".into(),
                 text: format!(
                     "specialist_access_denied: {} needs {} for {}",
                     chat.agent_name,
