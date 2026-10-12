@@ -46,7 +46,7 @@ pub enum TurnOrigin {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
     pub id: String,
-    /// `subagent_settled`, `permission_requested`, `permission_decided`,
+    /// `subagent_settled`, `permission_requested`, `permission_decided`, `skill_request_allowed`,
     /// `permission_expired`, `message`.
     pub kind: String,
     pub text: String,

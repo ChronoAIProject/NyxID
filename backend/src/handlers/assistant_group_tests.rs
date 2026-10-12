@@ -495,6 +495,31 @@ async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() {
     .unwrap();
     let phrase = format!("yes {}", acks::confirm_code(&card.id));
     assert_eq!(page["pending_actions"][0]["confirm_phrase"], json!(phrase));
+    state.db.collection::<mongodb::bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .update_one(doc! {"_id":&card.id}, doc! {"$set":{"authored_skill":{
+            "agent_id":&nyxbot.id,"proposal_id":Uuid::new_v4().to_string(),"revision":0_i64,"skills_revision":0_i64
+        }}}).await.unwrap();
+    let authored = pending_actions(&state, OWNER, &group.id).await.unwrap();
+    let note = group_note(&state, &thread, &nyxbot).await.unwrap();
+    assert!(note.contains("review_url instead of confirm_phrase"));
+    assert!(note.contains("Group replies never approve publication"));
+    assert_eq!(authored[0]["authored_skill"], true);
+    assert!(authored[0].get("confirm_phrase").is_none());
+    assert!(authored[0].get("can_decide").is_none());
+    assert!(
+        authored[0]["review_url"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("card={}", card.id))
+    );
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        )
+        .update_one(doc! {"_id":&card.id}, doc! {"$unset":{"authored_skill":""}})
+        .await
+        .unwrap();
     let calls_before = calls.lock().await.len();
     let (_, addressed) = post(&state, OWNER, &group.id, &phrase, None).await.unwrap();
     assert_eq!(addressed, vec![nyxbot.id.clone()]);

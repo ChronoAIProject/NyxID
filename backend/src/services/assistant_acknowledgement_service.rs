@@ -334,7 +334,7 @@ pub fn arguments_digest(arguments: &Value) -> String {
     hex::encode(Sha256::digest(canonical(&value).to_string().as_bytes()))
 }
 
-async fn fence(
+pub(crate) async fn fence(
     db: &Database,
     chat: &ChatAuthority,
     session: &mut ClientSession,
@@ -442,6 +442,26 @@ pub async fn history(
     Ok(rows)
 }
 
+/// Include an explicitly linked card outside the normal recent-history window.
+pub async fn include_card(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    card: &str,
+    rows: &mut Vec<AssistantAcknowledgement>,
+) -> AppResult<()> {
+    if !rows.iter().any(|row| row.id == card)
+        && let Some(row) = db
+            .collection::<AssistantAcknowledgement>(ACKS)
+            .find_one(doc! {"_id":card,"user_id":user,"conversation_id":conversation})
+            .await?
+    {
+        rows.push(row);
+        rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    }
+    Ok(())
+}
+
 /// Cards the owner allowed or denied after `since`, oldest first and bounded.
 /// Each new turn reports decisions made since the previous user message, so a
 /// decision made while a turn was still running reaches the model exactly once.
@@ -498,6 +518,11 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         let target = match row.kind.as_str() {
             "service" => format!("service {}", identifier(row.service_slug.as_deref())),
             "account" => "account management".into(),
+            "skills" if row.status == "allowed" => "skill proposal: NyxBot attaches it after the user confirms a separate card; do not request it again".into(),
+            "skills" => "skill proposal".into(),
+            "operations" => "operation scope".into(),
+            "machine" => "machine access".into(),
+            "saved_login" => "saved login access".into(),
             _ => format!(
                 "action {} (acknowledgement_id {})",
                 identifier(row.tool_name.as_deref()),
@@ -506,10 +531,19 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         };
         note.push_str(&format!("\n- {}: {target}", identifier(Some(&row.status))));
     }
-    note.push_str(
-        "\nAllowed items are usable now; retry an allowed action with its acknowledgement_id. \
-        Do not request denied items again unless the user asks.",
-    );
+    if rows
+        .iter()
+        .any(|row| row.status == "allowed" && !matches!(row.kind.as_str(), "skills" | "action"))
+    {
+        note.push_str("\nAllowed services, account access, machine access, saved logins and operation scopes are usable now.");
+    }
+    if rows
+        .iter()
+        .any(|row| row.status == "allowed" && row.kind == "action")
+    {
+        note.push_str("\nRetry an allowed action with its acknowledgement_id.");
+    }
+    note.push_str("\nDo not request denied items again unless the user asks.");
     note
 }
 
@@ -609,19 +643,69 @@ pub async fn request_tracked(
     request_tracked_with_machine_context(db, chat, request, None).await
 }
 
+/// Initiating identity retained by a durable authored-draft claim. Recovery
+/// must not bind the original confirmation to a later voice or trigger turn.
+#[derive(Clone)]
+pub struct RequestOrigin {
+    pub requested_turn_id: Option<String>,
+    pub voice_request_id: Option<String>,
+    pub trigger_run_id: Option<String>,
+}
+
+/// Insert or reuse a card in a caller-owned transaction. The caller must
+/// commit its claim in this same transaction; this helper performs the usual
+/// authority fence, deduplication and voice-confirmation bookkeeping.
+pub async fn request_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    request: Request<'_>,
+    origin: Option<&RequestOrigin>,
+    session: &mut ClientSession,
+) -> AppResult<AssistantAcknowledgement> {
+    let candidate = prepare_request_candidate(db, chat, request, None).await?;
+    Ok(
+        request_candidate_in_session(db, chat, &candidate, origin, session)
+            .await?
+            .0,
+    )
+}
+
 async fn request_tracked_with_machine_context(
     db: &Database,
     chat: &ChatAuthority,
     request: Request<'_>,
     machine_context: Option<crate::models::machine_access::HumanContextAction>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
+    expire(db, &chat.user_id, &chat.conversation_id).await?;
+    let candidate = prepare_request_candidate(db, chat, request, machine_context).await?;
+    let db = db.clone();
+    let chat = chat.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation = Box::pin(request_candidate_in_session(
+                &db, &chat, &candidate, None, session,
+            ))
+            .await;
+            mutations::transaction_result(operation)
+        })
+        .await
+        .map_err(mutations::map_transaction_error)
+}
+
+async fn prepare_request_candidate(
+    db: &Database,
+    chat: &ChatAuthority,
+    request: Request<'_>,
+    machine_context: Option<crate::models::machine_access::HumanContextAction>,
+) -> AppResult<AssistantAcknowledgement> {
     if request.kind == "operations" {
         Box::pin(
             super::agent_operation_scope_service::require_configuration_enabled(db, &chat.user_id),
         )
         .await?;
     }
-    expire(db, &chat.user_id, &chat.conversation_id).await?;
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
@@ -700,93 +784,165 @@ async fn request_tracked_with_machine_context(
         .await?;
         candidate.operation_contract_digest = Some(digest);
     }
-    let db = db.clone();
-    let chat = chat.clone();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            // Do not embed the card transaction in MongoDB's retry frames.
-            let operation = Box::pin(async {
-                let (conversation, _, access) = Box::pin(fence(&db, &chat, session)).await?;
-                // Covers every permission kind, including machine/skill/scope
-                // requests and internal callers without an auth snapshot.
-                // Reuse the access already resolved or reused by the fence.
-                if orchestrated && access.as_ref().is_some_and(|a| !a.can_maintain()) {
-                    return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
-                }
-                let mut row = candidate.clone();
-                // Ordinary denials stay bound to the initiating user/orchestrator
-                // message across event turns. Only trigger runs use the active turn.
-                let mut initiating_filter = doc! {
-                    "conversation_id": &conversation.id, "user_id": &chat.user_id,
-                    "role": {"$in": ["user", "orchestrator"]},
-                    "steering": bson::Bson::Null,
-                    "execution_pending": {"$ne": true},
-                };
-                if let Some(seq) = conversation.active_turn.as_ref().and_then(|t| t.initiating_message_seq) {
-                    initiating_filter.insert("seq", doc! {"$lte": seq});
-                }
-                let started_by = db
-                    .collection::<AssistantMessage>(MESSAGES)
-                    .find_one(initiating_filter)
-                    .sort(doc! {"seq": -1})
-                    .session(&mut *session)
-                    .await?;
-                row.requested_turn_id = conversation.active_turn.as_ref()
-                    .filter(|turn| turn.trigger_run_id.is_some())
-                    .map(|turn| turn.turn_id.clone())
-                    .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
-                row.voice_request_id = conversation.active_turn.as_ref().and_then(|t| t.voice_request_id.clone());
-                row.trigger_run_id = conversation.active_turn.as_ref().and_then(|turn| turn.trigger_run_id.clone());
-                if row.decider == "orchestrator" {
-                    row.request_excerpt = started_by.map(|message| {
-                        format!(
-                            "{} said: {}",
-                            message.role,
-                            super::assistant_nyxagent::excerpt(&message.text, 600)
-                        )
-                    });
-                }
-                let filter = doc! {"conversation_id": &chat.conversation_id,
-                "user_id": &chat.user_id, "api_key_id": &chat.api_key_id, "kind": &row.kind,
-                "service_id": &row.service_id, "tool_name": &row.tool_name,
-                "arguments_digest": &row.arguments_digest,
-                "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
-                    {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
-                // A valid allowed action can be reused only by explicitly presenting its id.
-                if let Some(mut existing) = db
-                    .collection::<AssistantAcknowledgement>(ACKS)
-                    .find_one(filter)
-                    .sort(doc! {"created_at": -1})
-                    .session(&mut *session)
-                    .await?
-                {
-                    // A pending text card may be encountered again from voice.
-                    // Keep its digest/expiry/initiating identity, and attach the
-                    // server continuation before returning that same record.
-                    if existing.status == "pending" && existing.voice_request_id.is_none()
-                        && row.voice_request_id.is_some() && row.decider == "user" {
-                        existing.voice_request_id = row.voice_request_id.clone();
-                        db.collection::<AssistantAcknowledgement>(ACKS)
-                            .replace_one(doc! {"_id":&existing.id},&existing)
-                            .session(&mut *session).await?;
-                        super::assistant_voice::await_confirmation(&db, &existing, session).await?;
-                    }
-                    return Ok((existing, false));
-                }
-                db.collection::<AssistantAcknowledgement>(ACKS)
-                    .insert_one(&row)
-                    .session(&mut *session)
-                    .await?;
-                super::assistant_voice::await_confirmation(&db, &row, session).await?;
-                Ok((row, true))
-            })
-            .await;
-            mutations::transaction_result(operation)
-        })
-        .await
-        .map_err(mutations::map_transaction_error)
+    Ok(candidate)
+}
+
+async fn request_candidate_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    candidate: &AssistantAcknowledgement,
+    origin: Option<&RequestOrigin>,
+    session: &mut ClientSession,
+) -> AppResult<(AssistantAcknowledgement, bool)> {
+    let now = candidate.created_at;
+    let orchestrated = candidate.decider == "orchestrator";
+    let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
+    // Covers every permission kind, including machine/skill/scope
+    // requests and internal callers without an auth snapshot.
+    // Reuse the access already resolved or reused by the fence.
+    if orchestrated && access.as_ref().is_some_and(|a| !a.can_maintain()) {
+        return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
+    }
+    // The owner may have allowed the request after the handler's
+    // preflight. Check again under the same conversation fence
+    // that serializes this insert with the decision transaction.
+    if candidate.kind == "skills"
+        && let Some(existing) = db
+            .collection::<AssistantAcknowledgement>(ACKS)
+            .find_one(allowed_skill_filter(
+                chat,
+                candidate.arguments_digest.clone(),
+                now,
+            ))
+            .sort(doc! {"decided_at": -1})
+            .session(&mut *session)
+            .await?
+    {
+        return Ok((existing, false));
+    }
+    let mut row = candidate.clone();
+    // Ordinary denials stay bound to the initiating user/orchestrator
+    // message across event turns. Only trigger runs use the active turn.
+    let mut initiating_filter = doc! {
+        "conversation_id": &conversation.id, "user_id": &chat.user_id,
+        "role": {"$in": ["user", "orchestrator"]},
+        "steering": bson::Bson::Null,
+        "execution_pending": {"$ne": true},
+    };
+    if let Some(seq) = conversation
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.initiating_message_seq)
+    {
+        initiating_filter.insert("seq", doc! {"$lte": seq});
+    }
+    let started_by = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(initiating_filter)
+        .sort(doc! {"seq": -1})
+        .session(&mut *session)
+        .await?;
+    row.requested_turn_id = conversation
+        .active_turn
+        .as_ref()
+        .filter(|turn| turn.trigger_run_id.is_some())
+        .map(|turn| turn.turn_id.clone())
+        .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
+    row.voice_request_id = conversation
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.voice_request_id.clone());
+    row.trigger_run_id = conversation
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.trigger_run_id.clone());
+    if let Some(origin) = origin {
+        row.requested_turn_id = origin.requested_turn_id.clone();
+        row.voice_request_id = origin.voice_request_id.clone();
+        row.trigger_run_id = origin.trigger_run_id.clone();
+    }
+    if row.decider == "orchestrator" {
+        row.request_excerpt = started_by.map(|message| {
+            format!(
+                "{} said: {}",
+                message.role,
+                super::assistant_nyxagent::excerpt(&message.text, 600)
+            )
+        });
+    }
+    let filter = doc! {"conversation_id": &chat.conversation_id,
+    "user_id": &chat.user_id, "api_key_id": &chat.api_key_id, "kind": &row.kind,
+    "service_id": &row.service_id, "tool_name": &row.tool_name,
+    "arguments_digest": &row.arguments_digest,
+    "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+        {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
+    // A valid allowed action can be reused only by explicitly presenting its id.
+    if let Some(mut existing) = db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find_one(filter)
+        .sort(doc! {"created_at": -1})
+        .session(&mut *session)
+        .await?
+    {
+        // A pending text card may be encountered again from voice.
+        // Keep its digest/expiry/initiating identity, and attach the
+        // server continuation before returning that same record.
+        if existing.status == "pending"
+            && existing.voice_request_id.is_none()
+            && row.voice_request_id.is_some()
+            && row.decider == "user"
+        {
+            existing.voice_request_id = row.voice_request_id.clone();
+            db.collection::<AssistantAcknowledgement>(ACKS)
+                .replace_one(doc! {"_id":&existing.id}, &existing)
+                .session(&mut *session)
+                .await?;
+            super::assistant_voice::await_confirmation(db, &existing, session).await?;
+        }
+        return Ok((existing, false));
+    }
+    db.collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(&row)
+        .session(&mut *session)
+        .await?;
+    super::assistant_voice::await_confirmation(db, &row, session).await?;
+    Ok((row, true))
+}
+
+/// An advisory skill approval remains pending attachment across later turns.
+pub const SKILL_REQUEST_ALLOW_WINDOW_HOURS: i64 = 24;
+
+fn allowed_skill_filter(
+    chat: &ChatAuthority,
+    digest: Option<String>,
+    now: DateTime<Utc>,
+) -> bson::Document {
+    doc! {"conversation_id": &chat.conversation_id,
+    "user_id": &chat.user_id, "api_key_id": &chat.api_key_id,
+    "kind": "skills", "status": "allowed", "arguments_digest": digest,
+    "decided_at": {"$gt": bson::DateTime::from_chrono(now - Duration::hours(SKILL_REQUEST_ALLOW_WINDOW_HOURS))}}
+}
+
+pub fn allowed_skill_result(row: &AssistantAcknowledgement) -> Value {
+    json!({"status":"allowed_pending_attachment", "request_id":row.id,
+        "instructions":"This request was already allowed. NyxBot resolves the exact version and asks the owner to confirm attaching it on a separate card. Do not call request_agent_skills again for this request. Continue without it and check nyxid__get_agent_skills later."})
+}
+
+pub async fn allowed_skill_request(
+    db: &Database,
+    chat: &ChatAuthority,
+    arguments: &Value,
+) -> AppResult<Option<Value>> {
+    let row = db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find_one(allowed_skill_filter(
+            chat,
+            Some(arguments_digest(arguments)),
+            Utc::now(),
+        ))
+        .sort(doc! {"decided_at": -1})
+        .await?;
+    Ok(row.as_ref().map(allowed_skill_result))
 }
 
 pub fn refusal(row: &AssistantAcknowledgement) -> Value {
@@ -807,7 +963,7 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
                 card unless the user explicitly asks again in a later message."
             .into()
     } else if row.authored_skill.is_some() {
-        "End your turn. The owner must review the complete draft on its NyxID card. NyxID publishes and pins after approval; do not retry or accept a chat reply as publication approval.".into()
+        "End your turn. The review card is in the NyxID app conversation. If the owner is in a chat app or group, or cannot find the card, send review_url as a full URL. Only the card, after reviewing all files, approves publication; a chat reply such as allow never approves. NyxID publishes and pins after approval without a tool retry.".into()
     } else if row.voice_request_id.is_some() {
         "NyxID is awaiting the owner's confirmation of this exact action. End this turn; \
         the voice coordinator reads the server summary and handles the owner's decision. \
@@ -842,6 +998,20 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         && row.authored_skill.is_none()
     {
         value["confirm_phrase"] = json!(format!("yes {}", confirm_code(&row.id)));
+    }
+    value
+}
+
+pub fn refusal_with_frontend(row: &AssistantAcknowledgement, frontend: &str) -> Value {
+    let mut value = refusal(row);
+    if row.authored_skill.is_some() {
+        value["review_url"] = json!(
+            super::assistant_links::AssistantPage::ReviewCard {
+                conversation: &row.conversation_id,
+                card: &row.id,
+            }
+            .url(frontend)
+        );
     }
     value
 }
@@ -1351,6 +1521,15 @@ pub(crate) async fn decide_with_voice(
                     .replace_one(filter, &row)
                     .session(&mut *session)
                     .await?;
+                if allow && row.kind == "skills" && !by_nyxbot {
+                    // Internal outbox marker: the saved approval always has
+                    // durable work, even if the deciding process exits before
+                    // it can notify NyxBot. Consumption clears it in the same
+                    // transaction that binds the event to a NyxBot turn.
+                    db.collection::<bson::Document>(ACKS)
+                        .update_one(doc! {"_id": &row.id}, doc! {"$set": {"skill_notification_pending": true}})
+                        .session(&mut *session).await?;
+                }
                 if let Some(run_id) = &row.trigger_run_id {
                     // Durable wakeup in the decision transaction. Settlement
                     // reads card state and writes this same work row, preventing
@@ -1381,6 +1560,9 @@ pub(crate) async fn decide_with_voice(
         .map_err(mutations::map_transaction_error)?;
     Ok(row)
 }
+
+#[path = "assistant_skill_notifications.rs"]
+pub mod skill_notifications;
 
 /// Atomically consume a digest-bound action. Failures never fall through to execution.
 pub async fn consume_action(

@@ -46,12 +46,53 @@ async fn setup_options(
     failures: Vec<&'static str>,
     images: bool,
 ) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
+    setup_options_with_tools(
+        error,
+        delay,
+        failures,
+        images,
+        0,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await
+}
+async fn setup_options_with_tools(
+    error: Option<(u16, &'static str)>,
+    delay: Duration,
+    failures: Vec<&'static str>,
+    images: bool,
+    tool_rounds: usize,
+    capability_calls: Arc<AtomicUsize>,
+) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
+    setup_options_with_tool_gate(
+        error,
+        delay,
+        failures,
+        images,
+        tool_rounds,
+        capability_calls,
+        None,
+    )
+    .await
+}
+
+async fn setup_options_with_tool_gate(
+    error: Option<(u16, &'static str)>,
+    delay: Duration,
+    failures: Vec<&'static str>,
+    images: bool,
+    tool_rounds: usize,
+    capability_calls: Arc<AtomicUsize>,
+    response_gate: Option<Arc<tokio::sync::Semaphore>>,
+) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database("nyxa_http").await;
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
         .insert_one(test_user(OWNER, UserType::Person))
         .await
         .unwrap();
+    let state = test_app_state(db.clone());
+    let image_state = state.clone();
     let calls: Captures = Arc::new(Mutex::new(vec![]));
     let sink = calls.clone();
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -59,13 +100,33 @@ async fn setup_options(
         "/v1/responses",
         post(
             move |uri: Uri, headers: HeaderMap, Json(body): Json<Value>| {
+                let image_state = image_state.clone();
                 let sink = sink.clone();
                 let attempts = attempts.clone();
                 let failures = failures.clone();
+                let response_gate = response_gate.clone();
                 async move {
                     sink.lock().await.push(Capture { uri, headers, body });
                     let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                    let failure = failures.get(attempt).copied();
+                    let failure = failures.get(attempt).copied().filter(|code| !code.is_empty());
+                    let multipart = matches!(failure, Some("multipart_success" | "multipart_budget"));
+                    let delay_first = matches!(failure, Some("delay_before_image" | "delay_image_success" | "delay_image_failure"));
+                    let metadata_failure = failure == Some("metadata_failure");
+                    let failure = match failure {
+                        Some("multipart_success" | "delay_image_success" | "metadata_failure") => None,
+                        Some("multipart_budget") => Some("tool_budget_exhausted"),
+                        Some("delay_image_failure") => Some("upstream_error"),
+                        other => other,
+                    };
+                    if attempt < tool_rounds {
+                        let row = image_state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                            .find_one(doc! {"user_id":OWNER,"active_turn.turn_id":{"$exists":true}}).await.unwrap().unwrap();
+                        engine::attach_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
+                            "camera__snapshot", "image/png", b"fixture pixels").await.unwrap();
+                    }
+                    if failure == Some("invalid_stream") {
+                        return (StatusCode::OK, "not an event stream").into_response();
+                    }
                     if failure == Some("http_not_found") {
                         return (
                             StatusCode::NOT_FOUND,
@@ -86,16 +147,40 @@ async fn setup_options(
                             .into_response();
                     }
                     let stream = async_stream::stream! {
+                        if delay_first && attempt == 1
+                            && let Some(gate) = &response_gate
+                        {
+                            gate.acquire().await.unwrap().forget();
+                        }
+                        if delay_first {
+                            tokio::time::sleep(delay).await;
+                        }
                         let delta = json!({
                             "type": "response.output_text.delta",
                             "sequence_number": 0,
-                            "delta": "Partial answer",
+                            "delta": if multipart { "First item" } else if failure == Some("cancelled") { "Image partial answer" } else { "Partial answer" },
                         });
                         yield Ok::<_, Infallible>(Event::default().data(delta.to_string()));
                         tokio::time::sleep(delay).await;
-                        let completed = json!({
+                        let cjk = "文".repeat(256);
+                        if multipart {
+                            yield Ok::<_, Infallible>(Event::default().data(json!({
+                                "type":"response.output_text.delta","sequence_number":1,"delta":cjk,
+                            }).to_string()));
+                            if let Some(gate) = &response_gate {
+                                gate.acquire().await.unwrap().forget();
+                            }
+                        }
+                        if metadata_failure {
+                            image_state.db.run_command(doc! {
+                                "collMod":crate::models::assistant_conversation::COLLECTION_NAME,
+                                "validator":{"active_turn.attachments.image_input":{"$ne":"sent"}},
+                                "validationLevel":"strict","validationAction":"error",
+                            }).await.unwrap();
+                        }
+                        let mut completed = json!({
                             "type": if failure.is_some() { "response.failed" } else { "response.completed" },
-                            "sequence_number": 1,
+                            "sequence_number": if multipart { 2 } else { 1 },
                             "response": {
                                 "id": RESPONSE,
                                 "conversation": {"id": SESSION},
@@ -106,11 +191,20 @@ async fn setup_options(
                                     "role": "assistant",
                                     "content": [{
                                         "type": "output_text",
-                                        "text": "Partial answer completed",
+                                        "text": if failure == Some("cancelled") { "Image partial answer completed" } else { "Partial answer completed" },
                                     }],
                                 }],
                             },
                         });
+                        if multipart {
+                            completed["response"]["output"] = json!([
+                                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"First item"}]},
+                                {"type":"message","role":"assistant","content":[{"type":"output_text","text":cjk}]},
+                            ]);
+                        }
+                        if metadata_failure {
+                            completed["response"]["output"][0]["content"][0]["text"] = "Image answer survives metadata failure".into();
+                        }
                         yield Ok::<_, Infallible>(Event::default().data(completed.to_string()));
                     };
                     Sse::new(stream).into_response()
@@ -120,18 +214,21 @@ async fn setup_options(
     );
     let upstream = upstream.route(
         "/v1/capabilities",
-        axum::routing::get(move || async move {
-            if images {
-                Json(
-                    json!({"protocol":"nyxagent-input-image-v1", "input_image": {
-                        "version":1, "sources":["nyxid_attachment_url"], "max_images":8,
-                        "max_image_bytes":5_000_000, "max_total_bytes":20_000_000,
-                        "content_types":["image/png", "image/jpeg", "image/gif", "image/webp"]
-                    }}),
-                )
-                .into_response()
-            } else {
-                StatusCode::NOT_FOUND.into_response()
+        axum::routing::get(move || {
+            capability_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if images {
+                    Json(
+                        json!({"protocol":"nyxagent-input-image-v1", "input_image": {
+                            "version":1, "sources":["nyxid_attachment_url"], "max_images":8,
+                            "max_image_bytes":5_000_000, "max_total_bytes":20_000_000,
+                            "content_types":["image/png", "image/jpeg", "image/gif", "image/webp"]
+                        }}),
+                    )
+                    .into_response()
+                } else {
+                    StatusCode::NOT_FOUND.into_response()
+                }
             }
         }),
     );
@@ -154,7 +251,7 @@ async fn setup_options(
         .insert_one(row)
         .await
         .unwrap();
-    (test_app_state(db), calls, server)
+    (state, calls, server)
 }
 fn turn_request(id: Option<&str>) -> Request<Body> {
     let mut req = Request::builder()
@@ -2106,3 +2203,483 @@ mod upload_matrix;
 
 #[path = "assistant_nyxagent_steering_tests.rs"]
 mod steering_tests;
+
+#[tokio::test]
+async fn tool_images_continue_with_capability_bounds_and_graceful_fallback() {
+    for (capable, tool_rounds, failures, expected_requests, sent) in [
+        (true, 0, vec![], 1, 0),
+        (false, 1, vec![], 1, 0),
+        (true, 1, vec![], 2, 1),
+        (true, 3, vec![], 3, 2),
+        (true, 1, vec!["", "http_not_found"], 2, 0),
+        (true, 1, vec!["", "invalid_stream"], 2, 0),
+        (true, 1, vec!["", "upstream_error"], 2, 0),
+        (true, 1, vec!["tool_budget_exhausted"], 3, 1),
+        (true, 1, vec!["turn_timeout"], 3, 1),
+    ] {
+        let capabilities = Arc::new(AtomicUsize::new(0));
+        let (state, calls, server) = setup_options_with_tools(
+            None,
+            Duration::ZERO,
+            failures.clone(),
+            capable,
+            tool_rounds,
+            capabilities.clone(),
+        )
+        .await;
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let stream = String::from_utf8(bytes.to_vec()).unwrap();
+        let row = settled(&state).await;
+        let history = engine::messages(&state.db, OWNER, &row.id, 20, None)
+            .await
+            .unwrap();
+        let reply = history.iter().find(|m| m.role == "assistant").unwrap();
+        assert_eq!(reply.status, "completed", "{stream}");
+        assert_eq!(
+            reply
+                .attachments
+                .iter()
+                .filter(|a| a.image_input.as_deref() == Some("sent"))
+                .count(),
+            sent
+        );
+        assert_eq!(
+            capabilities.load(Ordering::SeqCst),
+            usize::from(tool_rounds > 0)
+        );
+        let requests = calls.lock().await;
+        assert_eq!(requests.len(), expected_requests);
+        let automatic = failures
+            .first()
+            .is_some_and(|f| matches!(*f, "tool_budget_exhausted" | "turn_timeout"));
+        if capable && tool_rounds > 0 {
+            let image_index = if automatic { 2 } else { 1 };
+            if automatic {
+                assert!(requests[1].body["input"].is_string());
+                assert!(
+                    requests[1].headers["idempotency-key"]
+                        .to_str()
+                        .unwrap()
+                        .ends_with(":continuation:1")
+                );
+            }
+            let image_request = &requests[image_index];
+            let content = image_request.body["input"][0]["content"]
+                .as_array()
+                .unwrap();
+            assert_eq!(content[1]["type"], "input_image");
+            let note = content[0]["text"].as_str().unwrap();
+            assert!(note.contains("untrusted tool output"));
+            assert!(note.contains("Do not repeat actions already completed"));
+            assert!(note.contains("only if the images show they are needed"));
+            assert_eq!(image_request.body["conversation"], SESSION);
+            assert!(
+                image_request.headers["idempotency-key"]
+                    .to_str()
+                    .unwrap()
+                    .ends_with(":images:1")
+            );
+            let events: Vec<Value> = stream
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str(data).ok())
+                .collect();
+            let continued = events
+                .iter()
+                .find(|event| event["reason"] == "tool_images")
+                .unwrap();
+            assert_eq!(continued["continuation"], 1);
+            assert_eq!(continued["image_round"], 1);
+        }
+        if !capable {
+            assert!(reply.attachments.iter().all(|a| a.image_input.is_none()));
+        }
+        if tool_rounds == 3 {
+            assert!(reply.attachments[2].image_input.is_none());
+        }
+        if failures.len() == 2 {
+            assert_eq!(reply.text, "Partial answer completed");
+            assert!(stream.contains("image_input_unavailable"));
+            assert!(row.nyxagent_session_id.is_none());
+            assert_eq!(
+                row.context_reset_reason.as_deref(),
+                Some("image_input_unavailable")
+            );
+        }
+        if capable && tool_rounds > 0 && failures.is_empty() {
+            assert!(stream.contains("tool_images"));
+            assert_eq!(
+                reply.text.matches("Partial answer completed").count(),
+                expected_requests
+            );
+        }
+        drop(requests);
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn multipart_terminal_rewrites_preserve_cjk_across_image_and_budget_rounds() {
+    for image_round in [true, false] {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (state, calls, server) = setup_options_with_tool_gate(
+            None,
+            Duration::from_millis(50),
+            vec![if image_round {
+                "multipart_success"
+            } else {
+                "multipart_budget"
+            }],
+            image_round,
+            usize::from(image_round),
+            Arc::new(AtomicUsize::new(0)),
+            Some(gate.clone()),
+        )
+        .await;
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !String::from_utf8_lossy(&bytes).contains("文") {
+                bytes.extend_from_slice(&body.next().await.unwrap().unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        gate.add_permits(1);
+        while let Some(chunk) = body.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+        }
+        let stream = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(stream.contains("turn.completed"));
+        assert!(stream.contains("block.delta"));
+        let row = settled(&state).await;
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        let reply = messages.iter().find(|m| m.role == "assistant").unwrap();
+        assert_eq!(reply.status, "completed");
+        assert_eq!(
+            reply.text,
+            format!(
+                "First item\n\n{}\n\nPartial answer completed",
+                "文".repeat(256)
+            )
+        );
+        let deltas: String = stream
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .filter_map(|event| event["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(deltas.starts_with("First item文"));
+        assert_eq!(calls.lock().await.len(), 2);
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn tool_images_are_unclassified_while_in_flight_then_record_the_outcome() {
+    for success in [true, false] {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (state, calls, server) = setup_options_with_tool_gate(
+            None,
+            Duration::ZERO,
+            vec![
+                "",
+                if success {
+                    "delay_image_success"
+                } else {
+                    "delay_image_failure"
+                },
+            ],
+            true,
+            1,
+            Arc::new(AtomicUsize::new(0)),
+            Some(gate.clone()),
+        )
+        .await;
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while calls.lock().await.len() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let row = engine::list(&state.db, OWNER, 1, None, None)
+            .await
+            .unwrap()
+            .remove(0);
+        let axum::Json(history) = history(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(row.id.clone()),
+            Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        let history = serde_json::to_value(history).unwrap();
+        assert_eq!(
+            history["conversation"]["active_turn"]["attachments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(history["conversation"]["active_turn"]["attachments"][0]["image_input"].is_null());
+        assert!(
+            row.active_turn.as_ref().unwrap().attachments[0]
+                .image_input
+                .is_none()
+        );
+        gate.add_permits(1);
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let row = settled(&state).await;
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        let reply = messages.iter().find(|m| m.role == "assistant").unwrap();
+        assert_eq!(reply.status, "completed");
+        assert_eq!(
+            reply.attachments[0].image_input.as_deref(),
+            Some(if success { "sent" } else { "unavailable" })
+        );
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn optional_image_preparation_read_failure_does_not_start_a_round() {
+    let (mut state, _, server) = setup(None, Duration::ZERO).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let row = settled(&state).await;
+    let credential = credentials::load_existing(&state.db, &state.encryption_keys, OWNER)
+        .await
+        .unwrap()
+        .unwrap();
+    let real_db = state.db.clone();
+    let mut options =
+        mongodb::options::ClientOptions::parse("mongodb://127.0.0.1:1/?directConnection=true")
+            .await
+            .unwrap();
+    options.server_selection_timeout = Some(Duration::from_millis(20));
+    state.db = mongodb::Client::with_options(options)
+        .unwrap()
+        .database("unavailable");
+    let mut images = images::ToolImages::default();
+    assert!(
+        !images
+            .prepare(&state, &test_auth_user(OWNER), &row, &credential, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(images.rounds, 0);
+    assert!(images.fallback.is_none());
+    assert!(images.parts.is_empty());
+    assert_eq!(
+        engine::get(&real_db, OWNER, &row.id)
+            .await
+            .unwrap()
+            .nyxagent_session_id
+            .as_deref(),
+        Some(SESSION)
+    );
+    server.abort();
+    real_db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn successful_image_text_survives_rejected_delivery_metadata() {
+    let (state, calls, server) = setup_options_with_tools(
+        None,
+        Duration::ZERO,
+        vec!["", "metadata_failure"],
+        true,
+        1,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("image_input_unavailable"));
+    let row = settled(&state).await;
+    assert_eq!(row.nyxagent_session_id.as_deref(), Some(SESSION));
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let reply = messages.iter().find(|m| m.role == "assistant").unwrap();
+    assert_eq!(reply.status, "completed");
+    assert_eq!(
+        reply.text,
+        "Partial answer completed\n\nImage answer survives metadata failure"
+    );
+    assert!(reply.attachments[0].image_input.is_none());
+    assert_eq!(calls.lock().await.len(), 2);
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_fences_a_tool_image_round() {
+    for before_first_chunk in [true, false] {
+        let (state, calls, server) = setup_options_with_tools(
+            None,
+            Duration::from_millis(800),
+            if before_first_chunk {
+                vec!["", "delay_before_image"]
+            } else {
+                vec![]
+            },
+            true,
+            1,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await;
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if calls.lock().await.len() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if !before_first_chunk {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let row = state
+            .db
+            .collection::<AssistantConversation>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id":OWNER})
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .db
+            .collection::<AssistantConversation>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"active_turn.stop_requested":true}},
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("cancelled"));
+        let row = settled(&state).await;
+        assert!(row.nyxagent_session_id.is_none());
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        let reply = messages.iter().find(|m| m.role == "assistant").unwrap();
+        assert!(
+            reply.text.starts_with("Partial answer completed"),
+            "{}",
+            reply.text
+        );
+        assert_eq!(reply.status, "failed");
+        assert_eq!(reply.error_code.as_deref(), Some("cancelled"));
+        if !before_first_chunk {
+            assert!(reply.text.ends_with("Partial answer"), "{}", reply.text);
+        }
+        assert_eq!(calls.lock().await.len(), 2);
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn upstream_cancelled_image_round_keeps_completed_text() {
+    let (state, calls, server) = setup_options_with_tools(
+        None,
+        Duration::ZERO,
+        vec!["", "cancelled"],
+        true,
+        1,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("cancelled"));
+    let row = settled(&state).await;
+    let history = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let reply = history.iter().find(|m| m.role == "assistant").unwrap();
+    assert_eq!(
+        reply.text,
+        "Partial answer completed\n\nImage partial answer completed"
+    );
+    assert_eq!(reply.status, "failed");
+    assert_eq!(reply.error_code.as_deref(), Some("cancelled"));
+    assert!(row.nyxagent_session_id.is_none());
+    assert_eq!(calls.lock().await.len(), 2);
+    server.abort();
+    state.db.drop().await.unwrap();
+}

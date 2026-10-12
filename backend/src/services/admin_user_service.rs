@@ -570,6 +570,11 @@ async fn delete_user_cascade_internal(
             .delete_many(user_filter.clone())
             .await?;
     }
+    db.collection::<bson::Document>(
+        crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+    )
+    .delete_many(doc! {"owner_id":target_user_id})
+    .await?;
     // NyxBot settings are keyed by the user ID itself.
     db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
         .update_many(
@@ -1007,6 +1012,7 @@ mod tests {
             .insert_one(&session)
             .await
             .unwrap();
+
         let api_key = crate::services::key_service::create_api_key(
             &db,
             &target_id,
@@ -1100,6 +1106,17 @@ mod tests {
             .await
             .unwrap();
 
+        let claims = db.collection::<bson::Document>(
+            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+        );
+        claims
+            .insert_many([
+                doc! {"_id":"target-draft","owner_id":&target_id},
+                doc! {"_id":"other-draft","owner_id":&admin_id},
+            ])
+            .await
+            .unwrap();
+
         delete_user_cascade(&db, &admin_id, &target_id)
             .await
             .unwrap();
@@ -1117,6 +1134,20 @@ mod tests {
             .await
             .unwrap();
         assert!(sess.is_none());
+        assert!(
+            claims
+                .find_one(doc! {"owner_id":&target_id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            claims
+                .find_one(doc! {"owner_id":&admin_id})
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

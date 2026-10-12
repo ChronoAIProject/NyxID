@@ -266,7 +266,7 @@ pub async fn approve(
     } else {
         let card = acks::request(&state.db, &chat, acks::Request { kind: "action", service: None, tool: Some("nyxid__approve_agent_learning"), arguments: Some(&args), summary: "Publish this reviewed private Ornn skill and attach its exact pinned version to the agent.", platform: false }).await?;
         return Ok(Json(
-            json!({"status":"confirmation_required", "acknowledgement":acks::refusal(&card)}),
+            json!({"status":"confirmation_required", "acknowledgement":acks::refusal_with_frontend(&card, &state.config.frontend_url)}),
         ));
     }
     Ok(Json(

@@ -121,6 +121,68 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
+  it("retains a linked card during internal refresh and pagination, then clears its scope", async () => {
+    const card = "12345678-1234-4123-8123-1234567890ab";
+    const requests: string[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      requests.push(endpoint);
+      const page = history();
+      if (endpoint.includes(`card=${card}`)) {
+        page.acknowledgements = [{
+          id: card, kind: "action", status: "expired", summary: "Review old draft",
+          decider: "user", decided_by: null, reason: null, service_slug: null,
+          service_name: null, tool_name: null, created_at: start,
+          decided_at: null, expires_at: start,
+        }];
+      }
+      return json(page);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id, undefined, card);
+    await transport.history(id);
+    const older = await transport.history(id, 2);
+    expect(older.acknowledgements.map((row) => row.id)).toEqual([card]);
+    expect(requests.slice(0, 3).every((endpoint) => endpoint.includes(`card=${card}`))).toBe(true);
+    await transport.history(id, undefined, null);
+    await transport.history(id);
+    expect(requests.slice(3).every((endpoint) => !endpoint.includes("card="))).toBe(true);
+    await transport.history(id, undefined, card);
+    transport.clear();
+    await transport.history(id);
+    expect(requests.at(-1)).not.toContain("card=");
+  });
+
+  it("rejects a delayed refresh after the selected review card changes", async () => {
+    let finishOld!: (response: Response) => void;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) =>
+      endpoint.includes("card=old")
+        ? new Promise<Response>((resolve) => { finishOld = resolve; })
+        : json(history());
+    const transport = new NyxAgentTransport();
+    const old = transport.history(id, undefined, "old");
+    const rejected = expect(old).rejects.toMatchObject({ name: "AbortError" });
+    await transport.history(id, undefined, "new");
+    finishOld(json(history()));
+    await rejected;
+    await transport.history(id);
+  });
+
+  it.each([false, true])("loads a linked card with older-replica fallback=%s", async (oldReplica) => {
+    const card = "12345678-1234-4123-8123-1234567890ab";
+    const requests: string[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      requests.push(endpoint);
+      if (oldReplica && endpoint.includes("&card=")) return json({ message: "Unknown field card" }, 400);
+      return json(history());
+    };
+    const transport = new NyxAgentTransport();
+    const page = await transport.history(id, undefined, card);
+    expect(page.conversation.id).toBe(id);
+    expect(requests[0]).toContain(`&card=${card}`);
+    expect(requests).toHaveLength(oldReplica ? 2 : 1);
+    if (oldReplica) expect(requests[1]).not.toContain("&card=");
+  });
+
   it("adopts server identity, decodes fragmented SSE and a live inline notice, then reads history", async () => {
     const requests: { endpoint: string; body?: BodyInit | null }[] = [];
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
@@ -277,7 +339,7 @@ describe("NyxAgent server-backed transport", () => {
           { id: "t2", label: "github__list_issues", status: "running", started_at: reset, ended_at: null },
         ],
         attachments: [
-          { id: "img-1", content_type: "image/jpeg", size: 10, label: "lobby-camera__snapshot" },
+          { id: "img-1", content_type: "image/jpeg", size: 10, label: "lobby-camera__snapshot", origin: "tool", image_input: "unavailable" },
         ],
       };
       return json(page);
@@ -299,6 +361,8 @@ describe("NyxAgent server-backed transport", () => {
         endpoint: `/assistant/nyxagent/conversations/${id}/attachments/img-1`,
         contentType: "image/jpeg",
         label: "lobby-camera__snapshot",
+        origin: "tool",
+        imageInput: "unavailable",
       },
     ]);
     await transport.stop(id);

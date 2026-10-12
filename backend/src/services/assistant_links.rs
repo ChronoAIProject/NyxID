@@ -5,6 +5,10 @@ pub enum AssistantPage<'a> {
         tab: &'a str,
     },
     NyxBotSettings,
+    ReviewCard {
+        conversation: &'a str,
+        card: &'a str,
+    },
     Billing {
         tab: &'a str,
     },
@@ -38,6 +42,12 @@ impl AssistantPage<'_> {
                 query
                     .append_pair("panel", "settings")
                     .append_pair("panelTab", tab);
+                "/assistant".into()
+            }
+            Self::ReviewCard { conversation, card } => {
+                query
+                    .append_pair("c", conversation)
+                    .append_pair("card", card);
                 "/assistant".into()
             }
             Self::NyxBotSettings => {
@@ -146,6 +156,13 @@ mod tests {
             (
                 Settings { tab: "privacy" },
                 "/assistant?panel=settings&panelTab=privacy",
+            ),
+            (
+                ReviewCard {
+                    conversation: "nyxa-test",
+                    card: "a&b",
+                },
+                "/assistant?c=nyxa-test&card=a%26b",
             ),
             (NyxBotSettings, "/assistant?panel=nyxbot"),
             (

@@ -63,15 +63,33 @@ NyxBot must apply it through `set_agent_skills`, which still requires the owner
 card for external additions or re-pins. No permission decision alone attaches
 external content. Owner UI writes are explicit owner actions.
 
+After the owner allows a specialist's request, NyxID wakes the assigning NyxBot
+thread (or its home thread) with `skill_request_allowed`, including the immutable
+agent ID, request ID and a bounded summary of the requested roots. The saved
+owner decision retains a durable notification marker until a NyxBot turn
+consumes its event. The assistant sweep retries after restart, routing failure,
+or bounded event-queue eviction; concurrent retries reuse the same event. NyxBot previews
+each root with `preview_agent_skill` to obtain complete pins and calls
+`set_agent_skills` at the current revision; the owner then receives
+a separate attachment card. Trigger-run skill requests also wake NyxBot; their
+specialist resumes through the existing trigger flow. The specialist continues
+without the skill and may
+check `get_agent_skills` later; it must never re-request after an allow. An
+identical request in that conversation within 24 hours of allowance returns
+`allowed_pending_attachment` without another card or wake. A NyxBot decision
+already has the agent ID and summary and does not enqueue another NyxBot event.
+
 Audit contains agent/skill IDs, versions, revisions and counts only. No package
 content, credentials, request bodies or external descriptions enter audit or
 Debug output.
 
 ## Rollout
 
-No feature flag is needed: old replicas safely omit skill guidance and preserve
-the sibling fields on grant updates. Deploy new replicas normally. There is no
-new permission or execution boundary that an old replica can fail open.
+For the base B2 skill fields, no feature flag is needed: old replicas safely
+omit skill guidance and preserve sibling fields on grant updates. Those base
+fields support a normal rolling deploy and add no permission boundary that an
+old replica can fail open. The durable skill-approval outbox and authored-draft
+claims require the coordinated backend rollout described below.
 
 ## Interfaces
 
@@ -98,6 +116,25 @@ only under the existing default-off `assistant:agent-learning` flag. Authored
 drafts share L1's encrypted review store and publisher; they do not enroll the
 agent in automatic learning. Description is role/scope; persona is tone/style;
 skills contain repeatable procedures, references, checklists and templates.
+
+Draft results and authored-card refusals include an absolute `review_url` to
+`/assistant?c={conversation_id}&card={acknowledgement_id}`. Send that full URL in
+chat apps or groups, or whenever the owner cannot find the card. The app loads
+and highlights the exact card, including hidden group member threads. Group
+pending actions expose **Review draft**, never a chat confirmation or Allow/Deny.
+Only the owner can review all files and approve on the full card; a chat reply
+such as "allow" never approves publication.
+
+Identical pending, never-dispatched drafts reuse their original proposal/card
+across turns and concurrent threads while the original owner's conversation and
+its bound authoring key remain valid. An expired card
+returns the same link and **Request a new confirmation** instructions; no new
+card is created automatically. A durable fingerprint claim recovers interrupted
+preparation in its original conversation without creating another proposal.
+Changed content or an unusable original review surface creates a new draft. Learning
+status/list/run tools accept NyxBot's immutable UUID with the same maintain ACL;
+proposal listings include the latest card ID, status, expiry and exact review URL.
+Authoring pilot recipients can list their drafts without enabling automatic learning.
 
 The card displays every text file and the generated publication frontmatter.
 One approval packages server-side, privately publishes with the approving
@@ -171,3 +208,37 @@ Another registry adapter would implement:
 Legacy recovery (`assistant_learning_recovery.rs`) sits above this boundary: it
 decides eligibility, fences and audits, and calls only the publication module
 for registry reads. No registry response detail reaches an admin.
+
+The durable skill-approval outbox and authored-draft generation claims require
+all backend replicas and assistant workers to run this version before enabling
+or resuming the corresponding workflows. During rollout, pause authoring and
+skill approvals, drain active assistant turns, upgrade every writer and sweeper,
+then resume. Existing API shapes and stored drafts remain readable; older writers
+do not participate in claim serialization or transactional event consumption.
+Running these workflows across mixed backend versions can duplicate drafts or
+replay a notification. The image-input capability gate and card-query fallback
+continue to support older NyxAgent deployments and frontends independently.
+
+For this coordinated upgrade, first disable `assistant:agent-learning` for
+all affected users using the existing feature-flag administration. Quiesce
+assistant and approval ingress at the deployment's load balancer, including
+channel webhook ingress; the learning flag alone does not pause skill requests
+or owner decisions. Let admitted assistant turns and publication requests finish,
+then stop the old backend/assistant worker processes so no old sweeper can drain
+or enqueue events. Upgrade every backend writer and worker before restoring
+traffic and the flag. This requires a maintenance window; there is no automatic
+mixed-version activation fence for these two new internal workflows.
+
+Before rollback, quiesce the same ingress and drain/stop the new workers.
+An older binary leaves undelivered skill-notification markers untouched and
+cannot deliver them; retain those rows and upgrade again to recover delivery.
+Do not run old and new workers simultaneously. A marker records notification
+admission to a NyxBot turn, not successful attachment: upstream turn failure can
+still require the owner to resume NyxBot, and attachment always requires its
+separate owner review card.
+
+When source or persisted destination authority is temporarily unavailable,
+keep the owner decision and defer notification retries for 60 seconds, doubling
+to a one-hour cap. Restored access is rechecked at the next due sweep (at most
+one hour plus sweep backlog). Busy threads and event-budget limits retain normal
+queued-event handling; database failures do not become authority deferrals.

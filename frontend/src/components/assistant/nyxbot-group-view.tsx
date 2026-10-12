@@ -7,7 +7,7 @@ import {
   useState,
   type UIEvent,
 } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
@@ -109,6 +109,7 @@ export function GroupMessageRow({
                 id: item.id,
                 label: item.label,
                 contentType: item.content_type,
+                origin: item.origin || undefined,
                 imageInput: item.image_input ?? undefined,
                 expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
@@ -390,6 +391,7 @@ export function GroupPendingActions({
   readonly onAnswer: (text: string) => Promise<void>;
   readonly onDecide?: (action: AssistantGroupPendingAction, decision: "allow" | "deny") => Promise<void>;
 }) {
+  const actorId = useAuthStore((state) => state.user?.id);
   if (!actions.length) return null;
   return (
     // Opaque and above the composer's fade: the transcript scrolls
@@ -414,7 +416,11 @@ export function GroupPendingActions({
               <p className="min-w-0 flex-1 text-12 text-foreground">
                 <span className="font-medium">{who}</span> wants to: {action.summary}
               </p>
-              {action.triggering_person ? <>
+              {action.authored_skill ? (
+                action.acknowledgement_id && (!action.triggering_person || action.triggering_person.id === actorId) ? (
+                  <Button size="sm" variant="outline" asChild><Link to="/assistant" search={{ c: action.conversation_id, card: action.acknowledgement_id }}>Review draft</Link></Button>
+                ) : <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
+              ) : action.triggering_person ? <>
                 <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person.display_name}</span>
                 {action.can_decide ? <>
                   <Button size="sm" variant="outline" disabled={sending} onClick={() => void onDecide?.(action, "deny")}>Deny</Button>

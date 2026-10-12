@@ -4,6 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { GroupPendingActions } from "@/components/assistant/nyxbot-group-view";
 import { assistantGroupMessagesSchema } from "@/schemas/assistant-nyxagent";
 
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tanstack/react-router")>(),
+  Link: ({ to, search, children, ...props }: { to: string; search: Record<string, string>; children: React.ReactNode }) =>
+    <a {...props} href={`${to}?${new URLSearchParams(search).toString()}`}>{children}</a>,
+}));
+
 const action = {
   conversation_id: "nyxa-00000000000000000000000000000001",
   acknowledgement_id: "7b1d2c3e-0000-4000-8000-000000000001",
@@ -83,4 +89,17 @@ it("decides an org card by id instead of posting a confirmation phrase", async (
   await userEvent.click(screen.getByRole("button", { name: "Deny" }));
   expect(onDecide).toHaveBeenLastCalledWith(card, "deny");
   expect(onAnswer).not.toHaveBeenCalled();
+});
+
+it("links authored drafts to file review without any confirmation buttons", () => {
+  const answer = vi.fn();
+  render(<GroupPendingActions actions={[{
+    conversation_id: "nyxa-hidden", acknowledgement_id: "draft-card", summary: "Publish skill",
+    expires_at: "2099-01-01T00:00:00Z", authored_skill: true,
+    review_url: "https://nyx.test/assistant?c=nyxa-hidden&card=draft-card",
+    confirm_phrase: "yes 1234", can_decide: true,
+  }]} members={[]} sending={false} onAnswer={answer} />);
+  expect(screen.getByRole("link", { name: "Review draft" })).toHaveAttribute("href", "/assistant?c=nyxa-hidden&card=draft-card");
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  expect(answer).not.toHaveBeenCalled();
 });

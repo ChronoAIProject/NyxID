@@ -1565,6 +1565,8 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
+                    .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
                     db, &mut agent, session,
                 ))
@@ -1679,6 +1681,13 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
             Err(error) => return Err(error),
         }
     }
+    // Clean derived authoring claims before the parent so a failed cleanup
+    // remains retryable through the existing destroyed-agent purge endpoint.
+    db.collection::<bson::Document>(
+        crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+    )
+    .delete_many(doc! {"agent_id": &agent.id})
+    .await?;
     db.collection::<AssistantAgent>(AGENTS)
         .delete_one(doc! {"_id": &agent.id, "user_id": &agent.user_id})
         .await?;

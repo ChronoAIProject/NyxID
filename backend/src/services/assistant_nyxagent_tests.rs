@@ -1718,3 +1718,25 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
         row.context_reset_at = None;
     }
 }
+
+#[test]
+fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
+    let mut row = stale_test_row(Utc::now());
+    row.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        nyxbot_channel_id: "bot".into(),
+        platform: "telegram".into(),
+        partition: "chat".into(),
+        thread: None,
+    });
+    let note = channel_note(&row);
+    assert!(note.contains("review_url as a full URL"));
+    assert!(note.contains("chat replies cannot approve"));
+    let selection = "pin ".repeat(500);
+    let event = crate::services::assistant_team_service::event(
+        "skill_request_allowed",
+        format!("{selection} Attach it now."),
+        None,
+    );
+    let note = events_text(&[event]);
+    assert!(note.ends_with("Attach it now."));
+}

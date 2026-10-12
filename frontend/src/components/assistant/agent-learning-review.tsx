@@ -207,7 +207,7 @@ export function AgentLearningReview({
                 proposal.card_conversation_id ? (
                   <Link
                     to="/assistant"
-                    search={{ c: proposal.card_conversation_id }}
+                    search={{ c: proposal.card_conversation_id, card: proposal.acknowledgement_id ?? undefined }}
                     className="text-11 text-primary hover:underline"
                   >
                     Open the confirmation card

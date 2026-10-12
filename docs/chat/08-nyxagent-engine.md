@@ -575,7 +575,7 @@ and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
 
 ## Tool images
 
-Machine screenshots and shared images use this same owner-only attachment
+Machine screenshots and shared images use this same encrypted attachment
 pipeline. Machine tool text stays within the 10,000-character result budget;
 desktop streams and owner input use a separate human-only socket and never
 enter tool results. Owner takeover ends the active turn; a durable machine watch
@@ -593,8 +593,8 @@ other type never qualify.
 
 For MCP `tools/call` (direct service tools and `nyx__call_tool`), a verified
 image produces a text note first, because NyxAgent hands the whole result to its
-model as one JSON string truncated at 10,000 characters and cannot pass pixels to
-the model. Callers other than assistant chat keys also get an MCP `image` content
+model as one JSON string truncated at 10,000 characters. Pixels reach capable
+agents through a separate image-input continuation below. Callers other than assistant chat keys also get an MCP `image` content
 block (base64, `mimeType`) after the note, up to 1 MiB (NyxAgent caps a whole MCP
 response at 2 MiB); larger images are described in the note only. Assistant chat
 keys get the note alone: an image block would only push the note past the
@@ -607,9 +607,52 @@ the image is also envelope-encrypted with `EncryptionKeys` into
 onto `active_turn.attachments` (label = the tool identifier, at most 8 per turn;
 the slot is claimed before anything is encrypted or stored). Settlement copies
 the list onto the assistant reply. The note then tells the model the image is
-already displayed under its reply, that it must not claim otherwise, and that it
-cannot see the pixels and so must not describe them.
+already displayed under its reply. NyxID can show it to the model after this
+response when image input is supported; the model must not describe its contents
+before viewing it.
 Attachments are deleted with their conversation and in the admin user purge.
+
+After a successful upstream response, NyxID reads unseen tool images from the
+live turn and checks `nyxagent-input-image-v1`. Text-only turns make no extra
+capability request. A supported agent receives a user message on the same
+session containing NyxID's untrusted-tool-output warning, labels and
+`input_image` attachment URLs. Protocol, version, source, content types and
+per-image/count/total-byte capability limits match user uploads. Omitted images
+are noted. Each image round adds a model call and its normal usage charges.
+
+At most two image rounds run per turn, using `{turn_id}:images:{n}` idempotency
+keys. Newly produced images may enter the second round. Image rounds refresh
+the lease, obey Stop, emit `turn.continuing` with a positive `continuation` counter
+and additive `reason: tool_images` / `image_round` fields, and join
+completed text with the next answer. They do not consume the automatic budget
+continuation allowance. Budget/time continuations retain their existing text-only
+input; unseen tool images wait until a response succeeds, so image failures
+always have a completed answer to preserve. The viewing instruction forbids
+repeating completed actions and permits further actions only when the images
+show they are needed for the user's request.
+
+Only attempted image rounds set reply `image_input` metadata: `sent` on success,
+`unavailable` on failure or for images omitted by that round's capability limits.
+Included images keep the field unset while the request is in flight. Delivery
+metadata writes are best-effort and cannot discard a completed image answer.
+Without image capability, or after both rounds have been spent, remaining tool
+images keep this field unset and retain their existing presentation. Tool-image
+unavailability reads "The agent couldn't view this image." User-upload advice
+is unchanged.
+
+The thread-key `GET /api/v1/assistant-attachments/{id}/content` endpoint serves
+a tool image only to its producing conversation's current live, non-stopped
+turn, with the same owner, turn ID and still-bound credential. Org-agent access
+uses the existing conversation resolver. A guest may see images produced in
+that same guest turn, never another turn's images. Retention and image MIME
+checks apply; other contexts remain not-found-shaped. Human attachment access
+is unchanged.
+
+Deploy all NyxID replicas for consistent image fetching. Agents without the
+capability keep one text-only response. If an image continuation fails (including
+an old replica returning 404 on its image fetch), the turn settles with the
+already completed answer and an unavailable notice. The failed upstream binding
+is cleared so the next turn starts from a recap instead of a damaged session.
 
 `GET /conversations/{id}/attachments/{attachment_id}` is owner-only on the
 human-only router (`/assistant` is already denied to delegated `account:read`),

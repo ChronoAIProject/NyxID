@@ -415,6 +415,60 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
     Err(missing())
 }
 
+/// Tool pixels belong only to the producing live turn, including a guest turn.
+async fn tool_image_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<Option<(String, Vec<u8>)>> {
+    if chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
+        return Err(missing());
+    }
+    let thread = if let Some(access) = chat.org_agent_access.as_deref() {
+        access
+            .conversation(db, &chat.user_id, &chat.conversation_id)
+            .await?
+    } else {
+        engine::get(db, &chat.user_id, &chat.conversation_id).await?
+    };
+    let active = engine::live_turn(&thread, Utc::now())
+        .filter(|turn| !turn.stop_requested && Some(&turn.turn_id) == chat.turn_id.as_ref())
+        .ok_or_else(missing)?;
+    if thread.credential_api_key_id != chat.api_key_id {
+        return Err(missing());
+    }
+    let filter = doc! {"_id":id, "user_id":&chat.user_id,
+    "conversation_id":&chat.conversation_id,"turn_id":&active.turn_id,
+    "$or":[{"origin":"tool"},{"origin":{"$exists":false}}]};
+    match Box::pin(super::assistant_upload_retention::require_available(
+        db,
+        filter.clone(),
+    ))
+    .await
+    {
+        Ok(()) => {}
+        Err(AppError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let row = db
+        .collection::<crate::models::assistant_attachment::AssistantAttachment>(COLLECTION_NAME)
+        .find_one(filter.clone())
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if !row.content_type.starts_with("image/") {
+        return Err(missing());
+    }
+    let bytes = keys.decrypt(&row.data_encrypted).await?;
+    Box::pin(super::assistant_upload_retention::require_available(
+        db, filter,
+    ))
+    .await?;
+    Ok(Some((row.content_type, bytes)))
+}
+
 pub async fn chat_bytes(
     db: &Database,
     keys: &EncryptionKeys,
@@ -422,6 +476,9 @@ pub async fn chat_bytes(
     id: &str,
     image_only: bool,
 ) -> AppResult<(String, Vec<u8>)> {
+    if image_only && let Some(image) = tool_image_bytes(db, keys, chat, id).await? {
+        return Ok(image);
+    }
     let row = for_chat(db, chat, id).await?;
     if image_only && !row.content_type.starts_with("image/") {
         return Err(missing());
@@ -598,6 +655,23 @@ pub fn image_plan(
     capabilities: &Value,
     base: &str,
 ) -> (Vec<Value>, Vec<String>) {
+    image_plan_for_origin(items, capabilities, base, "user_upload")
+}
+
+pub fn tool_image_plan(
+    items: &[TurnAttachment],
+    capabilities: &Value,
+    base: &str,
+) -> (Vec<Value>, Vec<String>) {
+    image_plan_for_origin(items, capabilities, base, "tool")
+}
+
+fn image_plan_for_origin(
+    items: &[TurnAttachment],
+    capabilities: &Value,
+    base: &str,
+    origin: &str,
+) -> (Vec<Value>, Vec<String>) {
     let cap = &capabilities["input_image"];
     let enabled = capabilities["protocol"] == "nyxagent-input-image-v1"
         && cap["version"] == 1
@@ -609,7 +683,7 @@ pub fn image_plan(
     let mut total = 0u64;
     for item in items
         .iter()
-        .filter(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))
+        .filter(|a| a.origin == origin && a.content_type.starts_with("image/"))
     {
         let bytes = item.size.max(0) as u64;
         if enabled
@@ -1204,9 +1278,12 @@ mod integration_tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            chat_bytes(db, keys, &chat, &image.id, true).await.is_err(),
-            "Tool images keep their owner-only contract"
+        assert_eq!(
+            chat_bytes(db, keys, &chat, &image.id, true)
+                .await
+                .unwrap()
+                .1,
+            png
         );
         assert_eq!(
             chat_bytes(db, keys, &chat, &document.id, false)
@@ -1348,5 +1425,186 @@ mod integration_tests {
         );
         assert!(IMAGE_FALLBACK.contains("cannot view"));
         assert!(IMAGE_FALLBACK.contains("nyx__machine_save_attachment"));
+    }
+    #[tokio::test]
+    async fn tool_image_content_is_fenced_by_live_turn_owner_key_type_and_retention() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let (state, user, id) = fixture().await;
+        let db = &state.db;
+        let row = engine::begin_turn(db, &user, &request(&id, vec![]), &state.encryption_keys)
+            .await
+            .unwrap();
+        let chat = acks::for_key(db, &user, Some(&row.credential_api_key_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let image = engine::attach_image(
+            db,
+            &state.encryption_keys,
+            &user,
+            &id,
+            "snapshot",
+            "image/png",
+            b"pixels",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let credential = super::super::assistant_agent_credential_service::load_for_conversation(
+            db,
+            &state.encryption_keys,
+            &user,
+            &id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, router) = crate::routes::build_router();
+        let app = router.with_state(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/assistant-attachments/{}/content",
+                        image.id
+                    ))
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+            b"pixels"
+        );
+        for field in ["user_id", "conversation_id", "turn_id", "api_key_id"] {
+            let mut wrong = chat.clone();
+            match field {
+                "user_id" => wrong.user_id = Uuid::new_v4().to_string(),
+                "conversation_id" => {
+                    wrong.conversation_id = format!("nyxa-{}", Uuid::new_v4().simple())
+                }
+                "turn_id" => wrong.turn_id = Some(Uuid::new_v4().to_string()),
+                _ => wrong.api_key_id = Uuid::new_v4().to_string(),
+            }
+            assert!(
+                matches!(
+                    chat_bytes(db, &state.encryption_keys, &wrong, &image.id, true).await,
+                    Err(AppError::NotFound(_))
+                ),
+                "{field}"
+            );
+        }
+        let threads =
+            db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+        threads
+            .update_one(doc! {"_id":&id}, doc! {"$set":{"guest_turn":true}})
+            .await
+            .unwrap();
+        let mut guest = chat.clone();
+        guest.guest = true;
+        assert_eq!(
+            chat_bytes(db, &state.encryption_keys, &guest, &image.id, true)
+                .await
+                .unwrap()
+                .1,
+            b"pixels"
+        );
+        threads
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"active_turn.stop_requested":true}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            chat_bytes(db, &state.encryption_keys, &guest, &image.id, true).await,
+            Err(AppError::NotFound(_))
+        ));
+        threads
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"active_turn.stop_requested":false,"guest_turn":false}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&image.id},
+                doc! {"$set":{"content_type":"text/plain"}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            chat_bytes(db, &state.encryption_keys, &chat, &image.id, true).await,
+            Err(AppError::NotFound(_))
+        ));
+        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&image.id}, doc! {"$set":{"content_type":"image/png","created_at":bson::DateTime::from_chrono(Utc::now()-Duration::days(400))}}).await.unwrap();
+        let settings = crate::models::assistant_upload_retention::Settings {
+            policy: Some(crate::models::assistant_upload_retention::Policy {
+                tool_image_days: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        db.collection("platform_settings")
+            .insert_one(settings)
+            .await
+            .unwrap();
+        assert!(
+            chat_bytes(db, &state.encryption_keys, &chat, &image.id, true)
+                .await
+                .is_err()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn tool_image_plan_keeps_user_selection_separate_and_enforces_capabilities() {
+        let item = TurnAttachment {
+            id: Uuid::new_v4().to_string(),
+            origin: "tool".into(),
+            content_type: "image/png".into(),
+            size: 10,
+            label: "camera".into(),
+            pages: None,
+            image_input: None,
+        };
+        let cap = json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":1,"max_image_bytes":10,"max_total_bytes":10,"content_types":["image/png"]}});
+        assert!(
+            image_plan(std::slice::from_ref(&item), &cap, "https://test")
+                .0
+                .is_empty()
+        );
+        assert_eq!(
+            tool_image_plan(&[item.clone(), item.clone()], &cap, "https://test")
+                .0
+                .len(),
+            1
+        );
+        for field in [
+            "version",
+            "sources",
+            "max_images",
+            "max_image_bytes",
+            "max_total_bytes",
+            "content_types",
+        ] {
+            let mut bad = cap.clone();
+            bad["input_image"][field] = Value::Null;
+            let (parts, omitted) =
+                tool_image_plan(std::slice::from_ref(&item), &bad, "https://test");
+            assert!(parts.is_empty(), "{field}");
+            assert_eq!(omitted, vec![item.id.clone()]);
+        }
+        let mut bad = cap.clone();
+        bad["protocol"] = "unknown".into();
+        assert!(tool_image_plan(&[item], &bad, "https://test").0.is_empty());
     }
 }

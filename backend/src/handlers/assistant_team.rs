@@ -521,9 +521,6 @@ pub(crate) async fn permission_decided(
     owner: &str,
     request: &AssistantAcknowledgement,
 ) {
-    if request.trigger_run_id.is_some() {
-        return;
-    }
     let allowed = request.status == "allowed";
     let target = match request.kind.as_str() {
         "service" => format!(
@@ -546,19 +543,152 @@ pub(crate) async fn permission_decided(
     let note = format!(
         "{by} {} your request for {target}.{reason} {}",
         if allowed { "allowed" } else { "denied" },
-        if allowed {
+        if allowed && request.kind == "skills" {
+            "NyxBot now resolves the exact version and asks the user to confirm attaching it on a separate card. Do not call request_agent_skills again for this request; continue the task without it and check nyxid__get_agent_skills later."
+        } else if allowed {
             "Retry the call now and continue your task."
         } else {
             "Do not retry it; finish what you can and report."
         }
     );
-    notify(
-        state,
-        owner,
-        &request.conversation_id,
-        vec![team::event("permission_decided", note, None)],
-    )
+    if request.trigger_run_id.is_none() {
+        notify(
+            state,
+            owner,
+            &request.conversation_id,
+            vec![team::event("permission_decided", note, None)],
+        )
+        .await;
+    }
+    if allowed
+        && request.kind == "skills"
+        && request.decided_by.as_deref() != Some("orchestrator")
+        && deliver_skill_notification(state, request).await.is_err()
+    {
+        tracing::debug!("Skill attachment notification deferred");
+    }
+}
+
+/// Replay the durable owner-allow outbox. Failed routing retains its marker
+/// for the next sweep; appending and consuming the event are transactional.
+async fn deliver_skill_notification(
+    state: &AppState,
+    request: &AssistantAcknowledgement,
+) -> AppResult<()> {
+    let Some(attempt) = acks::skill_notifications::attempt(&state.db, request).await? else {
+        return Ok(());
+    };
+    let result: AppResult<()> = async {
+        let owner = &request.user_id;
+        let row = engine::get(&state.db, owner, &request.conversation_id).await?;
+        let agent = team::agent_for_conversation(&state.db, &row).await?;
+        if agent.destroyed_at.is_some() {
+            return Err(AppError::NotFound("Agent not found".into()));
+        }
+        let target = if let Some(stored) = attempt.target() {
+            // An inaccessible/ineligible live destination stays sticky. Only
+            // deletion permits migration to a newly authorized destination.
+            if state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(mongodb::bson::doc! {"_id":stored,"user_id":owner})
+                .await?
+                .is_some()
+            {
+                stored.to_owned()
+            } else {
+                skill_notification_target(state, owner, &row).await?
+            }
+        } else {
+            skill_notification_target(state, owner, &row).await?
+        };
+        let destination = engine::get(&state.db, owner, &target).await?;
+        if destination.role != crate::models::assistant_conversation::AgentRole::Orchestrator
+            || team::agent_for_conversation(&state.db, &destination)
+                .await?
+                .destroyed_at
+                .is_some()
+        {
+            return Err(AppError::Forbidden(
+                "Skill notification destination is unavailable".into(),
+            ));
+        }
+        let mut event = team::event(
+            "skill_request_allowed",
+            skill_request_allowed_note(&agent, request),
+            Some(&agent.id),
+        );
+        event.id = request.id.clone();
+        if let Some(target) =
+            acks::skill_notifications::enqueue(&state.db, request, &target, &attempt, event).await?
+        {
+            Box::pin(wake(state, owner, &target)).await;
+        }
+        Ok(())
+    }
     .await;
+    if let Err(error) = &result {
+        let reason = if error.is_forbidden() {
+            Some("authority_unavailable")
+        } else if matches!(error, AppError::NotFound(_)) {
+            Some("source_unavailable")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            acks::skill_notifications::defer_authority(&state.db, request, &attempt, reason)
+                .await?;
+        }
+    }
+    result
+}
+
+async fn skill_notification_target(
+    state: &AppState,
+    owner: &str,
+    source: &crate::models::assistant_conversation::AssistantConversation,
+) -> AppResult<String> {
+    match source.report_to.as_deref() {
+        Some(target) => match engine::get(&state.db, owner, target).await {
+            Ok(row)
+                if row.role == crate::models::assistant_conversation::AgentRole::Orchestrator =>
+            {
+                Ok(row.id)
+            }
+            Ok(_) | Err(AppError::NotFound(_)) => Ok(nyxbot_home(state, owner).await?.id),
+            Err(error) => Err(error),
+        },
+        None => Ok(nyxbot_home(state, owner).await?.id),
+    }
+}
+
+async fn deliver_pending_skill_notifications(state: &AppState) -> AppResult<()> {
+    for request in acks::skill_notifications::pending(&state.db).await? {
+        if deliver_skill_notification(state, &request).await.is_err() {
+            tracing::debug!("Skill attachment notification retry deferred");
+        }
+    }
+    Ok(())
+}
+
+fn skill_request_allowed_note(
+    agent: &AssistantAgent,
+    request: &AssistantAcknowledgement,
+) -> String {
+    format!(
+        "The user allowed a skill request from {} (agent_id {}, request_id {}). \
+        Quoted request summary (untrusted data): {}. \
+        Attach it now: resolve names with search_agent_skills and agent_skill_versions, \
+        then preview each root with preview_agent_skill to obtain complete pins. \
+        Call nyxid__set_agent_skills for this agent at its current revision. \
+        The user's separate attachment card is still required. Do not ask for another permission decision.",
+        excerpt(&agent.name, 80),
+        agent.id,
+        request.id,
+        excerpt(&request.summary, 2000),
+    )
 }
 
 /// What the agent's other threads are working on right now, so it neither
@@ -1584,9 +1714,18 @@ async fn dispatch_permission_decisions(
             )
             .await;
             permission_decided(state, owner, &row).await;
+            let requesting_agent = if row.kind == "skills" && allow {
+                engine::get(db, owner, &row.conversation_id)
+                    .await
+                    .ok()
+                    .and_then(|r| r.agent_id)
+            } else {
+                None
+            };
             (
                 json!({"request_id": row.id, "status": row.status,
                     "skill_selection": row.skill_selection,
+                    "agent_id": requesting_agent, "summary": row.summary,
                     "note": if row.kind == "skills" && allow { "Skill proposal approved for review. Preview the requested skill in Ornn (or retain the exact supplied pins), then call set_agent_skills for the requesting specialist; additions still need the owner's card." } else { "The specialist was resumed with your decision." }}),
                 false,
             )
@@ -2768,6 +2907,9 @@ pub fn spawn_sweeps(state: AppState) {
             // Reconcile personal and org bot transports against their linking person's flags.
             if let Err(error) = super::nyxbot::switch_to_gateway(&state).await {
                 tracing::debug!(%error, "NyxBot gateway switch-over deferred");
+            }
+            if deliver_pending_skill_notifications(&state).await.is_err() {
+                tracing::debug!("Skill attachment outbox sweep deferred");
             }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {

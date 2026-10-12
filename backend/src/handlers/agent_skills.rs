@@ -420,19 +420,18 @@ pub(crate) async fn dispatch(
     let value = match name {
         "learning_status" | "learning_list_proposals" | "learning_run_now" => {
             let target = args["agent"].as_str().unwrap_or("nyxbot");
-            let agent =
-                super::assistant_team::target_agent(state, &chat.user_id, Some(target)).await?;
+            let agent = if uuid::Uuid::parse_str(target).is_ok() {
+                team::maintained_agent(db, &chat.user_id, target).await?
+            } else {
+                super::assistant_team::target_agent(state, &chat.user_id, Some(target)).await?
+            };
             crate::services::org_agent_service::require_maintain(db, &chat.user_id, &agent).await?;
-            crate::services::feature_flag_service::personal_flag_enabled(
-                db,
-                &chat.user_id,
-                crate::services::assistant_agent_learning::FLAG_KEY,
-            )
-            .await?
-            .then_some(())
-            .ok_or_else(|| {
-                AppError::ValidationError("Automatic agent learning is not enabled yet".into())
-            })?;
+            crate::services::assistant_skill_authoring::enabled(db, &chat.user_id)
+                .await?
+                .then_some(())
+                .ok_or_else(|| {
+                    AppError::ValidationError("Automatic agent learning is not enabled yet".into())
+                })?;
             match name {
                 "learning_status" => json!(
                     crate::services::assistant_agent_learning_review::status(
@@ -525,6 +524,9 @@ pub(crate) async fn dispatch(
                         "Request a skill or a pinned selection, not both".into(),
                     ));
                 }
+                if let Some(result) = acks::allowed_skill_request(db, chat, args).await? {
+                    return Ok((result, false));
+                }
                 let summary = format!(
                     "Skill {} version {} for agent {}. NyxBot must resolve and preview exact pins before requesting the owner's attachment card.",
                     arg(args, "skill"),
@@ -546,6 +548,9 @@ pub(crate) async fn dispatch(
                     },
                 ))
                 .await?;
+                if card.status == "allowed" {
+                    return Ok((acks::allowed_skill_result(&card), false));
+                }
                 if created {
                     Box::pin(super::assistant_team::permission_requested(
                         state, chat, &card,
@@ -561,6 +566,12 @@ pub(crate) async fn dispatch(
             let selection: skills::Selection = serde_json::from_value(args["selection"].clone())
                 .map_err(|_| AppError::ValidationError("Invalid skill selection".into()))?;
             skills::validate(&selection)?;
+            if name == "request_agent_skills"
+                && let Some(result) =
+                    acks::allowed_skill_request(db, chat, &args["selection"]).await?
+            {
+                return Ok((result, false));
+            }
             if agent.skills_revision != selection.expected_revision {
                 return Err(AppError::Conflict(
                     "Skills changed; reload the current revision".into(),
@@ -591,6 +602,9 @@ pub(crate) async fn dispatch(
                     },
                 ))
                 .await?;
+                if card.status == "allowed" {
+                    return Ok((acks::allowed_skill_result(&card), false));
+                }
                 if created {
                     Box::pin(super::assistant_team::permission_requested(
                         state, chat, &card,

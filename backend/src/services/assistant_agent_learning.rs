@@ -8,7 +8,7 @@ use std::{sync::LazyLock, time::Duration};
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::TryStreamExt;
 use mongodb::{
-    Database, IndexModel,
+    ClientSession, Database, IndexModel,
     bson::{self, doc},
     options::{FindOneAndUpdateOptions, IndexOptions, ReturnDocument},
 };
@@ -72,6 +72,13 @@ pub(crate) struct GeneratedFile {
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    for field in ["owner_id", "agent_id"] {
+        db.collection::<bson::Document>(
+            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+        )
+        .create_index(IndexModel::builder().keys(doc! {field:1}).build())
+        .await?;
+    }
     db.collection::<bson::Document>(CONFIG_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -171,6 +178,47 @@ async fn load_agent(db: &Database, actor: &str, id: &str) -> AppResult<Assistant
     super::assistant_team_service::maintained_agent(db, actor, id).await
 }
 
+async fn fence_live_agent(
+    db: &Database,
+    agent_id: &str,
+    owner_id: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let updated = db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": agent_id, "user_id": owner_id, "destroyed_at": bson::Bson::Null},
+            doc! {"$inc": {"authority_fence": 1_i64}},
+        )
+        .session(session)
+        .await?;
+    if updated.matched_count != 1 {
+        return Err(AppError::NotFound("Agent not found".into()));
+    }
+    Ok(())
+}
+
+pub(crate) async fn destroyed_in_session(
+    db: &Database,
+    agent_id: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let now = bson::DateTime::now();
+    db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME).update_one(
+        doc! {"_id": agent_id},
+        doc! {"$set": {"enabled": false, "lease_owner": bson::Bson::Null,
+            "lease_expires_at": bson::Bson::Null, "last_error_code": "agent_destroyed", "updated_at": now},
+            "$inc": {"config_revision": 1_i64, "fence": 1_i64}},
+    ).session(&mut *session).await?;
+    db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME).update_many(
+        doc! {"agent_id": agent_id, "status": {"$in": ["queued", "analyzing"]}},
+        doc! {"$set": {"status": "cancelled", "error_code": "agent_destroyed",
+            "lease_owner": bson::Bson::Null, "lease_expires_at": bson::Bson::Null, "updated_at": now},
+            "$inc": {"fence": 1_i64}},
+    ).session(session).await?;
+    Ok(())
+}
+
 /// Enable or disable learning for an agent. PR-1 exposes this service seam;
 /// the human editor and NyxBot management surfaces land in PR-2.
 #[allow(dead_code)]
@@ -186,70 +234,92 @@ pub async fn configure(
     }
     validate_threshold(threshold)?;
     let agent = load_agent(db, actor, agent_id).await?;
-    let collection = db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME);
-    let now = Utc::now();
-    let current = collection.find_one(doc! {"_id": agent_id}).await?;
-    let epoch = match current.as_ref() {
-        Some(row)
-            if row.enabled == enabled && (!enabled || row.enabled_by.as_deref() == Some(actor)) =>
-        {
-            row.learning_epoch.max(0)
-        }
-        Some(row) if enabled => row.learning_epoch.saturating_add(1).max(1),
-        Some(row) => row.learning_epoch.max(0),
-        None if enabled => 1,
-        None => 0,
-    };
-    let revision = current.as_ref().map_or(0, |row| row.config_revision + 1);
-    let row = AssistantAgentLearning {
-        agent_id: agent.id.clone(),
-        owner_id: agent.user_id.clone(),
-        enabled,
-        threshold,
-        learning_epoch: epoch,
-        config_revision: revision,
-        enabled_by: if enabled {
-            Some(actor.to_owned())
-        } else {
-            current.as_ref().and_then(|row| row.enabled_by.clone())
-        },
-        last_success_cursor: current
-            .as_ref()
-            .and_then(|row| row.last_success_cursor.clone()),
-        last_success_run_id: current
-            .as_ref()
-            .and_then(|row| row.last_success_run_id.clone()),
-        eligible_count: current.as_ref().map_or(0, |row| row.eligible_count),
-        last_run_at: current.as_ref().and_then(|row| row.last_run_at),
-        last_success_at: current.as_ref().and_then(|row| row.last_success_at),
-        last_error_code: None,
-        lease_owner: None,
-        lease_expires_at: None,
-        fence: current.as_ref().map_or(0, |row| row.fence),
-        created_at: current.as_ref().map_or(now, |row| row.created_at),
-        updated_at: now,
-    };
-    let filter = current.as_ref().map_or_else(
-        || doc! {"_id": agent_id},
-        |existing| doc! {"_id": agent_id, "config_revision": existing.config_revision},
-    );
-    let replacement = collection
-        .replace_one(filter, &row)
-        .upsert(current.is_none())
-        .await
-        .map_err(|error| {
-            if super::assistant_team_service::is_duplicate(&error) {
-                AppError::Conflict("Learning configuration changed concurrently".into())
-            } else {
-                error.into()
+    let db = db.clone();
+    let actor = actor.to_owned();
+    let agent_id = agent_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<_> = async {
+                let actor = actor.as_str();
+                let agent_id = agent_id.as_str();
+                fence_live_agent(&db, agent_id, &agent.user_id, session).await?;
+                let collection = db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME);
+                let now = Utc::now();
+                let current = collection
+                    .find_one(doc! {"_id": agent_id})
+                    .session(&mut *session)
+                    .await?;
+                let epoch = match current.as_ref() {
+                    Some(row)
+                        if row.enabled == enabled
+                            && (!enabled || row.enabled_by.as_deref() == Some(actor)) =>
+                    {
+                        row.learning_epoch.max(0)
+                    }
+                    Some(row) if enabled => row.learning_epoch.saturating_add(1).max(1),
+                    Some(row) => row.learning_epoch.max(0),
+                    None if enabled => 1,
+                    None => 0,
+                };
+                let revision = current.as_ref().map_or(0, |row| row.config_revision + 1);
+                let row = AssistantAgentLearning {
+                    agent_id: agent.id.clone(),
+                    owner_id: agent.user_id.clone(),
+                    enabled,
+                    threshold,
+                    learning_epoch: epoch,
+                    config_revision: revision,
+                    enabled_by: if enabled {
+                        Some(actor.to_owned())
+                    } else {
+                        current.as_ref().and_then(|row| row.enabled_by.clone())
+                    },
+                    last_success_cursor: current
+                        .as_ref()
+                        .and_then(|row| row.last_success_cursor.clone()),
+                    last_success_run_id: current
+                        .as_ref()
+                        .and_then(|row| row.last_success_run_id.clone()),
+                    eligible_count: current.as_ref().map_or(0, |row| row.eligible_count),
+                    last_run_at: current.as_ref().and_then(|row| row.last_run_at),
+                    last_success_at: current.as_ref().and_then(|row| row.last_success_at),
+                    last_error_code: None,
+                    lease_owner: None,
+                    lease_expires_at: None,
+                    fence: current.as_ref().map_or(0, |row| row.fence),
+                    created_at: current.as_ref().map_or(now, |row| row.created_at),
+                    updated_at: now,
+                };
+                let filter = current.as_ref().map_or_else(
+                    || doc! {"_id": agent_id},
+                    |existing| doc! {"_id": agent_id, "config_revision": existing.config_revision},
+                );
+                let replacement = collection
+                    .replace_one(filter, &row)
+                    .upsert(current.is_none())
+                    .session(&mut *session)
+                    .await
+                    .map_err(|error| {
+                        if super::assistant_team_service::is_duplicate(&error) {
+                            AppError::Conflict("Learning configuration changed concurrently".into())
+                        } else {
+                            error.into()
+                        }
+                    })?;
+                if current.is_some() && replacement.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "Learning configuration changed concurrently".into(),
+                    ));
+                }
+                Ok(row)
             }
-        })?;
-    if current.is_some() && replacement.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "Learning configuration changed concurrently".into(),
-        ));
-    }
-    Ok(row)
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 /// A member's consent is always self-service. Maintainers cannot opt in a
@@ -446,12 +516,12 @@ async fn candidate_threads(
     let mut out = Vec::new();
     for conversation in conversations {
         let rows: Vec<AssistantMessage> = messages
-            .find(doc! {"conversation_id": &conversation.id, "status": "completed", "steering": bson::Bson::Null})
-            .sort(doc! {"seq": 1})
-            .limit(200)
-            .await?
-            .try_collect()
-            .await?;
+                    .find(doc! {"conversation_id": &conversation.id, "status": "completed", "steering": bson::Bson::Null})
+                    .sort(doc! {"seq": 1})
+                    .limit(200)
+                    .await?
+                    .try_collect()
+                    .await?;
         let Some(reply) = rows
             .iter()
             .rev()
@@ -500,11 +570,11 @@ async fn candidate_threads(
 
 static SENSITIVE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
-    r"(?is)-----BEGIN [^-]*(?:PRIVATE KEY|CERTIFICATE)-----.*?(?:-----END [^-]+-----|$)",
-    r#"(?i)"?(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|cookie|set-cookie|authorization|x-api-key)"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|[^\r\n,}]+)"#,
-    r"\b(?:AKIA[A-Z0-9]{16}|gh[opusr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|AIza[A-Za-z0-9_-]+|ornn_[A-Za-z0-9_-]+|nyx_[A-Za-z0-9_-]+|nyxid_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+)\b",
-    r"[A-Za-z0-9_+/=-]{32,}",
-].into_iter().map(|pattern| Regex::new(pattern).expect("static learning detector")).collect()
+            r"(?is)-----BEGIN [^-]*(?:PRIVATE KEY|CERTIFICATE)-----.*?(?:-----END [^-]+-----|$)",
+            r#"(?i)"?(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|cookie|set-cookie|authorization|x-api-key)"?\s*[:=]\s*(?:"(?:[^"\\]|\\.)*"|[^\r\n,}]+)"#,
+            r"\b(?:AKIA[A-Z0-9]{16}|gh[opusr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|AIza[A-Za-z0-9_-]+|ornn_[A-Za-z0-9_-]+|nyx_[A-Za-z0-9_-]+|nyxid_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+)\b",
+            r"[A-Za-z0-9_+/=-]{32,}",
+        ].into_iter().map(|pattern| Regex::new(pattern).expect("static learning detector")).collect()
 });
 
 fn sensitive_text(input: &str) -> String {
@@ -656,6 +726,9 @@ async fn create_run(
     actor: &str,
     mode: &str,
 ) -> AppResult<Option<AssistantAgentLearningRun>> {
+    if agent.destroyed_at.is_some() || !config.enabled {
+        return Ok(None);
+    }
     let candidates = candidate_threads(db, agent, config).await?;
     let pending = db
         .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
@@ -666,11 +739,11 @@ async fn create_run(
     }
     if mode == "threshold" && candidates.len() < config.threshold as usize {
         db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
-            .update_one(
-                doc! {"_id": &agent.id, "config_revision": config.config_revision},
-                doc! {"$set": {"eligible_count": candidates.len() as i64, "updated_at": bson::DateTime::from_chrono(Utc::now())}},
-            )
-            .await?;
+                    .update_one(
+                        doc! {"_id": &agent.id, "config_revision": config.config_revision},
+                        doc! {"$set": {"eligible_count": candidates.len() as i64, "updated_at": bson::DateTime::from_chrono(Utc::now())}},
+                    )
+                    .await?;
         return Ok(None);
     }
     let (input, evidence) = build_input(&candidates);
@@ -678,30 +751,6 @@ async fn create_run(
         return Ok(None);
     }
     let now = Utc::now();
-    let Some(reserved) = db
-        .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {
-                "_id": &agent.id,
-                "owner_id": &config.owner_id,
-                "enabled": true,
-                "config_revision": config.config_revision,
-                "learning_epoch": config.learning_epoch,
-            },
-            doc! {
-                "$inc": {"fence": 1},
-                "$set": {"last_run_at": bson::DateTime::from_chrono(now), "updated_at": bson::DateTime::from_chrono(now)},
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?
-    else {
-        return Ok(None);
-    };
     let watermark = evidence.last().map(|row| LearningCursor {
         created_at: row.created_at,
         conversation_id: row.conversation_id.clone(),
@@ -726,34 +775,87 @@ async fn create_run(
         attempt: 0,
         lease_owner: None,
         lease_expires_at: None,
-        fence: reserved.fence,
+        fence: 0,
         error_code: None,
         created_at: now,
         updated_at: now,
     };
-    if db
-        .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
-        .find_one(doc! {
-            "agent_id": &run.agent_id,
-            "input_digest": &run.input_digest,
-            "status": {"$in": ["queued", "analyzing"]},
+    reserve_run(db, agent, config, run).await
+}
+
+async fn reserve_run(
+    db: &Database,
+    agent: &AssistantAgent,
+    config: &AssistantAgentLearning,
+    run: AssistantAgentLearningRun,
+) -> AppResult<Option<AssistantAgentLearningRun>> {
+    let now = Utc::now();
+    let db = db.clone();
+    let agent = agent.clone();
+    let config = config.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<_> = async {
+                fence_live_agent(&db, &agent.id, &agent.user_id, session).await?;
+                if db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                    .count_documents(doc! {"agent_id": &agent.id, "status": {"$in": ["queued", "analyzing"]}})
+                    .session(&mut *session).await? >= MAX_PENDING {
+                    return Ok(None);
+                }
+                let Some(reserved) = db
+                    .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
+                    .find_one_and_update(
+                        doc! {
+                            "_id": &agent.id,
+                            "owner_id": &config.owner_id,
+                            "enabled": true,
+                            "config_revision": config.config_revision,
+                            "learning_epoch": config.learning_epoch,
+                        },
+                        doc! {
+                            "$inc": {"fence": 1},
+                            "$set": {"last_run_at": bson::DateTime::from_chrono(now), "updated_at": bson::DateTime::from_chrono(now)},
+                        },
+                    )
+                    .return_document(ReturnDocument::After)
+                    .session(&mut *session)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let mut run = run.clone();
+                run.fence = reserved.fence;
+                if db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                    .find_one(doc! {
+                        "agent_id": &run.agent_id,
+                        "input_digest": &run.input_digest,
+                        "status": {"$in": ["queued", "analyzing"]},
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+                {
+                    return Ok(None);
+                }
+                db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                    .insert_one(&run)
+                    .session(&mut *session)
+                    .await
+                    .map_err(|error| {
+                        if super::assistant_team_service::is_duplicate(&error) {
+                            AppError::Conflict("Learning run is already queued".into())
+                        } else {
+                            error.into()
+                        }
+                    })?;
+                Ok(Some(run))
+            }.await;
+            super::api_key_mutation_service::transaction_result(result)
         })
-        .await?
-        .is_some()
-    {
-        return Ok(None);
-    }
-    db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
-        .insert_one(&run)
         .await
-        .map_err(|error| {
-            if super::assistant_team_service::is_duplicate(&error) {
-                AppError::Conflict("Learning run is already queued".into())
-            } else {
-                error.into()
-            }
-        })?;
-    Ok(Some(run))
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 async fn claim_run(
@@ -832,6 +934,7 @@ async fn finish_run(
     let lease_owner = run.lease_owner.clone().unwrap_or_default();
     let fence = run.fence;
     let agent_id = run.agent_id.clone();
+    let owner_id = run.owner_id.clone();
     let config_revision = run.config_revision;
     let candidate_watermark = run.candidate_watermark.clone();
     let status = status.to_owned();
@@ -850,13 +953,19 @@ async fn finish_run(
                     .session(&mut *session)
                     .await?;
                 if run_update.matched_count != 1 {
+                    if db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                        .find_one(doc! {"_id": &run_id, "status": "cancelled", "error_code": "agent_destroyed"})
+                        .session(&mut *session).await?.is_some() {
+                        return Ok(());
+                    }
                     return Err(AppError::Conflict("Learning run lease was lost".into()));
                 }
                 if status == "succeeded" {
+                    fence_live_agent(&db, &agent_id, &owner_id, session).await?;
                     let config_update = db
                         .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
                         .update_one(
-                            doc! {"_id": &agent_id, "config_revision": config_revision},
+                            doc! {"_id": &agent_id, "owner_id": &owner_id, "enabled": true, "config_revision": config_revision},
                             doc! {"$set": {"last_success_cursor": bson::to_bson(&candidate_watermark).unwrap_or(bson::Bson::Null), "last_success_run_id": &run_id, "last_success_at": bson::DateTime::from_chrono(now), "last_error_code": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now)}},
                         )
                         .session(&mut *session)
@@ -1007,8 +1116,27 @@ pub(crate) async fn all_evidence_current(
 async fn run_authority_error(
     db: &Database,
     run: &AssistantAgentLearningRun,
-    agent: &AssistantAgent,
 ) -> AppResult<Option<&'static str>> {
+    let Some(agent) = db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(
+            doc! {"_id": &run.agent_id, "user_id": &run.owner_id, "destroyed_at": bson::Bson::Null},
+        )
+        .await?
+    else {
+        return Ok(Some("agent_destroyed"));
+    };
+    if db
+        .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+        .find_one(
+            doc! {"_id": &run.id, "status": "analyzing", "lease_owner": &run.lease_owner,
+            "fence": run.fence, "lease_expires_at": {"$gt": bson::DateTime::now()}},
+        )
+        .await?
+        .is_none()
+    {
+        return Ok(Some("lease_lost"));
+    }
     let mut filter = doc! {
         "_id": &run.agent_id,
         "owner_id": &run.owner_id,
@@ -1029,13 +1157,11 @@ async fn run_authority_error(
     if agent.user_id == run.actor_id {
         return Ok(None);
     }
-    if super::org_agent_service::require_maintain(db, &run.actor_id, agent)
-        .await
-        .is_err()
-    {
-        return Ok(Some("owner_access_lost"));
+    match super::org_agent_service::require_maintain(db, &run.actor_id, &agent).await {
+        Ok(_) => Ok(None),
+        Err(AppError::Forbidden(_) | AppError::NotFound(_)) => Ok(Some("owner_access_lost")),
+        Err(error) => Err(error),
     }
-    Ok(None)
 }
 
 /// Public worker entry point used by tests and the server scheduler. The full
@@ -1057,7 +1183,7 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         finish_run(&state.db, &run, "cancelled", Some("feature_disabled"), None).await?;
         return Ok(());
     }
-    if let Some(error_code) = run_authority_error(&state.db, &run, &agent).await? {
+    if let Some(error_code) = run_authority_error(&state.db, &run).await? {
         finish_run(&state.db, &run, "cancelled", Some(error_code), None).await?;
         return Ok(());
     }
@@ -1066,6 +1192,10 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
     run.evidence = valid_evidence;
     if input.is_empty() {
         finish_run(&state.db, &run, "succeeded", None, None).await?;
+        return Ok(());
+    }
+    if let Some(error_code) = run_authority_error(&state.db, &run).await? {
+        finish_run(&state.db, &run, "cancelled", Some(error_code), None).await?;
         return Ok(());
     }
     let prompt = ANALYSIS_PROMPT;
@@ -1098,7 +1228,7 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         finish_run(&state.db, &run, "cancelled", Some("feature_disabled"), None).await?;
         return Ok(());
     }
-    if let Some(error_code) = run_authority_error(&state.db, &run, &agent).await? {
+    if let Some(error_code) = run_authority_error(&state.db, &run).await? {
         finish_run(&state.db, &run, "cancelled", Some(error_code), None).await?;
         return Ok(());
     }
@@ -1165,6 +1295,9 @@ pub async fn run_now(state: &AppState, actor: &str, agent_id: &str) -> AppResult
         return Err(feature_not_enabled());
     }
     let agent = load_agent(&state.db, actor, agent_id).await?;
+    if agent.destroyed_at.is_some() {
+        return Err(AppError::NotFound("Agent not found".into()));
+    }
     let config = state
         .db
         .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
@@ -1214,6 +1347,9 @@ async fn tick(state: &AppState) -> AppResult<()> {
         else {
             continue;
         };
+        if agent.destroyed_at.is_some() {
+            continue;
+        }
         if agent.kind == AgentKind::Specialist
             && agent.user_id != actor
             && super::org_agent_service::require_maintain(&state.db, actor, &agent)
@@ -1365,6 +1501,381 @@ mod tests {
         );
         db.drop().await.unwrap();
     }
+    #[tokio::test]
+    async fn destroyed_specialist_uuid_cannot_start_manual_learning() {
+        let f = crate::services::assistant_authority_tests::fixture("destroyed_learning_run").await;
+        feature_flag_service::set_platform_override(
+            &f.state.db,
+            FLAG_KEY,
+            &feature_flag_service::FlagTarget::Global,
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        configure(&f.state.db, &f.owner, &f.chat.agent_id, true, 15)
+            .await
+            .unwrap();
+        crate::services::assistant_team_service::destroy(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+        let before = f
+            .state
+            .db
+            .collection::<bson::Document>(CONFIG_COLLECTION_NAME)
+            .find_one(doc! {"_id": &f.chat.agent_id})
+            .await
+            .unwrap();
+        assert!(matches!(
+            run_now(&f.state, &f.owner, &f.chat.agent_id).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(RUNS_COLLECTION_NAME)
+                .count_documents(doc! {"agent_id": &f.chat.agent_id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(CONFIG_COLLECTION_NAME)
+                .find_one(doc! {"_id": &f.chat.agent_id})
+                .await
+                .unwrap(),
+            before
+        );
+        f.state.db.drop().await.unwrap();
+    }
+
+    async fn destruction_fixture() -> (
+        AppState,
+        wiremock::MockServer,
+        AssistantAgent,
+        AssistantAgentLearning,
+    ) {
+        use crate::services::assistant_oneshot_inference::tests::{ACTOR, utility_fixture};
+        use crate::services::{assistant_nyxagent as engine, assistant_team_service as team};
+        let (state, _, mock) = utility_fixture().await;
+        feature_flag_service::set_platform_override(
+            &state.db,
+            FLAG_KEY,
+            &feature_flag_service::FlagTarget::Global,
+            true,
+            ACTOR,
+        )
+        .await
+        .unwrap();
+        ensure_indexes(&state.db).await.unwrap();
+        let (agent, _) = team::create_specialist(
+            &state.db,
+            &state.encryption_keys,
+            ACTOR,
+            team::CreateRequest {
+                machines: None,
+                logins: None,
+                name: "learner".into(),
+                description: "Learn reusable procedures".into(),
+                display_name: None,
+                persona: None,
+                targets: Default::default(),
+                account_read: false,
+                specialty: None,
+                created_by: "nyxbot",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let config = configure(&state.db, ACTOR, &agent.id, true, 1)
+            .await
+            .unwrap();
+        let mut session = state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let row = Box::pin(team::create_thread_for(
+            &state.db,
+            &state.encryption_keys,
+            ACTOR,
+            &agent,
+            "Learning work",
+            &mut session,
+        ))
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        let request: engine::TurnRequest = serde_json::from_value(serde_json::json!({
+            "conversation_id": row.id, "text": "Help plan a reusable checklist"
+        }))
+        .unwrap();
+        let start: engine::TurnStart = (&request).into();
+        let active = Box::pin(engine::begin_turn(
+            &state.db,
+            ACTOR,
+            &start,
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        Box::pin(engine::finish_turn(
+            &state.db,
+            &active,
+            &active.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Identify the task, then validate the checklist".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            candidate_threads(&state.db, &agent, &config)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        (state, mock, agent, config)
+    }
+
+    async fn assert_destroyed_learning(
+        state: &AppState,
+        agent: &AssistantAgent,
+        config: &AssistantAgentLearning,
+        run: Option<&AssistantAgentLearningRun>,
+    ) {
+        let stored = state
+            .db
+            .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
+            .find_one(doc! {"_id": &agent.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.enabled);
+        assert_eq!(stored.config_revision, config.config_revision + 1);
+        assert!(stored.last_success_cursor.is_none());
+        assert!(stored.last_success_run_id.is_none());
+        assert!(stored.lease_owner.is_none());
+        assert!(stored.lease_expires_at.is_none());
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .count_documents(doc! {"agent_id": &agent.id})
+                .await
+                .unwrap(),
+            0
+        );
+        if let Some(run) = run {
+            let stored = state
+                .db
+                .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                .find_one(doc! {"_id": &run.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, "cancelled");
+            assert_eq!(stored.error_code.as_deref(), Some("agent_destroyed"));
+            assert_eq!(stored.fence, run.fence + 1);
+            assert!(stored.lease_owner.is_none());
+            assert!(stored.lease_expires_at.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn destroyed_queued_learning_never_dispatches() {
+        use crate::services::assistant_oneshot_inference::tests::ACTOR;
+        let (state, mock, agent, config) = destruction_fixture().await;
+        let run = create_run(&state.db, &agent, &config, ACTOR, "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        super::super::assistant_team_service::destroy(&state.db, ACTOR, &agent.id)
+            .await
+            .unwrap();
+        Box::pin(process_with_state(&state, run.clone()))
+            .await
+            .unwrap();
+        assert!(mock.received_requests().await.unwrap().is_empty());
+        assert_destroyed_learning(&state, &agent, &config, Some(&run)).await;
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn destroyed_learning_refuses_threshold_and_stale_admission() {
+        use crate::services::assistant_oneshot_inference::tests::ACTOR;
+        let (state, mock, agent, config) = destruction_fixture().await;
+        super::super::assistant_team_service::destroy(&state.db, ACTOR, &agent.id)
+            .await
+            .unwrap();
+        Box::pin(tick(&state)).await.unwrap();
+        assert!(matches!(
+            create_run(&state.db, &agent, &config, ACTOR, "threshold").await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            configure(&state.db, ACTOR, &agent.id, true, 1).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                .count_documents(doc! {"agent_id": &agent.id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(mock.received_requests().await.unwrap().is_empty());
+        assert_destroyed_learning(&state, &agent, &config, None).await;
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn destroyed_learning_fences_stale_cursor_only_completion() {
+        use crate::services::assistant_oneshot_inference::tests::ACTOR;
+        let (state, mock, agent, config) = destruction_fixture().await;
+        let run = create_run(&state.db, &agent, &config, ACTOR, "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        let run = claim_run(&state.db, &run).await.unwrap().unwrap();
+        assert_eq!(run_authority_error(&state.db, &run).await.unwrap(), None);
+        super::super::assistant_team_service::destroy(&state.db, ACTOR, &agent.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_authority_error(&state.db, &run).await.unwrap(),
+            Some("agent_destroyed")
+        );
+        finish_run(&state.db, &run, "succeeded", None, None)
+            .await
+            .unwrap();
+        assert!(mock.received_requests().await.unwrap().is_empty());
+        assert_destroyed_learning(&state, &agent, &config, Some(&run)).await;
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_learning_admission_respects_pending_cap() {
+        use crate::services::assistant_oneshot_inference::tests::ACTOR;
+        let (state, _mock, agent, config) = destruction_fixture().await;
+        let run = create_run(&state.db, &agent, &config, ACTOR, "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        for index in 1..MAX_PENDING - 1 {
+            let mut seed = run.clone();
+            seed.id = Uuid::new_v4().to_string();
+            seed.input_digest = Some(format!("seed-{index}"));
+            state
+                .db
+                .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                .insert_one(seed)
+                .await
+                .unwrap();
+        }
+        let mut first = run.clone();
+        first.id = Uuid::new_v4().to_string();
+        first.input_digest = Some("first-new-input".into());
+        let mut second = run;
+        second.id = Uuid::new_v4().to_string();
+        second.input_digest = Some("second-new-input".into());
+        let (first, second) = tokio::join!(
+            reserve_run(&state.db, &agent, &config, first),
+            reserve_run(&state.db, &agent, &config, second),
+        );
+        assert_eq!(
+            usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some()),
+            1
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+                .count_documents(doc! {"agent_id": &agent.id, "status": "queued"})
+                .await
+                .unwrap(),
+            MAX_PENDING
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn destroyed_during_learning_inference_never_stores_proposal_or_cursor() {
+        use crate::services::assistant_oneshot_inference::tests::ACTOR;
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+        let (state, _mock, agent, config) = destruction_fixture().await;
+        let entered = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let entered_handler = entered.clone();
+        let release_handler = release.clone();
+        let router = Router::new()
+            .route("/models", get(|| async {
+                Json(serde_json::json!({"data":[{"id":"gpt-6-luna"}]}))
+            }))
+            .route("/chat/completions", post(move || {
+                let entered = entered_handler.clone();
+                let release = release_handler.clone();
+                async move {
+                    entered.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    Json(serde_json::json!({"choices":[{"message":{"content":
+                        "{\"schema_version\":1,\"kind\":\"new\",\"name\":\"checklist\",\"description\":\"Reusable checklist\",\"skill_md\":\"Validate each step.\",\"files\":[],\"rationale\":\"Repeatable work\",\"safety_notes\":\"Review first\"}"
+                    }}]}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        state
+            .db
+            .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"slug": "chrono-llm-public"},
+                doc! {"$set": {"base_url": format!("http://{address}")}},
+            )
+            .await
+            .unwrap();
+        let run = create_run(&state.db, &agent, &config, ACTOR, "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        let worker_state = state.clone();
+        let worker_run = run.clone();
+        let worker =
+            tokio::spawn(
+                async move { Box::pin(process_with_state(&worker_state, worker_run)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(10), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        super::super::assistant_team_service::destroy(&state.db, ACTOR, &agent.id)
+            .await
+            .unwrap();
+        release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_destroyed_learning(&state, &agent, &config, Some(&run)).await;
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn learning_worker_uses_utility_route_and_flag_off_never_dispatches() {
         use crate::services::assistant_oneshot_inference::tests::{ACTOR, utility_fixture};

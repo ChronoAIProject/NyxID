@@ -170,6 +170,35 @@ when present, and granted calls add no maintainer reads. Ordinary action
 confirmations still belong to the acting person and do not expand grants or
 allow an organization agent to access the person's account.
 
+### Specialist skill permission decisions
+
+Skill permission is advisory: allowing `request_agent_skills` does not attach
+content. An owner allow queues `skill_request_allowed` on the assigning NyxBot
+thread (else its home thread), carrying the immutable agent ID, request ID,
+and a bounded summary listing requested root IDs and versions. The saved
+owner decision retains a durable notification marker until a NyxBot turn
+consumes its event. The assistant sweep retries after restart, routing failure,
+or bounded event-queue eviction; concurrent retries reuse the same event. NyxBot previews
+each root with `preview_agent_skill` to obtain complete pins and calls
+`set_agent_skills` at the current revision, which still raises a
+separate owner attachment card. A NyxBot allow returns the agent ID and summary
+directly without a duplicate wake. The specialist must continue without the
+skill, never retry the request after allow, and check `get_agent_skills` later.
+Identical requests within 24 hours return `allowed_pending_attachment` without
+another card. Trigger-run skill requests also wake NyxBot after owner allowance,
+while specialist resumption stays with the trigger flow. Events stay within
+3,200 characters and contain no full selection JSON. Denials retain the existing
+do-not-retry behavior.
+
+Skill approval notifications retain their owner decision when source or sticky
+destination authority is unavailable. Authority retries wait 60 seconds and
+double to a one-hour cap; restored access is checked on the next due sweep plus
+any sweep backlog. The due filter runs before the bounded 100-marker batch so
+unreachable requests cannot starve eligible ones. Busy threads and event limits
+keep their ordinary queued behavior. The marker remains until a NyxBot turn
+admits the notification; this does not guarantee successful skill attachment,
+which still requires the separate owner card.
+
 ## 9. Waking agents: event turns
 
 `start_server_turn` reuses the browser turn machinery with the owner's identity.
@@ -980,7 +1009,6 @@ from the desktop panel. macOS shares a physical desktop and locks both views
 on takeover. Update guidance never supplies an unverified updater tag: the
 server publishes only an attested digest or a temporary verification state.
 
-
 Machine updates (0.41.1) preserve fixed updater stage/reason codes in status,
 `previous_update` tool results and reconnect-watch failures, with actionable
 guidance. Relay that guidance without asking for tokens or dumping Docker
@@ -1082,3 +1110,8 @@ bounded best-effort call to the declared cancel operation under live authority.
 Conversation deletion removes its watches after attempting cancellation. A late
 poll cannot recreate a deleted watch or overwrite cancellation. Services without
 a trusted contract and legacy event behavior remain unchanged.
+
+Authored skill cards return `review_url` instead of `confirm_phrase`. Send the
+full link in channel chats and groups; replies cannot approve publication.
+Group pending actions offer **Review draft** to the reviewing owner and open
+the full file review at the exact card, including hidden member threads.

@@ -1024,6 +1024,15 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
 
 #[tokio::test]
 async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
+    confirmation_waits_and_resumes("action").await;
+}
+
+#[tokio::test]
+async fn scheduled_skill_allow_keeps_work_wake_and_durable_nyxbot_event() {
+    confirmation_waits_and_resumes("skills").await;
+}
+
+async fn confirmation_waits_and_resumes(kind: &str) {
     use crate::models::assistant_acknowledgement::{
         AssistantAcknowledgement, COLLECTION_NAME as ACKS,
     };
@@ -1072,7 +1081,7 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
             conversation_id: thread.id.clone(),
             user_id: OWNER.into(),
             api_key_id: thread.credential_api_key_id.clone(),
-            kind: "action".into(),
+            kind: kind.into(),
             service_id: None,
             service_slug: None,
             service_name: None,
@@ -1125,6 +1134,29 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
             .unwrap()
             .is_none()
     );
+    let skill_destination = if kind == "skills" {
+        // Park a distinct owner NyxBot thread with a live turn. Use the
+        // production permission routing without injecting a second ordinary
+        // event turn into the automation thread being measured below.
+        let destination = crate::services::assistant_authority_tests::new_orchestrator(
+            &state,
+            OWNER,
+            "Review approved skills",
+        )
+        .await;
+        state
+            .db
+            .collection::<Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &thread.id},
+                doc! {"$set": {"report_to": &destination.id}},
+            )
+            .await
+            .unwrap();
+        Some(destination)
+    } else {
+        None
+    };
     let decided_at = std::time::Instant::now();
     let resumed = crate::services::assistant_acknowledgement_service::decide(
         &state.db, OWNER, &thread.id, &ack_id, true,
@@ -1132,6 +1164,44 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
     .await
     .unwrap();
     assert_eq!(resumed.trigger_run_id.as_deref(), Some(run.id.as_str()));
+    let work = state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .find_one(doc! {"_id":&run.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(work.get_datetime("at").unwrap().to_chrono() <= Utc::now());
+    assert_eq!(work.get_str("fence").unwrap(), "");
+    assert_eq!(work.get_i32("deferrals").unwrap(), 0);
+    if kind == "skills" {
+        use crate::services::assistant_acknowledgement_service::skill_notifications as notifications;
+        assert!(
+            notifications::pending(&state.db)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.id == ack_id)
+        );
+        let destination = skill_destination.as_ref().unwrap();
+        crate::handlers::assistant_team::permission_decided(&state, OWNER, &resumed).await;
+        assert!(
+            engine::get(&state.db, OWNER, &destination.id)
+                .await
+                .unwrap()
+                .pending_events
+                .iter()
+                .any(|e| e.id == ack_id && e.kind == "skill_request_allowed")
+        );
+        assert!(
+            !engine::get(&state.db, OWNER, &thread.id)
+                .await
+                .unwrap()
+                .pending_events
+                .iter()
+                .any(|e| e.id == ack_id)
+        );
+    }
     tick(&state).await.unwrap();
     assert_eq!(
         completed(&state, &trigger).await.outcome,

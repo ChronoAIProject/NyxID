@@ -1454,5 +1454,92 @@ async fn org_group_pending_cards_batch_acknowledgements_and_bound_approvals() {
         assert_eq!(card["agent_id"].as_str(), Some(agent.id.as_str()));
         assert_eq!(card["can_decide"].as_bool(), Some(actor == &f.admin));
     }
+    f.state.db.collection::<mongodb::bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .update_many(doc! {},doc! {"$set":{"authored_skill":{
+            "agent_id":&agent.id,"proposal_id":uuid::Uuid::new_v4().to_string(),"revision":0_i64,"skills_revision":0_i64
+        }}}).await.unwrap();
+    let cards = crate::handlers::assistant_group::org_pending_actions(&state, &a)
+        .await
+        .unwrap();
+    assert_eq!(cards.len(), 2);
+    for card in cards {
+        assert_eq!(card["authored_skill"], true);
+        assert_eq!(card["can_decide"], false);
+        assert!(card.get("confirm_phrase").is_none());
+        assert!(
+            card["review_url"]
+                .as_str()
+                .unwrap()
+                .contains(card["acknowledgement_id"].as_str().unwrap())
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_group_tool_image_route_rechecks_membership_before_serving_pixels() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let f = Fixture::new("org_group_tool_image").await;
+    engine_flag(&f).await;
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    let access = access(&f, &f.member, &group.id).await;
+    let request = enqueue(&f, &access, &agent, &[]).await;
+    let row = start(&f, &access, &agent, &request).await;
+    let image = engine::attach_image(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &row.id,
+        "snapshot",
+        "image/png",
+        b"org tool pixels",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let credential = super::assistant_agent_credential_service::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router();
+    let app = router.with_state(f.state.clone());
+    let fetch = || {
+        Request::builder()
+            .uri(format!(
+                "/api/v1/assistant-attachments/{}/content",
+                image.id
+            ))
+            .header("x-api-key", credential.raw_key.as_str())
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(fetch()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+        b"org tool pixels"
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .delete_one(doc! {"org_user_id":&f.org,"member_user_id":&f.member})
+        .await
+        .unwrap();
+    let response = app.oneshot(fetch()).await.unwrap();
+    assert!(response.status().is_client_error());
+    assert!(
+        !String::from_utf8_lossy(&to_bytes(response.into_body(), 4096).await.unwrap())
+            .contains("org tool pixels")
+    );
     f.state.db.drop().await.unwrap();
 }

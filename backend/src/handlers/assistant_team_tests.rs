@@ -2059,3 +2059,816 @@ async fn instruction_refresh_guest_audiences_and_context_are_isolated_on_every_t
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
+    for selection in [false, true] {
+        let f = crate::services::assistant_authority_tests::fixture("skill_allow_routing").await;
+        let args = if selection {
+            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[{
+                "source":"ornn", "skill_id":Uuid::new_v4().to_string(), "name":"weekly-review",
+                "version":"1.0", "sha256":"a".repeat(64), "dependencies":[]
+            }]}})
+        } else {
+            json!({"agent":f.chat.agent_id,"skill":"weekly-review","version":"1.0.0"})
+        };
+        let (value, error) =
+            super::super::agent_skills::dispatch(&f.state, &f.chat, "request_agent_skills", &args)
+                .await
+                .unwrap();
+        assert!(error);
+        let id = value["acknowledgement_id"].as_str().unwrap();
+        assert!(
+            acks::allowed_skill_request(
+                &f.state.db,
+                &f.chat,
+                if selection { &args["selection"] } else { &args }
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let card = acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+            .await
+            .unwrap();
+        // Simulate a retry whose preflight ran before the decision. Calling
+        // the transaction directly must still reuse the allowed card.
+        let (raced, created) = acks::request_tracked(
+            &f.state.db,
+            &f.chat,
+            acks::Request {
+                kind: "skills",
+                service: None,
+                tool: None,
+                arguments: Some(if selection { &args["selection"] } else { &args }),
+                summary: "Retry after a missed preflight",
+                platform: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!created);
+        assert_eq!(raced.id, card.id);
+        assert_eq!(raced.status, "allowed");
+        // Simulate a crash after the saved decision, before HTTP routing.
+        assert!(
+            acks::skill_notifications::pending(&f.state.db)
+                .await
+                .unwrap()
+                .iter()
+                .any(|row| row.id == card.id)
+        );
+        deliver_pending_skill_notifications(&f.state).await.unwrap();
+        permission_decided(&f.state, &f.owner, &card).await;
+        let specialist = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+        let note = specialist
+            .pending_events
+            .iter()
+            .find(|e| e.kind == "permission_decided")
+            .unwrap();
+        assert!(!note.text.contains("Retry the call now"));
+        assert!(note.text.contains("Do not call request_agent_skills again"));
+        let nyxbot = engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap();
+        let event = nyxbot
+            .pending_events
+            .iter()
+            .find(|e| e.kind == "skill_request_allowed")
+            .unwrap();
+        assert!(event.text.contains(&f.chat.agent_id));
+        assert!(event.text.contains(id));
+        assert!(event.text.contains("nyxid__set_agent_skills"));
+        assert!(!event.text.contains("expected_revision"));
+        assert!(event.text.contains("preview each root"));
+        assert!(event.text.chars().count() <= engine::event_text_limit(event));
+        let mut roots = card.clone();
+        roots.summary = (0..16)
+            .map(|_| format!("{} @ {}", Uuid::new_v4(), "1".repeat(30) + ".0"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+        let note = skill_request_allowed_note(&agent, &roots);
+        assert!(note.chars().count() <= 3200);
+        assert!(note.contains(&roots.summary));
+        assert!(note.ends_with("Do not ask for another permission decision."));
+        let note = acks::decisions_note(std::slice::from_ref(&card));
+        assert!(note.contains("do not request it again"));
+        assert!(!note.contains("retry"));
+        roots.kind = "operations".into();
+        let note = acks::decisions_note(&[roots]);
+        assert!(note.contains("operation scope"));
+        assert!(!note.contains("allowed action"));
+        for kind in ["machine", "saved_login"] {
+            let mut access = card.clone();
+            access.kind = kind.into();
+            let note = acks::decisions_note(&[access]);
+            assert!(note.contains("are usable now"), "{kind}");
+            assert!(note.contains(if kind == "machine" {
+                "machine access"
+            } else {
+                "saved login access"
+            }));
+            assert!(!note.contains("action unknown"));
+            assert!(!note.contains("Retry an allowed action"), "{kind}");
+        }
+        let before = f
+            .state
+            .db
+            .collection::<AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        let (again, error) =
+            super::super::agent_skills::dispatch(&f.state, &f.chat, "request_agent_skills", &args)
+                .await
+                .unwrap();
+        assert!(!error);
+        assert_eq!(again["status"], "allowed_pending_attachment");
+        assert_eq!(again["request_id"], id);
+        assert_eq!(
+            f.state
+                .db
+                .collection::<AssistantAcknowledgement>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME
+                )
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            before
+        );
+        let mut orchestrator = card.clone();
+        orchestrator.decided_by = Some("orchestrator".into());
+        permission_decided(&f.state, &f.owner, &orchestrator).await;
+        let nyxbot = engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap();
+        assert_eq!(
+            nyxbot
+                .pending_events
+                .iter()
+                .filter(|e| e.kind == "skill_request_allowed")
+                .count(),
+            1
+        );
+        let specialist_before = engine::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .len();
+        let mut triggered = card.clone();
+        triggered.trigger_run_id = Some(Uuid::new_v4().to_string());
+        permission_decided(&f.state, &f.owner, &triggered).await;
+        assert_eq!(
+            engine::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .pending_events
+                .len(),
+            specialist_before
+        );
+        let nyxbot = engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap();
+        assert_eq!(
+            nyxbot
+                .pending_events
+                .iter()
+                .filter(|e| e.kind == "skill_request_allowed")
+                .count(),
+            1
+        );
+        f.state.db.collection::<AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .update_one(doc! {"_id":id},doc! {"$set":{"decided_at":mongodb::bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::hours(25))}}).await.unwrap();
+        let (later, error) =
+            super::super::agent_skills::dispatch(&f.state, &f.chat, "request_agent_skills", &args)
+                .await
+                .unwrap();
+        assert!(error);
+        assert_ne!(later["acknowledgement_id"], id);
+        let denied = acks::decide(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            later["acknowledgement_id"].as_str().unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+        permission_decided(&f.state, &f.owner, &denied).await;
+        let (retry, error) =
+            super::super::agent_skills::dispatch(&f.state, &f.chat, "request_agent_skills", &args)
+                .await
+                .unwrap();
+        assert!(error);
+        assert_eq!(retry["error"], "acknowledgement_denied");
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn skill_allow_outbox_recovers_eviction_and_consumes_once() {
+    let f = crate::services::assistant_authority_tests::fixture("skill_allow_outbox").await;
+    let args = json!({"agent":f.chat.agent_id,"skill":"weekly-review","version":"1.0.0"});
+    let (result, _) =
+        super::super::agent_skills::dispatch(&f.state, &f.chat, "request_agent_skills", &args)
+            .await
+            .unwrap();
+    let id = result["acknowledgement_id"].as_str().unwrap();
+    // A trigger-bound saved card queues NyxBot without resuming the specialist.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":id},
+            doc! {"$set":{"trigger_run_id":Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    let card = acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        deliver_skill_notification(&f.state, &card),
+        deliver_skill_notification(&f.state, &card)
+    );
+    a.unwrap();
+    b.unwrap();
+    let nyxbot = engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+        .await
+        .unwrap();
+    assert_eq!(
+        nyxbot.pending_events.iter().filter(|e| e.id == id).count(),
+        1
+    );
+    assert!(
+        acks::skill_notifications::pending(&f.state.db)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.id == id)
+    );
+    let other = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state, &f.owner, "Reassign",
+    )
+    .await;
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"report_to":&other.id}},
+        )
+        .await
+        .unwrap();
+    deliver_skill_notification(&f.state, &card).await.unwrap();
+    assert!(
+        !engine::get(&f.state.db, &f.owner, &other.id)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|e| e.id == id)
+    );
+    // Overflow the bounded ordinary event queue. The durable marker survives.
+    engine::push_events(
+        &f.state.db,
+        &f.owner,
+        &f.nyxbot_thread,
+        (0..engine::MAX_PENDING_EVENTS)
+            .map(|_| team::event("test", "filler".into(), None))
+            .collect(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|e| e.id == id)
+    );
+    deliver_pending_skill_notifications(&f.state).await.unwrap();
+    assert!(
+        engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|e| e.id == id)
+    );
+    // Fixture NyxBot has an active turn. End it so an ordinary owner turn
+    // consumes its queued event through the production transaction.
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&f.nyxbot_thread},
+            doc! {"$set":{"active_turn":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    let row = engine::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &engine::TurnRequest {
+            attachment_ids: vec![],
+            agent_id: None,
+            conversation_id: Some(f.nyxbot_thread.clone()),
+            text: "Continue".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        row.active_turn
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e.id == id)
+            .count(),
+        1
+    );
+    assert!(
+        acks::skill_notifications::pending(&f.state.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    deliver_skill_notification(&f.state, &card).await.unwrap();
+    assert!(
+        !engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|e| e.id == id)
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn skill_allow_outbox_rotates_past_parked_requests() {
+    let f =
+        crate::services::assistant_authority_tests::fixture("skill_allow_outbox_fairness").await;
+    let args = json!({"agent":f.chat.agent_id,"skill":"weekly-review"});
+    let (result, _) =
+        super::super::agent_skills::dispatch(&f.state, &f.chat, "request_agent_skills", &args)
+            .await
+            .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        result["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let acks = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    acks.delete_one(doc! {"_id":&card.id}).await.unwrap();
+    let second = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.owner,
+        "Second recovery destination",
+    )
+    .await;
+    let mut rows = Vec::new();
+    for i in 0..101 {
+        let mut row = bson::to_document(&card).unwrap();
+        row.insert("_id", format!("00000000-0000-4000-8000-{i:012x}"));
+        row.insert("skill_notification_pending", true);
+        if i == 100 {
+            row.insert("skill_notification_target", &second.id);
+        }
+        rows.push(row);
+    }
+    acks.insert_many(rows).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&f.nyxbot_thread},
+            doc! {"$set":{"active_turn":bson::Bson::Null,"event_streak":team::MAX_EVENT_STREAK}},
+        )
+        .await
+        .unwrap();
+    deliver_pending_skill_notifications(&f.state).await.unwrap();
+    let last = "00000000-0000-4000-8000-000000000064";
+    assert!(
+        !engine::get(&f.state.db, &f.owner, &second.id)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|e| e.id == last)
+    );
+    // The first100 remain unconsumed behind the streak cap. A later pass must
+    // still deliver the101st crash-recovery marker.
+    deliver_pending_skill_notifications(&f.state).await.unwrap();
+    assert!(
+        engine::get(&f.state.db, &f.owner, &second.id)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|e| e.id == last)
+    );
+    assert_eq!(
+        acks.count_documents(doc! {"skill_notification_pending":true})
+            .await
+            .unwrap(),
+        101
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn skill_outbox_authority_defer_restores_sticky_target_and_fences_stale_failure() {
+    let f = crate::services::assistant_authority_tests::fixture("skill_outbox_authority").await;
+    let (result, _) = super::super::agent_skills::dispatch(
+        &f.state,
+        &f.chat,
+        "request_agent_skills",
+        &json!({"agent": f.chat.agent_id, "skill": "review"}),
+    )
+    .await
+    .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        result["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let markers = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    markers
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {"skill_notification_target": &f.nyxbot_thread}},
+        )
+        .await
+        .unwrap();
+    let threads = f.state.db.collection::<bson::Document>(CONVERSATIONS);
+    // A live sticky destination becomes ineligible. It must not migrate to the
+    // source's new report_to or be retried by every immediate/sweep attempt.
+    let other =
+        crate::services::assistant_authority_tests::new_orchestrator(&f.state, &f.owner, "Other")
+            .await;
+    threads
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"report_to": &other.id}},
+        )
+        .await
+        .unwrap();
+    threads
+        .update_one(
+            doc! {"_id": &f.nyxbot_thread},
+            doc! {"$set": {"role": "subagent"}},
+        )
+        .await
+        .unwrap();
+    assert!(deliver_skill_notification(&f.state, &card).await.is_err());
+    let deferred = markers
+        .find_one(doc! {"_id": &card.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        deferred.get_str("skill_notification_target").unwrap(),
+        f.nyxbot_thread
+    );
+    assert_eq!(
+        deferred
+            .get_i32("skill_notification_authority_failures")
+            .unwrap(),
+        1
+    );
+    assert!(
+        acks::skill_notifications::pending(&f.state.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    deliver_skill_notification(&f.state, &card).await.unwrap();
+    assert_eq!(
+        markers
+            .find_one(doc! {"_id": &card.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("skill_notification_fence")
+            .unwrap(),
+        deferred.get_i64("skill_notification_fence").unwrap()
+    );
+    assert!(
+        engine::get(&f.state.db, &f.owner, &other.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    // Restore access and advance the retry deadline without wall-clock sleeps.
+    threads
+        .update_one(
+            doc! {"_id": &f.nyxbot_thread},
+            doc! {"$set": {"role": "orchestrator"}},
+        )
+        .await
+        .unwrap();
+    markers
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {"skill_notification_retry_after": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    let stale = acks::skill_notifications::attempt(&f.state.db, &card)
+        .await
+        .unwrap()
+        .unwrap();
+    deliver_skill_notification(&f.state, &card).await.unwrap();
+    acks::skill_notifications::defer_authority(&f.state.db, &card, &stale, "authority_unavailable")
+        .await
+        .unwrap();
+    let delivered = markers
+        .find_one(doc! {"_id": &card.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!delivered.contains_key("skill_notification_retry_after"));
+    assert_eq!(
+        engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .filter(|e| e.id == card.id)
+            .count(),
+        1
+    );
+    let stale = acks::skill_notifications::attempt(&f.state.db, &card)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    // Consume the actual stable event ID, then a stale failure cannot revive it.
+    let mut event = team::event("skill_request_allowed", "test".into(), None);
+    event.id = card.id.clone();
+    acks::skill_notifications::consume_in_session(&f.state.db, &f.owner, &[event], &mut session)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    acks::skill_notifications::defer_authority(&f.state.db, &card, &stale, "authority_unavailable")
+        .await
+        .unwrap();
+    assert!(
+        acks::skill_notifications::attempt(&f.state.db, &card)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !markers
+            .find_one(doc! {"_id": &card.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("skill_notification_retry_after")
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn skill_outbox_deferred_prefix_does_not_starve_due_work_and_deleted_target_migrates() {
+    let f = crate::services::assistant_authority_tests::fixture("skill_outbox_due").await;
+    let (result, _) = super::super::agent_skills::dispatch(
+        &f.state,
+        &f.chat,
+        "request_agent_skills",
+        &json!({"agent": f.chat.agent_id, "skill": "review"}),
+    )
+    .await
+    .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        result["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let markers = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    let mut rows = Vec::new();
+    for i in 0..100 {
+        let mut row = bson::to_document(&card).unwrap();
+        row.insert("_id", format!("00000000-0000-4000-8000-{i:012x}"));
+        row.insert("skill_notification_pending", true);
+        row.insert(
+            "skill_notification_retry_after",
+            bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(1)),
+        );
+        rows.push(row);
+    }
+    markers.insert_many(rows).await.unwrap();
+    let pending = acks::skill_notifications::pending(&f.state.db)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, card.id);
+    // Deletion, rather than loss of authority, permits fenced target migration.
+    markers
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {"skill_notification_target": Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    deliver_skill_notification(&f.state, &card).await.unwrap();
+    assert_eq!(
+        markers
+            .find_one(doc! {"_id": &card.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("skill_notification_target")
+            .unwrap(),
+        f.nyxbot_thread
+    );
+    assert_eq!(
+        engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .filter(|e| e.id == card.id)
+            .count(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn skill_outbox_rechecks_revoked_org_source_and_retains_decision_until_restored() {
+    let f = crate::services::org_agent_tests::Fixture::new("skill_outbox_org_authority").await;
+    let (agent, thread) = f.create().await;
+    let source = engine::begin_turn(
+        &f.state.db,
+        &f.admin,
+        &engine::TurnRequest {
+            conversation_id: Some(thread.id.clone()),
+            text: "Need review skill".into(),
+            attachment_ids: vec![],
+            agent_id: None,
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let destination =
+        crate::services::assistant_authority_tests::new_orchestrator(&f.state, &f.admin, "Review")
+            .await;
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &source.id},
+            doc! {"$set": {"report_to": &destination.id}},
+        )
+        .await
+        .unwrap();
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&source.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (result, _) = super::super::agent_skills::dispatch(
+        &f.state,
+        &chat,
+        "request_agent_skills",
+        &json!({"agent": agent.id, "skill": "review"}),
+    )
+    .await
+    .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.admin,
+        &source.id,
+        result["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    f.revoke(&f.admin).await;
+    assert!(deliver_skill_notification(&f.state, &card).await.is_err());
+    let markers = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    let deferred = markers
+        .find_one(doc! {"_id": &card.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deferred.get_str("status").unwrap(), "allowed");
+    assert!(deferred.get_bool("skill_notification_pending").unwrap());
+    assert!(
+        engine::get(&f.state.db, &f.admin, &destination.id)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .all(|event| event.id != card.id)
+    );
+    // Legacy int32 fences and saturated authority failures retain a one-hour
+    // cap and remain comparable to MongoDB's numeric CAS predicate.
+    markers
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {
+            "skill_notification_fence": 12_i32, "skill_notification_authority_failures": 7_i32,
+            "skill_notification_retry_after": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    deliver_skill_notification(&f.state, &card)
+        .await
+        .unwrap_err();
+    let capped = markers
+        .find_one(doc! {"_id": &card.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(capped.get_i64("skill_notification_fence").unwrap(), 13);
+    assert_eq!(
+        capped
+            .get_i32("skill_notification_authority_failures")
+            .unwrap(),
+        7
+    );
+    let delay = capped
+        .get_datetime("skill_notification_retry_after")
+        .unwrap()
+        .to_chrono()
+        - Utc::now();
+    assert!(delay <= chrono::Duration::hours(1) && delay > chrono::Duration::minutes(59));
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .update_one(
+            doc! {"org_user_id": &f.org, "member_user_id": &f.admin},
+            doc! {"$set": {"revoked_at": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    markers
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {"skill_notification_retry_after": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    deliver_skill_notification(&f.state, &card).await.unwrap();
+    assert_eq!(
+        engine::get(&f.state.db, &f.admin, &destination.id)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .filter(|e| e.id == card.id)
+            .count(),
+        1
+    );
+    assert!(
+        !markers
+            .find_one(doc! {"_id": &card.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("skill_notification_retry_after")
+    );
+    f.state.db.drop().await.unwrap();
+}

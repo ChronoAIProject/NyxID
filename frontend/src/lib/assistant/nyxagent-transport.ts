@@ -1,3 +1,4 @@
+import { ApiError } from "@/lib/api-client";
 import { assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
 import {
   applyDirectTurnEvent,
@@ -64,6 +65,7 @@ function images(
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,
       label: attachment.label,
+      origin: attachment.origin || undefined,
       ...(attachment.image_input ? { imageInput: attachment.image_input } : {}),
     })),
   };
@@ -126,6 +128,7 @@ export class NyxAgentTransport {
   private listeners = new Set<() => void>();
   private index = new Map<string, NyxAgentConversation>();
   private histories = new Map<string, NyxAgentHistory>();
+  private reviewCards = new Map<string, string>();
   private live = new Map<string, LiveTurn>();
   private requests = new Set<AbortController>();
   private draftModel = "nyxagent/chat";
@@ -157,6 +160,7 @@ export class NyxAgentTransport {
     this.live.clear();
     this.index.clear();
     this.histories.clear();
+    this.reviewCards.clear();
     this.draftModel = "nyxagent/chat";
     this.changed();
   }
@@ -193,6 +197,7 @@ export class NyxAgentTransport {
       this.rowRevisions.set(row.id, (this.rowRevisions.get(row.id) ?? 0) + 1);
       this.index.delete(row.id);
       this.histories.delete(row.id);
+      this.reviewCards.delete(row.id);
     }
     this.changed();
   }
@@ -262,13 +267,29 @@ export class NyxAgentTransport {
     return this.getConversations(agentId);
   }
 
-  async history(id: string, beforeSeq?: number) {
+  async history(id: string, beforeSeq?: number, reviewCard?: string | null) {
     const generation = this.identity();
+    // Internal refreshes and pagination retain the linked card. The route
+    // passes null explicitly when the owner leaves that review link.
+    if (reviewCard !== undefined) {
+      if (reviewCard === null) this.reviewCards.delete(id);
+      else this.reviewCards.set(id, reviewCard);
+    }
+    const card = this.reviewCards.get(id);
     const rowRevision = this.rowRevisions.get(id);
     const query = beforeSeq ? `&before_seq=${String(beforeSeq)}` : "";
-    const page = nyxAgentHistorySchema.parse(await assistantJson(`${path(id)}?limit=100${query}`));
+    const endpoint = `${path(id)}?limit=100${query}`;
+    let response: unknown;
+    try {
+      response = await assistantJson(card ? `${endpoint}&card=${encodeURIComponent(card)}` : endpoint);
+    } catch (error) {
+      // Older replicas reject the additive query field; ordinary history still works.
+      if (!card || !(error instanceof ApiError) || error.status !== 400) throw error;
+      response = await assistantJson(endpoint);
+    }
+    const page = nyxAgentHistorySchema.parse(response);
     this.current(generation);
-    if (rowRevision !== this.rowRevisions.get(id)) {
+    if (rowRevision !== this.rowRevisions.get(id) || card !== this.reviewCards.get(id)) {
       throw new DOMException("Conversation changed", "AbortError");
     }
     if (page.conversation.id !== id) throw new Error("Assistant conversation mismatch.");
@@ -363,6 +384,7 @@ export class NyxAgentTransport {
     this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
     this.index.delete(id);
     this.histories.delete(id);
+    this.reviewCards.delete(id);
     this.changed();
   }
 

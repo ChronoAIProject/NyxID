@@ -691,6 +691,8 @@ export const assistantGroupPendingActionSchema = z.object({
   confirm_phrase: z.string().regex(/^yes \d{4}$/).optional(),
   triggering_person: groupPersonSchema.optional(),
   can_decide: z.boolean().optional(),
+  authored_skill: z.boolean().optional(),
+  review_url: z.string().optional(),
   expires_at: z.string(),
 });
 export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;

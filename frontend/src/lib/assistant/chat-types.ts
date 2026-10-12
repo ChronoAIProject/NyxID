@@ -44,6 +44,7 @@ export interface ChatMessage {
 }
 
 export interface ChatImage {
+  readonly origin?: "tool" | "user_upload";
   readonly expired?: boolean;
   readonly imageInput?: "sent" | "unavailable";
   readonly id: string;

@@ -611,7 +611,9 @@ pub(crate) async fn group_note(
         group as you. Answer what was asked of you. To hand work to a member write their \
         @name; mention nobody when you are done or answering the user. The user cannot see \
         confirmation cards here: when an action needs confirmation, ask them to reply with \
-        its confirm_phrase (for example \"yes 4821\").",
+        its confirm_phrase (for example \"yes 4821\"). When a result has review_url instead \
+        of confirm_phrase, send that full URL so the owner can review all files in NyxID. \
+        Group replies never approve publication of a skill draft.",
         identifier(&agent.name),
         identifier(&group.name),
         if others.is_empty() {
@@ -635,14 +637,26 @@ async fn pending_actions(state: &AppState, owner: &str, group_id: &str) -> AppRe
                 && ack.decider == "user"
                 && ack.expires_at > now
             {
-                out.push(json!({
+                let mut item = json!({
                     "conversation_id": thread.id,
                     "acknowledgement_id": ack.id,
                     "agent_id": thread.agent_id,
                     "summary": ack.summary,
-                    "confirm_phrase": format!("yes {}", acks::confirm_code(&ack.id)),
                     "expires_at": ack.expires_at,
-                }));
+                });
+                if ack.authored_skill.is_some() {
+                    item["authored_skill"] = json!(true);
+                    item["review_url"] = json!(
+                        crate::services::assistant_links::AssistantPage::ReviewCard {
+                            conversation: &thread.id,
+                            card: &ack.id,
+                        }
+                        .url(&state.config.frontend_url)
+                    );
+                } else {
+                    item["confirm_phrase"] = json!(format!("yes {}", acks::confirm_code(&ack.id)));
+                }
+                out.push(item);
             }
         }
     }
@@ -685,9 +699,20 @@ pub(crate) async fn org_pending_actions(
             .find(|p| p.id == thread.user_id)
             .map(|p| p.display_name.as_str())
             .unwrap_or("Member");
-        out.push(json!({"conversation_id":thread.id,"acknowledgement_id":ack.id,
+        let mut item = json!({"conversation_id":thread.id,"acknowledgement_id":ack.id,
             "agent_id":thread.agent_id,"summary":ack.summary,"expires_at":ack.expires_at,
-            "triggering_person":{"id":thread.user_id,"display_name":name},"can_decide":thread.user_id==access.actor}));
+            "triggering_person":{"id":thread.user_id,"display_name":name},"can_decide":thread.user_id==access.actor && ack.authored_skill.is_none()});
+        if ack.authored_skill.is_some() {
+            item["authored_skill"] = json!(true);
+            item["review_url"] = json!(
+                crate::services::assistant_links::AssistantPage::ReviewCard {
+                    conversation: &thread.id,
+                    card: &ack.id,
+                }
+                .url(&state.config.frontend_url)
+            );
+        }
+        out.push(item);
     }
     let approvals: Vec<crate::models::approval_request::ApprovalRequest> = state.db
         .collection(crate::models::approval_request::COLLECTION_NAME)

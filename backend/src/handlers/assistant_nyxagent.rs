@@ -399,6 +399,7 @@ pub struct PageQuery {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryQuery {
+    card: Option<Uuid>,
     limit: Option<i64>,
     before_seq: Option<i64>,
 }
@@ -534,7 +535,17 @@ pub async fn history(
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
-    let acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
+    let mut acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
+    if let Some(card) = query.card {
+        acknowledgements::include_card(
+            &state.db,
+            &user_id,
+            &id,
+            &card.to_string(),
+            &mut acknowledgements,
+        )
+        .await?;
+    }
     let approvals =
         engine::pending_approvals(&state.db, &user_id, &conversation.credential_api_key_id).await?;
     // Best effort: the transcript never fails because of the waiting list.
@@ -1590,6 +1601,64 @@ async fn execute_turn(
     partial: &mut String,
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
 ) -> Result<TurnResult, TurnError> {
+    let mut tool_images = images::ToolImages::default();
+    let outcome = Box::pin(execute_turn_inner(
+        state,
+        auth,
+        row,
+        text,
+        credential,
+        policy,
+        events,
+        block_id,
+        partial,
+        instruction_context,
+        &mut tool_images,
+    ))
+    .await;
+    if outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|r| r.error.is_some()) {
+        tool_images.failed(state, row).await;
+    }
+    if tool_images.rounds > 0
+        && let Some(mut fallback) = tool_images.fallback.take()
+        && (outcome.as_ref().is_err_and(|e| e.code != "cancelled")
+            || outcome
+                .as_ref()
+                .is_ok_and(|r| r.error.as_ref().is_some_and(|e| e.code != "cancelled")))
+    {
+        events.emit("turn.notice", json!({"code":"image_input_unavailable", "message":"Tool images could not be viewed; the completed answer was preserved."}));
+        engine::clear_binding(
+            &state.db,
+            &row.user_id,
+            &row.id,
+            &row.active_turn.as_ref().expect("claimed turn").turn_id,
+            "image_input_unavailable",
+        )
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
+        fallback.session_id = None;
+        fallback.response_id = None;
+        *instruction_context = None;
+        *partial = fallback.text.clone();
+        return Ok(fallback);
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_turn_inner(
+    state: &AppState,
+    auth: &AuthUser,
+    row: &AssistantConversation,
+    text: &str,
+    credential: &mut AssistantCredential,
+    policy: Option<BillingRoutePolicy>,
+    events: &mut Events,
+    block_id: &str,
+    partial: &mut String,
+    instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
+    tool_images: &mut images::ToolImages,
+) -> Result<TurnResult, TurnError> {
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
     let mut history = engine::messages(
         &state.db,
@@ -1809,6 +1878,7 @@ async fn execute_turn(
         settings.max_auto_continuations,
     );
     let mut completed = String::new();
+    let mut emitted = String::new();
     let mut input = if text.trim().is_empty() {
         "Please discuss the attachments in this message."
     } else {
@@ -1860,11 +1930,14 @@ async fn execute_turn(
         {
             return Err(TurnError::new("cancelled"));
         }
-        let request_key = if continuations.count == 0 {
+        let request_key = if tool_images.fallback.is_some() {
+            format!("{turn_id}:images:{}", tool_images.rounds)
+        } else if continuations.count == 0 {
             turn_id.clone()
         } else {
             format!("{turn_id}:continuation:{}", continuations.count)
         };
+        tool_images.attempted(state, row).await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let response = tokio::time::timeout_at(
             deadline,
@@ -1875,8 +1948,15 @@ async fn execute_turn(
                 "POST",
                 "v1/responses",
                 Some({
+                    let request_input = if tool_images.note.is_empty() {
+                        input.to_owned()
+                    } else {
+                        format!("{input}\n\n{}", tool_images.note)
+                    };
                     let input = context.input(
-                        if continuations.count == 0 || binding.is_none() {
+                        if (continuations.count == 0 && tool_images.fallback.is_none())
+                            || binding.is_none()
+                        {
                             // Recovery into a fresh session must restore the
                             // turn facts that its discarded session had seen.
                             &decisions
@@ -1886,13 +1966,20 @@ async fn execute_turn(
                             // too, once per request, without repeating events.
                             &listing
                         },
-                        input,
+                        &request_input,
                     );
                     let mut body =
                         engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
-                    if continuations.count == 0 && !image_parts.is_empty() {
+                    let parts = if !tool_images.parts.is_empty() {
+                        &tool_images.parts
+                    } else if continuations.count == 0 && tool_images.fallback.is_none() {
+                        &image_parts
+                    } else {
+                        &Vec::new()
+                    };
+                    if !parts.is_empty() {
                         let mut content = vec![json!({"type":"input_text", "text":input})];
-                        content.extend(image_parts.clone());
+                        content.extend(parts.clone());
                         body["input"] = json!([{"role":"user", "content":content}]);
                     }
                     body
@@ -1905,6 +1992,9 @@ async fn execute_turn(
         .map_err(|_| TurnError::new("first_byte_timeout"))?
         .map_err(proxy_turn_error)?;
         if !response.status().is_success() {
+            if tool_images.fallback.is_some() {
+                return Err(TurnError::new("assistant_unavailable"));
+            }
             let status = response.status().as_u16();
             let bytes = tokio::time::timeout(
                 Duration::from_secs(10),
@@ -2011,7 +2101,6 @@ async fn execute_turn(
         let mut body = response.into_body().into_data_stream();
         let mut decoder = ResponseStream::default();
         let mut first = true;
-        let mut emitted_bytes = completed.len();
         loop {
             let timeout = if first {
                 deadline.saturating_duration_since(tokio::time::Instant::now())
@@ -2068,13 +2157,7 @@ async fn execute_turn(
                 while !partial.is_char_boundary(safe_end) {
                     safe_end -= 1;
                 }
-                if safe_end > emitted_bytes {
-                    events.emit(
-                        "block.delta",
-                        json!({"block_id": block_id, "text": &partial[emitted_bytes..safe_end]}),
-                    );
-                    emitted_bytes = safe_end;
-                }
+                emit_text_suffix(events, block_id, &mut emitted, &partial[..safe_end]);
             }
         }
         crate::services::assistant_steering::set_running_response(&state.db, row, None)
@@ -2089,6 +2172,56 @@ async fn execute_turn(
                 .replace(credential.raw_key.as_str(), "[redacted]"),
         );
         binding = result.session_id.clone().or(binding);
+        if tool_images.fallback.is_some() && result.error.is_some() {
+            result.text = completed + &result.text;
+            return Ok(result);
+        }
+        if result.error.is_none() {
+            result.text = completed.clone() + &result.text;
+            *partial = result.text.clone();
+            result.session_id = binding.clone();
+            tool_images.fallback = Some(result.clone());
+            tool_images.sent(state, row).await;
+            let prepared = if binding.is_some() {
+                match tool_images
+                    .prepare(state, auth, row, credential, policy)
+                    .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) if error.code == "cancelled" => return Err(error),
+                    Err(_) => {
+                        tracing::warn!("Optional tool image preparation could not complete");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if prepared {
+                images::renew(
+                    state,
+                    row,
+                    binding.as_deref().expect("bound above"),
+                    events,
+                    tool_images.rounds,
+                )
+                .await?;
+                emit_text_suffix(events, block_id, &mut emitted, partial);
+                if !result.text.is_empty() {
+                    events.emit("block.delta", json!({"block_id":block_id,"text":"\n\n"}));
+                    emitted.push_str("\n\n");
+                }
+                completed = if result.text.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n\n", result.text)
+                };
+                input = "Continue after viewing the tool images.";
+                continue;
+            }
+            tool_images.fallback = None;
+            return Ok(result);
+        }
         if let Some(error) = &result.error {
             match continue_turn(
                 state,
@@ -2102,14 +2235,10 @@ async fn execute_turn(
             .await
             {
                 Ok(true) => {
-                    if partial.len() > emitted_bytes {
-                        events.emit(
-                            "block.delta",
-                            json!({"block_id":block_id,"text":&partial[emitted_bytes..]}),
-                        );
-                    }
+                    emit_text_suffix(events, block_id, &mut emitted, partial);
                     if !partial.is_empty() {
                         events.emit("block.delta", json!({"block_id":block_id,"text":"\n\n"}));
+                        emitted.push_str("\n\n");
                     }
                     completed = if partial.is_empty() {
                         String::new()
@@ -2126,6 +2255,17 @@ async fn execute_turn(
         result.text = completed + &result.text;
         result.session_id = binding;
         return Ok(result);
+    }
+}
+
+// Terminal output can rewrite streamed text. Only append a proven suffix;
+// block.completed remains authoritative when the provider changes its prefix.
+fn emit_text_suffix(events: &mut Events, block_id: &str, emitted: &mut String, text: &str) {
+    if let Some(suffix) = text.strip_prefix(emitted.as_str())
+        && !suffix.is_empty()
+    {
+        events.emit("block.delta", json!({"block_id":block_id,"text":suffix}));
+        emitted.push_str(suffix);
     }
 }
 
@@ -2179,3 +2319,6 @@ mod tests;
 #[path = "assistant_nyxagent_steering.rs"]
 mod steering;
 pub use steering::{capabilities, steer};
+
+#[path = "assistant_nyxagent_images.rs"]
+mod images;

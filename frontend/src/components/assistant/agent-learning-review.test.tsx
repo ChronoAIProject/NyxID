@@ -158,9 +158,9 @@ describe("AgentLearningReview", () => {
   }
 
   it("links an authored proposal to its conversation card and shows its state", () => {
-    withProposals([{ ...proposal, source: "authored", status: "publication_failed", failure_code: "publish_uncertain", card_conversation_id: "conversation-1" }]);
+    withProposals([{ ...proposal, source: "authored", status: "publication_failed", failure_code: "publish_uncertain", card_conversation_id: "conversation-1", acknowledgement_id: "12345678-1234-4123-8123-123456789012" }]);
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.getByRole("link", { name: "Open the confirmation card" })).toHaveAttribute("href", "/assistant?c=conversation-1");
+    expect(screen.getByRole("link", { name: "Open the confirmation card" })).toHaveAttribute("href", "/assistant?c=conversation-1&card=12345678-1234-4123-8123-123456789012");
     expect(screen.getByText(/cannot yet confirm whether Ornn published this version/)).toBeVisible();
     expect(screen.getByText("publication_failed")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();

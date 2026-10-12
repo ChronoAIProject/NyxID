@@ -288,7 +288,8 @@ pub fn channel_note(row: &AssistantConversation) -> String {
             link (connect links, setup links) as a full URL in your text, and when an action \
             needs confirmation (acknowledgement_required) ask them to reply with its \
             confirm_phrase (for example \"yes 4821\") or \"no\" with the same code; NyxID \
-            applies their answer."
+            applies their answer. When a result has review_url instead of confirm_phrase, send \
+            review_url as a full URL so the owner can review all files in NyxID; chat replies cannot approve it."
         ));
     }
     prompt
@@ -518,7 +519,10 @@ pub fn events_text(events: &[AgentEvent]) -> String {
 
 /// Queued owner messages keep more text than status notices.
 pub fn event_text_limit(event: &AgentEvent) -> usize {
-    if matches!(event.kind.as_str(), "message" | "group_settled") {
+    if matches!(
+        event.kind.as_str(),
+        "message" | "group_settled" | "skill_request_allowed"
+    ) {
         3200
     } else {
         1200
@@ -782,6 +786,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             doc! {"conversation_id": 1, "status": 1, "created_at": 1},
+            false,
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"skill_notification_pending": 1, "skill_notification_retry_after": 1, "skill_notification_retry_at": 1, "_id": 1},
             false,
         ),
         (
@@ -1519,6 +1528,9 @@ pub async fn begin_turn_with_voice(
                 if start.origin == TurnOrigin::Event && events.is_empty() {
                     return Err(AppError::Conflict("No eligible pending events".into()));
                 }
+                super::assistant_acknowledgement_service::skill_notifications::consume_in_session(
+                    db, user_id, &events, session,
+                ).await?;
                 if start.origin == TurnOrigin::Event
                     && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
                     && !events.iter().any(|e| e.kind == super::async_service_operation::EVENT_KIND)

@@ -189,11 +189,22 @@ redaction, bounds or review.
 
 Creation, claiming and completion use compare-and-set updates on
 `config_revision` and a monotonically increasing fence. A worker claims one
-run with a short lease, renews it while reading evidence, and releases it by
-writing a terminal status. A lease expiry permits a later worker to retry;
+run with a 120-second lease and writes a terminal status on completion. The
+worker checks lease expiry before inference and after its response; stale work
+is cancelled without advancing the cursor. A lease expiry permits a later worker to retry;
 the fence prevents the old worker from advancing the cursor or writing a
 proposal after loss of ownership. Queue depth, attempts, evidence count,
 excerpt bytes and proposal size are bounded.
+
+Destroying a specialist disables its existing learning configuration, advances
+its revision, and cancels queued or analyzing runs with cleared leases and
+advanced fences in the same transaction. Configuration and run admission write
+fence the live agent; admission reserves the configuration and inserts the run
+atomically. Workers re-read agent, configuration and lease authority after
+loading evidence and again after inference. Inference already admitted before
+destruction may finish, but successful completion (including cursor-only results)
+write-fences the live agent in the proposal/cursor transaction. A destroyed agent
+cannot re-enable learning, admit another run, or persist a late learning result.
 
 Run states are `queued`, `running`, `analyzing`, `succeeded`, `failed`,
 `cancelled` and `blocked`; proposal state is separate (`pending`, `rejected`,
@@ -620,9 +631,12 @@ retention cleanup is a bounded maintenance task and is part of the delivery
 work that follows the dormant PR-1 worker; no cleanup can expose evidence.
 
 Changing the agent owner, destroying the agent, removing an org member or
-disabling the owner account fences queued and running work. The worker checks
-the fence before every read, model call, write and external mutation. Pending
-proposals are invalidated transactionally with the ownership change. A skill
+disabling the owner account fences queued and running work. Workers and review
+operations recheck live authority before inference, settlement and publication.
+Destroying a specialist cancels outstanding runs transactionally; existing
+proposals remain stored, and live review checks refuse publication for the
+destroyed agent. Other authority or evidence changes are revalidated by the
+review and publication paths and may invalidate the proposal there. A skill
 already published and pinned through B2 remains an explicit owner decision;
 L1 does not silently remove it or claim that learning revocation retracts
 content already shared in Ornn.
@@ -707,6 +721,44 @@ disables the flag before binaries are reverted. Neither PR changes grants,
 operation scopes, approvals, memory visibility or existing B2 pins.
 
 ## Owner-requested skill authoring
+
+Authored draft results include an absolute `review_url` identifying both the
+conversation and acknowledgement (`/assistant?c=...&card=...`). Channel agents
+must send this full link when there is no `confirm_phrase`. Group pending rows
+show **Review draft** without Confirm/Allow/Deny; chat replies never authorize
+publication. The app loads and highlights the exact card, where the owner must
+review all files. On old replicas the additive card query falls back to normal
+history; deploy all replicas to guarantee loading cards outside recent history.
+
+`learning_status`, `learning_list_proposals` and `learning_run_now` resolve
+NyxBot's own immutable UUID with the maintain ACL, just like specialist IDs.
+Listing honors the same person/pilot gate as authoring; automatic learning's
+own enrollment gate is unchanged. Authored proposal items add latest
+`acknowledgement_id`, `card_status`, `card_expires_at` and `review_url`.
+
+Re-drafting identical content in another turn reuses a pending, never-dispatched
+proposal and its latest pending/expired card if the original owner's conversation
+and its bound authoring key remain valid. Expired cards link to **Request a new confirmation**. Reuse never
+moves cards, approves them or bypasses publication fences. Changed content gets
+a new draft; started, uncertain or verified publication is not reusable. An
+unstarted proposal marked `publication_failed` only because its confirmation
+expired also keeps its original review link; only explicit owner renewal creates
+a new confirmation for that operation. An allowed, unexpired card with no
+publication started or active lease returns `waiting_publication` and the same
+review link. This joins the original operation without another card, Ornn read
+or publication dispatch.
+
+Concurrent authoring requests reserve one proposal and its original review origin
+in `assistant_authored_draft_claims`. Ornn preparation happens outside a database
+transaction; a second transaction fences that generation, proposal and credential
+when inserting the card. Interrupted or failed preparation retains the proposal
+for retry, including its original turn/trigger/voice identity. Stale workers cannot
+create a card after another generation replaces an unusable origin. Claim rows
+contain only stable identifiers and are removed on owner or target-agent deletion;
+a deleted origin conversation cannot authorize reuse. Legacy
+proposals with a valid card are adopted. A legacy orphan without recorded origin
+must be reviewed or discarded before retrying; NyxID refuses to guess a different
+review conversation or silently create a duplicate.
 
 `draft_agent_skill` is NyxBot-only: it drafts for review, never publishes on a
 model's authority. It reuses the default-off `assistant:agent-learning` flag,
@@ -927,3 +979,37 @@ authorizes another write.
   tag back; the agent's pin stays on the verified new version.
 - The flags and drain procedure of "Rollout and compatibility" still apply;
   keep learning disabled until the migration marker is present.
+
+The durable skill-approval outbox and authored-draft generation claims require
+all backend replicas and assistant workers to run this version before enabling
+or resuming the corresponding workflows. During rollout, pause authoring and
+skill approvals, drain active assistant turns, upgrade every writer and sweeper,
+then resume. Existing API shapes and stored drafts remain readable; older writers
+do not participate in claim serialization or transactional event consumption.
+Running these workflows across mixed backend versions can duplicate drafts or
+replay a notification. The image-input capability gate and card-query fallback
+continue to support older NyxAgent deployments and frontends independently.
+
+For this coordinated upgrade, first disable `assistant:agent-learning` for
+all affected users using the existing feature-flag administration. Quiesce
+assistant and approval ingress at the deployment's load balancer, including
+channel webhook ingress; the learning flag alone does not pause skill requests
+or owner decisions. Let admitted assistant turns and publication requests finish,
+then stop the old backend/assistant worker processes so no old sweeper can drain
+or enqueue events. Upgrade every backend writer and worker before restoring
+traffic and the flag. This requires a maintenance window; there is no automatic
+mixed-version activation fence for these two new internal workflows.
+
+Before rollback, quiesce the same ingress and drain/stop the new workers.
+An older binary leaves undelivered skill-notification markers untouched and
+cannot deliver them; retain those rows and upgrade again to recover delivery.
+Do not run old and new workers simultaneously. A marker records notification
+admission to a NyxBot turn, not successful attachment: upstream turn failure can
+still require the owner to resume NyxBot, and attachment always requires its
+separate owner review card.
+
+When source or persisted destination authority is temporarily unavailable,
+keep the owner decision and defer notification retries for 60 seconds, doubling
+to a one-hour cap. Restored access is rechecked at the next due sweep (at most
+one hour plus sweep backlog). Busy threads and event-budget limits retain normal
+queued-event handling; database failures do not become authority deferrals.
