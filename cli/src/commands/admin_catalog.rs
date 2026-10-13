@@ -217,6 +217,42 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
 
 pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
     match command {
+        AdminCatalogCommands::Icon {
+            provider,
+            file,
+            auth,
+        } => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(&file)?
+                .take(128 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 128 * 1024 {
+                bail!("SVG exceeds 128 KiB");
+            }
+            let svg = String::from_utf8(bytes)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let row = find_provider(&mut api, &provider)
+                .await?
+                .ok_or_else(|| anyhow!("Provider not found: {provider}"))?;
+            let id = row["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Provider has no ID"))?;
+            let uploaded: Value = api
+                .post(
+                    &format!("/providers/{id}/icon"),
+                    &serde_json::json!({"svg": svg}),
+                )
+                .await?;
+            let updated: Value = api
+                .put(
+                    &format!("/providers/{id}"),
+                    &serde_json::json!({"icon_url": uploaded["icon_url"]}),
+                )
+                .await?;
+            print_provider(&updated, &auth)?;
+            Ok(())
+        }
         AdminCatalogCommands::Apply {
             manifest,
             dry_run,
@@ -1580,6 +1616,7 @@ fn print_provider(provider: &Value, auth: &AuthArgs) -> Result<()> {
             );
             eprintln!("ID:            {}", text(provider, "id"));
             eprintln!("Type:          {}", text(provider, "provider_type"));
+            eprintln!("Icon URL:      {}", text(provider, "icon_url"));
             eprintln!("Authorize URL: {}", text(provider, "authorization_url"));
             eprintln!("Token URL:     {}", text(provider, "token_url"));
             let scopes = provider["default_scopes"]
@@ -1713,6 +1750,41 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "services": services })))
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn icon_upload_sets_provider_url() {
+        let server = MockServer::start().await;
+        listing(&server, json!([provider_row(true)]), json!([])).await;
+        let svg = r#"<svg viewBox="0 0 24 24"><path d="M0 0h24v24z"/></svg>"#;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), svg).unwrap();
+        let icon_url = format!("{}/catalog-icons/hash", server.uri());
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v1/providers/11111111-1111-4111-8111-111111111111/icon",
+            ))
+            .and(body_json(json!({"svg": svg})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"icon_url": icon_url})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/api/v1/providers/11111111-1111-4111-8111-111111111111",
+            ))
+            .and(body_json(json!({"icon_url": icon_url})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(provider_row(true)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_catalog(AdminCatalogCommands::Icon {
+            provider: "zoho-mail".into(),
+            file: file.path().into(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

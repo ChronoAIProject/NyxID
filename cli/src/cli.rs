@@ -431,6 +431,16 @@ pub struct ManifestArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCatalogCommands {
+    /// Upload a static SVG and set the linked provider's catalog icon
+    Icon {
+        /// Provider ID or slug (all linked services inherit this icon)
+        provider: String,
+        /// Local SVG file (maximum 128 KiB)
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Interactive wizard: create a provider and service, set the OAuth client, then validate
     Add {
         /// Start from a manifest instead of answering every question
