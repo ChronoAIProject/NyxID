@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Metadata-only snapshot of the reply a vote is about (addendum A1). Every
 /// field defaults, so rows written before a field existed, or partial rows,
@@ -35,7 +36,7 @@ pub struct FeedbackReplyContext {
 
 pub const COLLECTION_NAME: &str = "assistant_message_feedback";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessageFeedback {
     #[serde(rename = "_id")]
     pub id: String,
@@ -54,4 +55,50 @@ pub struct AssistantMessageFeedback {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for AssistantMessageFeedback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssistantMessageFeedback")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("group_id", &self.group_id)
+            .field("message_id", &self.message_id)
+            .field("turn_id", &self.turn_id)
+            .field("vote", &self.vote)
+            .field("comment_present", &self.comment.is_some())
+            .field("comment_len", &self.comment.as_ref().map(String::len))
+            .field("context_present", &self.context.is_some())
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_comment() {
+        let debug = format!(
+            "{:?}",
+            AssistantMessageFeedback {
+                id: "feedback".into(),
+                user_id: "user".into(),
+                conversation_id: Some("conversation".into()),
+                group_id: None,
+                message_id: "message".into(),
+                turn_id: Some("turn".into()),
+                vote: "down".into(),
+                comment: Some("sample feedback comment".into()),
+                context: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        );
+        assert!(!debug.contains("sample feedback comment"));
+        assert!(debug.contains("comment_present: true"));
+    }
 }
