@@ -115,11 +115,12 @@ export function toolServiceName(slug: string): string {
 function operationPhrase(operation: string): readonly [string, string] {
   const tokens = operation.toLowerCase().split(/[_\-\s]+/).filter(Boolean);
   const at = tokens.findIndex((token) => VERBS[token]);
-  if (at < 0) {
+  const verb = at < 0 ? undefined : VERBS[tokens[at] ?? ""];
+  if (!verb) {
     const object = words(tokens);
     return object ? [`Run ${object}`, `Running ${object}`] : ["Run a tool", "Running a tool"];
   }
-  const [action, progress] = VERBS[tokens[at]];
+  const [action, progress] = verb;
   const object = words([...tokens.slice(0, at), ...tokens.slice(at + 1)]);
   return object ? [`${action} ${object}`, `${progress} ${object}`] : [action, progress];
 }
