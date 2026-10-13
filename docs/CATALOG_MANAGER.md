@@ -159,3 +159,31 @@ The template pins one Zoho data center. Zoho expects comma-separated scopes,
 so they are one entry. NyxID sends `Authorization: Bearer`, while Zoho
 documents `Zoho-oauthtoken`; a 401 with a fresh token means Zoho rejected the
 scheme and NyxID needs a dedicated auth method.
+
+## Uploading provider SVG icons
+
+After creating the provider, upload a reviewed official vendor SVG:
+
+```bash
+nyxid admin catalog icon zoho-mail --file ./zoho-mail.svg --output json
+nyxid admin provider show zoho-mail --output json
+nyxid catalog show api-zoho-mail --output json
+```
+
+The command uploads the file to NyxID, then updates the provider's `icon_url`.
+All catalog services linked to that provider inherit the icon. Admins may update
+any provider; Catalog Managers may update only providers they created.
+
+The backend must support `POST /api/v1/providers/{provider_id}/icon` before using
+this command. Assets are stored in MongoDB and served publicly at
+`/catalog-icons/{id}`; no separate frontend asset deployment is needed.
+Each upload receives an immutable asset URL. If the provider update
+fails after upload, the existing icon remains selected; correct the error and
+rerun the command.
+
+Files must be UTF-8 static SVGs, at most 128 KiB, with a `viewBox`. Scripts,
+event handlers, styles, animation, embedded images and external resources are
+rejected. Convert style declarations to SVG presentation attributes before
+uploading. Shapes, groups, gradients, masks and clipping paths are supported.
+Use an official vendor source and observe its brand-use terms. Verify the
+resulting URL loads and inspect the catalog on light and dark backgrounds.

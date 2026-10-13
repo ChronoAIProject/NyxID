@@ -762,6 +762,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let provider_routes = Router::new()
+        .route(
+            "/{provider_id}/icon",
+            post(handlers::catalog_icons::upload).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/", get(handlers::providers::list_providers))
         .route("/", post(handlers::providers::create_provider))
         .route("/my-tokens", get(handlers::user_tokens::list_my_tokens))
@@ -2678,6 +2682,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/favicon.ico", get(handlers::brand_icons::favicon_ico))
         .route("/favicon.svg", get(handlers::brand_icons::favicon_svg))
         .route("/icon-512.png", get(handlers::brand_icons::icon_png))
+        .route("/catalog-icons/{id}", get(handlers::catalog_icons::serve))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .route(

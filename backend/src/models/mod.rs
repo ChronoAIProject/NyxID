@@ -162,3 +162,5 @@ pub mod service_concurrency;
 pub mod service_preference;
 
 pub mod async_service_operation;
+
+pub mod catalog_icon;
