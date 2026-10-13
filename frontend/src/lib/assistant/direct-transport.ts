@@ -141,6 +141,22 @@ function isDirectTurnActive(status: DirectTurnStatus | undefined): boolean {
   return status === "running" || status === "waiting";
 }
 
+/** Only the message holding the block changes identity, so settled rows stay memoized. */
+function replaceBlock(
+  messages: DirectTurnState["messages"],
+  blockId: string,
+  update: (block: DirectTextBlock) => DirectTextBlock,
+): DirectTurnState["messages"] {
+  return messages.map((message) =>
+    message.blocks.some((block) => block.block_id === blockId)
+      ? {
+          ...message,
+          blocks: message.blocks.map((block) => (block.block_id === blockId ? update(block) : block)),
+        }
+      : message,
+  );
+}
+
 export function applyDirectTurnEvent(
   state: DirectTurnState,
   event: DirectTurnEvent,
@@ -197,24 +213,15 @@ export function applyDirectTurnEvent(
     case "block.delta":
       return {
         ...nextBase,
-        messages: state.messages.map((message) => ({
-          ...message,
-          blocks: message.blocks.map((block) =>
-            block.block_id === event.block_id
-              ? { ...block, text: block.text + event.text }
-              : block,
-          ),
+        messages: replaceBlock(state.messages, event.block_id, (block) => ({
+          ...block,
+          text: block.text + event.text,
         })),
       };
     case "block.completed":
       return {
         ...nextBase,
-        messages: state.messages.map((message) => ({
-          ...message,
-          blocks: message.blocks.map((block) =>
-            block.block_id === event.block_id ? event.block : block,
-          ),
-        })),
+        messages: replaceBlock(state.messages, event.block_id, () => event.block),
       };
     case "message.completed":
       return nextBase;

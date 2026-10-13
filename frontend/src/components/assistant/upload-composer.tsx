@@ -19,11 +19,20 @@ import {
   type UploadedMessage,
   type UploadScope,
 } from "@/lib/assistant/uploads";
+import {
+  attachmentKind,
+  pastedTextFile,
+  resolveAttachmentMentions,
+  type AttachmentKind,
+} from "@/lib/assistant/attachment-mentions";
 import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import type { NyxAgentAttachment } from "@/schemas/assistant-nyxagent";
 
 type Pending = {
   key: string;
+  /** What the writer types after `@` to mention this file, e.g. `image-1`. */
+  handle: string;
+  kind: AttachmentKind;
   name: string;
   preview?: string;
   progress: number;
@@ -50,6 +59,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const scopeId = useRef<Promise<string> | undefined>(undefined);
   const resolved = useRef<UploadScope>(scope);
   const alive = useRef(true);
+  const handleCounts = useRef<Record<AttachmentKind, number>>({ image: 0, file: 0, "pasted-text": 0 });
   const locked = props.disabled || props.active || props.sending;
   useEffect(() => {
     alive.current = true;
@@ -77,9 +87,11 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     refresh();
     requestAnimationFrame(() => attach.current?.focus());
   }
-  async function add(incoming: File[]) {
-    if (locked) return;
+  /** Queues `incoming` for upload and returns the handles it was given. */
+  function add(incoming: File[], kind?: AttachmentKind): string[] {
+    if (locked) return [];
     setNotice(undefined);
+    const handles: string[] = [];
     for (const file of incoming) {
       if (pending.current.size >= 10) {
         setNotice(
@@ -87,12 +99,17 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         );
         break;
       }
+      const fileKind = kind ?? attachmentKind(file);
+      handleCounts.current[fileKind] += 1;
       const entry: Pending = {
         key: crypto.randomUUID(),
+        handle: `${fileKind}-${String(handleCounts.current[fileKind])}`,
+        kind: fileKind,
         name: file.name,
         progress: 0,
         controller: new AbortController(),
       };
+      handles.push(entry.handle);
       if (!isSupportedAttachment(file)) {
         entry.error = UNSUPPORTED_FORMAT_MESSAGE;
         pending.current.set(entry.key, entry);
@@ -143,6 +160,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         refresh();
       });
     }
+    return handles;
   }
   async function openVoice() {
     if (locked || openingVoice.current || pending.current.size || scope.kind !== "conversations" || !onVoice) return;
@@ -164,6 +182,18 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       hasAttachments={files.some((file) => file.item)}
       uploadBlocked={files.some((file) => !file.item) || Boolean(props.active && files.length)}
       onFiles={(items) => void add(items)}
+      // Every chip, failed ones included: a reference goes only when its chip is removed.
+      attachmentMentions={files.map((file) => ({
+        handle: file.handle,
+        label: file.item?.label ?? file.name,
+        kind: file.kind,
+      }))}
+      onLongText={(text) => {
+        if (locked || pending.current.size >= 10) return undefined;
+        // Named like its handle: @pasted-text-2 is pasted-text-2.md.
+        const file = pastedTextFile(text, handleCounts.current["pasted-text"] + 1);
+        return add([file], "pasted-text")[0];
+      }}
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
           {files.length > 0 && (
@@ -190,7 +220,15 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                     <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
                   )}
                   <div className="min-w-0 flex-1">
-                    <p className="truncate">{file.item?.label ?? file.name}</p>
+                    <p className="truncate">
+                      <span
+                        className="mr-1.5 font-mono text-muted-foreground"
+                        title={`Type @${file.handle} to refer to this file`}
+                      >
+                        @{file.handle}
+                      </span>
+                      {file.item?.label ?? file.name}
+                    </p>
                     {file.error ? (
                       <p role="alert" className="break-words text-destructive">
                         {file.error}
@@ -301,7 +339,10 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         refresh();
         try {
           await onSend(
-            text,
+            resolveAttachmentMentions(
+              text,
+              items.map((file) => ({ handle: file.handle, label: file.item!.label, kind: file.kind })),
+            ),
             items.length
               ? {
                   attachmentIds: items.map((file) => file.item!.id),

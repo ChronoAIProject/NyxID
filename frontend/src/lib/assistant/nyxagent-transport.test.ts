@@ -5,6 +5,7 @@ import { assistantChatSurface } from "./conversation-ids";
 import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 import { nyxAgentMessageSchema } from "@/schemas/assistant-nyxagent";
 import { isAdmittedSendError } from "./send-admission";
+import { applyDirectTurnEvent, type DirectTurnState } from "./direct-transport";
 
 const id = `nyxa-${"1".repeat(32)}`;
 const other = `nyxa-${"2".repeat(32)}`;
@@ -451,6 +452,50 @@ describe("NyxAgent server-backed transport", () => {
       1, 2,
     ]);
     expect(transport.getHistory(id)?.before_seq).toBeNull();
+  });
+
+  it("reuses unchanged rows across reads and identical refreshes, so only changed rows re-render", async () => {
+    let page = history();
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const first = transport.session(id).messages;
+    expect(transport.session(id).messages).toEqual(first);
+    expect(transport.session(id).messages[0]).toBe(first[0]);
+    await transport.history(id);
+    const refreshed = transport.session(id).messages;
+    expect(refreshed[0]).toBe(first[0]);
+    expect(refreshed[1]).toBe(first[1]);
+    page = history();
+    page.messages[1] = { ...page.messages[1]!, text: "Edited" };
+    await transport.history(id);
+    const edited = transport.session(id).messages;
+    expect(edited[0]).toBe(first[0]);
+    expect(edited[1]).not.toBe(first[1]);
+    expect(edited[1]!.content).toBe("Edited");
+  });
+
+  it("changes only the message that owns a streamed block", () => {
+    const settled = {
+      id: "u", role: "user" as const, schema_version: 1 as const, created_at: start,
+      blocks: [{ type: "text" as const, block_id: "u", text: "Question" }],
+    };
+    const state: DirectTurnState = {
+      lastCursor: 3,
+      activeTurn: null,
+      messages: [settled, {
+        id: "a", role: "assistant", schema_version: 1, created_at: start,
+        blocks: [{ type: "text", block_id: "b", text: "An" }],
+      }],
+    };
+    const delta = applyDirectTurnEvent(state, { event: "block.delta", cursor: 4, block_id: "b", text: "swer" });
+    expect(delta.messages[0]).toBe(settled);
+    expect(delta.messages[1]!.blocks[0]!.text).toBe("Answer");
+    const completed = applyDirectTurnEvent(delta, {
+      event: "block.completed", cursor: 5, block_id: "b", block: { type: "text", block_id: "b", text: "Answer!" },
+    });
+    expect(completed.messages[0]).toBe(settled);
+    expect(completed.messages[1]!.blocks[0]!.text).toBe("Answer!");
   });
 
   it("marks messages the user wrote in a chat app with its platform", async () => {

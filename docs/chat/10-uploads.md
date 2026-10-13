@@ -158,6 +158,15 @@ extension, and Markdown accepts `.md` and `.markdown`.
 Unsupported types return an actionable server error shown beside that file in
 the composer; sending stays blocked until the rejected file is removed.
 
+Each attachment gets a composer handle (`@image-1`, `@file-1`, `@pasted-text-1`)
+shown on its chip and offered when the writer types `@`. Before sending, each
+`@handle` becomes a plain description of its file (`image "chart.png"`), so
+servers that route `@name` to agents never see a handle; removing a chip removes
+its references. Pasting more than six lines, or more than 1,500 characters, of
+text attaches it as `pasted-text-N.md` (when it looks like Markdown) or `.txt` and
+places its handle at the caret. While a reply runs, uploads are closed, so a long
+paste stays ordinary text. Images show above the text of the message they belong to.
+
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,
 delete/purge, paging, prompt listing, upstream capability fallback, Codex image
