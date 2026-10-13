@@ -28,8 +28,9 @@ A Catalog Manager may:
 - create OAuth, device-code and API-key providers;
 - edit every field of a provider they created, including its OAuth client;
 - on any other provider, including seeded connectors:
-  - edit the name, description, default scopes, documentation URL, API key
-    instructions and link, and icon;
+  - edit the name, description, default scopes, whether the vendor uses OAuth
+    scopes (`supports_oauth_scopes`), documentation URL, API key instructions
+    and link, and icon (links must be absolute http(s) URLs);
   - set the first OAuth client on a provider that has none;
   - edit its authorization, token, revocation and device URLs, credential
     mode, PKCE and token request settings only **before anyone has connected

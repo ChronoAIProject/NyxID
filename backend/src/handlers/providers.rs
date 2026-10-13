@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::url_validation::validate_base_url;
+use crate::services::url_validation::{MAX_URL_LEN, validate_advisory_http_url, validate_base_url};
 use crate::services::{audit_service, provider_service, user_credentials_service};
 
 use super::catalog_authority::{self, CatalogAuthority};
@@ -418,6 +418,12 @@ pub async fn create_provider(
         ));
     }
 
+    validate_display_urls(
+        body.icon_url.as_deref(),
+        body.documentation_url.as_deref(),
+        body.api_key_url.as_deref(),
+    )?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     let oauth_config = if body.provider_type == "oauth2" {
@@ -620,6 +626,25 @@ pub async fn get_provider(
     Ok(Json(provider_to_response(provider)))
 }
 
+/// Links shown to users must be absolute http(s) URLs without credentials,
+/// whichever client wrote them. An empty value clears the field.
+fn validate_display_urls(
+    icon_url: Option<&str>,
+    documentation_url: Option<&str>,
+    api_key_url: Option<&str>,
+) -> AppResult<()> {
+    for (field, value) in [
+        ("icon_url", icon_url),
+        ("documentation_url", documentation_url),
+        ("api_key_url", api_key_url),
+    ] {
+        if let Some(url) = value.map(str::trim).filter(|url| !url.is_empty()) {
+            validate_advisory_http_url(url, field, MAX_URL_LEN)?;
+        }
+    }
+    Ok(())
+}
+
 /// PUT /api/v1/providers/{provider_id}
 pub async fn update_provider(
     State(state): State<AppState>,
@@ -674,6 +699,11 @@ pub async fn update_provider(
     {
         validate_base_url(url)?;
     }
+    validate_display_urls(
+        body.icon_url.as_deref(),
+        body.documentation_url.as_deref(),
+        body.api_key_url.as_deref(),
+    )?;
 
     let updates = provider_service::ProviderUpdateInput {
         name: body.name,

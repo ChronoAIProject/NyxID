@@ -6421,15 +6421,15 @@ mod tests {
         }
         let services =
             db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME);
-        let seeded_service = |slug: &'static str| {
+        let seeded_service = |slug: &'static str, auth_method: &'static str| {
             let state = state.clone();
             let services = services.clone();
             let admin_id = admin_id.clone();
             async move {
                 let (base_url, server) = spawn_empty_docs_server().await;
-                // A credential-bearing connector; no-auth rows are `internal`.
+                // Bearer rows are connectors; no-auth rows are `internal`.
                 let mut request = create_http_service_request(slug, slug, base_url);
-                request.auth_method = Some("bearer".to_string());
+                request.auth_method = Some(auth_method.to_string());
                 let Json(service) = create_service(
                     State(state),
                     test_auth_user(&admin_id),
@@ -6457,7 +6457,7 @@ mod tests {
         };
 
         // Operation lifecycle on a seeded row.
-        let service = seeded_service("api-seeded-ops").await;
+        let service = seeded_service("api-seeded-ops", "bearer").await;
         let mut ids = Vec::new();
         for name in ["list_items", "get_item"] {
             let Json(endpoint) = create_endpoint(
@@ -6513,6 +6513,7 @@ mod tests {
         )
         .await
         .expect("bulk pause on a seeded row");
+        assert_eq!(paused.endpoints.len(), 2);
         assert!(paused.endpoints.iter().all(|row| !row.is_active));
         assert!(forbidden(
             delete_endpoint(
@@ -6539,8 +6540,11 @@ mod tests {
             matches!(discovered, Err(AppError::BadRequest(ref message)) if message.contains("openapi_spec_url"))
         );
 
-        // Tool offerings and internal rows are not shared catalog rows.
-        let tool = seeded_service("tool-seeded").await;
+        // Tool offerings and internal rows are not shared catalog rows. Tool
+        // writes are Admin-only before the row gate, so prove the exclusion
+        // where it matters: a Catalog Manager does not see a Tool row's
+        // unpublished operations.
+        let tool = seeded_service("tool-seeded", "bearer").await;
         services
             .update_one(
                 doc! { "_id": &tool.id },
@@ -6548,23 +6552,42 @@ mod tests {
             )
             .await
             .unwrap();
+        let Json(tool_operation) = create_endpoint(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path(tool.id.clone()),
+            Json(endpoint_request("tool_op")),
+        )
+        .await
+        .expect("admin adds a Tool operation");
+        assert!(
+            !tool_operation.is_active,
+            "new Tool operations start as drafts"
+        );
+        let Json(tool_listing) = super::super::endpoints::list_endpoints(
+            State(state.clone()),
+            manager(),
+            Path(tool.id.clone()),
+        )
+        .await
+        .expect("list Tool operations");
+        assert!(
+            tool_listing
+                .endpoints
+                .iter()
+                .all(|row| row.id != tool_operation.id)
+        );
         assert!(forbidden(
             create_endpoint(
                 State(state.clone()),
                 manager(),
                 Path(tool.id.clone()),
-                Json(endpoint_request("tool_op")),
+                Json(endpoint_request("tool_op_2")),
             )
             .await
         ));
-        let internal = seeded_service("internal-seeded").await;
-        services
-            .update_one(
-                doc! { "_id": &internal.id },
-                doc! { "$set": { "service_category": "internal" } },
-            )
-            .await
-            .unwrap();
+        let internal = seeded_service("internal-seeded", "none").await;
+        assert_eq!(internal.service_category, "internal");
         assert!(forbidden(
             update_service(
                 State(state.clone()),
@@ -6636,6 +6659,16 @@ mod tests {
             described.api_key_instructions.as_deref(),
             Some("Create a key under Settings > API.")
         );
+        for field in ["api_key_url", "documentation_url", "icon_url"] {
+            let rejected = provider_change(serde_json::json!({
+                field: "javascript:alert(document.cookie)",
+            }))
+            .await;
+            assert!(
+                matches!(rejected, Err(AppError::ValidationError(_))),
+                "{field} must be an http(s) URL"
+            );
+        }
         db.drop().await.unwrap();
     }
 }
