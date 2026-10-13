@@ -708,14 +708,27 @@ pub async fn update_provider(
     let cleared_credentials = updates.clear_client_credentials == Some(true);
     let set_client_credentials = updates.client_id.is_some() || updates.client_secret.is_some();
 
-    let updated = provider_service::update_provider_if_unchanged(
-        &state.db,
-        &state.encryption_keys,
-        &provider_id,
-        updates,
-        checked_version,
-    )
-    .await?;
+    let updated = match checked_version {
+        Some(version) => {
+            provider_service::update_provider_if_unchanged(
+                &state.db,
+                &state.encryption_keys,
+                &provider_id,
+                updates,
+                Some(version),
+            )
+            .await?
+        }
+        None => {
+            provider_service::update_provider(
+                &state.db,
+                &state.encryption_keys,
+                &provider_id,
+                updates,
+            )
+            .await?
+        }
+    };
 
     audit_service::log_for_user(
         state.db.clone(),
