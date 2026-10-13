@@ -207,7 +207,8 @@ pub fn check_provider_create(body: &CreateProviderRequest) -> AppResult<()> {
 }
 
 /// A Catalog Manager may edit providers they created. On any other provider
-/// they may edit the name, description, scopes, documentation and icon. The
+/// they may edit the name, description, scopes, documentation, API key
+/// instructions and link, and icon. The
 /// URLs, credential mode and token request settings decide where client
 /// secrets, authorization codes and users' tokens are sent, so a Catalog
 /// Manager may change them only before anyone has connected through the
@@ -321,8 +322,10 @@ async fn reenters_current_client(
 
 /// Provider fields a Catalog Manager may not change on a provider someone
 /// else created (`admin_only`), and fields they may change there only while
-/// no foreign OAuth client would follow them (`client_bound`). Every other
-/// field is descriptive or scope selection and is always allowed.
+/// no foreign OAuth client or user credential would follow them
+/// (`client_bound`). Every other field is descriptive (including the API key
+/// instructions and link shown to users, like the documentation URL) or
+/// scope selection and is always allowed.
 struct ProviderUpdateFields {
     admin_only: Vec<&'static str>,
     client_bound: Vec<&'static str>,
@@ -345,8 +348,8 @@ fn provider_update_fields(body: &UpdateProviderRequest) -> ProviderUpdateFields 
         device_token_url,
         device_verification_url,
         hosted_callback_url,
-        api_key_instructions,
-        api_key_url,
+        api_key_instructions: _,
+        api_key_url: _,
         icon_url: _,
         documentation_url: _,
         credential_mode,
@@ -378,10 +381,6 @@ fn provider_update_fields(body: &UpdateProviderRequest) -> ProviderUpdateFields 
             .as_ref()
             .map(|_| "device_verification_url"),
         hosted_callback_url.as_ref().map(|_| "hosted_callback_url"),
-        api_key_instructions
-            .as_ref()
-            .map(|_| "api_key_instructions"),
-        api_key_url.as_ref().map(|_| "api_key_url"),
         credential_mode.as_ref().map(|_| "credential_mode"),
         token_endpoint_auth_method
             .as_ref()

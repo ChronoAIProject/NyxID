@@ -6398,6 +6398,246 @@ mod tests {
         ));
         db.drop().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn catalog_manager_operation_lifecycle_and_row_exclusions() {
+        use super::super::endpoints::{
+            CreateEndpointRequest, change_publication_bulk, create_endpoint, delete_endpoint,
+            discover_endpoints, update_endpoint,
+        };
+        use super::super::providers::{create_provider, update_provider};
+        let Some(db) = connect_test_database("h_catalog_manager_lifecycle").await else {
+            eprintln!("skipping catalog manager test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let manager_id = seed_operator(&db, true).await;
+        let plain_operator_id = seed_operator(&db, false).await;
+        let state = test_app_state(db.clone());
+        let manager = || test_auth_user(&manager_id);
+        let plain = || test_auth_user(&plain_operator_id);
+        fn forbidden<T>(result: AppResult<T>) -> bool {
+            matches!(result, Err(AppError::Forbidden(_)))
+        }
+        let services =
+            db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME);
+        let seeded_service = |slug: &'static str| {
+            let state = state.clone();
+            let services = services.clone();
+            let admin_id = admin_id.clone();
+            async move {
+                let (base_url, server) = spawn_empty_docs_server().await;
+                // A credential-bearing connector; no-auth rows are `internal`.
+                let mut request = create_http_service_request(slug, slug, base_url);
+                request.auth_method = Some("bearer".to_string());
+                let Json(service) = create_service(
+                    State(state),
+                    test_auth_user(&admin_id),
+                    Default::default(),
+                    Json(request),
+                )
+                .await
+                .expect("service");
+                server.abort();
+                services
+                    .update_one(
+                        doc! { "_id": &service.id },
+                        doc! { "$set": { "created_by": "system" } },
+                    )
+                    .await
+                    .unwrap();
+                service
+            }
+        };
+        let endpoint_request = |name: &str| -> CreateEndpointRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "method": "GET", "path": format!("/{name}")
+            }))
+            .unwrap()
+        };
+
+        // Operation lifecycle on a seeded row.
+        let service = seeded_service("api-seeded-ops").await;
+        let mut ids = Vec::new();
+        for name in ["list_items", "get_item"] {
+            let Json(endpoint) = create_endpoint(
+                State(state.clone()),
+                manager(),
+                Path(service.id.clone()),
+                Json(endpoint_request(name)),
+            )
+            .await
+            .expect("add operation");
+            ids.push(endpoint.id);
+        }
+        let update_body = || -> super::super::endpoints::UpdateEndpointRequest {
+            serde_json::from_value(serde_json::json!({ "description": "Read items" })).unwrap()
+        };
+        assert!(forbidden(
+            update_endpoint(
+                State(state.clone()),
+                plain(),
+                Path((service.id.clone(), ids[0].clone())),
+                Json(update_body()),
+            )
+            .await
+        ));
+        let _ = update_endpoint(
+            State(state.clone()),
+            manager(),
+            Path((service.id.clone(), ids[0].clone())),
+            Json(update_body()),
+        )
+        .await
+        .expect("update operation on a seeded row");
+        let bulk = || -> super::super::endpoints::BulkPublicationRequest {
+            serde_json::from_value(serde_json::json!({
+                "state": "paused", "endpoint_names": ["list_items", "get_item"]
+            }))
+            .unwrap()
+        };
+        assert!(forbidden(
+            change_publication_bulk(
+                State(state.clone()),
+                plain(),
+                Path(service.id.clone()),
+                Json(bulk()),
+            )
+            .await
+        ));
+        let Json(paused) = change_publication_bulk(
+            State(state.clone()),
+            manager(),
+            Path(service.id.clone()),
+            Json(bulk()),
+        )
+        .await
+        .expect("bulk pause on a seeded row");
+        assert!(paused.endpoints.iter().all(|row| !row.is_active));
+        assert!(forbidden(
+            delete_endpoint(
+                State(state.clone()),
+                plain(),
+                Path((service.id.clone(), ids[1].clone())),
+            )
+            .await
+        ));
+        let _ = delete_endpoint(
+            State(state.clone()),
+            manager(),
+            Path((service.id.clone(), ids[1].clone())),
+        )
+        .await
+        .expect("delete operation on a seeded row");
+        // Discovery passes the permission gate and then needs a spec URL.
+        assert!(forbidden(
+            discover_endpoints(State(state.clone()), plain(), Path(service.id.clone())).await
+        ));
+        let discovered =
+            discover_endpoints(State(state.clone()), manager(), Path(service.id.clone())).await;
+        assert!(
+            matches!(discovered, Err(AppError::BadRequest(ref message)) if message.contains("openapi_spec_url"))
+        );
+
+        // Tool offerings and internal rows are not shared catalog rows.
+        let tool = seeded_service("tool-seeded").await;
+        services
+            .update_one(
+                doc! { "_id": &tool.id },
+                doc! { "$set": { "offering_kind": "tool" } },
+            )
+            .await
+            .unwrap();
+        assert!(forbidden(
+            create_endpoint(
+                State(state.clone()),
+                manager(),
+                Path(tool.id.clone()),
+                Json(endpoint_request("tool_op")),
+            )
+            .await
+        ));
+        let internal = seeded_service("internal-seeded").await;
+        services
+            .update_one(
+                doc! { "_id": &internal.id },
+                doc! { "$set": { "service_category": "internal" } },
+            )
+            .await
+            .unwrap();
+        assert!(forbidden(
+            update_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Path(internal.id.clone()),
+                Json(serde_json::from_value(serde_json::json!({ "auth_notes": "x" })).unwrap()),
+            )
+            .await
+        ));
+        assert!(forbidden(
+            create_endpoint(
+                State(state.clone()),
+                manager(),
+                Path(internal.id.clone()),
+                Json(endpoint_request("internal_op")),
+            )
+            .await
+        ));
+
+        // A connection held as a user API key also locks client-bound
+        // settings, while display fields stay editable.
+        let Json(provider) = create_provider(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(oauth_provider_request("seeded-keyed")),
+        )
+        .await
+        .expect("provider");
+        db.collection::<crate::models::provider_config::ProviderConfig>(
+            crate::models::provider_config::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &provider.id },
+            doc! { "$set": { "created_by": "system" } },
+        )
+        .await
+        .unwrap();
+        db.collection::<mongodb::bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": Uuid::new_v4().to_string(),
+                "user_id": &plain_operator_id,
+                "provider_config_id": &provider.id,
+            })
+            .await
+            .unwrap();
+        let provider_change = |value: serde_json::Value| {
+            update_provider(
+                State(state.clone()),
+                manager(),
+                Path(provider.id.clone()),
+                provider_update(value),
+            )
+        };
+        let locked = provider_change(serde_json::json!({
+            "token_url": "https://attacker.example.com/token",
+        }))
+        .await;
+        assert!(
+            matches!(locked, Err(AppError::Forbidden(ref message)) if message.contains("connected"))
+        );
+        let Json(described) = provider_change(serde_json::json!({
+            "api_key_instructions": "Create a key under Settings > API.",
+            "documentation_url": "https://docs.example.com/api",
+        }))
+        .await
+        .expect("display fields stay editable after people connect");
+        assert_eq!(
+            described.api_key_instructions.as_deref(),
+            Some("Create a key under Settings > API.")
+        );
+        db.drop().await.unwrap();
+    }
 }
 
 #[cfg(test)]
