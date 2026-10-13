@@ -28,16 +28,17 @@ A Catalog Manager may:
 - create OAuth, device-code and API-key providers;
 - edit every field of a provider they created, including its OAuth client;
 - on any other provider, including seeded connectors:
-  - edit the name, description, default scopes, documentation URL and icon;
+  - edit the name, description, default scopes, whether the vendor uses OAuth
+    scopes (`supports_oauth_scopes`), documentation URL, API key instructions
+    and link, and icon (links must be absolute http(s) URLs without embedded
+    credentials or cloud-metadata hosts);
   - set the first OAuth client on a provider that has none;
   - edit its authorization, token, revocation and device URLs, credential
     mode, PKCE and token request settings only **before anyone has connected
     through it**: no `user_provider_tokens`, `user_provider_credentials` or
     `user_api_keys` row references it, including org-owned and API-key
     connections, because those settings decide where users' clients and
-    tokens are sent. This also locks an API-key provider's display-only
-    `api_key_url` and `api_key_instructions` once anyone has connected; ask an
-    Admin to change them then. Once a platform client exists they must also re-enter it in the same
+    tokens are sent. Once a platform client exists they must also re-enter it in the same
     request (`nyxid admin provider update <slug> --file f.yaml --with-client`),
     proving they already hold the secret. Providers whose client has no secret
     (public device-code clients) cannot be proven this way and stay Admin-only
