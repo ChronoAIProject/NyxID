@@ -11,13 +11,15 @@ use crate::{
         assistant_team_service as team,
     },
 };
+
 use axum::{
     Json,
     body::{Body, to_bytes},
     extract::{Path, Query, State},
     http::{self, Request},
 };
-use serde::Deserialize;
+
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[derive(Clone)]
@@ -334,6 +336,7 @@ pub async fn get(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<skills::SkillsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     Ok(Json(team::agent(&state.db, &owner, &id).await?.into()))
@@ -344,6 +347,7 @@ pub async fn set(
     Path(id): Path<String>,
     Json(selection): Json<skills::Selection>,
 ) -> AppResult<Json<skills::SkillsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     Ok(Json(
@@ -364,6 +368,133 @@ pub async fn set(
         .await?,
     ))
 }
+
+/// The result of testing one attached pin the way its agent reads it.
+#[derive(Debug, Serialize)]
+pub struct SkillTestResponse {
+    pub skill_id: String,
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+    pub disabled: bool,
+    pub description: String,
+    pub size_bytes: usize,
+    /// Whether the agent can read this pin now (false while disabled).
+    pub readable: bool,
+    /// The start of SKILL.md as the agent reads it.
+    pub excerpt: String,
+}
+
+const TEST_EXCERPT_CHARS: usize = 2_000;
+
+/// Test an attached skill: verify the exact pinned version in Ornn, then read
+/// its SKILL.md through the same reader the agent's `nyxid__skill_read` uses.
+pub async fn preview_attached(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, skill_id)): Path<(String, String)>,
+) -> AppResult<Json<SkillTestResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
+    let agent = team::agent(&state.db, &owner, &id).await?;
+    let pin = agent
+        .skills
+        .iter()
+        .find(|s| s.skill_id == skill_id)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound("Attached skill not found".into()))?;
+    let reader = Reader {
+        state: &state,
+        person: &owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    let preview = skills::preview(&reader, &pin.skill_id, &pin.version).await?;
+    if preview.reference.sha256 != pin.sha256 {
+        return Err(AppError::Conflict(
+            "Ornn now serves different content for this pinned version; reattach the skill".into(),
+        ));
+    }
+    let (readable, excerpt) = if pin.disabled {
+        (false, String::new())
+    } else {
+        let page = skills::read(&reader, &agent, &pin.skill_id, None, "SKILL.md", 0).await?;
+        let text: String = page["content"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .take(TEST_EXCERPT_CHARS)
+            .collect();
+        (true, text)
+    };
+    Ok(Json(SkillTestResponse {
+        skill_id: pin.skill_id,
+        name: pin.name,
+        version: pin.version,
+        sha256: pin.sha256,
+        disabled: pin.disabled,
+        description: preview.description,
+        size_bytes: preview.size_bytes,
+        readable,
+        excerpt,
+    }))
+}
+
+pub async fn history(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<skills::HistoryResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
+    let agent = team::agent(&state.db, &owner, &id).await?;
+    Ok(Json(skills::history(&state.db, &agent).await?))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImproveResponse {
+    pub proposal_id: String,
+    pub acknowledgement_id: String,
+}
+
+/// "Edit" an attached skill: start an authored improve draft from its exact
+/// pinned package. The owner edits it in the learning panel and publishes it
+/// from the review card raised in NyxBot's home thread.
+pub async fn improve(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, skill_id)): Path<(String, String)>,
+) -> AppResult<(axum::http::StatusCode, Json<ImproveResponse>)> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
+    // Refuse readers who cannot maintain the agent before touching any thread.
+    team::maintained_agent(&state.db, &owner, &id).await?;
+    let chat = super::assistant_agent_learning::owner_chat(&state, &owner).await?;
+    let reader = Reader {
+        state: &state,
+        person: &owner,
+        thread_key: Some(&chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(chat.clone())),
+    };
+    let result = crate::services::assistant_skill_authoring::create_improve_draft(
+        &state, &chat, &id, &skill_id, &reader,
+    )
+    .await?;
+    let text = |key: &str| result[key].as_str().unwrap_or_default().to_owned();
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ImproveResponse {
+            proposal_id: text("proposal_id"),
+            acknowledgement_id: text("acknowledgement_id"),
+        }),
+    ))
+}
+
 fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args[key].as_str().unwrap_or_default()
 }
@@ -584,7 +715,12 @@ pub(crate) async fn dispatch(
                 selection
                     .skills
                     .iter()
-                    .map(|s| format!("{} @ {}", s.skill_id, s.version))
+                    .map(|s| format!(
+                        "{} @ {}{}",
+                        s.skill_id,
+                        s.version,
+                        if s.disabled { " (disabled)" } else { "" }
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -658,6 +794,64 @@ mod tests {
     };
     use mongodb::bson::doc;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    fn authority(
+        role: crate::models::assistant_conversation::AgentRole,
+        guest: bool,
+    ) -> ChatAuthority {
+        ChatAuthority {
+            org_agent_access: None,
+            turn_id: None,
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            api_key_id: "k".into(),
+            role,
+            agent_id: "a".into(),
+            agent_name: "a".into(),
+            guest,
+            confirmation_policy: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn guest_skill_mutation_is_denied_before_state_access() {
+        let f = orchestrator_fixture("guest_skill_mutation").await;
+        let err = super::dispatch(
+            &f.state,
+            &authority(
+                crate::models::assistant_conversation::AgentRole::Orchestrator,
+                true,
+            ),
+            "set_agent_skills",
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("owner turns"));
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn specialist_learning_mutation_is_denied() {
+        let f = orchestrator_fixture("specialist_learning_mutation").await;
+        let err = super::dispatch(
+            &f.state,
+            &authority(
+                crate::models::assistant_conversation::AgentRole::Subagent,
+                false,
+            ),
+            "learning_run_now",
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("managed"));
+        f.state.db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn agent_skills_ornn_requires_live_person_identity_and_refuses_master_credentials() {

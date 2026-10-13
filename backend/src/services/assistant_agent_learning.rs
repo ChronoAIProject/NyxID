@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    errors::{AppError, AppResult},
+    errors::{AppError, AppResult, skill_draft::SkillDraftValidation as Diagnostic},
     models::{
         assistant_agent::{AgentKind, AssistantAgent},
         assistant_agent_learning::{
@@ -629,18 +629,30 @@ fn build_input(
     (input, evidence)
 }
 
-pub(crate) fn validate_generated(value: &str) -> AppResult<Option<Vec<u8>>> {
-    if value.len() > MAX_PROPOSAL_BYTES || value.chars().count() > 7_500 {
-        return Err(AppError::ValidationError(
-            "Learning proposal is too large".into(),
-        ));
+/// Diagnostics name the field and rule only, never the offending text.
+fn learned_text(field: &str, value: &str, maximum: usize, required: bool) -> AppResult<()> {
+    let count = value.chars().count();
+    if count > maximum {
+        return Err(Diagnostic::size(field, "characters", maximum, count).into());
     }
-    let draft: GeneratedProposal = serde_json::from_str(value)
-        .map_err(|_| AppError::ValidationError("Learning model returned invalid JSON".into()))?;
+    if required && value.is_empty() {
+        return Err(Diagnostic::at("required", field).into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_generated(value: &str) -> AppResult<Option<Vec<u8>>> {
+    if value.len() > MAX_PROPOSAL_BYTES {
+        return Err(Diagnostic::size("draft", "bytes", MAX_PROPOSAL_BYTES, value.len()).into());
+    }
+    let count = value.chars().count();
+    if count > 7_500 {
+        return Err(Diagnostic::size("draft", "characters", 7_500, count).into());
+    }
+    let draft: GeneratedProposal =
+        serde_json::from_str(value).map_err(|_| Diagnostic::at("invalid_shape", "draft"))?;
     if draft.schema_version != 1 {
-        return Err(AppError::ValidationError(
-            "Unsupported learning proposal schema".into(),
-        ));
+        return Err(Diagnostic::at("unsupported_schema", "schema_version").into());
     }
     if draft.kind == "none"
         && draft.name.is_empty()
@@ -653,70 +665,105 @@ pub(crate) fn validate_generated(value: &str) -> AppResult<Option<Vec<u8>>> {
     {
         return Ok(None);
     }
-    if !matches!(draft.kind.as_str(), "new" | "improve")
-        || draft.name.is_empty()
-        || draft.name.chars().count() > 80
-        || draft.description.chars().count() > 400
-        || draft.skill_md.is_empty()
-        || draft.skill_md.chars().count() > 7_500
-        || draft.rationale.chars().count() > 1_000
-        || draft.safety_notes.chars().count() > 1_000
-        || draft.files.len() > 8
-        || draft.files.iter().any(|file| {
-            file.content.chars().count() > 2_000
-                || file.path.is_empty()
-                || file.path.starts_with('/')
-                || file.path.len() > 160
-                || file.path.contains(['\\', ':'])
-                || file.path.chars().any(char::is_control)
-                || file
-                    .content
-                    .chars()
-                    .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-                || file
-                    .path
-                    .split('/')
-                    .any(|part| part.is_empty() || part == "." || part == "..")
-                || !file.path.ends_with(".md") && !file.path.ends_with(".txt")
-        })
-    {
-        return Err(AppError::ValidationError(
-            "Learning proposal failed validation".into(),
-        ));
+    if !matches!(draft.kind.as_str(), "new" | "improve") {
+        return Err(Diagnostic::at("invalid_kind", "kind").into());
+    }
+    learned_text("name", &draft.name, 80, true)?;
+    learned_text("description", &draft.description, 400, false)?;
+    learned_text("skill_md", &draft.skill_md, 7_500, true)?;
+    learned_text("rationale", &draft.rationale, 1_000, false)?;
+    learned_text("safety_notes", &draft.safety_notes, 1_000, false)?;
+    if draft.files.len() > 8 {
+        return Err(Diagnostic::size("files", "items", 8, draft.files.len()).into());
+    }
+    for (index, file) in draft.files.iter().enumerate() {
+        let path = format!("files[{index}].path");
+        let content = format!("files[{index}].content");
+        learned_text(&content, &file.content, 2_000, false)?;
+        if file.path.is_empty() {
+            return Err(Diagnostic::at("required", &path).into());
+        }
+        if file.path.len() > 160 {
+            return Err(Diagnostic::size(&path, "bytes", 160, file.path.len()).into());
+        }
+        if let Some(position) = file
+            .content
+            .find(|c: char| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            let line = file.content[..position]
+                .bytes()
+                .filter(|b| *b == b'\n')
+                .count()
+                + 1;
+            return Err(Diagnostic::at("text_only", &content).on_line(line).into());
+        }
+        if file.path.starts_with('/')
+            || file.path.contains(['\\', ':'])
+            || file.path.chars().any(char::is_control)
+            || file
+                .path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || !file.path.ends_with(".md") && !file.path.ends_with(".txt")
+        {
+            return Err(Diagnostic::at("unsafe_path", &path).into());
+        }
     }
     if (draft.kind == "improve") != draft.base_skill.is_some() {
-        return Err(AppError::ValidationError(
-            "Learning base skills are unavailable until their L1 provenance is pinned".into(),
-        ));
+        return Err(Diagnostic::at("base_skill_mismatch", "base_skill").into());
     }
     let mut paths = std::collections::HashSet::new();
-    if draft.files.iter().any(|file| {
-        !paths.insert(file.path.to_ascii_lowercase()) || file.path.eq_ignore_ascii_case("skill.md")
-    }) {
-        return Err(AppError::ValidationError(
-            "Learning proposal has duplicate paths".into(),
-        ));
+    for (index, file) in draft.files.iter().enumerate() {
+        if !paths.insert(file.path.to_ascii_lowercase())
+            || file.path.eq_ignore_ascii_case("skill.md")
+        {
+            return Err(Diagnostic::at("duplicate_path", &format!("files[{index}].path")).into());
+        }
     }
     // A second redaction pass also rejects secrets invented or reflected by the model.
     // Base IDs/hashes are server-validated provenance, not generated prose.
     let mut prose = draft.clone();
     prose.base_skill = None;
-    let prose = serde_json::to_string(&prose)
-        .map_err(|_| AppError::ValidationError("Invalid draft".into()))?;
+    let prose =
+        serde_json::to_string(&prose).map_err(|_| Diagnostic::at("invalid_shape", "draft"))?;
     let telemetry_scrubbed = crate::telemetry::scrub::scrub_string(&prose).into_owned();
     if sensitive_text(&prose) != prose || telemetry_scrubbed != prose {
-        return Err(AppError::ValidationError(
-            "Learning proposal contains private material".into(),
-        ));
+        return Err(Diagnostic::at("private_material", &private_field(&draft)).into());
     }
-    let bytes = serde_json::to_vec(&draft)
-        .map_err(|_| AppError::ValidationError("Learning proposal failed validation".into()))?;
+    let bytes = serde_json::to_vec(&draft).map_err(|_| Diagnostic::at("invalid_shape", "draft"))?;
     if bytes.len() > MAX_PROPOSAL_BYTES {
-        return Err(AppError::ValidationError(
-            "Learning proposal is too large".into(),
-        ));
+        return Err(Diagnostic::size("draft", "bytes", MAX_PROPOSAL_BYTES, bytes.len()).into());
     }
     Ok(Some(bytes))
+}
+
+/// The first prose field that redaction would change, else the whole draft.
+fn private_field(draft: &GeneratedProposal) -> String {
+    let changed = |text: &str| {
+        let encoded = serde_json::to_string(text).unwrap_or_default();
+        sensitive_text(&encoded) != encoded
+            || crate::telemetry::scrub::scrub_string(&encoded) != encoded
+    };
+    for (field, text) in [
+        ("name", draft.name.as_str()),
+        ("description", draft.description.as_str()),
+        ("skill_md", draft.skill_md.as_str()),
+        ("rationale", draft.rationale.as_str()),
+        ("safety_notes", draft.safety_notes.as_str()),
+    ] {
+        if changed(text) {
+            return field.into();
+        }
+    }
+    for (index, file) in draft.files.iter().enumerate() {
+        if changed(&file.path) {
+            return format!("files[{index}].path");
+        }
+        if changed(&file.content) {
+            return format!("files[{index}].content");
+        }
+    }
+    "draft".into()
 }
 
 async fn create_run(
@@ -1468,6 +1515,7 @@ mod tests {
             saved_login_ids: Vec::new(),
             created_by: "learning-test-owner".into(),
             model: "test".into(),
+            access_mode_override: None,
             home_conversation_id: None,
             memory: Vec::new(),
             display_name: None,

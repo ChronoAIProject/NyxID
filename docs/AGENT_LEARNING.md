@@ -980,6 +980,10 @@ authorizes another write.
 - The flags and drain procedure of "Rollout and compatibility" still apply;
   keep learning disabled until the migration marker is present.
 
+## Current HTTP editor contract
+
+The learning status response is flat and includes `enabled`, `threshold`, `org_owned`, `opted_in`, and `publication_blocked`. Organization members can update only their own learning consent with `PUT /assistant/nyxagent/agents/{id}/learning/consent`. Proposal edits use `{revision, draft}`; validation is a dry run and returns field diagnostics where available. Preview and history are metadata-bounded owner surfaces.
+
 The durable skill-approval outbox and authored-draft generation claims require
 all backend replicas and assistant workers to run this version before enabling
 or resuming the corresponding workflows. During rollout, pause authoring and

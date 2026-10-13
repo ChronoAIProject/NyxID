@@ -1512,6 +1512,7 @@ pub async fn list_channel_chats(
     auth: crate::mw::auth::AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let chats = list_chats(&state, &owner, Some(&id)).await?;
@@ -1524,6 +1525,7 @@ pub async fn update_channel_chat(
     Path((id, chat_id)): Path<(String, String)>,
     Json(body): Json<ChatSettings>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let (row, _) = load_chat(&state, &owner, &chat_id).await?;

@@ -18,6 +18,7 @@ import {
   mentionCandidates,
   type MentionQuery,
 } from "@/lib/assistant/nyxbot-mentions";
+import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -25,6 +26,22 @@ import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 const DRAFT_DEBOUNCE_MS = 300;
 const MAX_ROWS = 4;
 const MULTILINE_THRESHOLD = 0.95;
+const PASTED_EXTENSIONS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+/** Clipboard images arrive unnamed or with a generic `image.<ext>` name. */
+function isGenericPasteName(name: string): boolean {
+  return !name || /^image\.[a-z0-9]+$/i.test(name);
+}
+
+/** Keeps the clipboard's own format: a JPEG stays `.jpg`, a GIF `.gif`. */
+function pastedExtension(type: string): string {
+  return PASTED_EXTENSIONS[type] ?? (type.split("/")[1]?.split("+")[0]?.replace(/[^a-z0-9]/gi, "") || "png");
+}
 
 type ScrollEdges = {
   readonly top: boolean;
@@ -125,6 +142,7 @@ interface ChatComposerProps {
   readonly controls?: ReactNode;
   readonly attachmentButton?: ReactNode;
   readonly attachments?: ReactNode;
+  readonly recipients?: ReactNode;
   readonly hasAttachments?: boolean;
   readonly uploadBlocked?: boolean;
   readonly onFiles?: (files: File[]) => void;
@@ -136,6 +154,7 @@ interface ChatComposerProps {
    */
   readonly mentions?: readonly ComposerMention[];
   readonly onSend: (content: string) => Promise<void>;
+  readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
   readonly onVoice?: () => void;
 }
@@ -164,18 +183,22 @@ function DraftedChatComposer({
   controls,
   attachmentButton,
   attachments,
+  recipients,
   hasAttachments = false,
   uploadBlocked = false,
   onFiles,
   placeholder,
   mentions,
   onSend,
+  onContentChange,
   onStop,
   onVoice,
 }: ChatComposerProps) {
   const locked = active && !allowActiveInput;
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
+  // Unique across pastes so each chip's Remove/Preview label names one file.
+  const pastedImages = useRef(0);
   const mentionListId = `${useId()}-mentions`;
   const [mention, setMention] = useState<MentionQuery>();
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -250,6 +273,7 @@ function DraftedChatComposer({
     renderedOwnerUserIdRef.current = ownerUserId;
     renderedDraftKeyRef.current = draftKey;
     setContent(nextContent);
+    onContentChange?.(nextContent);
   }
 
   const syncComposerLayout = useCallback((draft?: string) => {
@@ -545,6 +569,7 @@ function DraftedChatComposer({
     }
     syncComposerLayout(nextContent);
     setContent(nextContent);
+    onContentChange?.(nextContent);
   }
 
   /** Re-read the mention under the caret after typing or moving the caret. */
@@ -584,7 +609,10 @@ function DraftedChatComposer({
     updateContent("");
     try {
       await onSend(message);
-    } catch {
+    } catch (error) {
+      // An admitted message is already in the transcript; restoring it would
+      // invite a duplicate send.
+      if (isAdmittedSendError(error)) return;
       // Guidance can be sent while the field remains editable. Preserve any
       // newer draft typed while the request was in flight.
       if (!contentRef.current) updateContent(message);
@@ -677,15 +705,28 @@ function DraftedChatComposer({
             }
           }}
           onPaste={(event) => {
-            if (onFiles && event.clipboardData.files.length) {
+            const files = event.clipboardData.files.length
+              ? Array.from(event.clipboardData.files)
+              : Array.from(event.clipboardData.items)
+                  .map((item) => item.getAsFile())
+                  .filter((file): file is File => Boolean(file));
+            if (onFiles && files.length) {
               event.preventDefault();
-              if (!locked && !disabled && !sending) onFiles(Array.from(event.clipboardData.files));
+              if (!locked && !disabled && !sending) {
+                onFiles(files.map((file) => {
+                  if (!isGenericPasteName(file.name)) return file;
+                  pastedImages.current += 1;
+                  const type = file.type || "image/png";
+                  return new File([file], `pasted-image-${pastedImages.current}.${pastedExtension(type)}`, { type });
+                }));
+              }
             }
           }}
           className={cn("relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
         >
           {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium">Drop files to attach</div>}
           {attachments}
+          {recipients}
           <div className="flex items-start gap-1.5">
           {attachmentButton}
           <div

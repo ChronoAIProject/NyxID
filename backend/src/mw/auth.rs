@@ -173,11 +173,23 @@ impl AuthUser {
     /// Conversation-key route restrictions are part of the live-turn rollout.
     /// Keep the flag check here so disabling the flag restores the historical
     /// API-key route behavior immediately; ordinary keys take the no-read path.
+    /// Assistant management routes (agents, grants, skills, settings,
+    /// channels, groups) are refused to conversation keys regardless of the
+    /// flag: an agent must never widen its own or a peer's authority through
+    /// the REST API.
     pub async fn ensure_conversation_key_route_if_enabled(
         &self,
         db: &mongodb::Database,
         path: &str,
     ) -> AppResult<()> {
+        if self.assistant_turn_fence.is_some()
+            && path
+                .strip_prefix("/api/v1")
+                .unwrap_or(path)
+                .starts_with("/assistant/")
+        {
+            return self.ensure_conversation_key_route(path);
+        }
         if self.assistant_turn_fence.is_none()
             || !crate::services::feature_flag_service::personal_flag_enabled(
                 db,
@@ -3391,6 +3403,70 @@ mod tests {
                 "ordinary keys must keep the no-read assistant fence fast path"
             );
         }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn assistant_management_routes_refuse_conversation_keys_with_the_flag_off() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("auth_assistant_routes_flag_off").await
+        else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let auth = AuthUser {
+            assistant_turn_fence: Some(
+                crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    conversation_id: "conversation".into(),
+                    turn_id: Some("turn".into()),
+                    turn_live: true,
+                    turn_stopped: false,
+                },
+            ),
+            user_id: Uuid::parse_str(&user_id).unwrap(),
+            ..test_auth_user(AuthMethod::ApiKey, "proxy")
+        };
+        for path in [
+            "/api/v1/assistant/nyxagent/agents/a/grants",
+            "/api/v1/assistant/nyxagent/settings",
+            "/api/v1/assistant/nyxagent/channels",
+            "/assistant/nyxagent/agents/a/destroy",
+        ] {
+            assert!(
+                matches!(
+                    auth.ensure_conversation_key_route_if_enabled(&db, path)
+                        .await,
+                    Err(AppError::Forbidden(_))
+                ),
+                "{path}"
+            );
+        }
+        // Attachment reads stay available, and other routes keep their
+        // flag-off behavior.
+        assert!(
+            auth.ensure_conversation_key_route_if_enabled(
+                &db,
+                "/api/v1/assistant/nyxagent/conversations/c/attachments/a",
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
+                .await
+                .is_ok()
+        );
+        // Ordinary keys are not conversation keys.
+        let ordinary = test_auth_user(AuthMethod::ApiKey, "proxy");
+        assert!(
+            ordinary
+                .ensure_conversation_key_route_if_enabled(
+                    &db,
+                    "/api/v1/assistant/nyxagent/settings"
+                )
+                .await
+                .is_ok()
+        );
         db.drop().await.unwrap();
     }
 

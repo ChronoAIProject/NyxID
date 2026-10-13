@@ -10,6 +10,7 @@ import {
   useDeleteChannelBot,
   useUpdateChannelBot,
   useVerifyChannelBot,
+  useResubscribeChannelBot,
   channelBotsQueryKeys,
 } from "./use-channel-bots";
 
@@ -56,6 +57,12 @@ beforeEach(() => {
 });
 
 describe("useChannelBots", () => {
+  it("resubscribes through the recovery endpoint", async () => {
+    mockPost.mockResolvedValue({ mode: "webhook", recommended_action: "verify" });
+    const { result } = renderHook(() => useResubscribeChannelBot(), { wrapper: createWrapper() });
+    result.current.mutate("bot-1");
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/channel-bots/bot-1/resubscribe", {}));
+  });
   it("keeps all-scope, personal and organization results separate when switching", async () => {
     mockGet.mockImplementation(async (path: string) => ({ bots: [{ id: path }] }));
     const { result, rerender } = renderHook(

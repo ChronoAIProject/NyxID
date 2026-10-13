@@ -88,6 +88,8 @@ pub struct TurnActivity {
     pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub digest: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -123,6 +125,13 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// The failed turn this turn retries (owner Retry only).
+    #[serde(default)]
+    pub retry_of: Option<String>,
+    /// Canonical call digests the retried turn completed. A repeated call
+    /// with the same tool and arguments is refused (`retry_duplicate_action`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_digests: Vec<String>,
     /// The running response, not the previous committed response head.
     #[serde(default)]
     pub running_response: Option<Box<RunningResponse>>,

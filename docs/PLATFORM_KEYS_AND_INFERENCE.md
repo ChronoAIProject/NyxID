@@ -494,3 +494,45 @@ while retaining the primary. Prices accept up to 12 fractional digits. Catalog c
 ## Service-instance history
 
 Explicit platform/user credential-binding transitions and platform-instance settings are recorded in the service journal. Automatic provisioning and removal use verified system attribution; retained UUID history remains available after physical cleanup under current owner/admin scope. Re-provisioning starts a new instance history even when the slug is reused. Platform credential material is never included. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe details, archive discovery, and MongoDB transaction prerequisites.
+
+## Billing configuration
+
+The admin page `/admin/billing` (tabs `?tab=overview|rates|settings`) and the API under `/api/v1/admin/billing` are the central billing configuration surface. Reads accept admins and operators; every write is admin-only. Prices stay scoped to each catalog service; the page edits them in place through the same write path and `service_updated` audit as `PUT /api/v1/services/{id}`.
+
+### Routes
+
+- `GET /admin/billing/config` returns the read-only environment mirror, the effective global defaults and their sources. Each mirrored row carries `source: "env"`. `LAGO_API_KEY`, `LAGO_WEBHOOK_SECRET` and `BILLING_LEDGER_HMAC_KEY` are reported only as `secret_set` booleans; their values never leave the server.
+- `PUT /admin/billing/config` is a per-field patch. An absent field keeps the stored value, `null` clears it back to the environment default, and a number sets it. Unknown fields and an empty patch are rejected. The write and its `billing_config_updated` audit row (with `before`/`after`) commit in one MongoDB transaction.
+- `GET /admin/billing/rates` lists the Lago rate cache with the exact decimal `credits_per_unit`, `synced_at`, `stale_after` (`synced_at + BILLING_RATE_CACHE_TTL_SECS`), `stale` and `retired_at`.
+- `GET /admin/billing/overview` lists every catalog service with a billing block, sorted by slug, with its effective billing. `GET /admin/billing/services/{id}` returns one such row; the service editor shows it as "Effective billing".
+- `PUT /admin/billing/services/{id}` accepts only `{"billing": {...}}` (unknown fields are rejected) and delegates to the `PUT /services/{id}` handler.
+- `POST /admin/billing/services/{id}/resync` reruns the Lago price sync and returns `{synced, service}`. Its `billing_service_resynced` audit row is best-effort: once Lago has applied the change the request does not fail.
+
+### Global defaults
+
+`PlatformSettings.billing` holds one value, `default_overdraft_cap_credits`. When it is set it wins over `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS`; otherwise the environment value applies. It is copied onto a wallet only when the wallet is first provisioned (first charge, top-up checkout or backfill). Existing wallets keep their cap. It accepts whole credits from 0 to 1,000,000,000,000.
+
+### Effective prices
+
+`services::billing::config::resolve_service_billing` builds the charge path's own `BillingRouteContext` for each credential class and explains the result. It never decides a charge, so the admin view cannot drift from billing. A unit test compares it with the charge path across every combination of lane, sync and legacy settings. Classes that resolve identically are grouped. For HTTP traffic each class reports `platform_charged`, a `source` and a stable `reason`:
+
+1. `billing_disabled` (`source: env`): `BILLING_ENABLED=false`, so nothing is charged.
+2. `nyxid_credentials_only` (`free`): the service sets `platform_charge_nyxid_credentials_only` and the class is neither the NyxID platform key nor the shared OAuth app.
+3. When either lane is configured, the class's lane decides. The NyxID platform key uses the platform-key lane; the shared OAuth app, own keys, agent overrides and node credentials use the BYOK lane. The outcomes are:
+   - `lane_synced` (`service`): the lane primary, its synced components and, on a Requests lane, its synced operation prices.
+   - `lane_unsynced_legacy` (`legacy`): the primary is pending or failed and `platform_billable` is on, so the legacy price applies to the whole lane.
+   - `lane_unsynced_free` (`free`): the primary is pending or failed and legacy billing is off.
+   - `lane_not_configured` (`free`): the class's lane is missing.
+   - `no_auth` (`free`): no-auth traffic, once any lane is configured.
+4. With no lanes: `legacy_platform_billable` (`legacy`) when `platform_billable` is on, else `not_billable` (`free`).
+
+Each charged value lists `metric`, optional `operation`, `lago_metric_code`, exact `credits_per_unit`, `source`, `origin`, `sync_status`/`sync_error` and the cached rate (`stale`, `retired`). The possible `origin` values are:
+
+- `lane_primary`, `lane_component` and `operation` (source `service`);
+- `service_price`, a synced legacy `platform_pricing` (source `legacy`);
+- `legacy_plan`, the Lago-authored plan price, priced from the rate cache (source `legacy`);
+- `resale_plan`.
+
+`pending` lists configured lane values that do not charge until they sync, all with source `free`. An unsynced primary lists its whole lane, because synced extras never revive it. Operation prices on a non-Requests lane are always pending.
+
+Resale applies only to NyxID platform-key traffic. It is reported with source `env` when `BILLING_RESALE_ENABLED` or `BILLING_ENABLED` turns it off. Per-owner billing rollout flags and wallet state are not part of this view.

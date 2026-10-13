@@ -15,6 +15,7 @@ import {
   nyxAgentHistorySchema,
   nyxAgentEventSchema,
   nyxAgentMessageSchema,
+  nyxAgentModelSchema,
   nyxAgentSettingsFormSchema,
 } from "./assistant-nyxagent";
 
@@ -272,12 +273,14 @@ describe("NyxBot team, settings and channel schemas", () => {
   it("validates settings form values against the server limits", () => {
     const schema = nyxAgentSettingsFormSchema(limits);
     const valid = {
+      access_mode: "nyxmode" as const,
       confirm_destructive: true,
       max_live_subagents: 0,
       max_concurrent_subagent_turns: 1,
       max_group_handoffs: 0,
       max_group_handoffs_per_hour: 0,
       max_auto_continuations: 8,
+      specialist_access_requests: "denied",
     };
     expect(schema.safeParse(valid).success).toBe(true);
     expect(schema.safeParse({ ...valid, max_auto_continuations: 0 }).success).toBe(true);
@@ -291,6 +294,33 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(schema.safeParse({ ...valid, max_concurrent_subagent_turns: 9 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_live_subagents: 2.5 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_live_subagents: Number.NaN }).success).toBe(false);
+  });
+
+  it("accepts each persisted access mode", () => {
+    const schema = nyxAgentSettingsFormSchema(limits);
+    const base = { specialist_access_requests: "denied" as const, max_live_subagents: 0, max_concurrent_subagent_turns: 1, max_group_handoffs: 0, max_group_handoffs_per_hour: 0, max_auto_continuations: 8 };
+    for (const access_mode of ["autopilot", "nyxmode", "ask_every_time"] as const) {
+      expect(schema.parse({ ...base, access_mode }).access_mode).toBe(access_mode);
+    }
+  });
+
+  it("parses action card confirmations and the model list", () => {
+    const card = {
+      id: "12345678-1234-4123-8123-123456789012", kind: "action", status: "pending",
+      summary: "Delete agent key", service_slug: null, service_name: null, tool_name: "nyxid__delete_agent_key",
+      created_at: at, decided_at: null, expires_at: at,
+    };
+    expect(nyxAgentAcknowledgementSchema.parse(card).confirmation).toBeUndefined();
+    expect(
+      nyxAgentAcknowledgementSchema.parse({
+        ...card,
+        confirmation: { risk: "destructive", access_mode: "ask_every_time", reason: "access_mode" },
+      }).confirmation,
+    ).toEqual({ risk: "destructive", access_mode: "ask_every_time", reason: "access_mode" });
+    expect(() =>
+      nyxAgentAcknowledgementSchema.parse({ ...card, confirmation: { risk: "unknown", reason: "access_mode" } }),
+    ).toThrow();
+    expect(nyxAgentModelSchema.parse({ id: "nyxagent/chat", label: "chat", available: false }).available).toBe(false);
   });
 
   it("treats missing and future channel follow readiness as unavailable", () => {

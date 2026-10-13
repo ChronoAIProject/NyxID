@@ -64,3 +64,58 @@ it("rebuilds a legacy learned package from the panel instead of publishing it", 
   expect(await screen.findByRole("button", { name: "Publish & request confirmation" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Review updated package" })).not.toBeInTheDocument();
 });
+
+const unattached = {
+  ...legacyProposal, status: "published_unpinned", failure_code: "pin_conflict",
+  published_skill_id: "skill-9", published_version: "1.0.1",
+};
+
+function respondWith(listed: Record<string, unknown>, approvals: unknown[] = []) {
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (init?.method === "POST") return json(approvals.shift());
+    if (url === `${base}/proposals`) return json({ proposals: [listed] });
+    return json({ enabled: true });
+  });
+}
+
+function show() {
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}>
+    <AgentLearningReview agentId="agent" />
+  </QueryClientProvider>);
+}
+
+it("explains the two steps first, then finishes an unattached publication through approve", async () => {
+  respondWith(unattached, [
+    { status: "confirmation_required", acknowledgement: { acknowledgement_id: "card-9" } },
+    { status: "pinned" },
+  ]);
+  show();
+  expect(await screen.findByText("Published version: 1.0.1")).toBeVisible();
+  expect(screen.getByText(/Publishing takes two steps: this button first asks for an owner confirmation card/)).toBeVisible();
+  // A publication that reached Ornn cannot be rejected or published again.
+  expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Finish publishing" }));
+  await waitFor(() => expect(posted(`${base}/proposals/proposal/approve`).body).toBe(JSON.stringify({})));
+  fireEvent.click(await screen.findByRole("button", { name: "Confirm finish publishing" }));
+  expect(screen.getByText(/Step 2 of 2: Confirming this exact card publishes the private skill/)).toBeVisible();
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => url === `${base}/proposals/proposal/approve` && (init as RequestInit).method === "POST")).toHaveLength(2));
+  const confirm = fetchMock.mock.calls.filter(([url]) => url === `${base}/proposals/proposal/approve`)[1]![1] as RequestInit;
+  expect(confirm.body).toBe(JSON.stringify({ acknowledgement_id: "card-9" }));
+});
+
+it("offers Finish publishing for an interrupted publishing row", async () => {
+  respondWith({ ...legacyProposal, status: "publishing", failure_code: null });
+  show();
+  expect(await screen.findByRole("button", { name: "Finish publishing" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+});
+
+it("offers no recovery for a settled unattached publication", async () => {
+  respondWith({ ...unattached, failure_code: "base_changed" });
+  show();
+  expect(await screen.findByText(/did not attach it because the source skill changed/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Finish publishing" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Publishing takes two steps/)).not.toBeInTheDocument();
+});

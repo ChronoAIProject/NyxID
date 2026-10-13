@@ -2768,6 +2768,7 @@ pub async fn scoped_specialist_auth(
         &state.db,
         owner,
         &engine::TurnRequest {
+            retry_of: None,
             agent_id: None,
             conversation_id: Some(home.id),
             text: "Exercise service operations".into(),

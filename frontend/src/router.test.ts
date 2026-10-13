@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { channelBotSetupRoute, loginAgentKeyRoute, loginDeviceRoute, loginCodeRoute, oauthCompleteRoute } from "./router";
+import { channelBotSetupRoute, loginAgentKeyRoute, loginDeviceRoute, loginCodeRoute, oauthCompleteRoute, router } from "./router";
 import { isPublicPath } from "./lib/public-paths";
 
 describe.each([loginAgentKeyRoute, loginDeviceRoute])("Login approval route $fullPath", (route) => {
@@ -42,6 +42,16 @@ it("protects per-platform setup routes and accepts scalar prefill values", () =>
     .toEqual({ label: "a".repeat(128), target_org_id: undefined, request_id: undefined, bot_token: "private", future_field: "value" });
 });
 
+it("mounts the admin billing page behind admin auth with a URL-driven tab", () => {
+  const route = Object.values(router.routesById).find((r) => r.fullPath === "/admin/billing");
+  if (!route) throw new Error("admin billing route is not registered");
+  expect(isPublicPath("/admin/billing")).toBe(false);
+  const validate = route.options.validateSearch;
+  if (typeof validate !== "function") throw new Error("Expected a search validator");
+  for (const tab of ["overview", "rates", "settings"]) expect(validate({ tab })).toEqual({ tab });
+  expect(validate({ tab: "secrets" })).toEqual({});
+  expect(validate({ tab: ["rates"] })).toEqual({});
+});
 
 import { providersRedirectRoute, servicesRedirectRoute } from "./router";
 import { useAuthStore } from "./stores/auth-store";

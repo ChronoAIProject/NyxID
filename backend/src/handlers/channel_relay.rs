@@ -1141,6 +1141,12 @@ pub(crate) async fn deliver_initiated_message(
         observation.waba_id = bot.app_id.clone();
     }
     let platform_message_id = outcome.final_id;
+    crate::services::channel_bot_service::record_outbound_outcome(
+        &state.db,
+        &bot.id,
+        outcome.error.as_ref(),
+    )
+    .await;
     // After upstream acceptance, retain pending claims on persistence failure.
     // An uncertain outcome must never automatically dispatch a second copy.
     let stored = channel_relay_service::store_outbound_message(
@@ -1268,8 +1274,37 @@ pub async fn async_reply(
     if is_device_reply_forbidden(&context.original.platform, &context.conversation.platform) {
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
-    let adapter = resolve_adapter(&context.conversation.platform, &state.token_exchange_cache)?;
+    let adapter = reply_adapter(&state, &context)?;
     deliver_async_reply(&state, &headers, context, body, adapter.as_ref()).await
+}
+
+/// Test-only adapter substitution, keyed by channel bot id, so NyxBot's
+/// production reply path can reach a mocked platform API.
+#[cfg(test)]
+pub(crate) static TEST_REPLY_ADAPTERS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter>,
+        >,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+fn reply_adapter(
+    state: &AppState,
+    context: &ReplyRequestContext,
+) -> AppResult<std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter>> {
+    #[cfg(test)]
+    if let Some(adapter) = context
+        .original
+        .channel_bot_id
+        .as_deref()
+        .and_then(|bot_id| TEST_REPLY_ADAPTERS.lock().unwrap().get(bot_id).cloned())
+    {
+        return Ok(adapter);
+    }
+    resolve_adapter(&context.conversation.platform, &state.token_exchange_cache)
+        .map(std::sync::Arc::from)
 }
 
 /// POST /api/v1/channel-relay/thread-reply. A distinct endpoint prevents an
@@ -1441,6 +1476,15 @@ async fn deliver_async_reply(
             None,
         )
         .await;
+    crate::services::channel_bot_service::record_outbound_outcome(
+        &state.db,
+        &bot.id,
+        match &send_result {
+            Ok(outcome) => outcome.error.as_ref(),
+            Err(error) => Some(error),
+        },
+    )
+    .await;
     let mut outcome = match send_result {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -3723,6 +3767,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -4244,6 +4289,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

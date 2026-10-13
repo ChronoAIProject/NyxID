@@ -48,6 +48,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import type { AdminUsageSearch } from "@/types/admin";
+import { AssistantFeedbackPanel } from "@/components/admin/assistant-feedback-panel";
 
 const SamplePage =
   import.meta.env.DEV && import.meta.env.MODE === "test"
@@ -68,13 +69,16 @@ export function AdminUsagePage() {
       </Suspense>
     );
   return (
-    <LiveAnalytics
+    <>
+      <AssistantFeedbackPanel />
+      <LiveAnalytics
       tab={tab}
       preloadSearch={normalizeAdminUsageSearch(search)}
       onTabChange={(next) =>
         void navigate({ to: "/admin/usage", search: { ...search, tab: next } })
       }
-    />
+      />
+    </>
   );
 }
 function LiveAnalytics({

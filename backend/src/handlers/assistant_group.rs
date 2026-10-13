@@ -49,6 +49,7 @@ pub struct GroupResponse {
     name: String,
     members: Vec<GroupMemberResponse>,
     lead_agent_id: String,
+    default_recipient_ids: Vec<String>,
     working_agent_ids: Vec<String>,
     message_count: i64,
     last_message_at: Option<DateTime<Utc>>,
@@ -65,6 +66,7 @@ pub struct GroupAgentRef {
 
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
+    pub feedback: Option<super::assistant_feedback::FeedbackResponse>,
     activities: Vec<super::assistant_nyxagent::ActivityResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<Value>,
@@ -74,6 +76,7 @@ pub struct GroupMessageResponse {
     role: String,
     agent: Option<GroupAgentRef>,
     text: String,
+    recipient_agent_ids: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -91,6 +94,7 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         }
     });
     GroupMessageResponse {
+        feedback: None,
         activities: row.activities.into_iter().map(Into::into).collect(),
         author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
         attachments: row.attachments.into_iter().map(Into::into).collect(),
@@ -99,8 +103,17 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         role: row.role,
         agent,
         text: row.text,
+        recipient_agent_ids: row.recipient_agent_ids,
         created_at: row.created_at,
     }
+}
+
+fn live_member_ids(members: &[AssistantAgent]) -> Vec<String> {
+    members
+        .iter()
+        .filter(|member| member.destroyed_at.is_none())
+        .map(|member| member.id.clone())
+        .collect()
 }
 
 async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<GroupResponse> {
@@ -124,7 +137,12 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
             .collect(),
         id: group.id,
         name: group.name,
-        lead_agent_id: group.lead_agent_id,
+        lead_agent_id: group.lead_agent_id.clone(),
+        default_recipient_ids: groups::default_recipients(
+            &group.last_recipient_ids,
+            &live_member_ids(&members),
+            &group.lead_agent_id,
+        ),
         working_agent_ids: working,
         message_count: group.message_count,
         last_message_at: group.last_message_at,
@@ -145,6 +163,14 @@ async fn group_response_for(
         crate::services::org_group_service::display_name(&state.db, &access.group.user_id).await?;
     let role = access.role().to_owned();
     let owner_id = access.group.user_id.clone();
+    // Each participant has their own sticky selection.
+    let sticky = access
+        .group
+        .last_recipient_ids_by_actor
+        .get(&access.actor)
+        .cloned()
+        .unwrap_or_default();
+    let lead = access.group.lead_agent_id.clone();
     let working: Vec<_> = crate::services::org_group_service::threads(&state.db, &access.group)
         .await?
         .into_iter()
@@ -158,6 +184,13 @@ async fn group_response_for(
     for member in &mut response.members {
         member.working = working.contains(&member.id);
     }
+    let live_ids: Vec<String> = response
+        .members
+        .iter()
+        .filter(|member| !member.destroyed)
+        .map(|member| member.id.clone())
+        .collect();
+    response.default_recipient_ids = groups::default_recipients(&sticky, &live_ids, &lead);
     response.working_agent_ids = working;
     Ok(response)
 }
@@ -264,6 +297,7 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        retry_of: None,
         channel_event_id: None,
         org_access: None,
         attachment_ids: Vec::new(),
@@ -436,7 +470,8 @@ async fn spend_handoffs(
 }
 
 /// Post a message to a group and address its recipients: the members it
-/// @mentions, else the lead. `author` is the NyxBot posting for the user.
+/// @mentions, else the owner's sticky selection, else the lead. `author` is
+/// the NyxBot posting for the user; its posts address only their mentions.
 pub(crate) async fn post(
     state: &AppState,
     owner: &str,
@@ -444,7 +479,7 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    post_with_uploads(state, owner, group_id, text, author, &[]).await
+    post_with_uploads(state, owner, group_id, text, author, &[], None).await
 }
 
 async fn post_with_uploads(
@@ -454,6 +489,7 @@ async fn post_with_uploads(
     text: &str,
     author: Option<&AssistantAgent>,
     ids: &[String],
+    explicit_recipients: Option<&[String]>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
     let text = text.trim();
     if (text.is_empty() && ids.is_empty()) || text.chars().count() > MAX_MESSAGE_CHARS {
@@ -468,7 +504,14 @@ async fn post_with_uploads(
                 "NyxBot cannot post into or follow organization groups".into(),
             ));
         }
-        return Box::pin(super::org_group::post(state, access, text, ids)).await;
+        return Box::pin(super::org_group::post(
+            state,
+            access,
+            text,
+            ids,
+            explicit_recipients,
+        ))
+        .await;
     }
     let group = access.group;
     let members = groups::members(&state.db, owner, &group).await?;
@@ -478,16 +521,33 @@ async fn post_with_uploads(
             member.destroyed_at.is_none() && author.is_none_or(|author| author.id != member.id)
         })
         .collect();
+    // Refuse a stale or forged selection before anything is decided.
+    let explicit = explicit_recipients
+        .map(|selected| groups::explicit_recipients(selected, &live))
+        .transpose()?;
     // The owner answering a member's confirmation in words decides that card
     // and sends the member back to it.
     let confirmed = match author {
         None => confirm_in_group(state, owner, &group, text).await?,
         Some(_) => None,
     };
-    let mut addressed = groups::mentions(text, &live);
-    if let Some(member) = confirmed {
-        addressed.retain(|id| id != &member);
-        addressed.insert(0, member);
+    let mut addressed = match (&confirmed, explicit) {
+        // A confirmation answers one card: its member plus anyone it names.
+        (Some(_), _) => groups::mentions(text, &live),
+        (None, Some(selected)) => selected,
+        (None, None) => {
+            let mentioned = groups::mentions(text, &live);
+            if !mentioned.is_empty() || author.is_some() {
+                mentioned
+            } else {
+                let live_ids: Vec<String> = live.iter().map(|member| member.id.clone()).collect();
+                groups::default_recipients(&group.last_recipient_ids, &live_ids, "")
+            }
+        }
+    };
+    if let Some(member) = &confirmed {
+        addressed.retain(|id| id != member);
+        addressed.insert(0, member.clone());
     }
     if addressed.is_empty()
         && author.is_none()
@@ -495,7 +555,7 @@ async fn post_with_uploads(
     {
         addressed.push(group.lead_agent_id.clone());
     }
-    let message = Box::pin(groups::append_with_uploads(
+    let message = Box::pin(groups::append_with_recipients(
         &state.db,
         owner,
         group_id,
@@ -503,8 +563,14 @@ async fn post_with_uploads(
         author,
         text,
         ids,
+        &addressed,
     ))
     .await?;
+    // Only the owner's own routing is sticky: a confirmation answers its card
+    // and NyxBot's posts never change who the owner is talking to.
+    if author.is_none() && confirmed.is_none() {
+        groups::persist_last_recipients(&state.db, owner, group_id, &addressed).await?;
+    }
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.
@@ -667,9 +733,7 @@ pub(crate) async fn org_pending_actions(
     state: &AppState,
     access: &crate::services::org_group_service::Access,
 ) -> AppResult<Vec<Value>> {
-    use crate::models::assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME};
-    use futures::TryStreamExt;
-    use mongodb::bson::doc;
+    use crate::models::assistant_acknowledgement::AssistantAcknowledgement;
     let mut out = Vec::new();
     let people = crate::services::org_group_service::participants(&state.db, &access.group).await?;
     let threads: std::collections::HashMap<_, _> =
@@ -682,10 +746,7 @@ pub(crate) async fn org_pending_actions(
     let rows: Vec<AssistantAcknowledgement> = if thread_ids.is_empty() {
         Vec::new()
     } else {
-        state.db.collection(COLLECTION_NAME).find(doc! {
-            "conversation_id":{"$in":thread_ids},"kind":"action","status":"pending","decider":"user",
-            "expires_at":{"$gt":mongodb::bson::DateTime::now()}
-        }).await?.try_collect().await?
+        groups::pending_thread_actions(&state.db, &thread_ids).await?
     };
     for ack in rows {
         let Some(thread) = threads
@@ -714,10 +775,7 @@ pub(crate) async fn org_pending_actions(
         }
         out.push(item);
     }
-    let approvals: Vec<crate::models::approval_request::ApprovalRequest> = state.db
-        .collection(crate::models::approval_request::COLLECTION_NAME)
-        .find(doc! {"assistant_group.group_id":&access.group.id,"status":"pending","expires_at":{"$gt":mongodb::bson::DateTime::now()}})
-        .limit(100).await?.try_collect().await?;
+    let approvals = groups::pending_group_approvals(&state.db, &access.group.id).await?;
     for approval in approvals {
         let Some(binding) = &approval.assistant_group else {
             continue;
@@ -737,6 +795,7 @@ pub(crate) async fn org_pending_actions(
 // ----- HTTP -----
 
 pub async fn list_groups(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let mut rows = Vec::new();
@@ -762,6 +821,7 @@ pub async fn create_group(
     auth: AuthUser,
     Json(body): Json<CreateGroupRequest>,
 ) -> AppResult<(StatusCode, Json<GroupResponse>)> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     if let Some(org) = body.org.as_deref() {
@@ -804,6 +864,7 @@ pub async fn get_group(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<GroupResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
@@ -831,6 +892,7 @@ pub async fn update_group(
     Path(id): Path<String>,
     Json(body): Json<UpdateGroupRequest>,
 ) -> AppResult<Json<GroupResponse>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
@@ -868,6 +930,7 @@ pub async fn delete_group(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
@@ -914,6 +977,7 @@ pub async fn list_messages(
     Path(id): Path<String>,
     Query(query): Query<MessagesQuery>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let limit = query.limit.unwrap_or(50);
@@ -941,6 +1005,13 @@ pub async fn list_messages(
         .into_iter()
         .map(|row| message_response(row, &agents))
         .collect();
+    let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
+    let feedback =
+        crate::services::assistant_feedback_service::states_for_messages(&state.db, &owner, &ids)
+            .await?;
+    super::assistant_feedback::attach(&mut messages, feedback, |m| {
+        (m.id.as_str(), &mut m.feedback)
+    });
     let receipts = messages
         .iter_mut()
         .flat_map(|m| m.activities.iter_mut())
@@ -986,6 +1057,8 @@ pub struct PostMessageRequest {
     #[serde(default)]
     attachment_ids: Vec<String>,
     text: String,
+    #[serde(default)]
+    recipient_agent_ids: Option<Vec<String>>,
 }
 
 pub async fn post_message(
@@ -999,8 +1072,16 @@ pub async fn post_message(
     if !body.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
     }
-    let (message, addressed) =
-        post_with_uploads(&state, &owner, &id, &body.text, None, &body.attachment_ids).await?;
+    let (message, addressed) = post_with_uploads(
+        &state,
+        &owner,
+        &id,
+        &body.text,
+        None,
+        &body.attachment_ids,
+        body.recipient_agent_ids.as_deref(),
+    )
+    .await?;
     let agents = team::agents(&state.db, &message.user_id, true).await?;
     Ok((
         StatusCode::ACCEPTED,

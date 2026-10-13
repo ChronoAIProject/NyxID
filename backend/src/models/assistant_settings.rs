@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "assistant_settings";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessMode {
+    Autopilot,
+    #[default]
+    Nyxmode,
+    AskEveryTime,
+}
+
 pub const DEFAULT_MAX_LIVE_SUBAGENTS: i32 = 8;
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS: i32 = 3;
 /// Hard ceilings that bound what an owner can configure.
@@ -14,6 +23,13 @@ pub const DEFAULT_MAX_GROUP_HANDOFFS: i32 = 6;
 pub const DEFAULT_MAX_GROUP_HANDOFFS_PER_HOUR: i32 = 60;
 pub const MAX_GROUP_HANDOFFS_LIMIT: i32 = 24;
 pub const MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT: i32 = 600;
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecialistAccessRequests {
+    #[default]
+    Denied,
+    RoutedToNyxbot,
+}
 
 pub const DEFAULT_SCHEDULE_MINIMUM_MINUTES: i32 = 5;
 pub const SCHEDULE_MINIMUM_MINUTES_LIMIT: i32 = 1440;
@@ -31,6 +47,9 @@ pub struct AssistantSettings {
     /// confirmation card before they run.
     #[serde(default)]
     pub skip_destructive_confirmation: bool,
+    /// Owner-level action approval policy. Missing legacy rows are migrated on read.
+    #[serde(default)]
+    pub access_mode: AccessMode,
     #[serde(default = "default_live")]
     pub max_live_subagents: i32,
     #[serde(default = "default_auto_continuations")]
@@ -54,6 +73,8 @@ pub struct AssistantSettings {
     pub trigger_runs_per_hour: i32,
     #[serde(default = "default_trigger_daily")]
     pub trigger_runs_per_day: i32,
+    #[serde(default)]
+    pub specialist_access_requests: SpecialistAccessRequests,
 }
 
 fn default_schedule_minimum() -> i32 {
@@ -88,6 +109,7 @@ impl AssistantSettings {
         Self {
             user_id: user_id.into(),
             skip_destructive_confirmation: false,
+            access_mode: AccessMode::Nyxmode,
             max_live_subagents: DEFAULT_MAX_LIVE_SUBAGENTS,
             max_auto_continuations: default_auto_continuations(),
             max_concurrent_subagent_turns: DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS,
@@ -99,6 +121,7 @@ impl AssistantSettings {
             schedule_minimum_minutes: DEFAULT_SCHEDULE_MINIMUM_MINUTES,
             trigger_runs_per_hour: DEFAULT_TRIGGER_RUNS_PER_HOUR,
             trigger_runs_per_day: DEFAULT_TRIGGER_RUNS_PER_DAY,
+            specialist_access_requests: SpecialistAccessRequests::Denied,
         }
     }
 }

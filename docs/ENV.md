@@ -156,7 +156,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
 | `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of a read-only rate used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
-| `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Hard default overdraft cap copied to newly provisioned wallets. The shared-store reservation gate enforces the wallet's cap atomically. |
+| `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap copied to newly provisioned wallets unless an admin sets the global default on `/admin/billing` (Settings), which then wins. Existing wallets keep their cap. The shared-store reservation gate enforces the wallet's cap atomically. |
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
 | `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
 

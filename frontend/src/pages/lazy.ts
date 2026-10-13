@@ -258,6 +258,9 @@ export const AdminCreditsPage = lazy(() =>
     default: m.AdminCreditsPage,
   })),
 );
+export const AdminBillingPage = lazy(() =>
+  import("@/pages/admin-billing").then((m) => ({ default: m.AdminBillingPage })),
+);
 export const SshTerminalPage = lazy(() =>
   import("@/pages/ssh-terminal").then((m) => ({
     default: m.SshTerminalPage,

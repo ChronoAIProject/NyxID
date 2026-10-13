@@ -63,6 +63,7 @@ pub(crate) async fn process_inbound_messages(
     )?;
 
     let mut complete = true;
+    let mut stamped = false;
     for inbound in messages {
         let activity = adapter.activity_metadata(inbound);
         let notification = activity
@@ -92,6 +93,12 @@ pub(crate) async fn process_inbound_messages(
                 tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
             }
             return Err(Box::new(error));
+        }
+        // Liveness is stamped once per batch, only after billing admitted the
+        // delivery; a diagnostics write failure never blocks processing.
+        if !stamped {
+            super::channel_bot_service::record_inbound_success(state.db, bot).await;
+            stamped = true;
         }
         if adapter.dedup_inbound_by_platform_message_id()
             && !adapter.atomic_inbound_admission()

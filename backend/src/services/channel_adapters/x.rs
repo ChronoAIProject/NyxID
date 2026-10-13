@@ -207,19 +207,73 @@ fn rate_backoff(headers: &HeaderMap, status: StatusCode) -> Option<Duration> {
     ))
 }
 
+/// Refusal causes keyed by `channel_bot_health::failure_code`; keep stable.
+pub(crate) const X_FORBIDDEN_SCOPES: &str =
+    "the X connection lacks a required OAuth scope; reconnect and grant every requested scope";
+pub(crate) const X_FORBIDDEN_ACCESS: &str = "the X app's access level or project enrollment does not allow this endpoint; an administrator must upgrade the X app";
+const X_FORBIDDEN_UNKNOWN: &str = "access denied; check granted scopes first; if scopes are present, verify the app's access level";
+
+/// Classify an X 403 envelope (v2 problem or v1.1 `errors[]`).
+fn forbidden_cause(body: &Value) -> &'static str {
+    let text = |key: &str| body.get(key).and_then(Value::as_str).unwrap_or_default();
+    let codes: Vec<i64> = body
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|error| error.get("code").and_then(Value::as_i64))
+        .collect();
+    let messages: Vec<&str> = body
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|error| error.get("message").and_then(Value::as_str))
+        .chain([text("detail"), text("title")])
+        .collect();
+    // 453: "You currently have access to a subset of X API endpoints".
+    if text("reason") == "client-not-enrolled"
+        || text("type").ends_with("/client-forbidden")
+        || body.get("required_enrollment").is_some()
+        || codes.contains(&453)
+    {
+        return X_FORBIDDEN_ACCESS;
+    }
+    if text("type").ends_with("/insufficient-scope")
+        || messages
+            .iter()
+            .any(|message| message.to_ascii_lowercase().contains("scope"))
+    {
+        return X_FORBIDDEN_SCOPES;
+    }
+    X_FORBIDDEN_UNKNOWN
+}
+
 fn response_error(status: StatusCode, backoff: Option<Duration>) -> AppError {
+    response_error_with(status, backoff, None)
+}
+
+fn response_error_with(
+    status: StatusCode,
+    backoff: Option<Duration>,
+    forbidden: Option<&'static str>,
+) -> AppError {
     let cause = match status {
         StatusCode::UNAUTHORIZED => {
             "authorization expired or revoked; reconnect the account".to_string()
         }
-        StatusCode::FORBIDDEN => {
-            "DM access denied; check granted scopes and the app's paid API access".to_string()
+        StatusCode::FORBIDDEN => forbidden.unwrap_or(X_FORBIDDEN_UNKNOWN).to_string(),
+        StatusCode::PAYMENT_REQUIRED => {
+            "the X app's API credits are exhausted; an administrator must restore them (NyxID credits are unaffected)".to_string()
         }
         StatusCode::TOO_MANY_REQUESTS => format!(
             "rate limited; retry after {}s",
             backoff.unwrap_or(Duration::from_secs(900)).as_secs()
         ),
-        _ => "API request failed; retry later".to_string(),
+        status if status.is_server_error() => {
+            "X is unavailable; NyxID retries after the provider recovers".to_string()
+        }
+        _ => "X API request failed; inspect the channel health and retry".to_string(),
     };
     AppError::ChannelPlatformError(format!("X: {cause} (HTTP {})", status.as_u16()))
 }
@@ -254,12 +308,24 @@ async fn send_response_json(response: reqwest::Response) -> AppResult<Value> {
                 return Err(error);
             }
         }
-        return Err(response_error(StatusCode::FORBIDDEN, None));
+        return Err(response_error_with(
+            StatusCode::FORBIDDEN,
+            None,
+            Some(forbidden_cause(&body)),
+        ));
     }
     response_json(response).await
 }
 
 async fn response_json(response: reqwest::Response) -> AppResult<Value> {
+    if response.status() == StatusCode::FORBIDDEN {
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        return Err(response_error_with(
+            StatusCode::FORBIDDEN,
+            None,
+            Some(forbidden_cause(&body)),
+        ));
+    }
     if !response.status().is_success() {
         return Err(response_error(
             response.status(),
@@ -949,6 +1015,18 @@ impl PlatformAdapter for XAdapter {
         webhooks::remove(self, http, credentials, bot_id).await
     }
 
+    async fn connection_webhook_status(
+        &self,
+        http: &reqwest::Client,
+        credentials: &PlatformVerifySecrets,
+        bot: &ChannelBot,
+        webhook_url: &str,
+    ) -> AppResult<Option<super::super::channel_platform::LiveWebhookStatus>> {
+        webhooks::status(self, http, credentials, bot, webhook_url)
+            .await
+            .map(Some)
+    }
+
     async fn platform_webhook_targets(
         &self,
         credentials: &PlatformVerifySecrets,
@@ -1007,6 +1085,78 @@ impl PlatformAdapter for XAdapter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn response_errors_map_to_stable_health_codes() {
+        use crate::services::channel_bot_health::{codes, failure_code};
+        let code = |status, backoff, body: Option<Value>| {
+            failure_code(&response_error_with(
+                status,
+                backoff,
+                body.as_ref().map(forbidden_cause),
+            ))
+        };
+        assert_eq!(
+            code(StatusCode::UNAUTHORIZED, None, None),
+            codes::AUTH_REVOKED
+        );
+        assert_eq!(
+            code(StatusCode::PAYMENT_REQUIRED, None, None),
+            codes::PROVIDER_CREDITS
+        );
+        assert_eq!(
+            code(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(Duration::from_secs(7)),
+                None
+            ),
+            codes::RATE_LIMITED
+        );
+        assert!(
+            response_error(StatusCode::TOO_MANY_REQUESTS, Some(Duration::from_secs(7)))
+                .to_string()
+                .contains("retry after 7s")
+        );
+        assert_eq!(
+            code(StatusCode::BAD_GATEWAY, None, None),
+            codes::PROVIDER_UNAVAILABLE
+        );
+        assert_eq!(
+            code(StatusCode::NOT_FOUND, None, None),
+            codes::PROVIDER_ERROR
+        );
+        // Real X 403 envelopes: project enrollment, v1.1 tier code 453, scopes.
+        for envelope in [
+            json!({"title": "Client Forbidden", "reason": "client-not-enrolled",
+                "type": "https://api.twitter.com/2/problems/client-forbidden",
+                "required_enrollment": "Appropriate Level of API Access"}),
+            json!({"errors": [{"code": 453, "message": "You currently have access to a subset of X API V2 endpoints"}]}),
+        ] {
+            assert_eq!(
+                code(StatusCode::FORBIDDEN, None, Some(envelope.clone())),
+                codes::APP_ACCESS_DENIED,
+                "{envelope}"
+            );
+        }
+        assert_eq!(
+            code(
+                StatusCode::FORBIDDEN,
+                None,
+                Some(
+                    json!({"title": "Forbidden", "detail": "Missing required OAuth2 scope dm.write"})
+                )
+            ),
+            codes::SCOPES_MISSING
+        );
+        assert_eq!(
+            code(
+                StatusCode::FORBIDDEN,
+                None,
+                Some(json!({"title": "Forbidden"}))
+            ),
+            codes::ACCESS_DENIED
+        );
+    }
+
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

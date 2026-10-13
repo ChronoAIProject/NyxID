@@ -29,6 +29,73 @@ use crate::{
 pub fn missing() -> AppError {
     AppError::NotFound("Group not found".into())
 }
+
+pub async fn persist_actor_recipients(
+    db: &Database,
+    group_id: &str,
+    actor: &str,
+    ids: &[String],
+) -> AppResult<()> {
+    db.collection::<AssistantGroup>(GROUPS)
+        .update_one(
+            doc! {"_id":group_id},
+            doc! {"$set": {format!("last_recipient_ids_by_actor.{actor}"): ids}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn pending_requests(
+    db: &Database,
+    group_id: &str,
+) -> AppResult<Vec<crate::models::assistant_group::GroupRequest>> {
+    use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
+    Ok(db
+        .collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
+        .find(doc! {"group_id":group_id,"pending_agent_ids.0":{"$exists":true}})
+        .sort(doc! {"created_at":1})
+        .limit(100)
+        .await?
+        .try_collect()
+        .await?)
+}
+
+pub async fn remove_pending_agent(
+    db: &Database,
+    request_id: &str,
+    agent_id: &str,
+) -> AppResult<()> {
+    use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
+    db.collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":request_id},
+            doc! {"$pull":{"pending_agent_ids":agent_id}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn request_trigger(
+    db: &Database,
+    group_id: &str,
+    request_id: &str,
+    seq: i64,
+    actor: &str,
+) -> AppResult<crate::models::assistant_group::GroupMessage> {
+    use crate::models::assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME};
+    db.collection::<GroupMessage>(MESSAGES_COLLECTION_NAME).find_one(doc! {"group_id":group_id,"request_id":request_id,"seq":seq,"role":"user","author_user_id":actor}).await?.ok_or_else(missing)
+}
+
+pub async fn queue_handoff(db: &Database, request_id: &str, target: &str) -> AppResult<()> {
+    use crate::models::assistant_group::{GroupRequest, REQUESTS_COLLECTION_NAME};
+    db.collection::<GroupRequest>(REQUESTS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":request_id,"hops_remaining":{"$gt":0}},
+            doc! {"$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target}},
+        )
+        .await?;
+    Ok(())
+}
 pub fn is_org(group: &AssistantGroup) -> bool {
     group.created_by_user_id.is_some()
 }
@@ -343,6 +410,8 @@ pub async fn create(
             created_by_user_id: Some(actor.into()),
             member_agent_ids: ids.to_vec(),
             lead_agent_id: agents[0].id.clone(),
+            last_recipient_ids: Vec::new(),
+            last_recipient_ids_by_actor: std::collections::HashMap::new(),
             created_by: created_by.into(),
             message_count: 0,
             pending_agent_ids: Vec::new(),
@@ -452,13 +521,14 @@ pub async fn update(
                     "member_agent_ids": &before.member_agent_ids,
                     "name": &before.name, "lead_agent_id": &before.lead_agent_id,
                 };
-                let update = doc! {"$set": {
+                let mut update = doc! {"$set": {
                     "name": &next.name,
                     "member_agent_ids": &next.member_agent_ids,
                     "participant_user_ids": &next.participant_user_ids,
                     "lead_agent_id": &next.lead_agent_id,
                     "updated_at": bson::DateTime::now(),
                 }};
+                update.extend(sticky_cleanup(&before, &next));
                 let changed = db.collection::<AssistantGroup>(GROUPS)
                     .update_one(filter, update).session(&mut *session).await?;
                 if changed.matched_count != 1 {
@@ -487,6 +557,31 @@ pub async fn update(
     )
     .await;
     Ok(access)
+}
+
+/// Departed participants lose their sticky selection; the others keep only
+/// agents still in the group.
+fn sticky_cleanup(before: &AssistantGroup, next: &AssistantGroup) -> bson::Document {
+    let mut unset = bson::Document::new();
+    let mut pull = bson::Document::new();
+    for actor in before.last_recipient_ids_by_actor.keys() {
+        let path = format!("last_recipient_ids_by_actor.{actor}");
+        if next.participant_user_ids.contains(actor) {
+            if before.member_agent_ids != next.member_agent_ids {
+                pull.insert(path, doc! {"$nin": &next.member_agent_ids});
+            }
+        } else {
+            unset.insert(path, "");
+        }
+    }
+    let mut update = bson::Document::new();
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
+    }
+    if !pull.is_empty() {
+        update.insert("$pull", pull);
+    }
+    update
 }
 
 async fn require_manager_remains(db: &Database, access: &Access) -> AppResult<()> {
@@ -583,6 +678,7 @@ pub(crate) async fn delete_contents(
                 for collection in [
                     assistant_group::MESSAGES_COLLECTION_NAME,
                     assistant_group::REQUESTS_COLLECTION_NAME,
+                    crate::models::assistant_message_feedback::COLLECTION_NAME,
                     crate::models::assistant_attachment::COLLECTION_NAME,
                     crate::models::assistant_upload_retention::TOMBSTONES,
                 ] {
@@ -660,6 +756,10 @@ async fn delete_threads_in_session(
                 .session(&mut *session)
                 .await?;
         }
+        db.collection::<bson::Document>(crate::models::assistant_checkpoint::COLLECTION_NAME)
+            .delete_one(doc! {"_id":&row.id,"user_id":&row.user_id})
+            .session(&mut *session)
+            .await?;
         db.collection::<bson::Document>(assistant_conversation::COLLECTION_NAME)
             .delete_one(doc! {"_id":&row.id,"user_id":&row.user_id})
             .session(&mut *session)
@@ -705,6 +805,7 @@ pub async fn append(
     request: Option<&str>,
     ids: &[String],
     enqueue: Option<crate::models::assistant_group::GroupRequest>,
+    recipients: &[String],
 ) -> AppResult<crate::models::assistant_group::GroupMessage> {
     use crate::models::assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME as MESSAGES};
     let name = display_name(db, &access.actor).await?;
@@ -734,6 +835,7 @@ pub async fn append(
         agent_id: agent.map(|a| a.id.clone()),
         agent_name: agent.map(|a| a.name.clone()),
         text: text.into(),
+        recipient_agent_ids: recipients.to_vec(),
         created_at: now,
         attachments,
     };
@@ -801,6 +903,7 @@ async fn dropped_notice(
         seq: parent.message_count,
         role: "notice".into(),
         text: DROPPED_NOTICE.into(),
+        recipient_agent_ids: Vec::new(),
         created_at: Utc::now(),
         author_user_id: None,
         author_display_name: None,

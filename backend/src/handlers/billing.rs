@@ -18,7 +18,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
+use crate::models::billing_rate_cache::BillingRateCache;
 use crate::models::billing_topup_session::BillingTopUpStatus;
 use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
 use crate::models::service_billing::BillingMetric;
@@ -387,7 +387,11 @@ pub async fn get_usage(
         let pricing = legacy_pricing(
             &doc,
             billable,
-            find_rate(&state.db, &lago_metric_code, model.as_deref()),
+            crate::services::billing::reservation::find_rate(
+                &state.db,
+                &lago_metric_code,
+                model.as_deref(),
+            ),
         )
         .await?;
         let costs = usage_costs(&doc, billable, pricing)?;
@@ -890,25 +894,6 @@ fn period_start(period: &str) -> chrono::DateTime<Utc> {
         "all" => now - Duration::days(3650),
         _ => now - Duration::days(30),
     }
-}
-
-async fn find_rate(
-    db: &mongodb::Database,
-    lago_metric_code: &str,
-    model: Option<&str>,
-) -> AppResult<Option<BillingRateCache>> {
-    let specific_id = BillingRateCache::cache_id(lago_metric_code, model);
-    if let Some(rate) = db
-        .collection::<BillingRateCache>(BILLING_RATE_CACHE)
-        .find_one(doc! { "_id": specific_id })
-        .await?
-    {
-        return Ok(Some(rate));
-    }
-    db.collection::<BillingRateCache>(BILLING_RATE_CACHE)
-        .find_one(doc! { "_id": BillingRateCache::cache_id(lago_metric_code, None) })
-        .await
-        .map_err(Into::into)
 }
 
 /// Fill `api_key_name` on usage rows with one batched lookup.

@@ -133,6 +133,9 @@ pub struct AssistantAgent {
     pub created_by: String,
     /// NyxAgent profile for new threads.
     pub model: String,
+    /// Optional per-agent approval policy; absent inherits the owner's mode.
+    #[serde(default)]
+    pub access_mode_override: Option<super::assistant_settings::AccessMode>,
     /// Where NyxID delivers this agent's events when no thread asked for them.
     #[serde(default)]
     pub home_conversation_id: Option<String>,
@@ -153,7 +156,7 @@ pub struct AssistantAgent {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentSkillMetadata {
     pub description: String,
     pub size_bytes: usize,

@@ -1,7 +1,66 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_error_code<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Code {
+        Text(String),
+        Number(i64),
+    }
+    match Code::deserialize(deserializer)? {
+        Code::Text(value) => Ok(value),
+        Code::Number(value) => Ok(value.to_string()),
+    }
+}
 
 pub const COLLECTION_NAME: &str = "channel_bots";
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChannelBotError {
+    /// Numeric `AppError` code, kept for compatibility with earlier rows.
+    #[serde(deserialize_with = "deserialize_error_code")]
+    pub code: String,
+    /// Stable failure code (`services::channel_bot_health::codes`).
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChannelBotSubscriptionState {
+    pub registered: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub checked_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChannelBotDiagnostics {
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_inbound_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_inbound_source: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_outbound_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_outbound_error: Option<ChannelBotError>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_webhook_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_webhook_error: Option<ChannelBotError>,
+    #[serde(default)]
+    pub subscription_state: Option<ChannelBotSubscriptionState>,
+    #[serde(default)]
+    pub consecutive_errors: u32,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +74,8 @@ pub enum XChannelEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    #[serde(default)]
+    pub diagnostics: ChannelBotDiagnostics,
     /// Absent on legacy X channels, which receive DMs only.
     #[serde(default)]
     pub x_events: Option<Vec<XChannelEvent>>,
@@ -194,6 +255,33 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_are_optional_for_legacy_rows() {
+        let mut document = bson::doc! {"_id": "legacy", "user_id": "u", "platform": "twitter", "label": "x", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()};
+        let bot: ChannelBot = bson::from_document(document.clone()).unwrap();
+        assert!(bot.diagnostics.last_inbound_at.is_none());
+        document.insert("diagnostics", bson::doc! {"last_inbound_source": "webhook"});
+        let bot: ChannelBot = bson::from_document(document).unwrap();
+        assert_eq!(
+            bot.diagnostics.last_inbound_source.as_deref(),
+            Some("webhook")
+        );
+    }
+
+    #[test]
+    fn diagnostics_accept_legacy_numeric_error_codes() {
+        let doc = bson::doc! {
+            "_id": "legacy-error", "user_id": "u", "platform": "twitter", "label": "x",
+            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
+            "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false,
+            "webhook_secret_hash": "h", "status": "active", "is_active": true,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            "diagnostics": { "last_outbound_error": { "code": 10004, "at": bson::DateTime::now() } }
+        };
+        let bot: ChannelBot = bson::from_document(doc).unwrap();
+        assert_eq!(bot.diagnostics.last_outbound_error.unwrap().code, "10004");
+    }
+
+    #[test]
     fn polling_fields_are_bson_datetimes_and_legacy_rows_keep_defaults() {
         let mut bot = make_channel_bot();
         let now = bson::DateTime::now().to_chrono();
@@ -238,6 +326,7 @@ mod tests {
 
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

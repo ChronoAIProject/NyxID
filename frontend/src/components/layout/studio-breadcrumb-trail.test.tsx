@@ -28,6 +28,7 @@ async function renderTrail(path: string, search: Record<string, unknown>) {
     "/admin/usage",
     "/admin/invite-codes",
     "/admin/credits",
+    "/admin/billing",
     "/integration-guide",
   ];
   const routes = paths.map((fullPath) => {
@@ -142,6 +143,14 @@ describe("Studio breadcrumb links", () => {
       "/admin/credits",
       "tab",
       "grants",
+    ],
+    [
+      "/admin/billing",
+      { tab: "settings" },
+      "Billing",
+      "/admin/billing",
+      "tab",
+      "overview",
     ],
   ] as const)(
     "navigates from %s via %s",

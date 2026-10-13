@@ -77,6 +77,15 @@ vi.mock("@/hooks/use-services", () => ({
     isPending: false,
   }),
 }));
+// The service editor's server-resolved billing panel is covered in
+// platform-service-fields.test.tsx; it renders nothing here.
+vi.mock("@/hooks/use-admin-billing", () => ({
+  useAdminBillingService: () => ({
+    data: undefined,
+    isLoading: false,
+    error: null,
+  }),
+}));
 vi.mock("@/hooks/use-endpoints", () => ({
   useEndpoints: () => ({ data: [] }),
 }));

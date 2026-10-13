@@ -44,7 +44,12 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
-import { ADMIN_CREDITS_TABS, KEY_DETAIL_TABS, isValidTab } from "@/lib/url-tabs";
+import {
+  ADMIN_BILLING_TABS,
+  ADMIN_CREDITS_TABS,
+  KEY_DETAIL_TABS,
+  isValidTab,
+} from "@/lib/url-tabs";
 
 import {
   LandingPage,
@@ -101,6 +106,7 @@ import {
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
   AdminCreditsPage,
+  AdminBillingPage,
   AdminInviteCodesPage,
   CliAuthPage,
   CliPairPage,
@@ -1128,6 +1134,15 @@ const adminCreditsRoute = createRoute({
   }),
 });
 
+const adminBillingRoute = createRoute({
+  path: "billing",
+  getParentRoute: () => adminLayout,
+  component: AdminBillingPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    ...(isValidTab(search.tab, ADMIN_BILLING_TABS) ? { tab: search.tab } : {}),
+  }),
+});
+
 const adminInviteCodesRoute = createRoute({
   path: "invite-codes",
   getParentRoute: () => adminLayout,
@@ -1268,6 +1283,7 @@ const routeTree = rootRoute.addChildren([
       adminAnalyticsRoute,
       adminIntegrityRoute,
       adminCreditsRoute,
+      adminBillingRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminUploadRetentionRoute,

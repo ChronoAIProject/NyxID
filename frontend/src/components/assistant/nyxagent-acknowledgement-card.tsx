@@ -1,6 +1,7 @@
 import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ACTION_RISK_LABEL, confirmationReason } from "@/lib/assistant/nyxbot-labels";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
 function title(row: NyxAgentAcknowledgement): string {
@@ -81,6 +82,23 @@ export function NyxAgentAcknowledgementCard({
         </p>
       ) : null}
       <p className="text-13 font-medium text-foreground">{label}</p>
+      {acknowledgement.confirmation ? (
+        <p className="text-11 text-muted-foreground">
+          <span
+            className={
+              acknowledgement.confirmation.risk === "destructive"
+                ? "font-medium text-destructive"
+                : acknowledgement.confirmation.risk === "sensitive"
+                  ? "font-medium text-warning"
+                  : "font-medium text-foreground"
+            }
+          >
+            {ACTION_RISK_LABEL[acknowledgement.confirmation.risk]}
+          </span>
+          {" · "}
+          {confirmationReason(acknowledgement.confirmation)}
+        </p>
+      ) : null}
       <p className="text-12 text-muted-foreground">
         {acknowledgement.kind === "skills"
           ? "Allowing this proposal asks NyxBot to resolve the exact version. You will get a separate card to confirm adding or re-pinning the skill."

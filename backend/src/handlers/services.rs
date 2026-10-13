@@ -566,6 +566,61 @@ pub struct UpdateServiceRequest {
     pub proxy_operation_policy: Option<Option<ProxyOperationPolicy>>,
 }
 
+impl UpdateServiceRequest {
+    /// A request that changes only the billing block, so the central admin
+    /// billing editor shares this handler's write path and audit.
+    pub(crate) fn billing_only(billing: BillingUpdate) -> Self {
+        Self {
+            service_category: None,
+            offering_kind: None,
+            topics: None,
+            supplier: None,
+            import_source: None,
+            destination_targets: None,
+            name: None,
+            description: None,
+            base_url: None,
+            is_active: None,
+            visibility: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            identity_propagation_mode: None,
+            identity_include_user_id: None,
+            identity_include_email: None,
+            identity_include_name: None,
+            identity_jwt_audience: None,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
+            ssh_config: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            billing: Some(billing),
+            inference: None,
+            platform_key: None,
+            credential: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
+            skills_revision: None,
+            skills_request_id: None,
+            clear_skill_refs: false,
+            recommended_skill_refs: None,
+            developer_app_ids: None,
+            custom_user_agent: None,
+            default_request_headers: None,
+            token_exchange_config: None,
+            ws_frame_injections: None,
+            anonymous_endpoints: None,
+            proxy_operation_policy: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for UpdateServiceRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UpdateServiceRequest")
@@ -1952,7 +2007,7 @@ pub async fn update_service(
     .await
 }
 
-async fn update_service_inner(
+pub(crate) async fn update_service_inner(
     state: AppState,
     auth_user: AuthUser,
     tele: TelemetryContext,

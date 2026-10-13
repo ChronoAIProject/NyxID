@@ -1343,6 +1343,7 @@ mod tests {
 
     fn make_test_bot(webhook_secret_hash: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

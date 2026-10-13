@@ -5,7 +5,10 @@ use crate::{
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
-    services::{assistant_team_service::CreateRequest, key_service},
+    services::{
+        assistant_acknowledgement_service as acks, assistant_team_service::CreateRequest,
+        key_service,
+    },
     test_utils::{connect_transaction_test_database, test_app_state, test_auth_user, test_user},
 };
 use axum::{
@@ -99,6 +102,10 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
 }
 
 async fn researcher(state: &AppState) -> AssistantAgent {
+    specialist(state, "researcher").await
+}
+
+async fn specialist(state: &AppState, name: &str) -> AssistantAgent {
     team::create_specialist(
         &state.db,
         &state.encryption_keys,
@@ -106,7 +113,7 @@ async fn researcher(state: &AppState) -> AssistantAgent {
         CreateRequest {
             machines: None,
             logins: None,
-            name: "researcher".into(),
+            name: name.into(),
             description: "Summarizes notes".into(),
             display_name: None,
             persona: None,
@@ -162,7 +169,409 @@ fn agent_texts(rows: &[GroupMessage]) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() {
+async fn sticky_recipients_persist_after_a_multi_mention() {
+    let (state, _, server) = setup("sticky_multi").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "sticky".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@NyxBot @researcher hi", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 4).await;
+    post(&state, OWNER, &group.id, "and then?", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 5).await;
+    let ids = rows
+        .iter()
+        .rev()
+        .find(|r| r.role == "user")
+        .unwrap()
+        .recipient_agent_ids
+        .clone();
+    assert_eq!(ids, vec![nyxbot.id, researcher.id]);
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .last_recipient_ids,
+        ids
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn explicit_recipient_ids_override_mentions_in_text() {
+    let (state, _, server) = setup("sticky_explicit").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "explicit".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    let (_, Json(response)) = post_message(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(group.id.clone()),
+        Json(PostMessageRequest {
+            attachment_ids: vec![],
+            recipient_agent_ids: Some(vec![nyxbot.id.clone()]),
+            text: "@researcher text".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["addressed_agent_ids"], json!([nyxbot.id]));
+    server.abort();
+}
+
+async fn group_of(state: &AppState, name: &str, members: &[&AssistantAgent]) -> GroupResponse {
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: name.into(),
+            member_agent_ids: members.iter().map(|agent| agent.id.clone()).collect(),
+        }),
+    )
+    .await
+    .unwrap();
+    group
+}
+
+async fn send(
+    state: &AppState,
+    group_id: &str,
+    text: &str,
+    ids: Option<Vec<String>>,
+) -> AppResult<Value> {
+    post_message(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(group_id.into()),
+        Json(PostMessageRequest {
+            attachment_ids: vec![],
+            recipient_agent_ids: ids,
+            text: text.into(),
+        }),
+    )
+    .await
+    .map(|(_, Json(body))| body)
+}
+
+async fn defaults(state: &AppState, group_id: &str) -> Vec<String> {
+    let Json(group) = get_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(group_id.into()),
+    )
+    .await
+    .unwrap();
+    group.default_recipient_ids
+}
+
+const RECIPIENTS_REFUSED: &str = "Choose 1 to 8 current group members as recipients";
+
+#[tokio::test]
+async fn unknown_or_destroyed_recipient_ids_are_rejected() {
+    let (state, _, server) = setup("sticky_unknown").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let writer = specialist(&state, "writer").await;
+    let group = group_of(&state, "refuse", &[&nyxbot, &researcher, &writer]).await;
+    team::destroy(&state.db, OWNER, &writer.id).await.unwrap();
+    let before = groups::messages(&state.db, OWNER, &group.id, 50, None)
+        .await
+        .unwrap()
+        .len();
+    for ids in [
+        vec![writer.id.clone()],
+        vec![Uuid::new_v4().to_string()],
+        vec![researcher.id.clone(), Uuid::new_v4().to_string()],
+        vec![],
+    ] {
+        let error = send(&state, &group.id, "hello", Some(ids))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, AppError::ValidationError(message) if message == RECIPIENTS_REFUSED),
+            "{error:?}"
+        );
+    }
+    // Nothing was appended for a refused selection.
+    assert_eq!(
+        groups::messages(&state.db, OWNER, &group.id, 50, None)
+            .await
+            .unwrap()
+            .len(),
+        before
+    );
+    // A duplicated live selection is accepted once.
+    let body = send(
+        &state,
+        &group.id,
+        "hello",
+        Some(vec![researcher.id.clone(), researcher.id.clone()]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(body["addressed_agent_ids"], json!([researcher.id]));
+    assert_eq!(
+        body["message"]["recipient_agent_ids"],
+        json!([researcher.id])
+    );
+    settled(&state, &group.id, 2).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn sticky_recipients_clear_when_a_member_leaves_or_is_purged() {
+    let (state, _, server) = setup("sticky_clear").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let writer = specialist(&state, "writer").await;
+    let group = group_of(&state, "clear", &[&nyxbot, &researcher, &writer]).await;
+    assert_eq!(defaults(&state, &group.id).await, vec![nyxbot.id.clone()]);
+    send(&state, &group.id, "@researcher @writer hi", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 3).await;
+    assert_eq!(
+        defaults(&state, &group.id).await,
+        vec![researcher.id.clone(), writer.id.clone()]
+    );
+    // The writer leaves the group: it drops out of the sticky selection.
+    groups::update(
+        &state.db,
+        OWNER,
+        &group.id,
+        None,
+        Some(&[nyxbot.id.clone(), researcher.id.clone()]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .last_recipient_ids,
+        vec![researcher.id.clone()]
+    );
+    // A destroyed member is never previewed; the lead takes over.
+    team::destroy(&state.db, OWNER, &researcher.id)
+        .await
+        .unwrap();
+    assert_eq!(defaults(&state, &group.id).await, vec![nyxbot.id.clone()]);
+    let body = send(&state, &group.id, "who is here?", None).await.unwrap();
+    assert_eq!(body["addressed_agent_ids"], json!([nyxbot.id]));
+    settled(&state, &group.id, 6).await;
+    // Purging removes it from the stored selection too.
+    send(&state, &group.id, "@NyxBot noted", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 8).await;
+    groups::persist_last_recipients(
+        &state.db,
+        OWNER,
+        &group.id,
+        &[researcher.id.clone(), nyxbot.id.clone()],
+    )
+    .await
+    .unwrap();
+    groups::remove_agent(&state.db, OWNER, &researcher.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .last_recipient_ids,
+        vec![nyxbot.id.clone()]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients() {
+    let (state, _, server) = setup("sticky_confirmation").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "confirm".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    post(&state, OWNER, &group.id, "@NyxBot hello", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 3).await;
+    post(&state, OWNER, &group.id, "@researcher approve this", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 5).await;
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &nyxbot.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (card, _) = acks::request_tracked(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_agent_key"),
+            arguments: Some(&json!({"key_id":"ci-bot"})),
+            summary: "Delete agent key",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let phrase = format!("yes {}", acks::confirm_code(&card.id));
+    let card_status = |state: AppState, thread_id: String, card_id: String| async move {
+        acks::history(&state.db, OWNER, &thread_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|ack| ack.id == card_id)
+            .unwrap()
+            .status
+    };
+    // A refused selection is rejected before the confirmation decides the card.
+    let refused = send(
+        &state,
+        &group.id,
+        &phrase,
+        Some(vec![Uuid::new_v4().to_string()]),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(refused, AppError::ValidationError(ref m) if m == RECIPIENTS_REFUSED));
+    assert_eq!(
+        card_status(state.clone(), thread.id.clone(), card.id.clone()).await,
+        "pending"
+    );
+    let (_, addressed) = post(&state, OWNER, &group.id, &phrase, None).await.unwrap();
+    assert_eq!(addressed, vec![nyxbot.id.clone()]);
+    assert_eq!(
+        card_status(state.clone(), thread.id.clone(), card.id.clone()).await,
+        "allowed"
+    );
+    // The confirmation answered one card; the owner's selection is unchanged.
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .last_recipient_ids,
+        vec![researcher.id.clone()]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn nyxbot_post_to_group_is_never_sticky() {
+    let (state, _, server) = setup("sticky_nyxbot_tool").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    let writer = specialist(&state, "writer").await;
+    // NyxBot is outside this group, so it can post into it.
+    let group = group_of(&state, "tool", &[&researcher, &writer]).await;
+    post(&state, OWNER, &group.id, "@writer first", None)
+        .await
+        .unwrap();
+    settled(&state, &group.id, 2).await;
+    let thread = team::home_thread(&state.db, &state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    // An unmentioned NyxBot post addresses no one, not the owner's selection.
+    let (value, error) = super::super::assistant_team::execute_tool(
+        &state,
+        &chat,
+        "nyxid__post_to_group",
+        &json!({"group": group.id, "text": "NyxBot update"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    assert_eq!(value["addressed_agent_ids"], json!([]));
+    // A mentioned one reaches its member without becoming sticky either.
+    let (value, error) = super::super::assistant_team::execute_tool(
+        &state,
+        &chat,
+        "nyxid__post_to_group",
+        &json!({"group": group.id, "text": "@researcher please check"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    assert_eq!(value["addressed_agent_ids"], json!([researcher.id]));
+    let rows = settled(&state, &group.id, 5).await;
+    let posts: Vec<&GroupMessage> = rows
+        .iter()
+        .filter(|row| row.agent_id.as_deref() == Some(nyxbot.id.as_str()))
+        .collect();
+    assert_eq!(posts.len(), 2);
+    assert!(posts[0].recipient_agent_ids.is_empty());
+    assert_eq!(posts[1].recipient_agent_ids, vec![researcher.id.clone()]);
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .last_recipient_ids,
+        vec![writer.id.clone()]
+    );
+    // The owner's bare follow-up still goes to their own last recipient.
+    post(&state, OWNER, &group.id, "bare follow-up", None)
+        .await
+        .unwrap();
+    let rows = settled(&state, &group.id, 7).await;
+    assert_eq!(
+        rows.iter()
+            .rev()
+            .find(|row| row.role == "user")
+            .unwrap()
+            .recipient_agent_ids,
+        vec![writer.id]
+    );
+    server.abort();
+}
+
+#[allow(dead_code)]
+async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl() {
     let (state, _, server) = setup("group_routing").await;
     let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let researcher = researcher(&state).await;
@@ -189,6 +598,7 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         Path(id.clone()),
         Json(PostMessageRequest {
             attachment_ids: Vec::new(),
+            recipient_agent_ids: None,
             text: "hello team".into(),
         }),
     )
@@ -212,11 +622,29 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
             "Researcher summary ready.".to_owned()
         )
     );
-    // The lead hands work to a member by mentioning it.
-    post(&state, OWNER, &id, "ask the researcher for a summary", None)
+    // Sticky routing keeps the previously mentioned researcher as the
+    // recipient when the owner omits a new mention.
+    post(&state, OWNER, &id, "anything else?", None)
         .await
         .unwrap();
-    let rows = settled(&state, &id, 8).await;
+    let rows = settled(&state, &id, 7).await;
+    let owner_message = rows.iter().rev().find(|row| row.role == "user").unwrap();
+    assert_eq!(
+        owner_message.recipient_agent_ids,
+        vec![researcher.id.clone()]
+    );
+    assert_eq!(agent_texts(&rows).last().unwrap().0, "researcher");
+    // The lead hands work to a member by mentioning it.
+    post(
+        &state,
+        OWNER,
+        &id,
+        "@NyxBot ask the researcher for a summary",
+        None,
+    )
+    .await
+    .unwrap();
+    let rows = settled(&state, &id, 10).await;
     let texts = agent_texts(&rows);
     assert_eq!(
         texts[texts.len() - 2..].to_vec(),
@@ -259,6 +687,16 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         .unwrap();
     assert!(!key.allow_all_services && key.allowed_service_ids.is_empty());
     server.abort();
+}
+
+#[tokio::test]
+async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded() {
+    group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded_impl().await;
+}
+
+#[tokio::test]
+async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() {
+    groups_resist_forged_lines_and_loops_and_answer_confirmations_impl().await;
 }
 
 #[tokio::test]
@@ -316,6 +754,28 @@ async fn groups_validate_members_and_delete_with_their_member_threads() {
         .await
         .is_err()
     );
+    state
+        .db
+        .collection::<crate::models::assistant_message_feedback::AssistantMessageFeedback>(
+            crate::models::assistant_message_feedback::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::assistant_message_feedback::AssistantMessageFeedback {
+                id: "group-feedback-delete".into(),
+                user_id: OWNER.into(),
+                conversation_id: None,
+                group_id: Some(group.id.clone()),
+                message_id: thread.id.clone(),
+                turn_id: None,
+                vote: "up".into(),
+                comment: None,
+                context: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
     delete_group(
         State(state.clone()),
         test_auth_user(OWNER),
@@ -324,6 +784,17 @@ async fn groups_validate_members_and_delete_with_their_member_threads() {
     .await
     .unwrap();
     assert!(groups::get(&state.db, OWNER, &group.id).await.is_err());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(
+                crate::models::assistant_message_feedback::COLLECTION_NAME
+            )
+            .count_documents(doc! {"group_id": &group.id})
+            .await
+            .unwrap(),
+        0
+    );
     assert!(
         groups::messages(&state.db, OWNER, &group.id, 50, None)
             .await
@@ -373,8 +844,7 @@ async fn group_with(state: &AppState, name: &str, members: &[&AssistantAgent]) -
 
 /// Review fixes: forged transcript lines, runaway posts, hidden-thread
 /// replies, home threads, and confirmations inside groups.
-#[tokio::test]
-async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() {
+async fn groups_resist_forged_lines_and_loops_and_answer_confirmations_impl() {
     use crate::services::assistant_acknowledgement_service as acks;
     let (state, calls, server) = setup("group_hardening").await;
     let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();

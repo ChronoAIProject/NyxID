@@ -748,6 +748,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         saved_login_ids: Vec::new(),
         created_by: "user".into(),
         model: "default".into(),
+        access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
         display_name: None,
@@ -1036,6 +1037,7 @@ async fn exact_root_provenance_is_active_even_when_legacy_active_is_false() {
         version: "1.0".into(),
         sha256: "b".repeat(64),
         dependencies: Vec::new(),
+        disabled: false,
     };
     fixture
         .state
@@ -1427,6 +1429,8 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                retry_of: None,
+                specialist_id: None,
                 steering: None,
                 voice: None,
                 execution_pending: false,
@@ -1439,6 +1443,8 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
                 text: text.into(),
                 status: "completed".into(),
                 error_code: None,
+                upstream_error_code: None,
+                error_detail: None,
                 created_at: now + chrono::Duration::seconds(seq),
                 activities: Vec::new(),
                 attachments: Vec::new(),
@@ -1660,6 +1666,8 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            requester_agent_id: None,
+            confirmation: None,
             authored_skill: None,
             machine_context: None,
             id: card.clone(),
@@ -2035,6 +2043,8 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            requester_agent_id: None,
+            confirmation: None,
             authored_skill: None,
             machine_context: None,
             id: card.clone(),
@@ -2431,6 +2441,7 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
         version: base.version.clone(),
         sha256: base.sha256.clone(),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db

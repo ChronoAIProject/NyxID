@@ -15,6 +15,8 @@ import {
   Sparkles,
   Wrench,
   X,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
@@ -22,13 +24,12 @@ import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
-import type {
-  ChatMessage,
-  ChatSessionState,
-} from "@/lib/assistant/chat-types";
+import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import { MachineToolCard } from "./machine-tool-card";
+import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
+import { capture } from "@/lib/telemetry";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
@@ -97,8 +98,17 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
         />
-        {running ? <PulseDot /> : tools.some((tool) => tool.status === "error") || steps.some((step) => step.status === "error") ? <X className="h-3 w-3 text-destructive" /> : <Check className="h-3 w-3 text-success" />}
-        <span>{count} {count === 1 ? "action" : "actions"}</span>
+        {running ? (
+          <PulseDot />
+        ) : tools.some((tool) => tool.status === "error") ||
+          steps.some((step) => step.status === "error") ? (
+          <X className="h-3 w-3 text-destructive" />
+        ) : (
+          <Check className="h-3 w-3 text-success" />
+        )}
+        <span>
+          {count} {count === 1 ? "action" : "actions"}
+        </span>
       </button>
       {open ? (
         <div className="space-y-1 border-t border-hairline px-2.5 py-2">
@@ -144,40 +154,159 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   );
 }
 
+type ErrorDetail = NonNullable<ChatMessage["errorDetail"]>;
+
+/** Metadata-only diagnostics of a failed turn, with a copyable ID. */
+function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
+  const diagnosticId = [
+    `turn ${detail.turnId}`,
+    detail.responseId ? `response ${detail.responseId}` : null,
+    detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  return (
+    <details className="mt-2 text-11 text-text-tertiary">
+      <summary className="cursor-pointer">Details</summary>
+      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
+        <dt>stage</dt>
+        <dd>{detail.stage}</dd>
+        {detail.httpStatus != null ? (
+          <>
+            <dt>http</dt>
+            <dd>{detail.httpStatus}</dd>
+          </>
+        ) : null}
+        <dt>turn</dt>
+        <dd>{detail.turnId}</dd>
+        {detail.responseId ? (
+          <>
+            <dt>response</dt>
+            <dd>{detail.responseId}</dd>
+          </>
+        ) : null}
+        {detail.upstreamRequestId ? (
+          <>
+            <dt>request</dt>
+            <dd>{detail.upstreamRequestId}</dd>
+          </>
+        ) : null}
+        <dt>continuations</dt>
+        <dd>{detail.continuations}</dd>
+        {detail.occurredAt ? (
+          <>
+            <dt>at</dt>
+            <dd>
+              <time dateTime={detail.occurredAt}>{new Date(detail.occurredAt).toLocaleString()}</time>
+            </dd>
+          </>
+        ) : null}
+      </dl>
+      <button
+        type="button"
+        className="mt-1 underline"
+        onClick={() => void navigator.clipboard?.writeText(diagnosticId)}
+      >
+        Copy diagnostic ID
+      </button>
+    </details>
+  );
+}
+
 export function ChatMessageBubble({
   message,
   interactiveCards = true,
+  onRetry,
+  conversationId,
+  feedbackEnabled = true,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
+  readonly onRetry?: () => Promise<void> | void;
+  readonly conversationId?: string;
+  readonly feedbackEnabled?: boolean;
 }) {
   const streaming = message.status === "streaming";
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string>();
+  const retry = async () => {
+    if (!onRetry) return;
+    setRetrying(true);
+    setRetryError(undefined);
+    try {
+      await onRetry();
+    } catch (error) {
+      setRetryError(error instanceof Error && error.message ? error.message : "Retry failed. Try again.");
+    } finally {
+      setRetrying(false);
+    }
+  };
   const content =
     message.role === "assistant"
       ? sanitizeAssistantMessageContent(message.content)
       : message.content;
+  const [vote, setVote] = useState<"up" | "down" | undefined>(
+    message.feedback?.vote,
+  );
+  const [commentOpen, setCommentOpen] = useState(false);
+  const [comment, setComment] = useState(message.feedback?.comment ?? "");
+  const [feedbackError, setFeedbackError] = useState(false);
+  const feedback = useAssistantFeedback(
+    "conversation",
+    conversationId ?? "",
+    message.id,
+  );
+  const setFeedback = async (next: "up" | "down") => {
+    const previous = vote;
+    const selected = previous === next ? undefined : next;
+    setVote(selected);
+    if (!conversationId || !feedbackEnabled) return;
+    try {
+      await feedback.mutateAsync(selected ? { vote: selected } : {});
+      setFeedbackError(false);
+    } catch {
+      setVote(previous);
+      setFeedbackError(true);
+      return;
+    }
+    if (selected)
+      capture({
+        name: "ui.assistant_feedback_submitted",
+        props: { message_id: message.id, vote: selected },
+      });
+  };
   if (message.role === "user") {
     return (
       <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
-        {message.steering && <p className="mb-1 text-11 text-muted-foreground" role="note">
-          Steering · {steeringNotice(message.steering.code, message.steering.outcome)}
-        </p>}
+        {message.steering && (
+          <p className="mb-1 text-11 text-muted-foreground" role="note">
+            Steering ·{" "}
+            {steeringNotice(message.steering.code, message.steering.outcome)}
+          </p>
+        )}
         {content}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
-            {message.images.map((image) => <ToolImage key={image.id} image={image} />)}
+            {message.images.map((image) => (
+              <ToolImage key={image.id} image={image} />
+            ))}
           </div>
+        ) : null}
+        {feedbackError ? (
+          <p role="alert" className="mt-1 text-11 text-destructive">
+            Unable to save feedback. Try again.
+          </p>
         ) : null}
       </div>
     );
   }
   const printable = Boolean(
     content ||
-      message.steps?.length ||
-      message.toolCalls?.length ||
-      message.images?.length ||
-      message.artifacts?.length ||
-      message.authorizationBlockers?.length,
+    message.steps?.length ||
+    message.toolCalls?.length ||
+    message.images?.length ||
+    message.artifacts?.length ||
+    message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
   const runningTool = streaming
@@ -199,21 +328,57 @@ export function ChatMessageBubble({
       <div className="min-w-0 max-w-[min(84%,758px)] flex-1 pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <ActivityBlock message={message} />
-        {message.toolCalls?.filter((tool) => tool.machine).map((tool) => (
-          <MachineToolCard key={tool.id} receipt={tool.machine!} conversationId={tool.conversationId} images={message.images} />
-        ))}
+        {message.toolCalls
+          ?.filter((tool) => tool.machine)
+          .map((tool) => (
+            <MachineToolCard
+              key={tool.id}
+              receipt={tool.machine!}
+              conversationId={tool.conversationId}
+              images={message.images}
+            />
+          ))}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {message.status === "error" && message.errorDetail ? (
+          <ErrorDetails detail={message.errorDetail} />
+        ) : null}
+        {message.status === "error" && onRetry ? (
+          <div className="mt-2">
+            <button
+              type="button"
+              className="text-11 underline disabled:opacity-50"
+              disabled={retrying}
+              onClick={() => void retry()}
+            >
+              {retrying ? "Retrying…" : "Retry"}
+            </button>
+            {retryError ? (
+              <p role="alert" className="mt-1 text-11 text-destructive">
+                {retryError}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
-            {message.images.filter((image) => !message.toolCalls?.some((tool) => tool.machine?.screenshot_id === image.id)).map((image) => (
-              <ToolImage key={image.id} image={image} />
-            ))}
+            {message.images
+              .filter(
+                (image) =>
+                  !message.toolCalls?.some(
+                    (tool) => tool.machine?.screenshot_id === image.id,
+                  ),
+              )
+              .map((image) => (
+                <ToolImage key={image.id} image={image} />
+              ))}
           </div>
         ) : null}
         {interactiveCards
           ? message.authorizationBlockers?.map((blocker) => (
               <div className="mt-2" key={blocker.serviceSlug}>
-                <ConnectCard block={authorizationBlockerToConnectCard(blocker)} />
+                <ConnectCard
+                  block={authorizationBlockerToConnectCard(blocker)}
+                />
               </div>
             ))
           : null}
@@ -248,6 +413,91 @@ export function ChatMessageBubble({
             <span>{message.error}</span>
           </div>
         ) : null}
+        {feedbackEnabled &&
+        conversationId &&
+        !streaming &&
+        message.status === "complete" &&
+        !message.errorCode &&
+        message.id ? (
+          <div
+            role="group"
+            className="mt-2 flex items-center gap-1"
+            aria-label="Reply feedback"
+          >
+            <button
+              type="button"
+              aria-label="Helpful"
+              aria-pressed={vote === "up"}
+              disabled={feedback.isPending}
+              onClick={() => void setFeedback("up")}
+              className={cn(
+                "rounded p-1 text-text-tertiary hover:bg-overlay",
+                vote === "up" && "text-success",
+              )}
+            >
+              <ThumbsUp className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              aria-label="Not helpful"
+              aria-pressed={vote === "down"}
+              disabled={feedback.isPending}
+              onClick={() => void setFeedback("down")}
+              className={cn(
+                "rounded p-1 text-text-tertiary hover:bg-overlay",
+                vote === "down" && "text-destructive",
+              )}
+            >
+              <ThumbsDown className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              aria-label="Add feedback comment"
+              onClick={() => setCommentOpen((open) => !open)}
+              className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
+            >
+              Comment
+            </button>
+          </div>
+        ) : null}
+        {feedbackEnabled && conversationId && commentOpen && !streaming ? (
+          <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
+            <textarea
+              autoFocus
+              aria-label="Optional feedback comment"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setCommentOpen(false);
+              }}
+              value={comment}
+              maxLength={1000}
+              onChange={(event) => setComment(event.target.value)}
+              className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none"
+              placeholder="Optional comment"
+            />
+            <button
+              type="button"
+              disabled={!vote || feedback.isPending}
+              className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10 disabled:opacity-50"
+              onClick={() => {
+                if (!conversationId || !vote) return;
+                void feedback
+                  .mutateAsync({ vote, comment })
+                  .then(() => {
+                    setFeedbackError(false);
+                    setCommentOpen(false);
+                  })
+                  .catch(() => setFeedbackError(true));
+              }}
+            >
+              Send
+            </button>
+          </div>
+        ) : null}
+        {feedbackError ? (
+          <p role="alert" className="mt-1 text-11 text-destructive">
+            Unable to save feedback. Try again.
+          </p>
+        ) : null}
       </div>
     </article>
   );
@@ -256,13 +506,26 @@ export function ChatMessageBubble({
 export function ChatMessageEntry({
   message,
   interactiveCards = true,
+  conversationId,
+  feedbackEnabled = true,
+  onRetry,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
+  readonly conversationId?: string;
+  readonly feedbackEnabled?: boolean;
+  readonly onRetry?: () => Promise<void> | void;
 }) {
-  if (message.role === "system" && message.id.startsWith("nyxagent-context-reset:")) {
+  if (
+    message.role === "system" &&
+    message.id.startsWith("nyxagent-context-reset:")
+  ) {
     return (
-      <p role="note" aria-label="Conversation context reset" className="text-xs text-text-tertiary">
+      <p
+        role="note"
+        aria-label="Conversation context reset"
+        className="text-xs text-text-tertiary"
+      >
         {message.content}
       </p>
     );
@@ -284,6 +547,9 @@ export function ChatMessageEntry({
         <ChatMessageBubble
           message={message}
           interactiveCards={interactiveCards}
+          conversationId={conversationId}
+          feedbackEnabled={feedbackEnabled}
+          onRetry={onRetry}
         />
       </div>
     );
@@ -291,14 +557,19 @@ export function ChatMessageEntry({
   const roleLabel = message.role.trim() || "Message";
   const displayName = authorName || roleLabel;
   return (
-    <article aria-label={`${displayName} ${roleLabel} message`} className="flex gap-2.5">
+    <article
+      aria-label={`${displayName} ${roleLabel} message`}
+      className="flex gap-2.5"
+    >
       <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-text-tertiary">
         <MessageSquare className="h-3 w-3" />
       </div>
       <div className="min-w-0 max-w-[84%] flex-1">
         <div className="text-11 font-medium text-foreground">{displayName}</div>
         {message.thinking ? (
-          <p className="mt-1 text-11 italic text-text-tertiary">{message.thinking}</p>
+          <p className="mt-1 text-11 italic text-text-tertiary">
+            {message.thinking}
+          </p>
         ) : null}
         {message.content ? (
           <div className="mt-1 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
@@ -313,7 +584,8 @@ export function ChatMessageEntry({
 function EmptyState({ children }: { readonly children?: ReactNode }) {
   return (
     <div className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
-      {children ?? "Ask NyxID to help with services, access, and account operations."}
+      {children ??
+        "Ask NyxID to help with services, access, and account operations."}
     </div>
   );
 }
@@ -326,6 +598,7 @@ export function ChatMessageList({
   notice,
   projectionVersion,
   renderMessage,
+  feedbackEnabled = false,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
@@ -334,6 +607,7 @@ export function ChatMessageList({
   readonly notice?: ReactNode;
   readonly projectionVersion?: string | number;
   readonly renderMessage?: (message: ChatMessage) => ReactNode;
+  readonly feedbackEnabled?: boolean;
 }) {
   const [detectedMessageId, setDetectedMessageId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -356,19 +630,21 @@ export function ChatMessageList({
   const terminalAssistant = messages.at(-1);
   const emptyTerminal = Boolean(
     session &&
-      session.status !== "streaming" &&
-      session.status !== "draft" &&
-      session.status !== "stopped" &&
-      terminalAssistant?.role === "assistant" &&
-      !terminalAssistant.content.trim() &&
-      !terminalAssistant.error &&
-      !(
-        terminalAssistant.steps?.length ||
-        terminalAssistant.toolCalls?.length ||
-        terminalAssistant.images?.length
-      ) &&
-      !(terminalAssistant.artifacts?.length ||
-        terminalAssistant.authorizationBlockers?.length),
+    session.status !== "streaming" &&
+    session.status !== "draft" &&
+    session.status !== "stopped" &&
+    terminalAssistant?.role === "assistant" &&
+    !terminalAssistant.content.trim() &&
+    !terminalAssistant.error &&
+    !(
+      terminalAssistant.steps?.length ||
+      terminalAssistant.toolCalls?.length ||
+      terminalAssistant.images?.length
+    ) &&
+    !(
+      terminalAssistant.artifacts?.length ||
+      terminalAssistant.authorizationBlockers?.length
+    ),
   );
   useEffect(() => {
     if (!emptyTerminal) return;
@@ -387,8 +663,8 @@ export function ChatMessageList({
       previousConversationRef.current !== session?.conversationId;
     const newUserMessage = Boolean(
       latestUserMessageId &&
-        previousUserMessageRef.current &&
-        previousUserMessageRef.current !== latestUserMessageId,
+      previousUserMessageRef.current &&
+      previousUserMessageRef.current !== latestUserMessageId,
     );
     if (conversationChanged || newUserMessage) followingRef.current = true;
     previousConversationRef.current = session?.conversationId;
@@ -407,7 +683,8 @@ export function ChatMessageList({
 
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget;
-    const distance = element.scrollHeight - element.clientHeight - element.scrollTop;
+    const distance =
+      element.scrollHeight - element.clientHeight - element.scrollTop;
     if (distance <= 48) followingRef.current = true;
     else if (element.scrollTop < lastScrollTopRef.current - 1) {
       followingRef.current = false;
@@ -436,7 +713,13 @@ export function ChatMessageList({
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
           <div id={`message-${message.id}`} key={message.id}>
-            {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
+            {renderMessage?.(message) ?? (
+              <ChatMessageEntry
+                message={message}
+                conversationId={session?.conversationId}
+                feedbackEnabled={feedbackEnabled}
+              />
+            )}
           </div>
         ))}
         {footer}

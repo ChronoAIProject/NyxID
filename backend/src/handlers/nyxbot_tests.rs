@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
+#[path = "nyxbot_x_bus_tests.rs"]
+mod x_bus_tests;
+
 const OWNER: &str = "12345678-1234-4123-8123-1234567890ab";
 const PARTITION: &str = "conv_0123456789abcdef0123456789abcdef";
 
@@ -2253,6 +2256,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            retry_of: None,
             channel_event_id: None,
             org_access: None,
             attachment_ids: Vec::new(),
@@ -3280,6 +3284,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            retry_of: None,
             channel_event_id: None,
             org_access: None,
             attachment_ids: Vec::new(),

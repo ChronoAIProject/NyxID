@@ -63,6 +63,7 @@ async fn tool_base(f: &Fixture, server: &MockServer) -> Base {
         version: "1.0".into(),
         sha256: base.sha.clone(),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db

@@ -125,6 +125,7 @@ pub(crate) async fn new_orchestrator(
         &state.db,
         owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -175,6 +176,7 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.db,
         &owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
@@ -186,7 +188,21 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
     )
     .await
     .unwrap();
-    chat_fixture(state, owner, row, orchestrator.id).await
+    let fixture = chat_fixture(state, owner, row, orchestrator.id).await;
+    // Legacy specialist-flow fixtures explicitly opt into routed compatibility;
+    // production defaults remain denied.
+    fixture
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &fixture.owner},
+            doc! {"$set": {"specialist_access_requests": "routed_to_nyxbot", "updated_at": bson::DateTime::now()}},
+        )
+        .upsert(true)
+        .await
+        .unwrap();
+    fixture
 }
 
 fn orchestrator_chat() -> acks::ChatAuthority {
@@ -461,6 +477,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
@@ -554,6 +571,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -910,7 +928,11 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
         if !tools::read_only(name) {
             assert_eq!(result.value["error"], "orchestrator_only", "{name}");
         } else if name.starts_with("list_") && *name != "list_agent_key_bindings" {
-            assert!(!result.is_error, "{name}: unexpected error result");
+            assert!(
+                !result.is_error,
+                "{name}: unexpected error result: {}",
+                result.value
+            );
         } else {
             assert!(result.is_error, "{name}");
             assert!(
@@ -979,7 +1001,11 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
         args["acknowledgement_id"] = json!(id);
         result = f.tools().execute(&f.auth, &name, &args).await;
     }
-    assert!(!result.is_error, "{name}: unexpected error result");
+    assert!(
+        !result.is_error,
+        "{name}: unexpected error result: {}",
+        result.value
+    );
     let serialized = result.value.to_string();
     for secret_field in [
         "key_hash",
@@ -1303,6 +1329,7 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
@@ -1370,6 +1397,7 @@ async fn assert_assistant_key_boundaries(f: &Fixture) {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1567,23 +1595,16 @@ async fn orchestrator_keys_are_full_and_rotation_and_replacement_preserve_role_a
         "https://api.github.com",
     )
     .await;
-    let refusal = service_gate(
-        &sub.state.db,
-        &sub.chat,
-        &service,
-        "github",
-        "GitHub",
-        false,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    acks::decide(
+    super::assistant_team_service::set_grants(
         &sub.state.db,
         &sub.owner,
-        &sub.row.id,
-        refusal["acknowledgement_id"].as_str().unwrap(),
-        true,
+        &sub.chat.agent_id,
+        super::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            },
+        ),
     )
     .await
     .unwrap();
@@ -1664,6 +1685,7 @@ async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_can
         db,
         &f.owner,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1746,4 +1768,224 @@ async fn deleting_a_conversation_revokes_children_clears_bindings_and_audits_aft
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn specialist_account_card_request_denied_audited_and_routed() {
+    use super::assistant_settings_service as settings;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = fixture("strict_account_gate_card").await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .delete_one(doc! {"_id":&f.owner})
+        .await
+        .unwrap();
+    let (denied, card) = acks::account_gate(&f.state.db, &f.chat)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(denied["error"], "access_request_denied");
+    assert!(card.is_none());
+    let audit = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(
+            doc! {"event_type":"assistant_access_request_denied","event_data.scope":"account"},
+        )
+        .await
+        .unwrap()
+        .expect("account denial audit");
+    let audit_data = audit.get_document("event_data").unwrap();
+    assert_eq!(
+        audit_data.get_str("requester_agent").unwrap(),
+        f.chat.agent_id
+    );
+    assert_eq!(audit_data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(
+        audit_data.get_str("key").unwrap(),
+        f.row.credential_api_key_id
+    );
+    assert!(matches!(
+        audit_data.get("target"),
+        None | Some(bson::Bson::Null)
+    ));
+    assert_eq!(audit_data.get_str("scope").unwrap(), "account");
+    assert_eq!(audit_data.get_str("decision").unwrap(), "denied");
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (_, card) = acks::account_gate(&f.state.db, &f.chat)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(card.is_some());
+}
+
+#[tokio::test]
+async fn specialist_operation_scope_card_request_denied_audited_and_routed() {
+    use super::assistant_settings_service as settings;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = fixture("strict_operation_scope_card").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "operation-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    super::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        super::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let err = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "operations",
+            service: Some((&service, "operation-service", "Operation service")),
+            tool: None,
+            arguments: None,
+            summary: "Request operation scope",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("access_request_denied"));
+    assert!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"operations"}).await.unwrap().is_some());
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (row, created) = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "operations",
+            service: Some((&service, "operation-service", "Operation service")),
+            tool: None,
+            arguments: Some(&json!({"expected_revision": 0, "all_operations": false})),
+            summary: "Request operation scope",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(created);
+    assert_eq!(row.decider, "orchestrator");
+}
+
+#[tokio::test]
+async fn specialist_skill_card_request_denied_audited_and_routed() {
+    use super::assistant_settings_service as settings;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = fixture("strict_skill_card").await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let args = serde_json::json!({"expected_revision":0,"skills":[{"source":"ornn","skill_id":"00000000-0000-0000-0000-000000000001","name":"strict-skill","version":"1.0","sha256":"0000000000000000000000000000000000000000000000000000000000000000","dependencies":[]}]});
+    let err = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "skills",
+            service: None,
+            tool: Some("nyxid__request_agent_skills"),
+            arguments: Some(&args),
+            summary: "Request skill",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("access_request_denied"));
+    let audit = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"skills"})
+        .await
+        .unwrap()
+        .expect("skill denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(data.get_str("decision").unwrap(), "denied");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (row, created) = super::assistant_acknowledgement_service::request_tracked(
+        &f.state.db,
+        &f.chat,
+        super::assistant_acknowledgement_service::Request {
+            kind: "skills",
+            service: None,
+            tool: Some("nyxid__request_agent_skills"),
+            arguments: Some(&args),
+            summary: "Request skill",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(created);
+    assert_eq!(row.decider, "orchestrator");
 }

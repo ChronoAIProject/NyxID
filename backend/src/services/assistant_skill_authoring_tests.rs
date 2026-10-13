@@ -24,6 +24,7 @@ mod recovery;
 fn input(agent: &str) -> Value {
     json!({"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
+
 async fn fixture(name: &str) -> Fixture {
     let f = orchestrator_fixture(name).await;
     review::migrate_publication_targets(&f.state, false)
@@ -102,6 +103,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
         version: "1.0".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db
@@ -4724,4 +4726,178 @@ async fn destroyed_or_deleted_target_fences_stale_reservation_and_finalization()
         assert_eq!(claims.count_documents(doc! {}).await.unwrap(), 0);
         f.state.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
+    let f = fixture("authoring_owner_improve").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &id, "POST").await;
+    finish(&f, card, true).await.unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/versions")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[{"version":"1.0"}]}})),
+        )
+        .mount(&server)
+        .await;
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    // An unknown pin is not found and creates nothing.
+    let missing = create_improve_draft(
+        &f.state,
+        &f.chat,
+        &f.chat.agent_id,
+        &Uuid::new_v4().to_string(),
+        &reader,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(&missing, AppError::NotFound(m) if m == "Attached skill not found"));
+    let result = create_improve_draft(&f.state, &f.chat, &f.chat.agent_id, &id, &reader)
+        .await
+        .unwrap();
+    assert_eq!(result["error"], "acknowledgement_required", "{result}");
+    assert!(result["acknowledgement_id"].as_str().is_some());
+    let proposal: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":result["proposal_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(proposal.source, ProposalSource::Authored);
+    assert_eq!(proposal.status, "pending");
+    let body: GeneratedProposal = serde_json::from_slice(
+        &f.state
+            .encryption_keys
+            .decrypt(&proposal.body_encrypted)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.kind, "improve");
+    assert_eq!(body.name, "weekly-review");
+    let base = body.base_skill.as_ref().unwrap();
+    assert_eq!(base.skill_id, id);
+    assert_eq!(base.version, "1.0");
+    assert_eq!(base.sha256, row.publication.as_ref().unwrap().sha256);
+    // The editable guidance is the published body without its frontmatter,
+    // and the package's other text files come along.
+    assert_eq!(
+        body.skill_md,
+        input(&f.chat.agent_id)["skill_md"].as_str().unwrap()
+    );
+    assert_eq!(body.files.len(), 1);
+    assert_eq!(body.files[0].path, "references/checklist.md");
+    assert_eq!(body.files[0].content, "Verify dates before publishing.");
+    assert!(!body.description.is_empty());
+    // Repeating the same edit reuses the pending draft.
+    let again = create_improve_draft(&f.state, &f.chat, &f.chat.agent_id, &id, &reader)
+        .await
+        .unwrap();
+    assert_eq!(again["proposal_id"], result["proposal_id"]);
+    // "Test" reads the pin the way the agent does; a disabled pin is unreadable.
+    let owner = f.owner.clone();
+    let test = |state: crate::AppState, agent: String, skill: String| {
+        let owner = owner.clone();
+        async move {
+            crate::handlers::agent_skills::preview_attached(
+                axum::extract::State(state),
+                crate::test_utils::test_auth_user(&owner),
+                axum::extract::Path((agent, skill)),
+            )
+            .await
+            .map(|axum::Json(body)| body)
+        }
+    };
+    let live = test(f.state.clone(), f.chat.agent_id.clone(), id.clone())
+        .await
+        .unwrap();
+    assert!(live.readable);
+    assert!(!live.disabled);
+    assert!(live.excerpt.contains("Check outstanding work."), "{live:?}");
+    assert_eq!(live.version, "1.0");
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"skills.0.disabled":true}},
+        )
+        .await
+        .unwrap();
+    let off = test(f.state.clone(), f.chat.agent_id.clone(), id.clone())
+        .await
+        .unwrap();
+    assert!(off.disabled);
+    assert!(!off.readable);
+    assert!(off.excerpt.is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn editing_an_authored_draft_raises_a_fresh_card_that_publishes_the_edit() {
+    let f = fixture("authoring_edit_new_card").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let draft = json!({"schema_version":1,"kind":"new","name":"weekly-review",
+        "description":"Prepare a weekly review","skill_md":"# Weekly review\nEdited by the owner.",
+        "files":[],"base_skill":null,"rationale":"","safety_notes":""});
+    let axum::Json(edited) = crate::handlers::assistant_agent_learning::edit(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), row.id.clone())),
+        axum::Json(serde_json::from_value(json!({"revision":0,"draft":draft})).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited["status"], "updated");
+    assert_eq!(edited["conversation_id"], f.chat.conversation_id);
+    let fresh_id = edited["acknowledgement_id"].as_str().unwrap().to_owned();
+    assert_ne!(fresh_id, card.id);
+    let fresh: AssistantAcknowledgement = f
+        .state
+        .db
+        .collection(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .find_one(doc! {"_id":&fresh_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let reference = fresh.authored_skill.as_ref().unwrap();
+    assert_eq!(reference.proposal_id, row.id);
+    assert_eq!(reference.revision, 1);
+    // The fresh card publishes the edited revision.
+    let saved: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &saved, &id, "POST").await;
+    let decided = finish(&f, fresh, true).await.unwrap();
+    assert_eq!(decided.status, "used");
+    let agent: AssistantAgent = f
+        .state
+        .db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(agent.skills.len(), 1);
+    assert_eq!(agent.skills[0].skill_id, id);
+    f.state.db.drop().await.unwrap();
 }

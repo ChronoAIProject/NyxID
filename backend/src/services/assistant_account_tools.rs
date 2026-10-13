@@ -235,10 +235,13 @@ fn description(name: &str) -> String {
         "{purpose} {} Key creation/rotation, credentials, approval decisions, org \
                 administration and billing are available only in the UI.",
         if destructive(name) {
-            "Destructive: unless the user turned confirmations off, NyxID first shows \
-            the user a single-use confirmation card; retry with its acknowledgement_id."
+            "Destructive: NyxID shows the user a single-use confirmation card unless their \
+            access mode is Autopilot; retry with its acknowledgement_id."
+        } else if read_only(name) {
+            "Non-destructive. Read-only."
         } else {
-            "Non-destructive."
+            "Non-destructive. Depending on the user's access mode NyxID may first show a \
+            single-use confirmation card; retry with its acknowledgement_id."
         }
     )
 }
@@ -445,6 +448,13 @@ pub fn error_result(error: AppError) -> ToolResult {
                     "message": message}),
             };
         }
+        AppError::Forbidden(message) if message.starts_with("access_request_denied:") => {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: super::assistant_acknowledgement_service::access_request_denied(),
+            };
+        }
         error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
             "This operation requires a conversation key and human acknowledgement."
         }
@@ -602,60 +612,19 @@ impl AccountTools<'_> {
                 permission_request: request,
             });
         }
-        if let Some(refusal) = acks::webhook_action_gate(
-            self.db,
-            chat,
-            tool_name,
-            args,
-            read_only(name),
-            destructive(name),
-        )
-        .await?
-        {
-            return Ok(ToolResult {
-                permission_request: None,
-                value: refusal,
-                is_error: true,
-            });
-        }
-        if destructive(name)
-            && chat.confirmation_policy.is_none()
-            && !super::assistant_settings_service::get(self.db, &chat.user_id)
-                .await?
-                .skip_destructive_confirmation
-        {
-            // Resolve ownership and a human-readable summary before requesting authority.
+        // One card answers every reason to confirm (webhook policy and the
+        // governing access mode) and is consumed exactly once.
+        let facts = acks::ActionFacts::of(acks::classify_owner_action(tool_name, args));
+        if let Some(need) = acks::confirmation_needed(self.db, chat, facts, false).await? {
+            // Resolve ownership and a human-readable summary before requesting
+            // authority, preserving not-found refusals and key restrictions.
             let summary = self.action_summary(&chat.user_id, name, args).await?;
-            if let Some(id) = args["acknowledgement_id"].as_str() {
-                if !acks::consume_action(self.db, chat, id, tool_name, args).await? {
-                    return Ok(ToolResult {
-                        permission_request: None,
-                        is_error: true,
-                        value: json!({
-                            "error": "acknowledgement_invalid", "kind": "action",
-                            "instructions": "The acknowledgement is missing, expired, used, \
-                                or does not match this action. Ask the user before requesting \
-                                a new action card.",
-                        }),
-                    });
-                }
-            } else {
-                let row = acks::request(
-                    self.db,
-                    chat,
-                    acks::Request {
-                        kind: "action",
-                        service: None,
-                        tool: Some(tool_name),
-                        arguments: Some(args),
-                        summary: &summary,
-                        platform: false,
-                    },
-                )
-                .await?;
+            if let Some(refusal) =
+                acks::confirm_action(self.db, chat, tool_name, args, &need, &summary).await?
+            {
                 return Ok(ToolResult {
                     permission_request: None,
-                    value: acks::refusal(&row),
+                    value: refusal,
                     is_error: true,
                 });
             }
@@ -774,7 +743,12 @@ impl AccountTools<'_> {
             .collect())
     }
 
-    async fn action_summary(&self, user: &str, name: &str, args: &Value) -> AppResult<String> {
+    pub(crate) async fn action_summary(
+        &self,
+        user: &str,
+        name: &str,
+        args: &Value,
+    ) -> AppResult<String> {
         Ok(match name {
             "delete_agent_key" => {
                 let key = self.mutable_key(user, text(args, "api_key_id")).await?;
@@ -782,6 +756,101 @@ impl AccountTools<'_> {
                     "Delete agent key '{}' ({})",
                     short(&key.name),
                     key.key_prefix
+                )
+            }
+            "bind_agent_key_credential" => {
+                let key = self.mutable_key(user, text(args, "api_key_id")).await?;
+                let service = user_service_service::get_user_service(
+                    self.db,
+                    user,
+                    text(args, "user_service_id"),
+                )
+                .await?;
+                format!(
+                    "Make agent key '{}' ({}) use credential {} for connected service '{}'",
+                    short(&key.name),
+                    key.key_prefix,
+                    short(text(args, "user_api_key_id")),
+                    short(&service.slug)
+                )
+            }
+            "update_agent_key" => {
+                let key = self.mutable_key(user, text(args, "api_key_id")).await?;
+                let fields: Vec<&str> = args
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|object| object.keys())
+                    .map(String::as_str)
+                    .filter(|field| !matches!(*field, "api_key_id" | "acknowledgement_id"))
+                    .collect();
+                format!(
+                    "Change agent key '{}' ({}): {}",
+                    short(&key.name),
+                    key.key_prefix,
+                    fields.join(", ")
+                )
+            }
+            "update_channel_bot" => {
+                let bot = self.managed_bot(user, text(args, "bot_id")).await?;
+                let mut changes = Vec::new();
+                if let Some(label) = args["label"].as_str() {
+                    changes.push(format!("label to '{}'", short(label)));
+                }
+                if let Some(app_id) = args["app_id"].as_str() {
+                    changes.push(format!("app id to '{}'", short(app_id)));
+                }
+                format!(
+                    "Update {}channel bot '{}': {}",
+                    self.org_prefix(user, &bot.user_id).await?,
+                    short(&bot.label),
+                    changes.join(", ")
+                )
+            }
+            "set_channel_route" => {
+                let key = self
+                    .mutable_key(user, text(args, "agent_api_key_id"))
+                    .await?;
+                let target = match args["route_id"].as_str() {
+                    Some(id) => format!(
+                        "route '{}'",
+                        short(&self.own_route(user, id).await?.platform_conversation_id)
+                    ),
+                    None => {
+                        let bot = channel_bot_service::get_bot_for_user(
+                            self.db,
+                            text(args, "bot_id"),
+                            user,
+                        )
+                        .await?;
+                        format!(
+                            "{} on channel bot '{}'",
+                            args["platform_conversation_id"].as_str().map_or_else(
+                                || "every chat".to_owned(),
+                                |id| format!("chat '{}'", short(id))
+                            ),
+                            short(&bot.label)
+                        )
+                    }
+                };
+                format!(
+                    "Send {target} to agent key '{}' ({})",
+                    short(&key.name),
+                    key.key_prefix
+                )
+            }
+            "set_approval_mode" => {
+                let service =
+                    user_service_service::get_user_service(self.db, user, text(args, "service_id"))
+                        .await?;
+                format!(
+                    "Set approvals for '{}' to {}{}",
+                    short(&service.slug),
+                    short(text(args, "approval_mode")),
+                    match args["approval_required"].as_bool() {
+                        Some(true) => ", approval required",
+                        Some(false) => ", approval not required",
+                        None => "",
+                    }
                 )
             }
             "unbind_agent_key_credential" => {
@@ -812,6 +881,20 @@ impl AccountTools<'_> {
                     "Delete {}channel route '{}'",
                     self.org_prefix(user, &route.user_id).await?,
                     short(&route.platform_conversation_id)
+                )
+            }
+            "set_service_enabled" => {
+                let service =
+                    user_service_service::get_user_service(self.db, user, text(args, "service_id"))
+                        .await?;
+                format!(
+                    "{} connected service '{}'",
+                    if args["enabled"].as_bool() == Some(false) {
+                        "Disable"
+                    } else {
+                        "Enable"
+                    },
+                    short(&service.slug)
                 )
             }
             "delete_service" => {

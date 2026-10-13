@@ -248,9 +248,15 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
     }
     let expected: Vec<Value> = definitions
         .iter()
-        .filter(|t| !(super::is_scoped_api_key(&auth) && super::SSH_META_TOOL_NAMES.contains(&t.name.as_str())))
+        .filter(|t| {
+            !(super::is_scoped_api_key(&auth)
+                && super::SSH_META_TOOL_NAMES.contains(&t.name.as_str()))
+        })
         .map(|t| {
-            let mut tool = json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema});
+            // Owner chat turns are offered the action-card id on every tool,
+            // exactly as tools/list renders it.
+            let mut tool = json!({"name": t.name, "description": t.description,
+                "inputSchema": super::webhook_tool_schema(&auth, &t.input_schema)});
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
                 tool["title"] = annotations["title"].clone();
                 tool["annotations"] = annotations;

@@ -17,6 +17,7 @@ pub mod assistant_action_receipts;
 pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_direct;
+pub mod assistant_feedback_service;
 mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
@@ -41,6 +42,7 @@ pub mod chain_verify_service;
 pub mod channel_adapters;
 pub mod channel_admission_service;
 pub mod channel_billing_service;
+pub mod channel_bot_health;
 pub mod channel_bot_service;
 pub mod channel_connect_link_service;
 pub mod channel_connection_webhook_service;
@@ -224,6 +226,8 @@ pub mod service_history;
 pub mod service_insights_activity;
 pub mod service_insights_billing;
 
+#[cfg(test)]
+mod assistant_access_mode_tests;
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;
 pub mod usage_workspace_service;

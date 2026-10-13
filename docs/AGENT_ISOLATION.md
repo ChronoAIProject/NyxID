@@ -402,3 +402,7 @@ All changes are additive. No breaking changes for existing users:
 | `cli/src/auth.rs` | Profile-aware token storage |
 | `cli/src/commands/api_key.rs` | bind command, --platform flag |
 | `cli/docker-entrypoint.sh` | Auto-register in Docker |
+
+### NyxBot access authority
+
+Specialist agents cannot widen access or grant permissions. The backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal; only the owner's NyxBot can initiate these requests.

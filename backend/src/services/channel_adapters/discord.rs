@@ -1135,6 +1135,7 @@ mod tests {
 
     fn make_test_bot(public_key: Option<&str>) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

@@ -548,6 +548,8 @@ async fn delete_user_cascade_internal(
         crate::models::assistant_agent_credential::COLLECTION_NAME,
         crate::models::assistant_conversation::COLLECTION_NAME,
         crate::models::assistant_message::COLLECTION_NAME,
+        crate::models::assistant_message_feedback::COLLECTION_NAME,
+        crate::models::assistant_checkpoint::COLLECTION_NAME,
         crate::models::nyxbot_channel::COLLECTION_NAME,
         crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
         crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
@@ -1012,7 +1014,10 @@ mod tests {
             .insert_one(&session)
             .await
             .unwrap();
-
+        db.collection::<bson::Document>("assistant_message_feedback")
+            .insert_one(doc! {"_id":"cascade-feedback", "user_id": &target_id, "message_id":"cascade-message", "vote":"up"})
+            .await
+            .unwrap();
         let api_key = crate::services::key_service::create_api_key(
             &db,
             &target_id,
@@ -1106,6 +1111,18 @@ mod tests {
             .await
             .unwrap();
 
+        db.collection::<bson::Document>("assistant_message_feedback")
+            .insert_one(doc! {"_id":"cascade-feedback", "user_id": &target_id, "message_id":"cascade-message", "vote":"up", "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()})
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<bson::Document>("assistant_message_feedback")
+                .find_one(doc! {"_id":"cascade-feedback"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+
         let claims = db.collection::<bson::Document>(
             crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
         );
@@ -1134,6 +1151,13 @@ mod tests {
             .await
             .unwrap();
         assert!(sess.is_none());
+        assert!(
+            db.collection::<bson::Document>("assistant_message_feedback")
+                .find_one(doc! {"user_id": &target_id})
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             claims
                 .find_one(doc! {"owner_id":&target_id})

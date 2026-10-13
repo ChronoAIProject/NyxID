@@ -7,6 +7,7 @@ import {
 } from "@/lib/assistant/direct-transport";
 import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
+import { markAdmitted } from "@/lib/assistant/send-admission";
 import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import {
@@ -26,7 +27,7 @@ import {
 
 const ROOT = "/assistant/nyxagent";
 export const CONTEXT_RESET_NOTICE =
-  "Conversation context was reset; the assistant was given a recap of this chat.";
+  "The last turn failed, so the assistant continues in a fresh context with a recap of its completed actions, failures and attachments. Rerun only what did not complete.";
 
 interface LiveTurn {
   state: DirectTurnState;
@@ -76,7 +77,7 @@ function path(id: string): string {
   return `${ROOT}/conversations/${id}`;
 }
 
-function storedError(code: string | null): string {
+export function storedError(code: string | null): string {
   if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
   if (code === "continuation_no_progress") return "Paused because the task repeated without progress. Its context is saved; give it new guidance.";
   if (code === "idle_timeout") return "The assistant stopped responding. Try again.";
@@ -89,7 +90,30 @@ function storedError(code: string | null): string {
   if (code === "session_busy" || code === "capacity_exceeded") {
     return "The assistant is busy. Try again shortly.";
   }
+  if (code === "turn_lost") return "This turn was interrupted; check which actions completed before retrying.";
+  if (code === "assistant_unavailable") return "The assistant is temporarily unavailable. Try again shortly.";
+  if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
+  if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
+  if (code === "output_too_large") return "The assistant reached its response limit.";
+  if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";
+  if (code === "stale_response") return "The assistant context changed. Start a new turn.";
+  if (code === "context_unavailable") return "The assistant context could not be restored. Try a new turn.";
   return "The assistant could not complete this turn.";
+}
+
+export function contextResetCopy(reason: string | null | undefined): string {
+  switch (reason) {
+    case "turn_failed": return CONTEXT_RESET_NOTICE;
+    case "instructions_changed": return "Instructions changed; the assistant context was refreshed.";
+    case "model_changed": return "The model changed; the assistant context was refreshed.";
+    case "session_lost": return "The assistant session expired; a fresh context will be used.";
+    case "audience_changed": return "The conversation audience changed; the assistant context was refreshed.";
+    case "guest_turn": return "This guest turn uses a separate assistant context.";
+    case "stopped": return "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it.";
+    case "credential_replaced": return "The assistant's key was replaced, so it continues in a fresh context with a recap of this chat.";
+    case "user_reset": return "You reset the working context.";
+    default: return CONTEXT_RESET_NOTICE;
+  }
 }
 
 function active(row: NyxAgentConversation | undefined): boolean {
@@ -452,12 +476,15 @@ export class NyxAgentTransport {
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       return {
         id: message.id,
+        feedback: message.feedback ?? undefined,
         role: message.role,
         content: message.text,
         timestamp: Date.parse(message.created_at),
         turnId: message.turn_id,
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
+        errorDetail: message.error_detail ? { stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
+        errorCode: message.error_code,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
         via: message.via,
@@ -485,13 +512,19 @@ export class NyxAgentTransport {
         return {
           id: message.id,
           role: settledMessages.get(message.id)?.role ?? message.role,
+          feedback: settledMessages.get(message.id)?.feedback ?? undefined,
+          errorCode: settledMessages.get(message.id)?.error_code,
           steering: settledMessages.get(message.id)?.steering,
           via: settledMessages.get(message.id)?.via,
           turnId: settledMessages.get(message.id)?.turn_id,
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? "streaming" : "complete",
-          ...(streaming ? liveActivity : settledImages.get(message.id)),
+          ...(message.attachments?.length
+            ? images(id, message.attachments)
+            : streaming
+              ? liveActivity
+              : settledImages.get(message.id)),
         };
       });
     }
@@ -526,7 +559,7 @@ export class NyxAgentTransport {
       messages.splice(position < 0 ? messages.length : position, 0, {
         id: `nyxagent-context-reset:${id ?? "draft"}`,
         role: "system",
-        content: CONTEXT_RESET_NOTICE,
+        content: contextResetCopy(conversation?.context_reset_reason),
         timestamp,
         status: "complete",
       });
@@ -582,12 +615,14 @@ export class NyxAgentTransport {
     options: {
       readonly agent?: NyxAgentConversationAgent;
       readonly attachmentIds?: string[];
+      readonly attachments?: readonly NyxAgentAttachment[];
       readonly adoptExisting?: boolean;
+      readonly retryOf?: string;
     } = {},
   ) {
     const generation = this.identity();
     if (this.isRunning(id)) throw new Error("A turn is already active.");
-    if ((!text.trim() && !options.attachmentIds?.length) || [...text].length > 32768) {
+    if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length) || [...text].length > 32768) {
       throw new Error("Message must contain 1 to 32768 characters.");
     }
     const controller = new AbortController();
@@ -635,6 +670,7 @@ export class NyxAgentTransport {
             schema_version: 1,
             created_at: now,
             blocks: [{ type: "text", block_id: userMessageId, text }],
+            attachments: options.attachments,
           },
         ],
       },
@@ -643,6 +679,7 @@ export class NyxAgentTransport {
     this.changed();
     let adopted = Boolean(id) && !options.adoptExisting;
     let terminal = false;
+    let responded = false;
     try {
       const response = await subscriptionDeadline(
         assistantHttp(`${ROOT}/turns`, {
@@ -652,6 +689,7 @@ export class NyxAgentTransport {
               ? { conversation_id: id }
               : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
             text,
+            ...(options.retryOf ? { retry_of: options.retryOf } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
           headers: { Accept: "text/event-stream" },
@@ -664,6 +702,7 @@ export class NyxAgentTransport {
         45_000,
         controller,
       );
+      responded = true;
       this.current(generation);
       if (!response.body) throw new Error("The assistant returned no stream.");
       const reader = response.body.getReader();
@@ -760,6 +799,10 @@ export class NyxAgentTransport {
       if (!terminal) {
         throw new Error("The connection was interrupted. The assistant may still be working.");
       }
+    } catch (error) {
+      // After a 2xx the server has stored the message and bound its uploads:
+      // every later failure (deadline, size, parse, mismatch, early end) is admitted.
+      throw responded ? markAdmitted(error) : error;
     } finally {
       this.requests.delete(controller);
       if (generation === this.generation) {
@@ -771,6 +814,25 @@ export class NyxAgentTransport {
         if (agentId) await this.list(agentId).catch(() => undefined);
       }
     }
+  }
+
+  /** Retry the failed reply `messageId`. The server fences the calls that
+   * failed turn completed and re-attaches its input's uploads (they are
+   * already bound, so their ids are never re-sent). */
+  async retry(id: string, messageId: string, onAdopt: (id: string) => void) {
+    const messages = this.histories.get(id)?.messages ?? [];
+    const failed = messages.find(
+      (message) => message.id === messageId && message.role === "assistant" && message.status === "failed",
+    );
+    const input = failed && messages.find(
+      (message) => message.turn_id === failed.turn_id && message.role === "user",
+    );
+    if (!failed || !input) throw new Error("This reply can no longer be retried. Send the request again.");
+    return this.send(id, input.text, onAdopt, undefined, {
+      adoptExisting: true,
+      retryOf: failed.turn_id,
+      attachments: input.attachments,
+    });
   }
 }
 

@@ -23,6 +23,15 @@ pub struct AssistantMessage {
     pub text: String,
     pub status: String,
     pub error_code: Option<String>,
+    /// Sanitized upstream code retained separately from the stable NyxID class.
+    #[serde(default)]
+    pub upstream_error_code: Option<String>,
+    /// Metadata-only failure diagnostics; never contains prompt or credential data.
+    #[serde(default)]
+    pub error_detail: Option<AssistantErrorDetail>,
+    /// Specialist identity for bounded access-denial notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialist_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     /// Tool calls observed during the turn that produced this reply (assistant rows only).
@@ -38,6 +47,21 @@ pub struct AssistantMessage {
     /// A user message written in a chat app: its platform.
     #[serde(default)]
     pub via: Option<String>,
+    /// Failed turn this user message retries, when applicable.
+    #[serde(default)]
+    pub retry_of: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AssistantErrorDetail {
+    pub stage: String,
+    pub http_status: Option<u16>,
+    pub upstream_request_id: Option<String>,
+    pub response_id: Option<String>,
+    pub continuations: u32,
+    pub turn_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub occurred_at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for AssistantMessage {

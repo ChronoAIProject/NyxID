@@ -2,6 +2,7 @@ import type { ComponentProps } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLearningReview } from "./agent-learning-review";
+import { ApiError } from "@/lib/api-client";
 
 const mocks = vi.hoisted(() => ({
   feature: vi.fn(),
@@ -9,8 +10,10 @@ const mocks = vi.hoisted(() => ({
   approve: vi.fn(),
   configure: vi.fn(),
   edit: vi.fn(),
+  validate: vi.fn(),
   reject: vi.fn(),
   run: vi.fn(),
+  consent: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: mocks.feature }));
@@ -20,6 +23,10 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("@/hooks/use-agent-learning-review", () => ({
   useAgentLearningReview: mocks.review,
+}));
+// The draft editor reads attached pins only for improve drafts.
+vi.mock("@/hooks/use-agent-skills", () => ({
+  useAgentSkills: () => ({ data: undefined, error: null }),
 }));
 
 const proposal = {
@@ -54,8 +61,10 @@ beforeEach(() => {
     configure: { mutate: mocks.configure, isPending: false },
     approve: { mutateAsync: mocks.approve, isPending: false },
     edit: { mutate: mocks.edit, isPending: false },
+    validate: { mutateAsync: mocks.validate, isPending: false },
     reject: { mutateAsync: mocks.reject, isPending: false },
     run: { mutate: mocks.run, isPending: false },
+    consent: { mutate: mocks.consent, isPending: false },
   });
   mocks.approve.mockResolvedValue({
     status: "confirmation_required",
@@ -87,6 +96,89 @@ describe("AgentLearningReview", () => {
     expect(screen.getByRole("button", { name: "Confirm publish & attach" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm publish & attach" }));
     await waitFor(() => expect(mocks.approve).toHaveBeenLastCalledWith({ proposalId: "proposal", acknowledgementId: "card" }));
+  });
+
+  it("clicks Save draft with a top-level revision and rejects the edited revision", async () => {
+    mocks.feature.mockReturnValue(true);
+    render(<AgentLearningReview agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Skill draft" }), { target: { value: "# Edited" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith(expect.objectContaining({ proposalId: "proposal", revision: 2 })));
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await waitFor(() => expect(mocks.reject).toHaveBeenCalledWith({ proposalId: "proposal", revision: 2 }));
+  });
+
+  it("saves a changed name in the edit payload", async () => {
+    mocks.feature.mockReturnValue(true);
+    render(<AgentLearningReview agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Skill name" }), { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    // The full draft is sent, including the unchanged SKILL.md.
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalledWith({
+      proposalId: "proposal",
+      revision: 2,
+      draft: { ...proposal.draft, name: "Renamed", base_skill: null },
+    }));
+  });
+
+  it("renders organization consent and sends the PUT learning consent mutation", () => {
+    mocks.feature.mockReturnValue(true);
+    mocks.review.mockReturnValue({
+      data: { proposals: [] },
+      status: { data: { enabled: true, org_owned: true, opted_in: false, publication_blocked: "owner_binding_unavailable" } },
+      consent: { mutate: mocks.consent, isPending: false },
+      configure: { mutate: mocks.configure, isPending: false },
+      approve: { mutateAsync: mocks.approve, isPending: false },
+      edit: { mutate: mocks.edit, isPending: false },
+      reject: { mutateAsync: mocks.reject, isPending: false },
+      run: { mutate: mocks.run, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText(/no owner binding.*only the bound owner can publish/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: /consent to learning/i }));
+    expect(mocks.consent).toHaveBeenCalledWith(true);
+  });
+
+  it("renders validation diagnostics at their field and line", async () => {
+    mocks.feature.mockReturnValue(true);
+    const error = new ApiError(400, {
+      error: "validation_error",
+      error_code: 1008,
+      message: "Skill draft failed validation",
+      details: { rule: "required", field: "name", line: 3 },
+    });
+    mocks.review.mockReturnValue({
+      data: { proposals: [proposal] },
+      status: { data: { enabled: true } },
+      edit: { mutate: mocks.edit, error, variables: { proposalId: "proposal" }, isPending: false },
+      validate: { mutateAsync: mocks.validate, isPending: false },
+      configure: { mutate: mocks.configure, isPending: false },
+      approve: { mutateAsync: mocks.approve, isPending: false },
+      reject: { mutateAsync: mocks.reject, isPending: false },
+      run: { mutate: mocks.run, isPending: false },
+      consent: { mutate: mocks.consent, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Review draft" }));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Skill name" })).toHaveAccessibleDescription(
+        "Line 3: Fill in the skill name.",
+      ),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Skill draft failed validation");
+  });
+
+  it("renders the published version on status rows", () => {
+    mocks.feature.mockReturnValue(true);
+    mocks.review.mockReturnValue({
+      data: { proposals: [{ ...proposal, status: "published_unpinned", published_version: "1.2.0" }] },
+      status: { data: { enabled: true } },
+      configure: { mutate: mocks.configure, isPending: false }, approve: { mutateAsync: mocks.approve, isPending: false }, edit: { mutate: mocks.edit, isPending: false }, reject: { mutateAsync: mocks.reject, isPending: false }, run: { mutate: mocks.run, isPending: false }, consent: { mutate: mocks.consent, isPending: false },
+    });
+    render(<AgentLearningReview agentId="agent" />);
+    expect(screen.getByText("Published version: 1.2.0")).toBeInTheDocument();
   });
 
   it("keeps authored proposals visible without the invalid approval button", () => {

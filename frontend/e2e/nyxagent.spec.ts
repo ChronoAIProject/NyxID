@@ -8,8 +8,9 @@ import {
   SEEDED,
 } from "./helpers";
 
+// The Stop reset note (`contextResetCopy("stopped")` in nyxagent-transport.ts).
 const RESET_NOTICE =
-  "Conversation context was reset; the assistant was given a recap of this chat.";
+  "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it.";
 const GREETING = /^Good (morning|afternoon|evening), Dannick$/;
 
 function homeHeading(page: Page) {

@@ -2,14 +2,24 @@ import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { FileText, Paperclip, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import {
   createUploadDraft,
+  isSupportedAttachment,
   removeUpload,
+  UNSUPPORTED_FORMAT_MESSAGE,
   uploadFile,
   type UploadedMessage,
   type UploadScope,
 } from "@/lib/assistant/uploads";
+import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import type { NyxAgentAttachment } from "@/schemas/assistant-nyxagent";
 
 type Pending = {
@@ -31,6 +41,7 @@ type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
 export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
+  const [preview, setPreview] = useState<Pending>();
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
@@ -82,6 +93,12 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         progress: 0,
         controller: new AbortController(),
       };
+      if (!isSupportedAttachment(file)) {
+        entry.error = UNSUPPORTED_FORMAT_MESSAGE;
+        pending.current.set(entry.key, entry);
+        refresh();
+        continue;
+      }
       if (
         ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(
           file.type,
@@ -157,11 +174,18 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                   className="flex min-w-0 items-center gap-2 rounded-lg border border-hairline bg-card p-2 text-xs"
                 >
                   {file.preview ? (
-                    <img
-                      src={file.preview}
-                      alt="Upload preview"
-                      className="h-8 w-8 shrink-0 rounded object-cover"
-                    />
+                    <button
+                      type="button"
+                      className="shrink-0"
+                      aria-label={`Preview ${file.name}`}
+                      onClick={() => setPreview(file)}
+                    >
+                      <img
+                        src={file.preview}
+                        alt={file.name}
+                        className="h-16 w-16 shrink-0 rounded object-cover"
+                      />
+                    </button>
                   ) : (
                     <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
                   )}
@@ -200,12 +224,37 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               {notice}
             </p>
           )}
+          <Dialog
+            open={Boolean(preview?.preview)}
+            onOpenChange={(open) => {
+              if (!open) setPreview(undefined);
+            }}
+          >
+            <DialogContent aria-describedby={undefined} className="md:max-w-3xl">
+              <DialogTitle className="truncate pr-8">{preview?.name}</DialogTitle>
+              {preview?.preview && (
+                <img
+                  src={preview.preview}
+                  alt={preview.name}
+                  className="max-h-[70vh] w-full rounded object-contain"
+                />
+              )}
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button type="button" variant="secondary">
+                    Close preview
+                  </Button>
+                </DialogClose>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       }
       attachmentButton={
         <>
-          {/* No picker MIME filter: extensionless text and browser MIME guesses
-              must reach the same server sniffing/validation as paste and drop. */}
+          {/* No picker MIME filter: it would hide extensionless text and files
+              with unusual browser MIME guesses. `add` applies the same allowlist
+              to picker, paste and drop, and the server still sniffs every file. */}
           <input
             ref={input}
             type="file"
@@ -256,6 +305,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             items.length
               ? {
                   attachmentIds: items.map((file) => file.item!.id),
+                  attachments: items.map((file) => file.item!),
                   conversationId:
                     scope.kind === "conversations"
                       ? resolved.current.id
@@ -264,8 +314,10 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               : undefined,
           );
         } catch (error) {
+          // Admitted uploads are bound to the stored message: never offer them again.
+          const admitted = isAdmittedSendError(error);
           for (const file of items) {
-            if (alive.current) pending.current.set(file.key, file);
+            if (alive.current && !admitted) pending.current.set(file.key, file);
             else if (file.preview) URL.revokeObjectURL(file.preview);
           }
           refresh();

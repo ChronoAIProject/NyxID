@@ -117,3 +117,32 @@ it.each([
     );
   },
 );
+
+it.each([
+  [{ risk: "destructive", access_mode: "nyxmode", reason: "access_mode" }, "Destructive", "Your access mode is NyxMode."],
+  [{ risk: "change", access_mode: "ask_every_time", reason: "access_mode" }, "Change", "Your access mode is Ask Every Time."],
+  [{ risk: "sensitive", access_mode: null, reason: "webhook" }, "Sensitive", "This automation's confirmation policy asks."],
+  [{ risk: "change", reason: "policy" }, "Change", "This machine's or saved login's confirmation setting asks."],
+] as const)("explains an action card's risk and why it asks (%o)", (confirmation, risk, why) => {
+  render(
+    <NyxAgentAcknowledgementCard
+      acknowledgement={{ ...acknowledgement, kind: "action", confirmation }}
+      deciding={false}
+      onDecision={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(risk)).toBeVisible();
+  expect(screen.getByText(why, { exact: false })).toBeVisible();
+  expect(screen.getByText("Confirm: Delete agent key ci-bot")).toBeVisible();
+});
+
+it("shows no risk line on cards from older servers", () => {
+  render(
+    <NyxAgentAcknowledgementCard
+      acknowledgement={{ ...acknowledgement, kind: "action" }}
+      deciding={false}
+      onDecision={vi.fn()}
+    />,
+  );
+  expect(screen.queryByText(/access mode is/)).not.toBeInTheDocument();
+});
