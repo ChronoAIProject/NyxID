@@ -210,7 +210,7 @@ export function OAuthIncrementalConsentPage({
                           role="region"
                           aria-label="Additional services"
                           tabIndex={0}
-                          className="mt-4 max-h-[min(18rem,45dvh)] divide-y divide-border/60 overflow-y-auto overscroll-contain border-y border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
+                          className="relative mt-4 max-h-[min(18rem,45dvh)] divide-y divide-border/60 overflow-y-auto overscroll-contain border-y border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
                         >
                           {requiredAdditions.map((id) => serviceRow(id, false))}
                         </div>
@@ -243,7 +243,7 @@ export function OAuthIncrementalConsentPage({
                               aria-hidden="true"
                             />
                           </summary>
-                          <div className="mt-3 max-h-[min(16rem,35dvh)] divide-y divide-border/60 overflow-y-auto border-y border-border/60">
+                          <div className="relative mt-3 max-h-[min(16rem,35dvh)] divide-y divide-border/60 overflow-y-auto border-y border-border/60">
                             {optional.map((service) => (
                               <div
                                 key={service.id}
