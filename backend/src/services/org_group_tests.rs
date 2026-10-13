@@ -744,10 +744,17 @@ async fn org_group_sticky_recipients_are_per_actor() {
         serde_json::json!([researcher.id])
     );
     // A selection naming a non-member is refused without a message.
+    // `post_message` advances eligible member turns inline. A member can
+    // therefore append its own reply while this assertion is running; that
+    // background activity is unrelated to whether the rejected request wrote
+    // a message. Count only owner-authored user messages, which is the state
+    // this validation is expected to leave unchanged.
     let before = personal::messages(&f.state.db, &f.org, &group.id, 50, None)
         .await
         .unwrap()
-        .len();
+        .into_iter()
+        .filter(|row| row.role == "user")
+        .count();
     let refused = post_as(
         &f,
         &f.admin,
@@ -764,7 +771,9 @@ async fn org_group_sticky_recipients_are_per_actor() {
         personal::messages(&f.state.db, &f.org, &group.id, 50, None)
             .await
             .unwrap()
-            .len(),
+            .into_iter()
+            .filter(|row| row.role == "user")
+            .count(),
         before
     );
     // The admin's bare follow-up goes to the admin's sticky writer.
