@@ -630,7 +630,13 @@ pub async fn update_provider(
     let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
     if authority == CatalogAuthority::CatalogManager {
         let provider = provider_service::get_provider(&state.db, &provider_id).await?;
-        catalog_authority::check_provider_update(&auth_user.user_id.to_string(), &provider, &body)?;
+        catalog_authority::check_provider_update(
+            &state.encryption_keys,
+            &auth_user.user_id.to_string(),
+            &provider,
+            &body,
+        )
+        .await?;
     }
 
     // SSRF validation on URLs if provided

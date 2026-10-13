@@ -1,4 +1,4 @@
-use super::catalog_authority::{self, CatalogAuthority};
+use super::catalog_authority;
 use crate::{AppState, errors::AppResult, mw::auth::AuthUser, services::catalog_icon_service};
 use axum::{
     Json,
@@ -23,11 +23,8 @@ pub async fn upload(
     Path(provider_id): Path<String>,
     Json(body): Json<Upload>,
 ) -> AppResult<Json<Uploaded>> {
-    let authority = catalog_authority::require_catalog_writer(&state, &auth).await?;
-    if authority == CatalogAuthority::CatalogManager {
-        catalog_authority::check_owned_provider(&state, &auth.user_id.to_string(), &provider_id)
-            .await?;
-    }
+    // Icons are display only, so a Catalog Manager may set one on any provider.
+    catalog_authority::require_catalog_writer(&state, &auth).await?;
     crate::services::provider_service::get_provider(&state.db, &provider_id).await?;
     let id = catalog_icon_service::store(&state.db, &body.svg).await?;
     Ok(Json(Uploaded {

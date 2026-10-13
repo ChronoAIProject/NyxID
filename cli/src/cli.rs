@@ -382,6 +382,17 @@ pub enum AdminProviderCommands {
         /// Fields to change (JSON or YAML, no secrets)
         #[arg(long)]
         file: Option<std::path::PathBuf>,
+        /// Send the OAuth client with the change (prompts unless env vars are given). A Catalog
+        /// Manager changing URLs or token settings on a provider whose client someone else set
+        /// must re-enter that client; an Admin sending a different client replaces it
+        #[arg(long)]
+        with_client: bool,
+        /// Read the client ID from this environment variable
+        #[arg(long, requires = "with_client")]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long, requires = "with_client")]
+        client_secret_env: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

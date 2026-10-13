@@ -2029,8 +2029,8 @@ pub(crate) async fn update_service_inner(
     {
         require_admin(&state, &auth_user).await?;
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        if super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?
+        if super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service)
+            .await?
             == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
         {
             super::catalog_authority::check_service_update(&body)?;
@@ -5901,7 +5901,7 @@ mod tests {
         .expect("catalog manager sets client on own provider");
         assert!(own.has_client_id && own.has_client_secret && own.has_oauth_config);
 
-        // Someone else's provider: only the first client, never other fields.
+        // Someone else's provider without a client: settings and the first client.
         let Json(foreign) = create_provider(
             State(state.clone()),
             test_auth_user(&admin_id),
@@ -5909,49 +5909,78 @@ mod tests {
         )
         .await
         .expect("admin creates provider");
-        assert!(forbidden(
+        let foreign_update = |value: serde_json::Value| {
             update_provider(
                 State(state.clone()),
                 manager(),
                 Path(foreign.id.clone()),
-                provider_update(serde_json::json!({
-                    "token_url": "https://attacker.example.com/token",
-                })),
+                provider_update(value),
             )
-            .await
+        };
+        let Json(configured) = foreign_update(serde_json::json!({
+            "authorization_url": "https://accounts.example.com/oauth/v2/authorize",
+            "default_scopes": ["Mail.messages.READ", "Mail.folders.READ"],
+            "credential_mode": "both",
+        }))
+        .await
+        .expect("settings on a provider without a client");
+        assert_eq!(
+            configured.authorization_url.as_deref(),
+            Some("https://accounts.example.com/oauth/v2/authorize")
+        );
+        assert!(forbidden(
+            foreign_update(serde_json::json!({ "is_active": false })).await
         ));
-        let partial = update_provider(
-            State(state.clone()),
-            manager(),
-            Path(foreign.id.clone()),
-            provider_update(serde_json::json!({ "client_id": "only-id" })),
-        )
-        .await;
+        let partial = foreign_update(serde_json::json!({ "client_id": "only-id" })).await;
         assert!(matches!(partial, Err(AppError::ValidationError(_))));
-        let Json(foreign) = update_provider(
-            State(state.clone()),
-            manager(),
-            Path(foreign.id.clone()),
-            provider_update(serde_json::json!({
-                "client_id": "first-id",
-                "client_secret": "first-secret",
-            })),
-        )
+        let Json(foreign_with_client) = foreign_update(serde_json::json!({
+            "client_id": "first-id",
+            "client_secret": "first-secret",
+        }))
         .await
         .expect("first client on a provider without one");
-        assert!(foreign.has_client_id && foreign.has_client_secret);
+        assert!(foreign_with_client.has_client_id && foreign_with_client.has_client_secret);
+
+        // Once a client exists, settings that decide where it is sent need
+        // the current client re-entered; replacing or clearing it stays Admin.
         assert!(forbidden(
-            update_provider(
-                State(state.clone()),
-                manager(),
-                Path(foreign.id.clone()),
-                provider_update(serde_json::json!({
-                    "client_id": "replacement-id",
-                    "client_secret": "replacement-secret",
-                })),
-            )
+            foreign_update(serde_json::json!({
+                "token_url": "https://attacker.example.com/token",
+            }))
             .await
         ));
+        assert!(forbidden(
+            foreign_update(serde_json::json!({
+                "token_url": "https://attacker.example.com/token",
+                "client_id": "first-id",
+                "client_secret": "guessed-secret",
+            }))
+            .await
+        ));
+        assert!(forbidden(
+            foreign_update(serde_json::json!({
+                "client_id": "replacement-id",
+                "client_secret": "replacement-secret",
+            }))
+            .await
+        ));
+        assert!(forbidden(
+            foreign_update(serde_json::json!({ "clear_client_credentials": true })).await
+        ));
+        let Json(moved) = foreign_update(serde_json::json!({
+            "token_url": "https://accounts.example.com/oauth/v2/token-v2",
+            "client_id": "first-id",
+            "client_secret": "first-secret",
+        }))
+        .await
+        .expect("settings change with the current client re-entered");
+        assert_eq!(
+            moved.token_url.as_deref(),
+            Some("https://accounts.example.com/oauth/v2/token-v2")
+        );
+        let _ = foreign_update(serde_json::json!({ "default_scopes": ["Mail.messages.READ"] }))
+            .await
+            .expect("scopes stay editable while a client exists");
         assert!(forbidden(
             delete_provider(State(state.clone()), manager(), Path(own.id.clone())).await
         ));
@@ -6126,6 +6155,191 @@ mod tests {
         ));
         assert!(forbidden(
             super::delete_service(State(state.clone()), manager(), Path(service.id.clone())).await
+        ));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_manager_completes_seeded_rows() {
+        use super::super::endpoints::{
+            CreateEndpointRequest, PublicationRequest, change_publication, create_endpoint,
+        };
+        use super::super::providers::{create_provider, update_provider};
+        let Some(db) = connect_test_database("h_catalog_manager_seeded").await else {
+            eprintln!("skipping catalog manager test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let manager_id = seed_operator(&db, true).await;
+        let plain_operator_id = seed_operator(&db, false).await;
+        let state = test_app_state(db.clone());
+        let manager = || test_auth_user(&manager_id);
+        fn forbidden<T>(result: AppResult<T>) -> bool {
+            matches!(result, Err(AppError::Forbidden(_)))
+        }
+
+        // A seeded provider and service, as startup creates them.
+        let Json(provider) = create_provider(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(oauth_provider_request("seeded-connector")),
+        )
+        .await
+        .expect("provider");
+        db.collection::<crate::models::provider_config::ProviderConfig>(
+            crate::models::provider_config::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &provider.id },
+            doc! { "$set": { "created_by": "system" } },
+        )
+        .await
+        .unwrap();
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let mut request = create_http_service_request("api-seeded", "api-seeded", base_url);
+        request.provider_config_id = Some(provider.id.clone());
+        request.auth_method = Some("bearer".to_string());
+        let Json(service) = create_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Json(request),
+        )
+        .await
+        .expect("service");
+        server.abort();
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "created_by": "system" } },
+            )
+            .await
+            .unwrap();
+
+        // Provider: settings, first client and icon.
+        let _ = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(provider.id.clone()),
+            provider_update(serde_json::json!({
+                "default_scopes": ["read"],
+                "authorization_url": "https://accounts.example.com/oauth/v2/authorize",
+                "client_id": "seeded-id",
+                "client_secret": "seeded-secret",
+            })),
+        )
+        .await
+        .expect("seeded provider settings with its first client");
+        let _ = super::super::catalog_icons::upload(
+            State(state.clone()),
+            manager(),
+            Path(provider.id.clone()),
+            Json(super::super::catalog_icons::Upload {
+                svg: r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#123456"/></svg>"##.to_string(),
+            }),
+        )
+        .await
+        .expect("icon on a seeded provider");
+
+        // Service: descriptive fields and operations, not Admin-only fields.
+        let update = |value: serde_json::Value| {
+            update_service(
+                State(state.clone()),
+                manager(),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(serde_json::from_value(value).unwrap()),
+            )
+        };
+        let _ = update(serde_json::json!({ "auth_notes": "Read-only scopes." }))
+            .await
+            .expect("descriptive edit on a seeded row");
+        assert!(forbidden(
+            update(serde_json::json!({ "forward_access_token": true })).await
+        ));
+        let endpoint_request = || -> CreateEndpointRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": "list_items", "method": "GET", "path": "/items"
+            }))
+            .unwrap()
+        };
+        assert!(forbidden(
+            create_endpoint(
+                State(state.clone()),
+                test_auth_user(&plain_operator_id),
+                Path(service.id.clone()),
+                Json(endpoint_request()),
+            )
+            .await
+        ));
+        let Json(endpoint) = create_endpoint(
+            State(state.clone()),
+            manager(),
+            Path(service.id.clone()),
+            Json(endpoint_request()),
+        )
+        .await
+        .expect("operation on a seeded row");
+        let Json(paused) = change_publication(
+            State(state.clone()),
+            manager(),
+            Path((service.id.clone(), endpoint.id.clone())),
+            Json(PublicationRequest {
+                state: crate::models::service_endpoint::PublicationState::Paused,
+            }),
+        )
+        .await
+        .expect("pause an operation on a seeded row");
+        assert!(!paused.is_active);
+        let Json(listed) = super::super::endpoints::list_endpoints(
+            State(state.clone()),
+            manager(),
+            Path(service.id.clone()),
+        )
+        .await
+        .expect("list operations");
+        assert!(
+            listed.endpoints.iter().any(|row| row.id == endpoint.id),
+            "a Catalog Manager sees the operation they paused"
+        );
+        let Json(public_listing) = super::super::endpoints::list_endpoints(
+            State(state.clone()),
+            test_auth_user(&plain_operator_id),
+            Path(service.id.clone()),
+        )
+        .await
+        .expect("list operations");
+        assert!(
+            public_listing
+                .endpoints
+                .iter()
+                .all(|row| row.id != endpoint.id)
+        );
+        assert!(forbidden(
+            change_publication(
+                State(state.clone()),
+                test_auth_user(&plain_operator_id),
+                Path((service.id.clone(), endpoint.id.clone())),
+                Json(PublicationRequest {
+                    state: crate::models::service_endpoint::PublicationState::Published,
+                }),
+            )
+            .await
+        ));
+
+        // Deleting a seeded row stays Admin-only, and private rows are not shared.
+        assert!(forbidden(
+            super::delete_service(State(state.clone()), manager(), Path(service.id.clone())).await
+        ));
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "visibility": "private" } },
+            )
+            .await
+            .unwrap();
+        assert!(forbidden(
+            update(serde_json::json!({ "auth_notes": "private" })).await
         ));
         db.drop().await.unwrap();
     }

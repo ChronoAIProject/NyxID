@@ -13,7 +13,7 @@ use crate::services::service_endpoint_service::{
 };
 use crate::services::{openapi_parser, service_endpoint_service};
 
-use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
+use super::services_helpers::{fetch_service, require_http_service};
 
 // --- Request / Response types ---
 
@@ -236,14 +236,17 @@ pub async fn list_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
 
-    let endpoints = if super::services_helpers::require_admin(&state, &auth_user)
-        .await
-        .is_ok()
-    {
-        service_endpoint_service::list_all_endpoints(&state.db, &service_id).await?
-    } else {
-        service_endpoint_service::list_endpoints(&state.db, &service_id).await?
-    };
+    // Paused and draft operations are listed for anyone who may write the
+    // row, so a Catalog Manager can find and re-publish what they paused.
+    let endpoints =
+        if super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service)
+            .await
+            .is_ok_and(|authority| authority.is_some())
+        {
+            service_endpoint_service::list_all_endpoints(&state.db, &service_id).await?
+        } else {
+            service_endpoint_service::list_endpoints(&state.db, &service_id).await?
+        };
     let items: Vec<EndpointResponse> = endpoints
         .into_iter()
         .filter(|endpoint| {
@@ -283,8 +286,7 @@ pub async fn create_endpoint(
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
     }
 
     validate_endpoint_name(&body.name)?;
@@ -345,8 +347,7 @@ pub async fn update_endpoint(
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
     }
 
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
@@ -418,8 +419,7 @@ pub async fn delete_endpoint(
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
     }
 
     service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
@@ -450,8 +450,7 @@ pub async fn discover_endpoints(
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
     }
 
     let api_spec_url = service
@@ -707,6 +706,23 @@ pub struct BulkPublicationRequest {
     pub endpoint_names: Vec<String>,
 }
 
+/// Tool operations stay Admin-only. Other catalog operations may be paused or
+/// published by anyone with catalog authority over the row.
+async fn require_publication_writer(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &crate::models::downstream_service::DownstreamService,
+) -> AppResult<()> {
+    if service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
+        && super::catalog_authority::require_catalog_row_writer(state, auth_user, service)
+            .await?
+            .is_some()
+    {
+        return Ok(());
+    }
+    super::services_helpers::require_admin(state, auth_user).await
+}
+
 pub async fn change_publication(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -714,7 +730,7 @@ pub async fn change_publication(
     Json(body): Json<PublicationRequest>,
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    super::services_helpers::require_admin(&state, &auth_user).await?;
+    require_publication_writer(&state, &auth_user, &service).await?;
     require_http_service(&service)?;
     let mut rows = crate::services::tool_publication_service::change_publication(
         &state.db,
@@ -735,7 +751,7 @@ pub async fn change_publication_bulk(
     Json(body): Json<BulkPublicationRequest>,
 ) -> AppResult<Json<EndpointListResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    super::services_helpers::require_admin(&state, &auth_user).await?;
+    require_publication_writer(&state, &auth_user, &service).await?;
     require_http_service(&service)?;
     let ids = crate::services::tool_publication_service::ids_by_name(
         &state.db,
