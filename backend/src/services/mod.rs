@@ -34,6 +34,7 @@ pub mod catalog_delegation_service;
 pub mod catalog_discovery_service;
 pub mod catalog_identity_service;
 pub mod catalog_import_source;
+pub mod catalog_mutation_service;
 pub mod catalog_service;
 pub mod catalog_spec_registry;
 pub mod catalog_spec_sync;
@@ -304,3 +305,5 @@ pub mod service_preference_service;
 pub mod tool_twin_service;
 
 pub mod catalog_icon_service;
+
+pub mod tools_manager_service;

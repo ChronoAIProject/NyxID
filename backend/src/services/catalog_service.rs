@@ -217,7 +217,11 @@ fn build_catalog_entry(
         requires_gateway_url: provider.is_some_and(|p| p.requires_gateway_url),
         api_key_instructions: provider.and_then(|p| p.api_key_instructions.clone()),
         api_key_url: provider.and_then(|p| p.api_key_url.clone()),
-        icon_url: provider.and_then(|p| p.icon_url.clone()),
+        icon_url: if svc.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            svc.icon_url.clone()
+        } else {
+            provider.and_then(|p| p.icon_url.clone())
+        },
         documentation_url: provider.and_then(|p| p.documentation_url.clone()),
         credential_mode: provider.map(|p| p.credential_mode.clone()),
         // OAuth config
@@ -1037,6 +1041,9 @@ mod tests {
             visibility: "public".to_string(),
             created_by: user_id.to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             ..dummy_service()
         }
     }

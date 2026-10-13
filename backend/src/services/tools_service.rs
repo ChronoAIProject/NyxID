@@ -57,6 +57,7 @@ pub struct ToolOffering {
     pub supplier: Option<String>,
     pub topics: Vec<String>,
     pub import_source: Option<crate::services::catalog_import_source::CatalogImportSourceDto>,
+    pub icon_url: Option<String>,
     pub homepage_url: Option<String>,
     pub provider_label: String,
     pub access: ToolAccess,
@@ -157,6 +158,7 @@ pub async fn list(
             supplier: service.supplier,
             topics: service.topics,
             import_source: service.import_source.map(Into::into),
+            icon_url: service.icon_url,
             homepage_url: service.homepage_url,
             provider_label,
             access: ToolAccess { platform, byok },
@@ -220,10 +222,13 @@ mod tests {
             cost_class: Some(CostClass::Free),
             execution: ExecutionKind::HttpOperation,
         };
-        let endpoint =
-            super::super::service_endpoint_service::create_endpoint(&db, &service.id, input)
-                .await
-                .unwrap();
+        let endpoint = super::super::service_endpoint_service::test_support::create_endpoint(
+            &db,
+            &service.id,
+            input,
+        )
+        .await
+        .unwrap();
         assert!(list(&db, &actor, false, (2, 10)).await.unwrap().is_empty());
         db.collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
             .update_one(

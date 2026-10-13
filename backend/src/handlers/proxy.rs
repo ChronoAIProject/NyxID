@@ -6041,7 +6041,12 @@ async fn execute_resolved_proxy_inner(
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
-            if is_pool_attempt || operation_scoped || permission_ingress.is_some() {
+            if is_pool_attempt
+                || operation_scoped
+                || permission_ingress.is_some()
+                || target.service.offering_kind
+                    == crate::models::downstream_service::OfferingKind::Tool
+            {
                 proxy_service::no_redirect_http_client()
             } else {
                 &state.http_client

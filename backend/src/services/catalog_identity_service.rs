@@ -244,76 +244,50 @@ pub async fn propagate_catalog_update(
 /// previously failed propagation.
 pub async fn force_resync(
     db: &mongodb::Database,
-    actor: &AuditActor,
+    authority: &super::catalog_mutation_service::Authority,
     service: &DownstreamService,
+    audit_key: &[u8],
 ) -> AppResult<u64> {
-    let mut target = service.clone();
-    let mut report = ReconciliationReport::with_fields(IDENTITY_FIELDS);
-
-    for _ in 0..MAX_CATCH_UP_REVISIONS {
-        let config = effective_identity_config(&target);
-        let mut set_doc = identity_set_document(&config);
-        set_doc.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+    let db = db.clone();
+    let observed = service.clone();
+    let authority = authority.clone();
+    let key = zeroize::Zeroizing::new(audit_key.to_vec());
+    super::service_history::transaction::run(&db.clone(), async move |transaction| {
         let result =
-            match crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .update_many(
-                    doc! { "catalog_service_id": &service.id },
-                    doc! { "$set": set_doc },
+            async {
+                let (live, _) = super::catalog_mutation_service::fence(
+                    &db,
+                    transaction,
+                    &observed,
+                    Some(&authority),
                 )
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    audit_resync_failure(db, actor, &service.id, &report, "user_services_update")
-                        .await;
-                    return Err(error.into());
-                }
-            };
-        for field in IDENTITY_FIELDS {
-            report.record(field, result.matched_count, result.modified_count, 0);
-        }
-
-        let latest = match db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "_id": &service.id })
-            .await
-        {
-            Ok(Some(latest)) => latest,
-            Ok(None) => {
-                audit_resync_failure(db, actor, &service.id, &report, "catalog_revision_read")
-                    .await;
-                return Err(AppError::NotFound("Service not found".to_string()));
-            }
-            Err(error) => {
-                audit_resync_failure(db, actor, &service.id, &report, "catalog_revision_read")
-                    .await;
-                return Err(error.into());
-            }
-        };
-
-        if latest.updated_at == target.updated_at {
-            persist_outcome(
-                db,
-                actor,
-                "catalog_identity_resync_succeeded",
-                &service.id,
-                "success",
-                &report,
-                None,
-            )
-            .await?;
-            clear_reconciliation_marker_for_catalog_revision(db, &service.id, target.updated_at)
                 .await?;
-            return Ok(result.matched_count);
-        }
-
-        target = latest;
-    }
-
-    audit_resync_failure(db, actor, &service.id, &report, "catalog_revision_limit").await;
-    Err(AppError::Conflict(
-        "Catalog identity changed repeatedly during resync; retry the request".to_string(),
-    ))
+                let mut set_doc = identity_set_document(&effective_identity_config(&live));
+                set_doc.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+                let result = super::service_history::collection::<UserService>(&db, USER_SERVICES)
+                    .update_many(doc! {"catalog_service_id": &live.id}, doc! {"$set":set_doc})
+                    .session(transaction)
+                    .await?;
+                db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                    .update_one(
+                        doc! {"_id": &live.id},
+                        doc! {"$unset":{RECONCILIATION_FIELD:""}},
+                    )
+                    .session(&mut **transaction)
+                    .await?;
+                audit_service::log_actor_event_in_session(&db, transaction, &key, &authority.actor,
+                "catalog_identity_resync_succeeded", serde_json::json!({
+                    "catalog_service_id":live.id, "status":"success", "fields":IDENTITY_FIELDS,
+                    "matched_count":result.matched_count, "modified_count":result.modified_count,
+                    "skipped_customized_count":0
+                })).await?;
+                Ok(result.matched_count)
+            }
+            .await;
+        super::api_key_mutation_service::transaction_result(result)
+    })
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 async fn mark_reconciliation_failed(
@@ -375,21 +349,6 @@ async fn clear_reconciliation_marker(
     clear_reconciliation_marker_with_filter(db, filter).await
 }
 
-async fn clear_reconciliation_marker_for_catalog_revision(
-    db: &mongodb::Database,
-    catalog_service_id: &str,
-    catalog_revision: DateTime<Utc>,
-) -> AppResult<()> {
-    clear_reconciliation_marker_with_filter(
-        db,
-        doc! {
-            "_id": catalog_service_id,
-            "updated_at": bson::DateTime::from_chrono(catalog_revision),
-        },
-    )
-    .await
-}
-
 async fn clear_reconciliation_marker_with_filter(
     db: &mongodb::Database,
     filter: Document,
@@ -404,32 +363,6 @@ async fn clear_reconciliation_marker_with_filter(
 
 fn durable_count(count: u64) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
-}
-
-async fn audit_resync_failure(
-    db: &mongodb::Database,
-    actor: &AuditActor,
-    catalog_service_id: &str,
-    report: &ReconciliationReport,
-    stage: &'static str,
-) {
-    if let Err(audit_error) = persist_outcome(
-        db,
-        actor,
-        "catalog_identity_resync_failed",
-        catalog_service_id,
-        "failure",
-        report,
-        Some(stage),
-    )
-    .await
-    {
-        tracing::error!(
-            catalog_service_id,
-            error = %audit_error,
-            "Failed to persist catalog identity resync failure audit"
-        );
-    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -690,6 +623,33 @@ mod tests {
             user_agent: None,
             api_key_id: None,
             api_key_name: None,
+        }
+    }
+
+    async fn resync_authority(
+        db: &mongodb::Database,
+    ) -> super::super::catalog_mutation_service::Authority {
+        crate::services::role_service::seed_system_roles(db)
+            .await
+            .unwrap();
+        let role = db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! {"slug":"admin"})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut user =
+            crate::test_utils::test_user(&actor().user_id, crate::models::user::UserType::Person);
+        user.role_ids.push(role.id);
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(user)
+            .await
+            .unwrap();
+        super::super::catalog_mutation_service::Authority {
+            catalog_base_url: "http://localhost:3001".into(),
+            actor: actor(),
+            first_party_human: true,
+            admin_required: true,
         }
     }
 
@@ -1028,7 +988,7 @@ mod tests {
             .await
             .expect("insert user service");
 
-        let affected = force_resync(&db, &actor(), &service)
+        let affected = force_resync(&db, &resync_authority(&db).await, &service, &[2; 32])
             .await
             .expect("force resync");
         assert_eq!(affected, 1);
@@ -1051,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_resync_catches_up_when_given_a_stale_catalog_snapshot() {
+    async fn force_resync_rejects_stale_catalog_authority_without_instance_writes() {
         let Some(db) = connect_test_database("catalog_identity_force_catchup").await else {
             eprintln!("skipping catalog identity test: no local MongoDB available");
             return;
@@ -1079,10 +1039,10 @@ mod tests {
             .await
             .expect("insert user service");
 
-        let affected = force_resync(&db, &actor(), &stale)
+        let error = force_resync(&db, &resync_authority(&db).await, &stale, &[2; 32])
             .await
-            .expect("force resync should catch up");
-        assert_eq!(affected, 1);
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
 
         let after = db
             .collection::<UserService>(USER_SERVICES)
@@ -1090,8 +1050,8 @@ mod tests {
             .await
             .expect("find user service")
             .expect("user service exists");
-        assert_eq!(after.identity_propagation_mode, "jwt");
-        assert!(after.forward_access_token);
-        assert_eq!(after.delegation_token_scope, "account:read");
+        assert_eq!(after.identity_propagation_mode, "none");
+        assert!(!after.forward_access_token);
+        assert_eq!(after.delegation_token_scope, "llm:proxy");
     }
 }

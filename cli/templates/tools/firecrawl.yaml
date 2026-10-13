@@ -1,0 +1,9 @@
+version: 1
+tools:
+  - slug: tools-firecrawl
+    name: Firecrawl
+    twin_of: api-firecrawl
+    supplier: Firecrawl
+    topics: [web-search, page-fetch]
+    credential_env: TOOLS_FIRECRAWL_CREDENTIAL
+    operations: [search, scrape]

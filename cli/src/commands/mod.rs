@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod admin_catalog;
+mod admin_catalog_playbook;
 pub mod admin_platform_credentials;
 pub mod ai_setup;
 pub mod api_key;
@@ -144,3 +145,5 @@ mod tests {
 }
 
 pub mod catalog_tools;
+
+pub mod admin_tools;

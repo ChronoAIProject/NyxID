@@ -30,12 +30,13 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::{
     DeleteServiceResponse, compute_viewer_routing, fetch_service, require_admin,
-    require_admin_or_creator, service_to_response_with_viewer, validate_developer_app_ids,
+    require_admin_or_creator, service_to_response_with_eligibility, validate_developer_app_ids,
 };
 
 // --- Request / Response types ---
 
 #[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateServiceRequest {
     pub twin_of_service_id: Option<String>,
     pub asyncapi_spec_url: Option<String>,
@@ -65,6 +66,7 @@ pub struct CreateServiceRequest {
     pub visibility: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
     // Rich metadata for AI agent discovery
+    pub icon_url: Option<String>,
     pub homepage_url: Option<String>,
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
@@ -166,6 +168,10 @@ pub struct XChannelBillingResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    pub tools_manager_created: bool,
+    /// Safe shape eligibility; never exposes token-exchange configuration.
+    pub tools_manager_eligible: bool,
+    pub tools_credential_frozen: bool,
     pub declared_operations: Vec<DeclaredOperationResponse>,
     pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub topics: Vec<String>,
@@ -207,6 +213,7 @@ pub struct ServiceResponse {
     pub delegation_token_scope: String,
     // Rich metadata
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
     pub homepage_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_url: Option<String>,
@@ -461,6 +468,7 @@ impl std::ops::DerefMut for BillingUpdate {
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateServiceRequest {
     pub service_category: Option<String>,
     pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
@@ -500,6 +508,7 @@ pub struct UpdateServiceRequest {
     pub delegation_token_scope: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
     // Rich metadata for AI agent discovery
+    pub icon_url: Option<String>,
     pub homepage_url: Option<String>,
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
@@ -516,6 +525,9 @@ pub struct UpdateServiceRequest {
     /// Write-only replacement of the catalog master credential (admin only).
     #[schema(value_type = Option<String>)]
     pub credential: Option<zeroize::Zeroizing<String>>,
+    /// Explicit Admin-only clear; empty credential retains its legacy no-op meaning.
+    #[serde(default)]
+    pub clear_credential: bool,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -636,6 +648,7 @@ pub struct RegenerateSecretResponse {
 #[derive(Debug, Deserialize)]
 pub struct ListServicesQuery {
     pub category: Option<String>,
+    pub include_inactive: Option<bool>,
 }
 
 fn default_certificate_ttl_minutes() -> u32 {
@@ -961,6 +974,36 @@ pub async fn list_services(
             { "$and": [{ "visibility": "private" }, crate::services::ownership_transfer_service::catalog_owner_filter(&user_id_str)] },
         ],
     };
+    if query.include_inactive == Some(true) {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+        let user = state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id": &user_id_str})
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Account required".into()))?;
+        let role = crate::services::role_service::resolve_platform_role(&state.db, &user).await?;
+        filter.remove("is_active");
+        if !role.is_admin() {
+            let tools =
+                crate::services::role_service::can_manage_tools(&state.db, &user, role).await?;
+            let catalog =
+                crate::services::role_service::can_manage_catalog(&state.db, &user, role).await?;
+            if !tools && !catalog {
+                return Err(AppError::Forbidden(
+                    "Catalog or Tools Manager authority required".into(),
+                ));
+            }
+            let mut visible = vec![doc! {"is_active": true}];
+            if tools {
+                visible.push(doc! {"offering_kind": "tool"});
+            }
+            if catalog {
+                visible.push(doc! {"catalog_manager_created": true, "created_by": &user_id_str});
+            }
+            filter.insert("$and", vec![doc! {"$or": visible}]);
+        }
+    }
     if let Some(ref category) = query.category {
         let valid = ["provider", "connection", "internal"];
         if !valid.contains(&category.as_str()) {
@@ -990,10 +1033,22 @@ pub async fn list_services(
 
     let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
     let inspection_keys = can_inspect.then_some(state.encryption_keys.as_ref());
+    let eligible =
+        crate::services::tools_manager_service::eligible_manager_tool_ids(&state.db, &services)
+            .await?;
     let mut items = Vec::with_capacity(services.len());
     for svc in services {
         let routing = viewer_routing.remove(&svc.id);
-        items.push(service_to_response_with_viewer(inspection_keys, svc, routing.as_ref()).await);
+        let can_manage = eligible.contains(&svc.id);
+        items.push(
+            super::services_helpers::service_to_response_with_known_eligibility(
+                inspection_keys,
+                svc,
+                routing.as_ref(),
+                can_manage,
+            )
+            .await,
+        );
     }
 
     Ok(Json(ServiceListResponse { services: items }))
@@ -1032,19 +1087,46 @@ pub async fn create_service_request(
     tele: TelemetryContext,
     Json(body): Json<serde_json::Value>,
 ) -> AppResult<Json<ServiceResponse>> {
-    let authority = super::catalog_authority::require_catalog_writer(&state, &auth_user).await?;
-    if authority == super::catalog_authority::CatalogAuthority::CatalogManager
-        && body
-            .get("twin_of_service_id")
-            .is_some_and(|value| !value.is_null())
+    let tool = body.get("offering_kind").is_some_and(|v| v == "tool")
+        || body.get("twin_of_service_id").is_some_and(|v| !v.is_null());
+    let authority =
+        super::catalog_authority::require_service_creator(&state, &auth_user, tool).await?;
+    let manager = authority == super::catalog_authority::CatalogAuthority::ToolsManager;
+    // Validate caller input before inserting any server-owned twin defaults.
+    let mut validation_body = body.clone();
+    // A twin implies Tool identity. Normalize only the missing kind before
+    // exhaustive caller preflight; privileged defaults still come afterwards.
+    if body
+        .get("twin_of_service_id")
+        .is_some_and(|v| v.is_string())
+        && body.get("offering_kind").is_none()
     {
-        return Err(AppError::Forbidden(
-            "A Catalog Manager cannot create tool twins; ask an Admin".to_string(),
-        ));
+        validation_body["offering_kind"] = "tool".into();
     }
-    let prepared = crate::services::tool_twin_service::prepare_create(&state.db, body).await?;
-    let body =
-        serde_json::from_value(prepared).map_err(|e| AppError::ValidationError(e.to_string()))?;
+    if body
+        .get("twin_of_service_id")
+        .is_some_and(|v| v.is_string())
+        && body.get("name").is_none()
+    {
+        // Twins inherit the source name after caller fields are classified.
+        // Supply only the missing required field for this preflight; retain
+        // caller-provided values so malformed names still fail validation.
+        validation_body["name"] = String::new().into();
+    }
+    let request: CreateServiceRequest = serde_json::from_value(validation_body)
+        .map_err(|_| AppError::ValidationError("Invalid service request fields".into()))?;
+    if manager {
+        super::catalog_authority::check_tool_create(&request)?;
+    }
+    let caller = auth_user.user_id.to_string();
+    let prepared = if manager {
+        crate::services::tool_twin_service::prepare_create_for_actor(&state.db, body, Some(&caller))
+            .await?
+    } else {
+        crate::services::tool_twin_service::prepare_create(&state.db, body).await?
+    };
+    let body = serde_json::from_value(prepared)
+        .map_err(|_| AppError::ValidationError("Invalid service request fields".into()))?;
     create_service(State(state), auth_user, tele, Json(body)).await
 }
 
@@ -1061,7 +1143,26 @@ async fn create_service_inner(
         inference.realtime |= inference.voice.is_some();
     }
 
-    let authority = super::catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    let authority = super::catalog_authority::require_service_creator(
+        &state,
+        &auth_user,
+        body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool),
+    )
+    .await?;
+    let tools_manager = authority == super::catalog_authority::CatalogAuthority::ToolsManager;
+    if tools_manager {
+        // Provenance on twins is computed by the server; it is never caller-owned.
+        let provenance = body.import_source.take();
+        super::catalog_authority::check_tool_create(&body)?;
+        body.import_source = provenance;
+        body.service_category = Some("internal".into());
+        body.service_type = Some("http".into());
+        body.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            enabled: true,
+            audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
+            allowed_owner_ids: Vec::new(),
+        });
+    }
     if authority == super::catalog_authority::CatalogAuthority::CatalogManager {
         super::catalog_authority::check_service_create(&body)?;
         if let Some(provider_id) = body.provider_config_id.as_deref() {
@@ -1094,7 +1195,13 @@ async fn create_service_inner(
             catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), created.id.clone());
         }
         return Ok(Json(
-            service_to_response_with_viewer(Some(&state.encryption_keys), created, None).await,
+            service_to_response_with_eligibility(
+                &state.db,
+                Some(&state.encryption_keys),
+                created,
+                None,
+            )
+            .await?,
         ));
     }
     let initial_skills = crate::services::catalog_skill_service::SkillUpdate {
@@ -1188,7 +1295,13 @@ async fn create_service_inner(
                 catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), created.id.clone());
             }
             return Ok(Json(
-                service_to_response_with_viewer(Some(&state.encryption_keys), created, None).await,
+                service_to_response_with_eligibility(
+                    &state.db,
+                    Some(&state.encryption_keys),
+                    created,
+                    None,
+                )
+                .await?,
             ));
         }
         return Err(AppError::Conflict(
@@ -1487,6 +1600,9 @@ async fn create_service_inner(
         ));
     }
 
+    if let Some(icon) = body.icon_url.as_deref() {
+        validate_service_icon_url(&state, icon).await?;
+    }
     // Validate metadata URL fields
     for (label, url_opt) in [
         ("homepage_url", &body.homepage_url),
@@ -1566,7 +1682,9 @@ async fn create_service_inner(
         .await?;
     }
     if let Some(config) = body.platform_key.as_mut() {
-        require_admin(&state, &auth_user).await?;
+        if !tools_manager {
+            require_admin(&state, &auth_user).await?;
+        }
         crate::services::platform_key_service::validate_config(
             &state.db,
             config,
@@ -1594,7 +1712,12 @@ async fn create_service_inner(
         import_source: body
             .import_source
             .clone()
-            .map(crate::services::catalog_import_source::CatalogImportSourceDto::into_model)
+            .map(|mut source| {
+                if body.twin_of_service_id.is_some() && source.imported_at.is_none() {
+                    source.imported_at = Some(now.to_rfc3339());
+                }
+                source.into_model()
+            })
             .transpose()?,
         git_http: None,
         destination_targets,
@@ -1629,6 +1752,13 @@ async fn create_service_inner(
         requires_user_credential,
         is_active: true,
         created_by: user_id_str.clone(),
+        tools_manager_created: tools_manager,
+        tools_credential_frozen: body.offering_kind
+            == Some(crate::models::downstream_service::OfferingKind::Tool)
+            && body
+                .credential
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty()),
         catalog_manager_created: authority
             == super::catalog_authority::CatalogAuthority::CatalogManager,
         identity_propagation_mode: "none".to_string(),
@@ -1640,6 +1770,7 @@ async fn create_service_inner(
         inject_delegation_token: false,
         delegation_token_scope: "llm:proxy".to_string(),
         provider_config_id: body.provider_config_id.clone(),
+        icon_url: body.icon_url.clone().filter(|value| !value.is_empty()),
         homepage_url: body.homepage_url.clone(),
         repository_url: body.repository_url.clone(),
         issues_url: body.issues_url.clone(),
@@ -1669,7 +1800,7 @@ async fn create_service_inner(
 
     crate::services::destination_routing::validate_credential_source(&new_service)?;
 
-    let twin_endpoints = match body.twin_of_service_id.as_deref() {
+    let mut twin_endpoints = match body.twin_of_service_id.as_deref() {
         Some(source_id) => {
             crate::services::tool_twin_service::clone_endpoints(
                 &state.db,
@@ -1680,6 +1811,17 @@ async fn create_service_inner(
         }
         None => Vec::new(),
     };
+    if tools_manager && twin_endpoints.iter().any(|e| e.target_id.is_some()) {
+        return Err(AppError::ValidationError(
+            "Manager twins cannot inherit destination-bound operations".into(),
+        ));
+    }
+    if tools_manager {
+        for endpoint in &mut twin_endpoints {
+            endpoint.async_operation = None;
+            endpoint.execution = Default::default();
+        }
+    }
     let new_service = if body.twin_of_service_id.is_some() {
         crate::services::catalog_skill_service::create_with_endpoints(
             &state.db,
@@ -1770,7 +1912,13 @@ async fn create_service_inner(
     // lookup query.
     let created = fetch_service(&state, &id).await?;
     Ok(Json(
-        service_to_response_with_viewer(Some(&state.encryption_keys), created, None).await,
+        service_to_response_with_eligibility(
+            &state.db,
+            Some(&state.encryption_keys),
+            created,
+            None,
+        )
+        .await?,
     ))
 }
 
@@ -1798,6 +1946,7 @@ pub async fn delete_service(
     // CR-4: Use shared require_admin_or_creator helper instead of inline check
     let service = fetch_service(&state, &service_id).await?;
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::login_client_context::require_first_party_human(&auth_user)?;
         require_admin(&state, &auth_user).await?;
     } else {
         require_admin_or_creator(&state, &auth_user, &service).await?;
@@ -1805,17 +1954,24 @@ pub async fn delete_service(
     }
 
     let now = Utc::now();
-    state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(
-            doc! { "_id": &service_id },
-            doc! { "$set": {
-                "is_active": false,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    let authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_url: state.config.base_url.clone(),
+        actor: audit_service::AuditActor::from_auth_user(&auth_user),
+        first_party_human: super::login_client_context::require_first_party_human(&auth_user)
+            .is_ok(),
+        admin_required: service.offering_kind
+            == crate::models::downstream_service::OfferingKind::Tool
+            || super::services_helpers::is_admin(&state, &auth_user).await?,
+    };
+    crate::services::catalog_mutation_service::commit_update(
+        &state.db,
+        &service,
+        &authority,
+        &doc! {"is_active": false, "updated_at": bson::DateTime::from_chrono(now)},
+        &doc! {"_id": &service_id},
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+    )
+    .await?;
 
     // SEC-M2: Cascade deactivation - wipe all user credentials for this service
     use crate::models::user_service_connection::{
@@ -1912,12 +2068,13 @@ pub async fn get_service(
     let routing = viewer_routing.remove(&service.id);
     let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
     Ok(Json(
-        service_to_response_with_viewer(
+        service_to_response_with_eligibility(
+            &state.db,
             can_inspect.then_some(state.encryption_keys.as_ref()),
             service,
             routing.as_ref(),
         )
-        .await,
+        .await?,
     ))
 }
 
@@ -1966,26 +2123,77 @@ async fn update_service_inner(
         inference.realtime |= inference.voice.is_some();
     }
 
+    if body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool) {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+    }
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
-        || body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool)
-    {
-        require_admin(&state, &auth_user).await?;
-    } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        if super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?
-            == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
-        {
-            super::catalog_authority::check_service_update(&body)?;
-            super::catalog_authority::check_destination_change(
-                &state,
-                &auth_user.user_id.to_string(),
-                &service,
-                body.base_url.as_deref(),
+    let ingress_admin = super::services_helpers::is_admin(&state, &auth_user).await?;
+    let tool_authority =
+        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            Some(
+                super::catalog_authority::require_tool_writer(&state, &auth_user, Some(&service))
+                    .await?,
             )
-            .await?;
+        } else {
+            None
+        };
+    let tools_manager =
+        tool_authority == Some(super::catalog_authority::CatalogAuthority::ToolsManager);
+    if tools_manager {
+        super::catalog_authority::check_tool_update(&body)?;
+        if body
+            .credential
+            .as_ref()
+            .is_some_and(|v| v.trim().is_empty())
+        {
+            return Err(AppError::Forbidden(
+                "Only an Admin may clear a shared credential".into(),
+            ));
+        }
+        if body.credential.is_some()
+            && (service.tools_credential_frozen
+                || !service.credential_encrypted.is_empty()
+                || service.auth_method == "none")
+        {
+            return Err(AppError::Forbidden(
+                "Only an Admin may replace a credential".into(),
+            ));
+        }
+        if body
+            .base_url
+            .as_ref()
+            .is_some_and(|v| v != &service.base_url)
+            && (body.credential.is_some()
+                || service.tools_credential_frozen
+                || !service.credential_encrypted.is_empty())
+        {
+            return Err(AppError::Forbidden(
+                "Credential destination is frozen; ask an Admin".into(),
+            ));
+        }
+        if body.base_url.as_ref() == Some(&service.base_url) {
+            body.base_url = None;
+        }
+    } else if tool_authority.is_none() {
+        if body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool) {
+            require_admin(&state, &auth_user).await?;
+        } else {
+            require_admin_or_creator(&state, &auth_user, &service).await?;
+            if super::catalog_authority::require_public_row_writer(&state, &auth_user, &service)
+                .await?
+                == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
+            {
+                super::catalog_authority::check_service_update(&body)?;
+                super::catalog_authority::check_destination_change(
+                    &state,
+                    &auth_user.user_id.to_string(),
+                    &service,
+                    body.base_url.as_deref(),
+                )
+                .await?;
+            }
         }
     }
 
@@ -2006,7 +2214,7 @@ async fn update_service_inner(
         )
         .await?
     {
-        let result = crate::services::catalog_skill_service::commit(
+        let result = crate::services::catalog_skill_service::commit_with_audit(
             &state.db,
             &service_id,
             &crate::services::catalog_skill_service::SkillActor::Human {
@@ -2019,14 +2227,20 @@ async fn update_service_inner(
             &bson::Document::new(),
             None,
             Some(&skill_fingerprint_input),
+            Some((
+                &audit_service::AuditActor::from_auth_user(&auth_user),
+                state.audit_chain_hmac_key.as_ref().as_ref(),
+            )),
+            None, // Durable receipt replay does not perform a new mutation.
         )
         .await?;
         return complete_replayed_skill_update(&state, &auth_user, &result.service, &body).await;
     }
     if body.inference.is_some()
         || body.platform_key.is_some()
-        || body.credential.is_some()
+        || (body.credential.is_some() && !tools_manager)
         || body.proxy_operation_policy.is_some()
+        || body.clear_credential
     {
         require_admin(&state, &auth_user).await?;
     }
@@ -2176,6 +2390,20 @@ async fn update_service_inner(
     }
     crate::services::tool_topics::validate_tool_service(&proposed)?;
     let mut set_doc = doc! {};
+    if body.clear_credential {
+        if body.credential.is_some() {
+            return Err(AppError::ValidationError(
+                "clear_credential conflicts with credential".into(),
+            ));
+        }
+        set_doc.insert(
+            "credential_encrypted",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: vec![],
+            },
+        );
+    }
     if body.service_category.is_some() {
         set_doc.insert("service_category", &proposed.service_category);
         set_doc.insert(
@@ -2528,6 +2756,17 @@ async fn update_service_inner(
 
     // Rich metadata fields (apply to all service types).
     // Empty strings clear the field (set to null), matching openapi_spec_url pattern.
+    if let Some(ref icon) = body.icon_url {
+        validate_service_icon_url(&state, icon).await?;
+        set_doc.insert(
+            "icon_url",
+            if icon.is_empty() {
+                bson::Bson::Null
+            } else {
+                bson::Bson::String(icon.clone())
+            },
+        );
+    }
     if body.homepage_url.is_some() {
         let val = body
             .homepage_url
@@ -2894,12 +3133,34 @@ async fn update_service_inner(
             doc! { "$exists": false },
         );
     }
+    if (service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || proposed.offering_kind == crate::models::downstream_service::OfferingKind::Tool)
+        && (body
+            .credential
+            .as_ref()
+            .is_some_and(|v| !v.trim().is_empty())
+            || !service.credential_encrypted.is_empty())
+    {
+        set_doc.insert("tools_credential_frozen", true);
+    }
+    let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_url: state.config.base_url.clone(),
+        actor: audit_service::AuditActor::from_auth_user(&auth_user),
+        first_party_human: super::login_client_context::require_first_party_human(&auth_user)
+            .is_ok(),
+        admin_required: ingress_admin
+            || (!tools_manager
+                && (service.offering_kind
+                    == crate::models::downstream_service::OfferingKind::Tool
+                    || proposed.offering_kind
+                        == crate::models::downstream_service::OfferingKind::Tool)),
+    };
     let committed_service = if skill_update.is_present() {
         let request_id = body
             .skills_request_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let result = crate::services::catalog_skill_service::commit(
+        let result = crate::services::catalog_skill_service::commit_with_audit(
             &state.db,
             &service_id,
             &crate::services::catalog_skill_service::SkillActor::Human {
@@ -2912,6 +3173,11 @@ async fn update_service_inner(
             &catalog_filter,
             None,
             Some(&skill_fingerprint_input),
+            Some((
+                &audit_service::AuditActor::from_auth_user(&auth_user),
+                state.audit_chain_hmac_key.as_ref().as_ref(),
+            )),
+            Some((&service, &mutation_authority)),
         )
         .await?;
         if result.replayed {
@@ -2928,12 +3194,13 @@ async fn update_service_inner(
             let viewer = routing.remove(&result.service.id);
             let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
             return Ok(Json(
-                service_to_response_with_viewer(
+                service_to_response_with_eligibility(
+                    &state.db,
                     can_inspect.then_some(state.encryption_keys.as_ref()),
                     result.service,
                     viewer.as_ref(),
                 )
-                .await,
+                .await?,
             ));
         }
         if result.changed {
@@ -2948,31 +3215,18 @@ async fn update_service_inner(
         }
         result.service
     } else {
-        state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one_and_update(
-            catalog_filter,
-            doc! {
-                "$set": &set_doc,
-                "$unset": { "api_spec_url": "" },
-            },
+        crate::services::catalog_mutation_service::commit_update(
+            &state.db,
+            &service,
+            &mutation_authority,
+            &set_doc,
+            &catalog_filter,
+            state.audit_chain_hmac_key.as_ref().as_ref(),
         )
-        .return_document(mongodb::options::ReturnDocument::After)
         .await?
-        .ok_or_else(|| {
-            if identity_changed {
-                AppError::Conflict(
-                    "Service changed or has unresolved identity reconciliation; retry after it completes or run identity resync"
-                        .to_string(),
-                )
-            } else {
-                AppError::NotFound("Service not found".to_string())
-            }
-        })?
     };
 
-    if body.credential.is_some() {
+    if body.credential.is_some() || body.clear_credential {
         audit_service::log_for_user(
             state.db.clone(),
             &auth_user,
@@ -3131,12 +3385,13 @@ async fn update_service_inner(
     let routing = viewer_routing.remove(&updated.id);
     let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
     Ok(Json(
-        service_to_response_with_viewer(
+        service_to_response_with_eligibility(
+            &state.db,
             can_inspect.then_some(state.encryption_keys.as_ref()),
             updated,
             routing.as_ref(),
         )
-        .await,
+        .await?,
     ))
 }
 
@@ -3177,12 +3432,13 @@ async fn complete_replayed_skill_update(
     let viewer = routing.remove(&latest.id);
     let can_inspect = super::services_helpers::is_admin(state, auth).await?;
     Ok(Json(
-        service_to_response_with_viewer(
+        service_to_response_with_eligibility(
+            &state.db,
             can_inspect.then_some(state.encryption_keys.as_ref()),
             latest,
             viewer.as_ref(),
         )
-        .await,
+        .await?,
     ))
 }
 
@@ -3211,11 +3467,21 @@ pub async fn resync_service_identity(
 ) -> AppResult<Json<ResyncIdentityResponse>> {
     require_admin(&state, &auth_user).await?;
     let service = fetch_service(&state, &service_id).await?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+    }
     super::services_helpers::require_http_service(&service)?;
     let affected_count = catalog_identity_service::force_resync(
         &state.db,
-        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &crate::services::catalog_mutation_service::Authority {
+            catalog_base_url: state.config.base_url.clone(),
+            actor: audit_service::AuditActor::from_auth_user(&auth_user),
+            first_party_human: super::login_client_context::require_first_party_human(&auth_user)
+                .is_ok(),
+            admin_required: true,
+        },
         &service,
+        state.audit_chain_hmac_key.as_ref().as_ref(),
     )
     .await?;
 
@@ -3250,7 +3516,9 @@ pub async fn get_oidc_credentials(
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
 
-    if service.auth_method != "oidc" {
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || service.auth_method != "oidc"
+    {
         return Err(AppError::BadRequest(
             "Service is not an OIDC service".to_string(),
         ));
@@ -3258,6 +3526,7 @@ pub async fn get_oidc_credentials(
 
     let oauth_client_id = service
         .oauth_client_id
+        .clone()
         .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
 
     // Decrypt the client secret from credential_encrypted
@@ -3333,15 +3602,13 @@ pub async fn update_redirect_uris(
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
 
-    if service.auth_method != "oidc" {
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || service.auth_method != "oidc"
+    {
         return Err(AppError::BadRequest(
             "Service is not an OIDC service".to_string(),
         ));
     }
-
-    let oauth_client_id = service
-        .oauth_client_id
-        .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
 
     if body.redirect_uris.is_empty() {
         return Err(AppError::ValidationError(
@@ -3373,32 +3640,28 @@ pub async fn update_redirect_uris(
         }
     }
 
-    oauth_client_service::update_redirect_uris(&state.db, &oauth_client_id, &body.redirect_uris)
-        .await?;
-
-    // Touch updated_at on the service
-    let now = Utc::now();
-    state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(
-            doc! { "_id": &service_id },
-            doc! { "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?;
+    let now = bson::DateTime::from_chrono(Utc::now());
+    crate::services::catalog_mutation_service::commit_oidc_update(
+        &state.db,
+        &service,
+        &crate::services::catalog_mutation_service::Authority {
+            catalog_base_url: state.config.base_url.clone(),
+            actor: audit_service::AuditActor::from_auth_user(&auth_user),
+            first_party_human: super::login_client_context::require_first_party_human(&auth_user)
+                .is_ok(),
+            admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
+        },
+        &doc! {"redirect_uris": &body.redirect_uris, "updated_at":now},
+        &doc! {"updated_at":now},
+        "redirect_uris_updated",
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+    )
+    .await?;
 
     tracing::info!(
         service_id = %service_id,
         updated_by = %auth_user.user_id,
         "Redirect URIs updated"
-    );
-
-    // CR-1: Audit log for redirect URI update
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "redirect_uris_updated",
-        Some(serde_json::json!({ "service_id": &service_id })),
     );
 
     Ok(Json(RedirectUrisResponse {
@@ -3431,68 +3694,37 @@ pub async fn regenerate_oidc_secret(
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
 
-    if service.auth_method != "oidc" {
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+        || service.auth_method != "oidc"
+    {
         return Err(AppError::BadRequest(
             "Service is not an OIDC service".to_string(),
         ));
     }
 
-    let oauth_client_id = service
-        .oauth_client_id
-        .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
-
     // Generate a new secret
     let new_secret = generate_random_token();
     let new_hash = hash_token(&new_secret);
 
-    // SEC-5: These two updates are not wrapped in a MongoDB transaction. If the
-    // server crashes after the first update but before the second, the system will
-    // be in an inconsistent state (new hash stored but old encrypted secret remains).
-    // A MongoDB multi-document transaction requires a replica set or sharded cluster.
-    // TODO: Use a MongoDB session with start_transaction/commit_transaction when
-    // running on a replica set.
-
-    // Update the OauthClient with the new hash
-    let now = Utc::now();
-    state
-        .db
-        .collection::<OauthClient>(OAUTH_CLIENTS)
-        .update_one(
-            doc! { "_id": &oauth_client_id },
-            doc! { "$set": {
-                "client_secret_hash": &new_hash,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    // Encrypt the new secret and update credential_encrypted on the service
     let encrypted = state.encryption_keys.encrypt(new_secret.as_bytes()).await?;
-
-    state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(
-            doc! { "_id": &service_id },
-            doc! { "$set": {
-                "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    let now = bson::DateTime::from_chrono(Utc::now());
+    crate::services::catalog_mutation_service::commit_oidc_update(
+        &state.db, &service,
+        &crate::services::catalog_mutation_service::Authority {
+            catalog_base_url: state.config.base_url.clone(),
+            actor: audit_service::AuditActor::from_auth_user(&auth_user),
+            first_party_human: super::login_client_context::require_first_party_human(&auth_user).is_ok(),
+            admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
+        },
+        &doc! {"client_secret_hash":&new_hash,"updated_at":now},
+        &doc! {"credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"updated_at":now},
+        "oidc_secret_regenerated", state.audit_chain_hmac_key.as_ref().as_ref(),
+    ).await?;
 
     tracing::info!(
         service_id = %service_id,
         regenerated_by = %auth_user.user_id,
         "OIDC client secret regenerated"
-    );
-
-    // CR-1/SEC-4: Audit log for secret regeneration
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "oidc_secret_regenerated",
-        Some(serde_json::json!({ "service_id": &service_id })),
     );
 
     Ok(Json(RegenerateSecretResponse {
@@ -3720,6 +3952,7 @@ mod tests {
             service_category: None,
             visibility: None,
             ssh_config: None,
+            icon_url: None,
             homepage_url: None,
             repository_url: None,
             issues_url: None,
@@ -4044,6 +4277,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(non_admin_view.credential_configured, None);
+        assert!(!non_admin_view.tools_credential_frozen);
         assert!(
             crate::services::platform_key_service::available(&db, &stored, &person_id)
                 .await
@@ -6200,4 +6434,12 @@ mod platform_key_request_tests {
             .is_err()
         );
     }
+}
+
+async fn validate_service_icon_url(state: &AppState, value: &str) -> AppResult<()> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let id = crate::services::catalog_icon_service::asset_id(&state.config.base_url, value)?;
+    crate::services::catalog_icon_service::require_asset(&state.db, id, None).await
 }

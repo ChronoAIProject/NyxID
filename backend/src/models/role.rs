@@ -12,6 +12,9 @@ pub const CREDITS_MANAGER_ROLE_SLUG: &str = "credits_manager";
 /// anyone who is not an Operator; Admins already hold every permission.
 pub const CREDIT_GRANTS_WRITE_PERMISSION: &str = "nyxid:billing:credit_grants:write";
 
+pub const TOOLS_MANAGER_ROLE_SLUG: &str = "tools_manager";
+pub const TOOLS_WRITE_PERMISSION: &str = "nyxid:catalog:tools:write";
+
 pub const CATALOG_MANAGER_ROLE_SLUG: &str = "catalog_manager";
 
 /// Lets an Operator create providers and catalog services, edit the rows they

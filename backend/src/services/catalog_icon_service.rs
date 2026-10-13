@@ -8,6 +8,21 @@ use crate::{
 
 pub const MAX_SVG_BYTES: usize = 128 * 1024;
 
+/// Only the configured immutable catalog asset route is attachable. Reject
+/// alternative UUID encodings, query/fragment suffixes and foreign origins.
+pub fn asset_id<'a>(base_url: &str, value: &'a str) -> AppResult<&'a str> {
+    let prefix = format!("{}/catalog-icons/", base_url.trim_end_matches('/'));
+    let id = value
+        .strip_prefix(&prefix)
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == *id))
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "icon_url must reference an uploaded catalog SVG asset".into(),
+            )
+        })?;
+    Ok(id)
+}
+
 pub fn validate(svg: &str) -> AppResult<()> {
     let invalid = || {
         AppError::ValidationError("Use a static SVG with a viewBox; scripts, styles, external resources and animation are unsupported".into())
@@ -196,9 +211,48 @@ pub async fn load(db: &Database, id: &str) -> AppResult<String> {
         .ok_or_else(|| AppError::NotFound("Icon not found".into()))
 }
 
+/// Immutable assets must exist before metadata can reference them. Session reads
+/// bind manager attachment to the same snapshot as authority and metadata.
+pub async fn require_asset(
+    db: &Database,
+    id: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<()> {
+    let coll = db.collection::<CatalogIcon>(COLLECTION_NAME);
+    let query = coll.find_one(doc! {"_id": id});
+    let asset = match session {
+        Some(session) => query.session(session).await?,
+        None => query.await?,
+    };
+    if asset.is_none() {
+        return Err(AppError::ValidationError(
+            "icon_url must reference an existing uploaded catalog SVG asset".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn asset_references_require_exact_origin_prefix_and_canonical_identity() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let base = "https://nyxid.example";
+        let url = format!("{base}/catalog-icons/{id}");
+        assert_eq!(asset_id(base, &url).unwrap(), id);
+        for invalid in [
+            format!("{url}?x=1"),
+            format!("{url}#x"),
+            format!("{url}/extra"),
+            format!("https://foreign.example/catalog-icons/{id}"),
+            format!("{base}/other/catalog-icons/{id}"),
+            format!("{base}/catalog-icons/{}", id.replace('-', "")),
+            format!("{base}/catalog-icons/{}", id.to_uppercase()),
+        ] {
+            assert!(asset_id(base, &invalid).is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn accepts_static_logo() {
         assert!(validate(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#abc" d="M0 0h24v24z"/></svg>"##).is_ok());

@@ -100,6 +100,9 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
     <Card>
       <CardContent className="space-y-3 p-4">
         <div>
+          {tool.icon_url && (
+            <img src={tool.icon_url} alt="" className="size-6" />
+          )}
           <h3 className="text-15 font-semibold">{tool.name}</h3>
           <p className="text-11 text-text-tertiary">
             {tool.supplier ?? tool.provider_label}

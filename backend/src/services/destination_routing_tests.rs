@@ -226,9 +226,11 @@ pub(crate) async fn restore_historical_drive_endpoints(
             },
         )
         .collect();
-    crate::services::service_endpoint_service::upsert_endpoints_additive(db, service_id, inputs)
-        .await
-        .unwrap();
+    crate::services::service_endpoint_service::test_support::upsert_endpoints_additive(
+        db, service_id, inputs,
+    )
+    .await
+    .unwrap();
 }
 
 pub(crate) async fn connect(

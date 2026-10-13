@@ -6366,6 +6366,9 @@ pub async fn seed_default_services(
             is_active: true,
             created_by: "system".to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -7303,9 +7306,16 @@ pub async fn create_provider_with_revocation(
 
 /// List all active providers (visible to all authenticated users).
 pub async fn list_providers(db: &mongodb::Database) -> AppResult<Vec<ProviderConfig>> {
+    list_providers_filtered(db, doc! {"is_active": true}).await
+}
+
+pub async fn list_providers_filtered(
+    db: &mongodb::Database,
+    filter: bson::Document,
+) -> AppResult<Vec<ProviderConfig>> {
     let providers: Vec<ProviderConfig> = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find(doc! { "is_active": true })
+        .find(filter)
         .sort(doc! { "name": 1 })
         .await?
         .try_collect()

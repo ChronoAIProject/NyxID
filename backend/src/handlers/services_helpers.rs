@@ -144,6 +144,10 @@ pub async fn require_admin_or_creator(
     auth_user: &AuthUser,
     service: &DownstreamService,
 ) -> AppResult<()> {
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        super::login_client_context::require_first_party_human(auth_user)?;
+        return require_admin(state, auth_user).await;
+    }
     if service.owner_user_id.is_some() {
         return require_admin(state, auth_user).await;
     }
@@ -250,6 +254,29 @@ pub async fn resolve_service_or_user_service(
 /// the create handler, where the catalog row didn't exist a moment
 /// ago). See [`compute_viewer_routing`] for batched resolution and
 /// [`ViewerRouting`] for the multi-binding semantics.
+pub async fn service_to_response_with_eligibility(
+    db: &mongodb::Database,
+    keys: Option<&crate::crypto::aes::EncryptionKeys>,
+    service: DownstreamService,
+    viewer: Option<&ViewerRouting>,
+) -> AppResult<ServiceResponse> {
+    let eligible =
+        crate::services::tools_manager_service::eligible_manager_tool_in_db(db, &service, None)
+            .await?;
+    Ok(service_to_response_with_known_eligibility(keys, service, viewer, eligible).await)
+}
+
+pub async fn service_to_response_with_known_eligibility(
+    keys: Option<&crate::crypto::aes::EncryptionKeys>,
+    service: DownstreamService,
+    viewer: Option<&ViewerRouting>,
+    eligible: bool,
+) -> ServiceResponse {
+    let mut response = service_to_response_with_viewer(keys, service, viewer).await;
+    response.tools_manager_eligible = eligible;
+    response
+}
+
 pub async fn service_to_response_with_viewer(
     inspection_keys: Option<&crate::crypto::aes::EncryptionKeys>,
     s: DownstreamService,
@@ -289,6 +316,11 @@ pub async fn service_to_response_with_viewer(
             })
             .collect();
     ServiceResponse {
+        tools_manager_created: s.tools_manager_created,
+        tools_manager_eligible: crate::services::tools_manager_service::eligible_manager_tool(&s),
+        tools_credential_frozen: s.offering_kind
+            == crate::models::downstream_service::OfferingKind::Tool
+            && s.tools_credential_frozen,
         offering_kind: s.offering_kind,
         topics: s.topics.clone(),
         supplier: s.supplier.clone(),
@@ -299,6 +331,9 @@ pub async fn service_to_response_with_viewer(
         credential_configured: match inspection_keys {
             Some(keys) => {
                 crate::services::platform_key_service::credential_configured(keys, &s).await
+            }
+            None if s.offering_kind == crate::models::downstream_service::OfferingKind::Tool => {
+                Some(!s.credential_encrypted.is_empty())
             }
             None => None,
         },
@@ -337,6 +372,7 @@ pub async fn service_to_response_with_viewer(
         forward_access_token: s.forward_access_token,
         inject_delegation_token: s.inject_delegation_token,
         delegation_token_scope: s.delegation_token_scope,
+        icon_url: s.icon_url,
         homepage_url: s.homepage_url,
         repository_url: s.repository_url,
         issues_url: s.issues_url,

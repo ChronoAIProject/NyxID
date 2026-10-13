@@ -1,3 +1,5 @@
+import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
+import { canManageCatalog, canWriteTool } from "@/types/api";
 import { ServiceToolFields } from "@/components/services/service-tool-fields";
 import { ServiceConcurrency } from "@/components/services/service-concurrency";
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
@@ -78,6 +80,7 @@ export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const { data: service, isLoading, error, refetch } = useService(serviceId);
   useBreadcrumbLabel(service?.name);
+  const user = useAuthStore(state => state.user);
   if (isLoading && !service) return <Skeleton className="h-96 w-full" />;
   if (!service)
     return (
@@ -88,6 +91,15 @@ export function ServiceEditPage() {
         onRetry={refetch}
       />
     );
+  if (!user?.is_admin && service.offering_kind === "tool") {
+    return canWriteTool(user, service) ? (
+      <ToolManagerEditor service={service} />
+    ) : (
+      <ErrorBanner message="Tool write authority required" />
+    );
+  }
+  if (!canManageCatalog(user))
+    return <ErrorBanner message="Catalog write authority required" />;
   return <ServiceEditForm key={serviceId} source={service} />;
 }
 

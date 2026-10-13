@@ -142,6 +142,7 @@ pub async fn gate_unconfigured_public_tool(
 pub async fn change_publication(
     db: &Database,
     service_id: &str,
+    expected_kind: OfferingKind,
     endpoint_ids: &[String],
     state: PublicationState,
     actor: &AuditActor,
@@ -165,6 +166,7 @@ pub async fn change_publication(
                 &transaction_db,
                 session,
                 &service_id,
+                expected_kind,
                 &endpoint_ids,
                 state,
                 &actor,
@@ -181,11 +183,63 @@ async fn change_publication_in_session(
     db: &Database,
     session: &mut mongodb::ClientSession,
     service_id: &str,
+    expected_kind: OfferingKind,
     endpoint_ids: &[String],
     state: PublicationState,
     actor: &AuditActor,
     audit_key: &[u8],
 ) -> AppResult<Vec<ServiceEndpoint>> {
+    let service = db
+        .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .find_one(doc! {"_id":service_id})
+        .session(&mut *session)
+        .await?;
+    let service =
+        service.ok_or_else(|| AppError::Conflict("Publication parent no longer exists".into()))?;
+    if service.offering_kind != expected_kind {
+        return Err(AppError::Conflict(
+            "Offering kind changed; reread before publication".into(),
+        ));
+    }
+    if service.offering_kind == OfferingKind::Tool {
+        let admin =
+            super::tools_manager_service::fence_authority(db, session, &actor.user_id).await?;
+        if !admin
+            && (!service.tools_manager_created
+                || service.created_by != actor.user_id
+                || service
+                    .owner_user_id
+                    .as_ref()
+                    .is_some_and(|owner| owner != &actor.user_id)
+                || !super::tools_manager_service::eligible_manager_tool_in_db(
+                    db,
+                    &service,
+                    Some(&mut *session),
+                )
+                .await?
+                || state == PublicationState::Published)
+        {
+            return Err(AppError::Forbidden(
+                "Only an Admin may publish; manager must own an eligible Tool".into(),
+            ));
+        }
+        db.collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":service_id},
+                doc! {"$inc":{"authority_fence":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    if service.offering_kind != OfferingKind::Tool {
+        db.collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": service_id},
+                doc! {"$inc": {"authority_fence": 1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
     let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
     let endpoints: Vec<ServiceEndpoint> = coll
         .find(doc! {"service_id": service_id, "_id": {"$in": endpoint_ids}})
@@ -401,11 +455,18 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
         };
+        let mut parent = crate::models::downstream_service::test_helpers::dummy_service();
+        parent.id = "tool".into();
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(parent)
+            .await
+            .unwrap();
         let ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
         assert!(matches!(
             change_publication(
                 &db,
                 "tool",
+                OfferingKind::AiService,
                 &ids,
                 PublicationState::Published,
                 &actor,
@@ -451,6 +512,12 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
         };
+        let mut parent = crate::models::downstream_service::test_helpers::dummy_service();
+        parent.id = row.service_id.clone();
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(parent)
+            .await
+            .unwrap();
         for (index, state) in [
             PublicationState::Validated,
             PublicationState::Published,
@@ -463,6 +530,7 @@ mod tests {
             let changed = change_publication(
                 &db,
                 &row.service_id,
+                OfferingKind::AiService,
                 &[row.id.clone()],
                 state,
                 &actor,

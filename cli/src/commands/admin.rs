@@ -13,6 +13,7 @@ pub async fn run(command: AdminCommands) -> Result<()> {
         AdminCommands::InviteCode { command } => run_invite_code(command).await,
         AdminCommands::User { command } => run_user(command).await,
         AdminCommands::Provider { command } => super::admin_catalog::run_provider(command).await,
+        AdminCommands::Tools { command } => super::admin_tools::run(command).await,
         AdminCommands::Catalog { command } => super::admin_catalog::run_catalog(command).await,
     }
 }
