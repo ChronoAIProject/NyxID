@@ -139,10 +139,8 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
             let mut body = body;
             if with_client {
-                let (client_id, client_secret) = read_client(
-                    &text(&current, "slug"),
+                let (client_id, client_secret) = read_client_values(
                     current["provider_type"] != "device_code",
-                    &redirect_uri(&auth)?,
                     client_id_env.as_deref(),
                     client_secret_env.as_deref(),
                 )?;
@@ -1263,6 +1261,14 @@ fn read_client(
     client_secret_env: Option<&str>,
 ) -> Result<(String, Option<String>)> {
     eprintln!("{slug}: register this redirect URI in the vendor's OAuth app: {redirect}");
+    read_client_values(needs_secret, client_id_env, client_secret_env)
+}
+
+fn read_client_values(
+    needs_secret: bool,
+    client_id_env: Option<&str>,
+    client_secret_env: Option<&str>,
+) -> Result<(String, Option<String>)> {
     let client_id = match client_id_env {
         Some(name) => env_secret(name)?,
         None => ask_required("Client ID", None)?,

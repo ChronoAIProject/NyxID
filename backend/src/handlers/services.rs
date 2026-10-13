@@ -2034,6 +2034,12 @@ pub(crate) async fn update_service_inner(
             == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
         {
             super::catalog_authority::check_service_update(&body)?;
+            if body.is_active.is_some() && service.created_by != auth_user.user_id.to_string() {
+                return Err(AppError::Forbidden(
+                    "A Catalog Manager can only deactivate or reactivate services they created; ask an Admin"
+                        .to_string(),
+                ));
+            }
             super::catalog_authority::check_destination_change(
                 &state,
                 &auth_user.user_id.to_string(),
@@ -6241,6 +6247,52 @@ mod tests {
         .await
         .expect("icon on a seeded provider");
 
+        // Once anyone has connected, their own clients and tokens follow the
+        // provider's URLs, so re-entering the platform client is not enough.
+        db.collection::<mongodb::bson::Document>(
+            crate::models::user_provider_token::COLLECTION_NAME,
+        )
+        .insert_one(doc! {
+            "_id": Uuid::new_v4().to_string(),
+            "user_id": &plain_operator_id,
+            "provider_config_id": &provider.id,
+        })
+        .await
+        .unwrap();
+        let connected = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(provider.id.clone()),
+            provider_update(serde_json::json!({
+                "token_url": "https://attacker.example.com/token",
+                "client_id": "seeded-id",
+                "client_secret": "seeded-secret",
+            })),
+        )
+        .await;
+        assert!(
+            matches!(connected, Err(AppError::Forbidden(ref message)) if message.contains("connected"))
+        );
+        let _ = update_provider(
+            State(state.clone()),
+            manager(),
+            Path(provider.id.clone()),
+            provider_update(serde_json::json!({ "default_scopes": ["read", "write"] })),
+        )
+        .await
+        .expect("scopes stay editable after people connect");
+
+        // A write checked against one version never lands on a newer one.
+        let stale = crate::services::provider_service::update_provider_if_unchanged(
+            &db,
+            &state.encryption_keys,
+            &provider.id,
+            Default::default(),
+            Some(chrono::Utc::now() - chrono::Duration::days(1)),
+        )
+        .await;
+        assert!(matches!(stale, Err(AppError::Conflict(_))));
+
         // Service: descriptive fields and operations, not Admin-only fields.
         let update = |value: serde_json::Value| {
             update_service(
@@ -6256,6 +6308,9 @@ mod tests {
             .expect("descriptive edit on a seeded row");
         assert!(forbidden(
             update(serde_json::json!({ "forward_access_token": true })).await
+        ));
+        assert!(forbidden(
+            update(serde_json::json!({ "is_active": false })).await
         ));
         let endpoint_request = || -> CreateEndpointRequest {
             serde_json::from_value(serde_json::json!({

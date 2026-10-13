@@ -207,15 +207,15 @@ pub fn check_provider_create(body: &CreateProviderRequest) -> AppResult<()> {
 }
 
 /// A Catalog Manager may edit providers they created. On any other provider
-/// they may edit the name, description, scopes, documentation and icon, and
-/// while the provider has no OAuth client also its URLs, credential mode and
-/// token request settings, together with the first client. Once someone has
-/// set a client, those settings decide where the client and users' tokens
-/// are sent, so changing them requires re-entering the current client in the
-/// same request, and replacing the client stays with Admins. Deactivating a
-/// provider or clearing its client stays with Admins.
+/// they may edit the name, description, scopes, documentation and icon. The
+/// URLs, credential mode and token request settings decide where client
+/// secrets, authorization codes and users' tokens are sent, so a Catalog
+/// Manager may change them only before anyone has connected through the
+/// provider, and, once someone has set an OAuth client, only by re-entering
+/// that client in the same request. Replacing someone else's client, clearing
+/// it, and deactivating the provider stay with Admins.
 pub async fn check_provider_update(
-    encryption_keys: &EncryptionKeys,
+    state: &AppState,
     caller_id: &str,
     provider: &ProviderConfig,
     body: &UpdateProviderRequest,
@@ -228,6 +228,13 @@ pub async fn check_provider_update(
         client_bound,
     } = provider_update_fields(body);
     forbid_fields("change on a provider they did not create", admin_only)?;
+    if !client_bound.is_empty() && provider_has_connections(&state.db, &provider.id).await? {
+        return Err(AppError::Forbidden(format!(
+            "People have connected through this provider, so their own OAuth clients and tokens follow these settings. A Catalog Manager cannot change {}; ask an Admin",
+            client_bound.join(", ")
+        )));
+    }
+    let encryption_keys = state.encryption_keys.as_ref();
 
     let sets_client = body.client_id.is_some() || body.client_secret.is_some();
     let has_client =
@@ -261,6 +268,29 @@ pub async fn check_provider_update(
         }
     }
     Ok(())
+}
+
+/// Whether any person or org holds a connection, token or own OAuth client
+/// for this provider. Those credentials are sent to the provider's URLs, so
+/// re-entering the platform client cannot vouch for them.
+async fn provider_has_connections(db: &mongodb::Database, provider_id: &str) -> AppResult<bool> {
+    let filter = doc! { "provider_config_id": provider_id };
+    for collection in [
+        crate::models::user_provider_token::COLLECTION_NAME,
+        crate::models::user_provider_credentials::COLLECTION_NAME,
+        crate::models::user_api_key::COLLECTION_NAME,
+    ] {
+        if db
+            .collection::<mongodb::bson::Document>(collection)
+            .find_one(filter.clone())
+            .projection(doc! { "_id": 1 })
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether the request carries the provider's stored client unchanged. A

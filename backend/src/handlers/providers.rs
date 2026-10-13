@@ -628,15 +628,18 @@ pub async fn update_provider(
     Json(body): Json<UpdateProviderRequest>,
 ) -> AppResult<Json<ProviderResponse>> {
     let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    // A Catalog Manager's write applies only to the version it was checked against.
+    let mut checked_version = None;
     if authority == CatalogAuthority::CatalogManager {
         let provider = provider_service::get_provider(&state.db, &provider_id).await?;
         catalog_authority::check_provider_update(
-            &state.encryption_keys,
+            &state,
             &auth_user.user_id.to_string(),
             &provider,
             &body,
         )
         .await?;
+        checked_version = Some(provider.updated_at);
     }
 
     // SSRF validation on URLs if provided
@@ -705,9 +708,14 @@ pub async fn update_provider(
     let cleared_credentials = updates.clear_client_credentials == Some(true);
     let set_client_credentials = updates.client_id.is_some() || updates.client_secret.is_some();
 
-    let updated =
-        provider_service::update_provider(&state.db, &state.encryption_keys, &provider_id, updates)
-            .await?;
+    let updated = provider_service::update_provider_if_unchanged(
+        &state.db,
+        &state.encryption_keys,
+        &provider_id,
+        updates,
+        checked_version,
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),

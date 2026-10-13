@@ -436,10 +436,12 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       </p>
                       {!isAdmin && provider.has_client_secret && (
                         <p className="text-xs text-muted-foreground">
-                          Catalog Managers: if someone else set this client,
-                          changing URLs, credential mode or token settings
-                          requires re-entering the current client ID and
-                          secret here. Replacing it requires an Admin.
+                          Catalog Managers: on a provider someone else
+                          created, URLs, credential mode and token settings
+                          can change only before anyone has connected, and
+                          only with the current client ID and secret
+                          re-entered here. Replacing the client requires an
+                          Admin.
                         </p>
                       )}
                       <FormMessage />

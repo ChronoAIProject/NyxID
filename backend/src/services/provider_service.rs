@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
@@ -7341,8 +7341,28 @@ pub async fn update_provider(
     provider_id: &str,
     updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
+    update_provider_if_unchanged(db, encryption_keys, provider_id, updates, None).await
+}
+
+/// `update_provider` that applies only while the provider's `updated_at`
+/// still equals `observed_updated_at`, so a write authorized against one
+/// version of the provider (for example its OAuth client being absent)
+/// cannot land on a version changed in between. A mismatch is a Conflict.
+pub async fn update_provider_if_unchanged(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    provider_id: &str,
+    updates: ProviderUpdateInput,
+    observed_updated_at: Option<DateTime<Utc>>,
+) -> AppResult<ProviderConfig> {
     // Verify exists
     let existing = get_provider(db, provider_id).await?;
+    if observed_updated_at.is_some_and(|observed| observed != existing.updated_at) {
+        return Err(AppError::Conflict(
+            "The provider changed while this update was being checked; reload and try again"
+                .to_string(),
+        ));
+    }
     if existing.provider_type == "telegram_widget"
         && let Some(ref mode) = updates.credential_mode
         && mode != "admin"
@@ -7642,17 +7662,27 @@ pub async fn update_provider(
     if !unset_doc.is_empty() {
         update_doc.insert("$unset", unset_doc);
     }
+    let mut filter = doc! { "_id": provider_id };
+    if let Some(observed) = observed_updated_at {
+        filter.insert("updated_at", bson::DateTime::from_chrono(observed));
+    }
 
     let updated = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(doc! { "_id": provider_id }, update_doc)
+        .find_one_and_update(filter, update_doc)
         .with_options(
             FindOneAndUpdateOptions::builder()
                 .return_document(ReturnDocument::After)
                 .build(),
         )
         .await?
-        .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
+        .ok_or_else(|| match observed_updated_at {
+            Some(_) => AppError::Conflict(
+                "The provider changed while this update was being checked; reload and try again"
+                    .to_string(),
+            ),
+            None => AppError::NotFound("Provider not found".to_string()),
+        })?;
 
     tracing::info!(provider_id = %provider_id, "Provider config updated");
 

@@ -29,16 +29,16 @@ A Catalog Manager may:
 - edit every field of a provider they created, including its OAuth client;
 - on any other provider, including seeded connectors:
   - edit the name, description, default scopes, documentation URL and icon;
-  - while it has no OAuth client, edit its authorization, token, revocation and
-    device URLs, credential mode, PKCE and token request settings, and set the
-    first client (in the same request or later);
-  - once it has a client, change those client-bound settings only by
-    re-entering the current client ID and secret in the same request
-    (`nyxid admin provider update <slug> --file f.yaml --with-client`). This
-    proves the caller already holds the secret, so a Catalog Manager can never
-    redirect someone else's client or users' tokens to a new host. Providers
-    whose client has no secret (public device-code clients) cannot be proven
-    this way and stay Admin-only for those settings;
+  - set the first OAuth client on a provider that has none;
+  - edit its authorization, token, revocation and device URLs, credential
+    mode, PKCE and token request settings only **before anyone has connected
+    through it** (no user tokens, connections or own OAuth clients reference
+    it), because those settings decide where users' clients and tokens are
+    sent. Once a platform client exists they must also re-enter it in the same
+    request (`nyxid admin provider update <slug> --file f.yaml --with-client`),
+    proving they already hold the secret. Providers whose client has no secret
+    (public device-code clients) cannot be proven this way and stay Admin-only
+    for those settings. After people connect, these settings need an Admin;
 - upload an SVG icon for any provider;
 - create public HTTP catalog services and link them to providers they created;
 - on services they created, and on every shared catalog row (public, unowned,
@@ -47,7 +47,7 @@ A Catalog Manager may:
   discover, pause and publish operation endpoints. The destination URL is
   fixed once an Admin attaches a shared credential, a platform key, or a
   provider someone else created, so those credentials cannot be redirected;
-- deactivate services they created;
+- deactivate or reactivate services they created (not other rows);
 - list the services linked to a provider (public rows and their own, without
   credential inspection).
 
@@ -55,6 +55,8 @@ Only an Admin may:
 
 - replace or clear an OAuth client on a provider someone else created, or
   deactivate such a provider;
+- change client-bound provider settings once people have connected through a
+  provider someone else created;
 - delete a provider (this revokes every user's tokens);
 - deactivate or delete a service someone else created;
 - link a service to a provider someone else created, so a new service cannot
@@ -73,7 +75,14 @@ change the token URL or clear the client. Admins should therefore not place
 a platform-owned OAuth client on a manager-owned provider; create an
 Admin-owned provider instead. Before setting a client on any provider a
 Catalog Manager could have edited, an Admin should check its URLs; every
-provider update records its `authority` in the audit log.
+provider update records its `authority` in the audit log. A Catalog Manager's
+provider write applies only to the version their permission check read, so a
+concurrent Admin change returns a conflict instead of combining with it.
+
+Operations on seeded services that come from a built-in spec are recreated at
+the next startup if deleted; pause them instead. Operation metadata such as
+`risk` drives assistant confirmation cards, so Catalog Managers are trusted
+not to downgrade a destructive operation on shared rows.
 
 A row a Catalog Manager creates is marked `catalog_manager_created`. On
 marked rows a non-admin may change the row or its operation endpoints only
