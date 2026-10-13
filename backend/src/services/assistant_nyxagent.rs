@@ -3029,11 +3029,6 @@ pub async fn retry_context_in_session(
             }
         }
     }
-    let completed: Vec<&TurnActivity> = failed
-        .activities
-        .iter()
-        .filter(|activity| activity.status == "completed")
-        .collect();
     let unfinished: Vec<&str> = failed
         .activities
         .iter()
