@@ -5,6 +5,7 @@ import {
   mentionCandidates,
   mentionSegments,
   mentionedNames,
+  mentionTokens,
 } from "./nyxbot-mentions";
 
 describe("activeMention", () => {
@@ -78,6 +79,37 @@ describe("mentionedNames and mentionSegments", () => {
       { text: "hi ", mention: false },
       { text: "@researcher", mention: true },
       { text: " and @nobody", mention: false },
+    ]);
+  });
+
+  it("keeps recipient names stable across repeated mentions", () => {
+    expect(mentionedNames("@researcher @NyxBot @researcher", names)).toEqual(["researcher", "NyxBot"]);
+  });
+});
+
+describe("mentionTokens (server routing rule)", () => {
+  it("accepts punctuation after a name and brackets before the @", () => {
+    expect(mentionedNames("@researcher, then (@writer): go", ["researcher", "writer"])).toEqual([
+      "researcher",
+      "writer",
+    ]);
+  });
+
+  it("ignores an @ inside a word, address or dotted name", () => {
+    expect(mentionTokens("mail@researcher a.@writer x_@ana")).toEqual([]);
+  });
+
+  it("reads underscores and hyphens as part of the name", () => {
+    expect(mentionTokens("hi @data_bot and @ops-2!")).toEqual([
+      { start: 3, name: "data_bot" },
+      { start: 17, name: "ops-2" },
+    ]);
+  });
+
+  it("highlights punctuation-adjacent mentions", () => {
+    expect(mentionSegments("@ana, hi", ["ana"])).toEqual([
+      { text: "@ana", mention: true },
+      { text: ", hi", mention: false },
     ]);
   });
 });

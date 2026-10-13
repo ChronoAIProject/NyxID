@@ -1,5 +1,8 @@
 pub mod admin;
 pub mod admin_anonymous_endpoints;
+pub mod admin_billing;
+#[cfg(test)]
+mod admin_billing_tests;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
@@ -128,6 +131,9 @@ mod catalog_editor_tests;
 #[cfg(test)]
 mod tools_tests;
 
+pub mod assistant_feedback;
+#[cfg(test)]
+mod assistant_feedback_tests;
 pub mod assistant_group;
 pub mod assistant_nyxagent;
 pub mod assistant_team;

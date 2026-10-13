@@ -111,8 +111,12 @@ bypass. Human UI reads retain ordinary browser-session behavior.
 ## Owner-requested authoring
 
 Reuse comes first: `search_agent_skills` → `preview_agent_skill` →
-`set_agent_skills` with an owner card. Personal NyxBot gains `draft_agent_skill`
-only under the existing default-off `assistant:agent-learning` flag. Authored
+`set_agent_skills` with an owner card. Personal NyxBot (for any agent it
+maintains) and specialists (for their own agent) gain `draft_agent_skill` only
+under the existing default-off `assistant:agent-learning` flag. Ornn validates
+the exact package before the owner card is raised; refusals return
+`ornn_format_rejected` with Ornn's rule identifiers. Raw Ornn create, pull and
+update routes are refused for assistant chat keys, so agents never handle a ZIP. Authored
 drafts share L1's encrypted review store and publisher; they do not enroll the
 agent in automatic learning. Description is role/scope; persona is tone/style;
 skills contain repeatable procedures, references, checklists and templates.
@@ -208,6 +212,10 @@ Another registry adapter would implement:
 Legacy recovery (`assistant_learning_recovery.rs`) sits above this boundary: it
 decides eligibility, fences and audits, and calls only the publication module
 for registry reads. No registry response detail reaches an admin.
+
+## Editable pin controls and routes
+
+Agent pin references include `disabled` (default `false`, omitted while false); disabled pins are excluded from `skill_read` and prompt injection. Writing one requires the default-off `assistant:skill-pin-disable` flag; deploy every backend replica, then the frontend, then enable the flag. Re-enabling a pin through NyxBot needs the owner's card. Under `/assistant/nyxagent/agents/{id}`: `GET skills/{skill_id}/preview` tests an attached pin (exact version check plus a SKILL.md read through the agent's reader; `readable: false` while disabled); `POST skills/{skill_id}/improve` starts an authored improve draft from the exact package; `GET skills/history` lists the agent's newest 50 pin changes (with each pin's disabled state) and learning/authoring events to anyone who can read the agent; `POST learning/proposals/{proposal_id}/validate` with `{draft}` dry-runs the proposal's own validator. Proposal edits use `{revision, draft}` with the top-level revision canonical. Draft refusals carry field diagnostics `{rule, field, line?, limit?, actual?, unit?}`. All NyxAgent routes enforce the engine flag and first-party human sessions; writes require maintain access to the agent.
 
 The durable skill-approval outbox and authored-draft generation claims require
 all backend replicas and assistant workers to run this version before enabling

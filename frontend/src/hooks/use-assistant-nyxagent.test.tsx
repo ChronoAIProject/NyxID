@@ -157,6 +157,7 @@ it("routes models server-side: no profile discovery, and a send refreshes the ag
   await act(() => result.current.send("Question"));
   expect(send).toHaveBeenCalledOnce();
   expect(agentReads()).toBe(2);
+  // Model discovery is intentionally owned by the selector hook, not turn transport.
   expect(requests.some((r) => r.endsWith("/models"))).toBe(false);
   unmount();
 });
@@ -448,6 +449,88 @@ it("names the agent only when a send starts a new thread", async () => {
   expect(send.mock.lastCall).toHaveLength(4);
   expect(send.mock.lastCall?.[0]).toBe(id);
   existing.unmount();
+});
+
+it("passes an upload's attachment ids and metadata to the transport", async () => {
+  page.conversation.active_turn = null;
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue();
+  const photo = { id: "img-1", content_type: "image/png" as const, size: 4, label: "photo.png", origin: "user_upload" as const };
+  const draftId = `nyxa-${"d".repeat(32)}`;
+  // A new thread: the composer created an upload draft, which the turn adopts.
+  const fresh = renderHook(() => useNyxAgentAssistantChat({
+    onConversationAdopted: vi.fn(), draftAgent: nyxbotRef,
+  }), { wrapper });
+  await act(() => fresh.result.current.send("Look", {
+    attachmentIds: [photo.id], attachments: [photo], conversationId: draftId,
+  }));
+  expect(send).toHaveBeenLastCalledWith(draftId, "Look", expect.any(Function), expect.any(Function), {
+    attachmentIds: [photo.id], attachments: [photo], adoptExisting: true,
+  });
+  fresh.unmount();
+  const existing = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(), draftAgent: nyxbotRef,
+  }), { wrapper });
+  await act(() => existing.result.current.send("", {
+    attachmentIds: [photo.id], attachments: [photo], conversationId: id,
+  }));
+  expect(send).toHaveBeenLastCalledWith(id, "", expect.any(Function), expect.any(Function), {
+    attachmentIds: [photo.id], attachments: [photo], adoptExisting: false,
+  });
+  existing.unmount();
+});
+
+it("shows a new thread's sent image at once, before the draft is adopted", async () => {
+  const photo = { id: "img-1", content_type: "image/png" as const, size: 4, label: "photo.png", origin: "user_upload" as const };
+  const draftId = `nyxa-${"d".repeat(32)}`;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const draftPage: NyxAgentHistory = {
+    ...page,
+    conversation: { ...page.conversation, id: draftId, active_turn: null },
+    messages: [{ ...page.messages[0]!, text: "Look", attachments: [photo] }],
+  };
+  const defaultMock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = async (request) => {
+    if (request.endpoint.endsWith("/turns")) {
+      await gate;
+      const events = [
+        { event: "turn.status", conversation_id: draftId, turn_id: "turn", status: "running" },
+        { event: "turn.completed", turn_id: "turn", status: "completed", error: null },
+      ];
+      return new Response(events.map((event, i) => `data: ${JSON.stringify({ ...event, cursor: i + 1 })}\n\n`).join(""));
+    }
+    if (request.endpoint.includes(`/conversations/${draftId}`)) return json(draftPage);
+    return defaultMock(request);
+  };
+  const adopted = vi.fn();
+  const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
+    onConversationAdopted: adopted, draftAgent: nyxbotRef,
+  }), { wrapper });
+  let sending!: Promise<void>;
+  act(() => {
+    sending = result.current.send("Look", {
+      attachmentIds: [photo.id], attachments: [photo], conversationId: draftId,
+    });
+  });
+  await waitFor(() => expect(result.current.session.messages[0]?.images).toEqual([{
+    id: "img-1",
+    endpoint: `/assistant/nyxagent/conversations/${draftId}/attachments/img-1`,
+    contentType: "image/png",
+    label: "photo.png",
+    origin: "user_upload",
+  }]));
+  expect(result.current.session.messages[0]).toMatchObject({ role: "user", content: "Look" });
+  // Still a new thread to the page: no conversation id until adoption.
+  expect(result.current.session.conversationId).toBeUndefined();
+  expect(result.current.isStreaming).toBe(true);
+  expect(adopted).not.toHaveBeenCalled();
+  release();
+  await act(() => sending);
+  expect(adopted).toHaveBeenCalledExactlyOnceWith(draftId);
+  // Unadopted here (the page would navigate): the draft view ends with its send.
+  expect(result.current.isStreaming).toBe(false);
+  expect(result.current.session.messages).toEqual([]);
+  unmount();
 });
 
 it("phrases continuation turns per acknowledgement kind", () => {

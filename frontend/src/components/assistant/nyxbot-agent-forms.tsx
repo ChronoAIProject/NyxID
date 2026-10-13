@@ -99,7 +99,7 @@ export function ServiceGrantPicker({
   return (
     <ul
       aria-label="Services"
-      className="assistant-scrollbar max-h-44 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
+      className="assistant-scrollbar relative max-h-44 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
     >
       {rows.map((service) => {
         const id = `grant-${service.slug}`;

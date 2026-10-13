@@ -1,5 +1,6 @@
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { channelBotHealthSchema } from "@/schemas/channel-bot-health";
 import { api, apiClient } from "@/lib/api-client";
 import { mutationCreditsDenial } from "@/lib/credits-denial";
 import type {
@@ -53,12 +54,11 @@ export function useChannelBots(params: UseChannelBotsParams = {}) {
         ? channelBotsQueryKeys.allScopes()
         : channelBotsQueryKeys.list(orgId),
     queryFn: async (): Promise<readonly ChannelBotItem[]> => {
-      const path =
-        params.scope
-          ? `/channel-bots?scope=${params.scope}`
-          : orgId
-            ? `/channel-bots?org_id=${encodeURIComponent(orgId)}`
-            : "/channel-bots";
+      const path = params.scope
+        ? `/channel-bots?scope=${params.scope}`
+        : orgId
+          ? `/channel-bots?org_id=${encodeURIComponent(orgId)}`
+          : "/channel-bots";
       const res = await api.get<ChannelBotListResponse>(path);
       return res.bots;
     },
@@ -72,7 +72,39 @@ export function useChannelBot(id: string) {
       return api.get<ChannelBotDetail>(`/channel-bots/${id}`);
     },
     enabled: Boolean(id),
-    refetchInterval: (query) => query.state.data?.last_verification?.status === "pending" ? 2000 : false,
+    refetchInterval: (query) =>
+      query.state.data?.last_verification?.status === "pending" ? 2000 : false,
+  });
+}
+
+/** Diagnostics and the server's recovery recommendation for one bot. */
+export function useChannelBotHealth(id: string) {
+  return useQuery({
+    queryKey: [...channelBotsQueryKeys.detail(id), "health"],
+    queryFn: async () =>
+      channelBotHealthSchema.parse(
+        await api.get(`/channel-bots/${encodeURIComponent(id)}/health`),
+      ),
+    enabled: Boolean(id),
+  });
+}
+
+/** Re-registers the platform webhook subscription and returns fresh health. */
+export function useResubscribeChannelBot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) =>
+      channelBotHealthSchema.parse(
+        await api.post(
+          `/channel-bots/${encodeURIComponent(id)}/resubscribe`,
+          {},
+        ),
+      ),
+    onSettled: (_data, _error, id) => {
+      void queryClient.invalidateQueries({
+        queryKey: channelBotsQueryKeys.detail(id),
+      });
+    },
   });
 }
 
@@ -90,7 +122,10 @@ export function useCreateChannelBot() {
       data: CreateChannelBotRequest,
     ): Promise<CreateChannelBotResponse> => {
       return link
-        ? api.post<CreateChannelBotResponse>("/channel-connect-links/complete", { ...data, token: link.token })
+        ? api.post<CreateChannelBotResponse>(
+            "/channel-connect-links/complete",
+            { ...data, token: link.token },
+          )
         : api.post<CreateChannelBotResponse>("/channel-bots", data);
     },
     onSettled: () => {
@@ -115,8 +150,12 @@ export function useDeleteChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (id: string): Promise<{ webhook_cleanup?: string } | undefined> => {
-      return api.delete<{ webhook_cleanup?: string } | undefined>(`/channel-bots/${id}`);
+    mutationFn: async (
+      id: string,
+    ): Promise<{ webhook_cleanup?: string } | undefined> => {
+      return api.delete<{ webhook_cleanup?: string } | undefined>(
+        `/channel-bots/${id}`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });

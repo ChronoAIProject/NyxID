@@ -12,6 +12,12 @@ pub struct AssistantAcknowledgement {
     pub conversation_id: String,
     pub user_id: String,
     pub api_key_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_agent_id: Option<String>,
+    /// Why an action card was raised and how risky the action is, shown on
+    /// the card. Absent on permission requests and rows from older replicas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<ActionConfirmation>,
     pub kind: String,
     pub service_id: Option<String>,
     pub service_slug: Option<String>,
@@ -66,6 +72,20 @@ pub struct AssistantAcknowledgement {
     /// only after the owner allows this action card.
     #[serde(default)]
     pub machine_context: Option<super::machine_access::HumanContextAction>,
+}
+
+/// The server's classification of an action card: its risk class, the
+/// owner's access mode when the card was raised, and which policy asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionConfirmation {
+    /// `read`, `change`, `sensitive` or `destructive`.
+    pub risk: String,
+    /// The effective access mode for the acting agent; absent when only a
+    /// policy floor (webhook, machine or login confirmation) asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<super::assistant_settings::AccessMode>,
+    /// `access_mode`, `webhook` or `policy`.
+    pub reason: String,
 }
 
 fn default_decider() -> String {

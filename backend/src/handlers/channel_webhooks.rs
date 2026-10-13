@@ -15,6 +15,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+#[cfg(test)]
 use mongodb::bson::doc;
 
 use crate::AppState;
@@ -226,17 +227,35 @@ pub(super) async fn dispatch_platform_webhook(
             "platform webhook rejected"
         )
     })?;
-    let targets = adapter
+    let targets = match adapter
         .platform_webhook_targets(&credentials, headers, body)
         .await
-        .inspect_err(|error| {
+    {
+        Ok(targets) => targets,
+        Err(error) => {
             tracing::warn!(
                 platform,
                 stage = "signature_or_target",
                 error_code = error.error_code(),
                 "platform webhook rejected"
+            );
+            // Platform-level failures name no bot; count them per platform.
+            crate::services::channel_bot_health::record_webhook_rejection(
+                &state.db,
+                platform,
+                if matches!(
+                    error,
+                    crate::errors::AppError::ChannelWebhookVerificationFailed(_)
+                ) {
+                    "signature"
+                } else {
+                    "target"
+                },
             )
-        })?;
+            .await;
+            return Err(error);
+        }
+    };
     let source = if crate::services::channel_connection_webhook_service::supports(adapter.as_ref())
     {
         "connection"
@@ -244,8 +263,9 @@ pub(super) async fn dispatch_platform_webhook(
         "platform"
     };
     for target in targets {
-        let bot = state.db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-            .find_one(doc! { "platform": platform, "credential_source": source, "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
+        let bot =
+            channel_bot_service::find_active_webhook_bot(&state.db, platform, source, &target)
+                .await?;
         let Some(bot) = bot else {
             tracing::warn!(
                 platform,
@@ -388,6 +408,13 @@ async fn handle_webhook_inner_impl(
             actual = %bot.platform,
             "webhook platform mismatch"
         );
+        // Unauthenticated: count per platform, never on the bot row.
+        crate::services::channel_bot_health::record_webhook_rejection(
+            state.db,
+            expected_platform,
+            "platform_mismatch",
+        )
+        .await;
         return Ok(None);
     }
 
@@ -443,12 +470,22 @@ async fn handle_webhook_inner_impl(
         format!("failed to prepare webhook secrets: {e}").into()
     })?;
 
-    let prepared = adapter
+    let prepared = match adapter
         .prepare_webhook(&bot, Some(&verify_secrets), headers, body)
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("webhook verification failed: {e}").into()
-        })?;
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // Unauthenticated: a forged POST must not write the bot row.
+            crate::services::channel_bot_health::record_webhook_rejection(
+                state.db,
+                &bot.platform,
+                "signature",
+            )
+            .await;
+            return Err(format!("webhook verification failed: {error}").into());
+        }
+    };
 
     if let Some(challenge_response) = prepared.challenge_response {
         return Ok(Some(challenge_response));
@@ -457,6 +494,12 @@ async fn handle_webhook_inner_impl(
     if bot.credential_source == "connection" {
         if !bot.webhook_registered {
             tracing::warn!(platform = %bot.platform, bot_id, stage = "subscription", "channel webhook is not registered");
+            channel_bot_service::record_webhook_error(
+                state.db,
+                bot_id,
+                crate::services::channel_bot_health::codes::UNREGISTERED,
+            )
+            .await?;
             return Ok(None);
         }
         crate::services::channel_credentials::resolve_bot_token(
@@ -516,6 +559,7 @@ mod tests {
     use super::*;
     use axum::{Router, body::Bytes, http::StatusCode, routing::post};
     use chrono::Utc;
+    #[cfg(test)]
     use mongodb::bson::doc;
     use tokio::sync::{Mutex, oneshot};
     use tokio::time::{Duration, timeout};
@@ -1473,6 +1517,7 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -1992,3 +2037,7 @@ mod whatsapp_activation_tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "channel_webhook_diagnostics_tests.rs"]
+mod diagnostics_tests;

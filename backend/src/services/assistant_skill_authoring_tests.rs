@@ -24,6 +24,29 @@ mod recovery;
 fn input(agent: &str) -> Value {
     json!({"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
+
+/// The pre-review format check NyxID sends while drafting (its package's
+/// operation ID is the fixed `preflight`), as opposed to publication traffic.
+pub(super) fn preflight_request(request: &wiremock::Request) -> bool {
+    const MARKER: &[u8] = br#"operation-id: "preflight""#;
+    request.url.path() == "/api/v1/skill-format/validate"
+        && request
+            .body
+            .windows(MARKER.len())
+            .any(|window| window == MARKER)
+}
+
+/// Ornn requests other than drafting's pre-review format check.
+async fn ornn_requests(server: &MockServer) -> Vec<wiremock::Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| !preflight_request(request))
+        .collect()
+}
+
 async fn fixture(name: &str) -> Fixture {
     let f = orchestrator_fixture(name).await;
     review::migrate_publication_targets(&f.state, false)
@@ -68,6 +91,7 @@ async fn make_with_access(
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
+        &reader,
     )
     .await
     .unwrap();
@@ -102,6 +126,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
         version: "1.0".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db
@@ -157,6 +182,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
+        &reader,
     )
     .await;
     assert!(
@@ -189,7 +215,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
             .unwrap(),
         1
     );
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
 
@@ -1066,6 +1092,7 @@ async fn authoring_flag_guest_specialist_and_discovery_gates() {
             &f.chat,
             serde_json::from_value(value.clone()).unwrap(),
             &review::UnavailableReader,
+            &review::UnavailableReader,
         )
         .await
         .is_err()
@@ -1088,26 +1115,42 @@ async fn authoring_flag_guest_specialist_and_discovery_gates() {
     assert!(visible(
         super::super::assistant_account_tools::virtual_service_for(&f.state.db, &f.chat).await
     ));
-    for guest in [true, false] {
-        let mut chat = f.chat.clone();
-        chat.guest = guest;
-        if !guest {
-            chat.role = crate::models::assistant_conversation::AgentRole::Subagent;
-        }
-        assert!(
-            create(
-                &f.state,
-                &chat,
-                serde_json::from_value(value.clone()).unwrap(),
-                &review::UnavailableReader,
-            )
-            .await
-            .is_err()
-        );
-        assert!(!visible(
-            super::super::assistant_account_tools::virtual_service_for(&f.state.db, &chat).await
-        ));
-    }
+    let mut guest = f.chat.clone();
+    guest.guest = true;
+    assert!(
+        create(
+            &f.state,
+            &guest,
+            serde_json::from_value(value.clone()).unwrap(),
+            &review::UnavailableReader,
+            &review::UnavailableReader,
+        )
+        .await
+        .is_err()
+    );
+    assert!(!visible(
+        super::super::assistant_account_tools::virtual_service_for(&f.state.db, &guest).await
+    ));
+    // A specialist sees the tool but drafts only for its own agent.
+    let mut specialist = f.chat.clone();
+    specialist.role = crate::models::assistant_conversation::AgentRole::Subagent;
+    specialist.agent_id = Uuid::new_v4().to_string();
+    assert!(visible(
+        super::super::assistant_account_tools::virtual_service_for(&f.state.db, &specialist).await
+    ));
+    let error = create(
+        &f.state,
+        &specialist,
+        serde_json::from_value(value.clone()).unwrap(),
+        &review::UnavailableReader,
+        &review::UnavailableReader,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, AppError::Forbidden(message) if message.contains("only for their own agent")),
+        "{error:?}"
+    );
     assert_eq!(
         f.state
             .db
@@ -3119,7 +3162,7 @@ async fn authored_denial_and_expiry_never_publish() {
         .await
         .unwrap();
     assert!(finish(&f, card, true).await.is_err());
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
 
@@ -3135,7 +3178,7 @@ async fn authored_changed_content_refuses_old_card_before_ornn() {
         .await
         .unwrap();
     assert!(finish(&f, card, true).await.is_err());
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
 
@@ -3534,6 +3577,7 @@ async fn draft_tool_result_keeps_its_shape() {
         &f.state,
         &f.chat,
         parse_input(&input(&f.chat.agent_id)).unwrap(),
+        &review::UnavailableReader,
         &review::UnavailableReader,
     )
     .await
@@ -4292,6 +4336,7 @@ async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
         &f.chat,
         serde_json::from_value(input(&f.chat.agent_id)).unwrap(),
         &reader,
+        &reader,
     )
     .await
     .unwrap();
@@ -4345,6 +4390,7 @@ async fn draft_in_chat(f: &Fixture, chat: &ChatAuthority) -> AppResult<Value> {
         &f.state,
         chat,
         parse_input(&input(&f.chat.agent_id)).unwrap(),
+        &reader,
         &reader,
     )
     .await
@@ -4724,4 +4770,364 @@ async fn destroyed_or_deleted_target_fences_stale_reservation_and_finalization()
         assert_eq!(claims.count_documents(doc! {}).await.unwrap(), 0);
         f.state.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
+    let f = fixture("authoring_owner_improve").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &id, "POST").await;
+    finish(&f, card, true).await.unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/versions")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[{"version":"1.0"}]}})),
+        )
+        .mount(&server)
+        .await;
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    // An unknown pin is not found and creates nothing.
+    let missing = create_improve_draft(
+        &f.state,
+        &f.chat,
+        &f.chat.agent_id,
+        &Uuid::new_v4().to_string(),
+        &reader,
+        &reader,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(&missing, AppError::NotFound(m) if m == "Attached skill not found"));
+    let result = create_improve_draft(&f.state, &f.chat, &f.chat.agent_id, &id, &reader, &reader)
+        .await
+        .unwrap();
+    assert_eq!(result["error"], "acknowledgement_required", "{result}");
+    assert!(result["acknowledgement_id"].as_str().is_some());
+    let proposal: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":result["proposal_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(proposal.source, ProposalSource::Authored);
+    assert_eq!(proposal.status, "pending");
+    let body: GeneratedProposal = serde_json::from_slice(
+        &f.state
+            .encryption_keys
+            .decrypt(&proposal.body_encrypted)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.kind, "improve");
+    assert_eq!(body.name, "weekly-review");
+    let base = body.base_skill.as_ref().unwrap();
+    assert_eq!(base.skill_id, id);
+    assert_eq!(base.version, "1.0");
+    assert_eq!(base.sha256, row.publication.as_ref().unwrap().sha256);
+    // The editable guidance is the published body without its frontmatter,
+    // and the package's other text files come along.
+    assert_eq!(
+        body.skill_md,
+        input(&f.chat.agent_id)["skill_md"].as_str().unwrap()
+    );
+    assert_eq!(body.files.len(), 1);
+    assert_eq!(body.files[0].path, "references/checklist.md");
+    assert_eq!(body.files[0].content, "Verify dates before publishing.");
+    assert!(!body.description.is_empty());
+    // Repeating the same edit reuses the pending draft.
+    let again = create_improve_draft(&f.state, &f.chat, &f.chat.agent_id, &id, &reader, &reader)
+        .await
+        .unwrap();
+    assert_eq!(again["proposal_id"], result["proposal_id"]);
+    // "Test" reads the pin the way the agent does; a disabled pin is unreadable.
+    let owner = f.owner.clone();
+    let test = |state: crate::AppState, agent: String, skill: String| {
+        let owner = owner.clone();
+        async move {
+            crate::handlers::agent_skills::preview_attached(
+                axum::extract::State(state),
+                crate::test_utils::test_auth_user(&owner),
+                axum::extract::Path((agent, skill)),
+            )
+            .await
+            .map(|axum::Json(body)| body)
+        }
+    };
+    let live = test(f.state.clone(), f.chat.agent_id.clone(), id.clone())
+        .await
+        .unwrap();
+    assert!(live.readable);
+    assert!(!live.disabled);
+    assert!(live.excerpt.contains("Check outstanding work."), "{live:?}");
+    assert_eq!(live.version, "1.0");
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"skills.0.disabled":true}},
+        )
+        .await
+        .unwrap();
+    let off = test(f.state.clone(), f.chat.agent_id.clone(), id.clone())
+        .await
+        .unwrap();
+    assert!(off.disabled);
+    assert!(!off.readable);
+    assert!(off.excerpt.is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn editing_an_authored_draft_raises_a_fresh_card_that_publishes_the_edit() {
+    let f = fixture("authoring_edit_new_card").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let draft = json!({"schema_version":1,"kind":"new","name":"weekly-review",
+        "description":"Prepare a weekly review","skill_md":"# Weekly review\nEdited by the owner.",
+        "files":[],"base_skill":null,"rationale":"","safety_notes":""});
+    let axum::Json(edited) = crate::handlers::assistant_agent_learning::edit(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), row.id.clone())),
+        axum::Json(serde_json::from_value(json!({"revision":0,"draft":draft})).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited["status"], "updated");
+    assert_eq!(edited["conversation_id"], f.chat.conversation_id);
+    let fresh_id = edited["acknowledgement_id"].as_str().unwrap().to_owned();
+    assert_ne!(fresh_id, card.id);
+    let fresh: AssistantAcknowledgement = f
+        .state
+        .db
+        .collection(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .find_one(doc! {"_id":&fresh_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let reference = fresh.authored_skill.as_ref().unwrap();
+    assert_eq!(reference.proposal_id, row.id);
+    assert_eq!(reference.revision, 1);
+    // The fresh card publishes the edited revision.
+    let saved: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &saved, &id, "POST").await;
+    let decided = finish(&f, fresh, true).await.unwrap();
+    assert_eq!(decided.status, "used");
+    let agent: AssistantAgent = f
+        .state
+        .db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(agent.skills.len(), 1);
+    assert_eq!(agent.skills[0].skill_id, id);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ornn_format_verdict_refuses_the_draft_before_review() {
+    let f = fixture("authoring_ornn_preflight").await;
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":false,
+            "violations":[{"rule":"allowed-root-items","message":"Root item \"private-notes.md\" is not allowed."}]}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: Some(&f.chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(f.chat.clone())),
+    };
+    let error = create(
+        &f.state,
+        &f.chat,
+        serde_json::from_value(input(&f.chat.agent_id)).unwrap(),
+        &reader,
+        &reader,
+    )
+    .await
+    .unwrap_err();
+    let AppError::SkillDraftValidation(diagnostic) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(diagnostic.rule, "ornn_format_rejected");
+    assert_eq!(diagnostic.field, "files");
+    assert_eq!(diagnostic.ornn_rules, ["allowed-root-items"]);
+    // Ornn's message (which can quote filenames) never reaches the author.
+    assert!(!format!("{:?}", error.response_body().details).contains("private-notes"));
+    for collection in [
+        PROPOSALS_COLLECTION_NAME,
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn top_level_files_are_reviewed_and_packaged_under_references() {
+    let f = fixture("authoring_reference_paths").await;
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+        )
+        .mount(&server)
+        .await;
+    let mut value = input(&f.chat.agent_id);
+    value["files"] = json!([
+        {"path":"faq.md","content":"Opening hours are 9 to 5."},
+        {"path":"assets/notes.txt","content":"Plain notes."}
+    ]);
+    let (row, _card) = make(&f, value).await;
+    let draft: GeneratedProposal = serde_json::from_slice(
+        &f.state
+            .encryption_keys
+            .decrypt(&row.body_encrypted)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let paths: Vec<_> = draft.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["references/faq.md", "assets/notes.txt"]);
+    let archive =
+        publication::package_with_snapshot(&draft, "op", "weekly-review", "1.0", None).unwrap();
+    let names: Vec<_> = zip::ZipArchive::new(std::io::Cursor::new(archive))
+        .unwrap()
+        .file_names()
+        .map(str::to_owned)
+        .collect();
+    assert!(names.contains(&"weekly-review/references/faq.md".to_owned()));
+    assert!(names.contains(&"weekly-review/assets/notes.txt".to_owned()));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ornn_field_rules_are_checked_when_authoring() {
+    let f = fixture("authoring_ornn_field_rules").await;
+    for (field, value, rule) in [
+        (
+            "description",
+            "Answers for <VIP> customers",
+            "angle_brackets",
+        ),
+        ("name", "claude-helper", "reserved_name"),
+    ] {
+        let mut draft = input(&f.chat.agent_id);
+        draft[field] = json!(value);
+        let error = create(
+            &f.state,
+            &f.chat,
+            serde_json::from_value(draft).unwrap(),
+            &review::UnavailableReader,
+            &review::UnavailableReader,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, AppError::SkillDraftValidation(d) if d.rule == rule && d.field == field),
+            "{error:?}"
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+/// A specialist drafts its own skill in the default (denied) access mode; the
+/// owner's approval publishes and pins it to that specialist.
+#[tokio::test]
+async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
+    let f =
+        crate::services::assistant_authority_tests::fixture("authoring_specialist_publish").await;
+    assert!(!f.chat.is_orchestrator());
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"specialist_access_requests":"denied"}},
+        )
+        .await
+        .unwrap();
+    review::migrate_publication_targets(&f.state, false)
+        .await
+        .unwrap();
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        learning::FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+        )
+        .mount(&server)
+        .await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    assert_eq!(row.agent_id, f.chat.agent_id);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(preflight_request),
+        "the specialist's draft gets Ornn's pre-review check"
+    );
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &id, "POST").await;
+    assert_eq!(finish(&f, card, true).await.unwrap().status, "used");
+    let agent = f
+        .state
+        .db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(agent.skills.iter().any(|pin| pin.skill_id == id));
+    f.state.db.drop().await.unwrap();
 }

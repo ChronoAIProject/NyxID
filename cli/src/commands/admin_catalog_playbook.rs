@@ -76,27 +76,25 @@ pub(super) fn validate(provider: &Value, service: bool) -> Result<()> {
         if let Some(value) = provider.get("playbook") {
             let playbook: Playbook = serde_json::from_value(value.clone())
                 .map_err(|_| anyhow!("Invalid playbook fields"))?;
-            if let Some(evidence) = playbook.scope_source {
-                if !["vendor_cli", "documented_minimum", "no_scopes"]
+            if let Some(evidence) = playbook.scope_source
+                && (!["vendor_cli", "documented_minimum", "no_scopes"]
                     .contains(&evidence.kind.as_str())
                     || !evidence_url(&evidence.url)
-                    || evidence.note.as_ref().is_some_and(|note| note.len() > 4096)
-                {
-                    bail!(
-                        "Scope evidence requires an applicable kind, bounded HTTPS url without userinfo, and bounded note"
-                    );
-                }
+                    || evidence.note.as_ref().is_some_and(|note| note.len() > 4096))
+            {
+                bail!(
+                    "Scope evidence requires an applicable kind, bounded HTTPS url without userinfo, and bounded note"
+                );
             }
-            if let Some(evidence) = playbook.revocation {
-                if !["configured", "vendor_unsupported", "nyxid_incompatible"]
+            if let Some(evidence) = playbook.revocation
+                && (!["configured", "vendor_unsupported", "nyxid_incompatible"]
                     .contains(&evidence.kind.as_str())
                     || !evidence_url(&evidence.source)
-                    || evidence.note.as_ref().is_some_and(|note| note.len() > 4096)
-                {
-                    bail!(
-                        "Revocation evidence requires an applicable kind, bounded HTTPS source without userinfo, and bounded note"
-                    );
-                }
+                    || evidence.note.as_ref().is_some_and(|note| note.len() > 4096))
+            {
+                bail!(
+                    "Revocation evidence requires an applicable kind, bounded HTTPS source without userinfo, and bounded note"
+                );
             }
         }
         return Ok(());
@@ -199,10 +197,16 @@ pub(super) fn report(
     let evidence = desired_provider
         .map(|row| &row["playbook"])
         .unwrap_or(&Value::Null);
-    let can_write = me["is_admin"] == true
-        || (me["capabilities"]["manage_catalog"] == true
-            && provider["created_by"].is_string()
-            && provider["created_by"] == me["id"]);
+    let can_write = me["is_admin"] == true || me["capabilities"]["manage_catalog"] == true;
+    // Shared provider metadata and icons are editable by Catalog Managers.
+    // Foreign client-bound changes additionally require no connections and,
+    // when a client exists, re-entry of that same client. Presence alone does
+    // not prove either condition; preserve that guidance in the report.
+    let client_boundary = if me["is_admin"] == true || provider["created_by"] == me["id"] {
+        "catalog_writer"
+    } else {
+        "no_user_connections_and_existing_client_reentry; replacement_clear_activation_require_admin"
+    };
     let client_ok = provider["has_client_id"] == true
         && (provider["provider_type"] == "device_code" || provider["has_client_secret"] == true);
     let c1 = if oauth {
@@ -323,7 +327,7 @@ pub(super) fn report(
         .all(|row| row["state"] != "missing")
         && smoke.is_some();
     (
-        json!({"c1":c1,"c2":c2,"c3":c3,"c4":c4,"c5":c5,"c6":c6,"smoke_test":if smoke.is_some(){"declared"}else{"missing"},"complete":complete}),
+        json!({"client_bound_write_requirement":client_boundary,"c1":c1,"c2":c2,"c3":c3,"c4":c4,"c5":c5,"c6":c6,"smoke_test":if smoke.is_some(){"declared"}else{"missing"},"complete":complete}),
         json!({"status":"not_verified","pending_gates":["api_smoke_test_real_vendor","outside_user_connection_admin_confirmed"]}),
         smoke,
     )

@@ -15,11 +15,58 @@ import {
 } from "@/schemas/services";
 import type { DownstreamService } from "@/types/api";
 import { PlatformServiceFields } from "./platform-service-fields";
+const adminBilling = vi.hoisted(() => ({ requested: [] as string[] }));
+vi.mock("@/hooks/use-admin-billing", () => ({
+  useAdminBillingService: (id: string) => {
+    adminBilling.requested.push(id);
+    return {
+      isLoading: false,
+      error: null,
+      data: {
+        id,
+        slug: "svc",
+        name: "Service",
+        is_active: true,
+        effective_metric: "requests",
+        allowance_metrics: ["requests"],
+        effective: {
+          fallback_metric: "requests",
+          resale: { configured: false, applied: false, source: "free" },
+          classes: [
+            {
+              credential_classes: ["user_owned"],
+              lane: "byok",
+              platform_charged: true,
+              source: "legacy",
+              reason: "lane_unsynced_legacy",
+              prices: [
+                {
+                  layer: "platform",
+                  metric: "requests",
+                  operation: null,
+                  lago_metric_code: "platform_requests",
+                  credits_per_unit: "7",
+                  source: "legacy",
+                  origin: "legacy_plan",
+                  sync_status: null,
+                  sync_error: null,
+                  cached_rate: null,
+                },
+              ],
+              pending: [],
+            },
+          ],
+        },
+      },
+    };
+  },
+}));
 vi.mock("@/components/admin-credits/credit-pickers", () => ({
   UserPicker: () => <span>Owner picker</span>,
 }));
 beforeEach(() => {
   endpoints.data = [];
+  adminBilling.requested = [];
 });
 function Harness({
   implicit = false,
@@ -64,6 +111,19 @@ it("marks platform switches dirty and preserves write-only credential entry", as
   );
   expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
   expect(screen.getByText("Owner picker")).toBeInTheDocument();
+});
+it("shows the server-resolved effective billing instead of deriving it", () => {
+  render(<Harness servicePatch={{ id: "svc-1", billing: { platform_pricing: { credits_per_unit: "1", lago_metric_code: "svc", sync_status: "synced" } } } as never} />);
+  expect(new Set(adminBilling.requested)).toEqual(new Set(["svc-1"]));
+  expect(screen.getByText("Effective billing")).toBeInTheDocument();
+  expect(screen.getByText(/lane price is not synced yet; legacy platform billing charges/)).toBeInTheDocument();
+  expect(screen.getByText(/7 credits \/ request · Lago plan price/)).toBeInTheDocument();
+  expect(screen.queryByText(/source: service/)).toBeNull();
+});
+it("omits the effective summary for a service that is not saved yet", () => {
+  render(<Harness />);
+  expect(adminBilling.requested).toEqual([]);
+  expect(screen.queryByText("Effective billing")).toBeNull();
 });
 it("enabling a lane shows pricing and marks legacy billing superseded", async () => {
   render(<Harness />);

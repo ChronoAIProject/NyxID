@@ -141,6 +141,7 @@ impl Registry {
             version: "1.0".into(),
             sha256: hex::encode(Sha256::digest(&self.bytes)),
             dependencies: vec![],
+            disabled: false,
         }
     }
 }
@@ -189,6 +190,7 @@ async fn agent_skill_pin_integrity_and_exact_guid_version() {
     );
     assert!(preview(&registry, ID, "latest").await.is_err());
 }
+
 #[tokio::test]
 async fn agent_skill_invisible_cannot_be_pinned_and_removal_needs_no_ornn() {
     let f = orchestrator_fixture("agent_skill_visibility").await;
@@ -602,4 +604,145 @@ async fn agent_skill_version_pages_keep_older_pins_available() {
     assert_eq!(last["items"][6]["version"], "1.0");
     assert_eq!(last["total_pages"], 2);
     assert!(first.to_string().len() < 8000);
+}
+
+#[tokio::test]
+async fn disabled_pins_are_omitted_from_prompt_instructions() {
+    let f = fixture("agent_skill_disabled_prompt").await;
+    let reader = Registry::new();
+    let selection = Selection {
+        expected_revision: 0,
+        skills: vec![reader.reference()],
+    };
+    set(
+        &f.state.db,
+        &reader,
+        &f.owner,
+        &f.chat.agent_id,
+        &selection,
+        true,
+    )
+    .await
+    .unwrap();
+    let mut toggled = reader.reference();
+    toggled.disabled = true;
+    let toggled_selection = Selection {
+        expected_revision: 1,
+        skills: vec![toggled],
+    };
+    // Disabling is refused until the rollout flag is on, before any write.
+    let refused = set(
+        &f.state.db,
+        &reader,
+        &f.owner,
+        &f.chat.agent_id,
+        &toggled_selection,
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&refused, AppError::Forbidden(m) if m == "Skill pin disabling is not enabled for this rollout"),
+        "{refused:?}"
+    );
+    let unchanged = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(unchanged.skills_revision, 1);
+    assert!(!unchanged.skills[0].disabled);
+    crate::services::feature_flag_service::set_platform_override(
+        &f.state.db,
+        crate::services::feature_flag_service::SKILL_PIN_DISABLE_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    set(
+        &f.state.db,
+        &reader,
+        &f.owner,
+        &f.chat.agent_id,
+        &toggled_selection,
+        true,
+    )
+    .await
+    .expect("disabling an existing pin must not require a re-preview");
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(agent.skills[0].disabled);
+    // The change is in the agent's skill history with each pin's state.
+    let history = history(&f.state.db, &agent).await.unwrap();
+    let latest = &history.items[0];
+    assert_eq!(latest.event_type, "assistant_skills_updated");
+    assert_eq!(latest.revision, Some(2));
+    assert_eq!(latest.skills.len(), 1);
+    assert_eq!(latest.skills[0].skill_id, reader.reference().skill_id);
+    assert!(latest.skills[0].disabled);
+    assert!(!history.items[1].skills[0].disabled);
+    let mut disabled = reader.reference();
+    disabled.skill_id = "disabled-skill".into();
+    disabled.name = "Disabled Skill".into();
+    agent.skills = vec![reader.reference(), disabled];
+    agent.skills[1].disabled = true;
+    let prompt = instructions(&agent);
+    assert!(prompt.contains(&reader.reference().name));
+    assert!(!prompt.contains("Disabled Skill"));
+    for pin in &mut agent.skills {
+        pin.disabled = true;
+    }
+    assert!(instructions(&agent).is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn disabled_pins_are_inaccessible_to_skill_read() {
+    let f = fixture("agent_skill_disabled_read").await;
+    let reader = Registry::new();
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    agent.skills = vec![reader.reference()];
+    assert!(read(&reader, &agent, ID, None, "/", 0).await.is_ok());
+    agent.skills[0].disabled = true;
+    assert!(matches!(
+        read(&reader, &agent, ID, None, "/", 0).await,
+        Err(AppError::Forbidden(_))
+    ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn re_enabling_a_disabled_pin_needs_the_owner_card_but_disabling_does_not() {
+    let f = fixture("agent_skill_reenable_card").await;
+    let reader = Registry::new();
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    agent.skills = vec![reader.reference()];
+    let selection = |disabled: bool| {
+        let mut pin = reader.reference();
+        pin.disabled = disabled;
+        Selection {
+            expected_revision: 0,
+            skills: vec![pin],
+        }
+    };
+    assert!(!needs_confirmation(&agent, &selection(true)));
+    assert!(!needs_confirmation(&agent, &selection(false)));
+    agent.skills[0].disabled = true;
+    assert!(needs_confirmation(&agent, &selection(false)));
+    assert!(!needs_confirmation(&agent, &selection(true)));
+    let mut other = reader.reference();
+    other.skill_id = "other".into();
+    assert!(needs_confirmation(
+        &agent,
+        &Selection {
+            expected_revision: 0,
+            skills: vec![other],
+        }
+    ));
+    f.state.db.drop().await.unwrap();
 }

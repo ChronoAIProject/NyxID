@@ -6,6 +6,182 @@ green, latest-main integration, remote CI, real-vendor test, outside-user
 confirmation or delivery is claimed. All older “final”/“latest source” labels
 are historical and superseded by this leading table.
 
+## R12 merge continuation — 2026-10-14 (+08), current source
+
+Runtime verified before edits from the latest actual `turn_context`, line 2681,
+`/Users/chronoai/.codex/sessions/2026/10/13/rollout-2026-10-13T20-52-33-01a13552-5e24-7250-88e8-f740d22ac5e3.jsonl`:
+model `gpt-6.1-sol`, effort `xhigh`, approval `never`, sandbox `danger-full-access`.
+The backup and WIP commit below remain intact. Merge is in progress; no merge
+commit or full backend green is claimed yet. The commands in this section are
+post-integration evidence; older sections remain historical.
+
+Conflict resolutions (semantic implementation plus review):
+
+| Conflicted file | Resolution |
+| --- | --- |
+| `CLAUDE.md` | Retain upstream assistant feedback/settings documentation and the Tool authority boundary. |
+| `backend/src/handlers/services.rs` | Preserve Tool preflight and transactional mutation; use shared Catalog row authority for non-Tools, retaining field/destination and foreign activation limits. |
+| `backend/src/handlers/endpoints.rs` | Preserve parent transactions and Tool demotion/publication; admit shared Catalog writers to non-Tool mutations, publication and paused/draft listings. |
+| `cli/src/commands/admin_catalog.rs` | Preserve `--with-client`, but borrow Zeroizing client values and use credential transport with secret-only redaction and retained status/error code. |
+| `docs/CATALOG_MANAGER.md` | Combine command and transport/playbook documentation; Catalog Managers can upload any provider icon. |
+| `frontend/src/router.test.ts` | Retain both billing-route coverage and Tools-route authority coverage. |
+
+Supporting semantic changes since the previous checkpoint:
+`catalog_authority.rs`, `catalog_mutation_service.rs`, `catalog_skill_service.rs`,
+`tool_publication_service.rs`, `tools_manager_tests.rs`, and
+`admin_catalog_playbook.rs`. A shared services-layer predicate now supplies both
+handler and transaction eligibility. The parent projection includes platform
+ACL configuration; foreign shared rows bind live Catalog permission. Field
+validation runs inside both service and skill-metadata transactions. Non-Tool
+publication now captures the observed parent and authenticated actor, binds
+kind/ownership/live role and requires Catalog permission; Tool publication
+still requires live human Admin. Provider version/client re-entry protections
+survive the auto-merge. New R12 regression covers live permission revocation,
+kind/owner drift, foreign activation/destination denials, and legacy creator
+fallback. Playbook icon/scopes authority now reflects shared-provider edits;
+client-bound guidance names the connection and client-re-entry conditions.
+The shared-row ingress guard now rejects nonhuman Catalog writers before any
+discovery fetch; a new loopback regression exercises API key, service account,
+delegated, relay and OAuth-app callers, plus the first-party success case.
+
+| Current-source command | Exit / actual result | Log |
+| --- | --- | --- |
+| `cargo fmt --all` | 0 | `/tmp/tools-manager-sol-merge-format1.log` |
+| `CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo check -p nyxid -p nyxid-cli --tests --locked` | 101; CLI test type ambiguity, one unused import, and upstream billing_only initializer missing our clear_credential/icon_url fields. Corrected after completion; no pass claimed. | `/tmp/tools-manager-sol-merge-check1.log` |
+| same combined check command, check2 | 0; no warnings. Subsequent private-row compatibility adjustment awaits focused compilation/Clippy. | `/tmp/tools-manager-sol-merge-check2.log` |
+| `NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:63201/?replicaSet=tools_manager_current&directConnection=true'` plus the same resource limits, `cargo test -p nyxid --bin nyxid-server --locked catalog_manager -- --test-threads=2` | 0; 3 passed, 0 failed; build 4m53s, runtime 0.93s. Includes PR1872 seeded/shared completion. | `/tmp/tools-manager-sol-merge-backend1-1.log` |
+| same env/resources, `cargo test -p nyxid --bin nyxid-server --locked tools_manager -- --test-threads=2` | 0; 23 passed, 0 failed, 1 ignored; build 4m49s, runtime 5.87s. Fake E2E ignored and not run. | `/tmp/tools-manager-sol-merge-backend1-2.log` |
+| same env/resources, `cargo test -p nyxid --bin nyxid-server --locked services::service_endpoint_service::tests -- --test-threads=2` | 0; 19 passed, 0 failed; runtime 1.55s. | `/tmp/tools-manager-sol-merge-backend1-3.log` |
+| same env/resources, `cargo test -p nyxid --bin nyxid-server --locked services::tool_publication_service::tests -- --test-threads=2` | 0; 6 passed, 0 failed; runtime 0.47s. | `/tmp/tools-manager-sol-merge-backend1-4.log` |
+| same env/resources, `cargo test -p nyxid --bin nyxid-server --locked services::catalog_spec_sync::tests -- --test-threads=2` | 0; 13 passed, 0 failed; runtime 2.84s, including corrected fixtures and missing-key failure. | `/tmp/tools-manager-sol-merge-backend1-5.log` |
+| same env/resources, `target/debug/deps/nyxid_server-79faaa7a79ea5bc1 services::catalog_identity_service::tests non_tool_receipt_replay_survives_inactive_and_deleted_resource resync_identity services::provider_link_service::tests services::catalog_icon_service::tests --test-threads=2` | 0; 13 passed, 0 failed; runtime 3.52s. | `/tmp/tools-manager-sol-merge-backend-direct1.log` |
+| same resources, `cargo test -p nyxid-cli --locked -- --test-threads=2` | 101; 1505 passed, 2 failed, 6 ignored. Fixture corrections follow: specific endpoint mock priority, and explicit synced pricing after testing free access advisory. | `/tmp/tools-manager-sol-merge-cli1.log` |
+| same resources, `cargo test -p nyxid-cli --locked -- --test-threads=2`, cli2 | 0; 1507 binary tests and 78 integration tests passed, 6 ignored; no warnings. | `/tmp/tools-manager-sol-merge-cli2.log` |
+| same owned Mongo/resources, `cargo test -p nyxid --bin nyxid-server --locked -- catalog_manager tools_manager services::service_endpoint_service::tests services::tool_publication_service::tests services::catalog_spec_sync::tests services::catalog_identity_service::tests non_tool_receipt_replay_survives_inactive_and_deleted_resource resync_identity services::provider_link_service::tests services::catalog_icon_service::tests --test-threads=2` | 0; 77 passed, 0 failed, 1 ignored, 8038 filtered; build 4m59s, runtime 13.93s. Fake E2E remained ignored. Includes latest shared-row ingress/commit regressions. | `/tmp/tools-manager-sol-merge-backend2.log` |
+| same resources, `cargo clippy -p nyxid -p nyxid-cli --tests --locked -- -D warnings` | 101; two CLI collapsible-if, one CLI needless-borrow and one backend twin-source collapsible-if diagnostic. All four corrected afterward. | `/tmp/tools-manager-sol-merge-clippy1.log` |
+| `cargo fmt --all`, format7 | 0; formats the four lint corrections. | `/tmp/tools-manager-sol-merge-format7.log` |
+| same combined Clippy command, clippy2 | 0; no warnings, 2m49s. R13 changes followed and are not covered by this compile-only result. | `/tmp/tools-manager-sol-merge-clippy2.log` |
+
+
+Backend executable SHA256:
+`564131ff28ba886a253fb70aecefe14782e98c4ef30acdc72c156232f4e9c6ac`.
+Source snapshot: HEAD `88dc48e82b9e8d064b2c14f3222df2ef9bf6c628`, MERGE_HEAD
+`4faec86bcbb958eb12ab2bb3adf5911f0eb94dfb`, source diff SHA256
+`fab0feedee449f20c62ecb0954cf97251f34d0baf5d2980fac31408ebff7da64` for
+`git diff --binary HEAD -- backend cli frontend Cargo.lock Cargo.toml`.
+Manifest and exact patch are `/tmp/tools-manager-sol-merge-source-manifest.json`
+and `/tmp/tools-manager-sol-merge-source-state.patch`. No backend source changed
+between these runtime runs. CLI-only fixture corrections follow this snapshot.
+The nonexistent crate-relative `.git/HEAD` and `.git/refs` build-script watches
+cause repeated builds; they predate this branch and remain unchanged per PM.
+Future focused runs use multiple libtest filters in one invocation or the
+printed executable directly after one build. The final lint-only corrections
+(two nested conditions, twin-source condition and unnecessary borrow) followed
+backend2/CLI2 runtime; Clippy2 checks those corrections. No new runtime behavior
+is claimed from the compile-only Clippy gate.
+
+Latest backend2 source/executable snapshot (supersedes source1 above):
+`target/debug/deps/nyxid_server-79faaa7a79ea5bc1`, SHA256
+`d928d41113a83c803040742e18bba286c10c475348c61cee108d14dee2bdb250`;
+source diff SHA256 `366f7d59931d552991f596f79da196c384d675941b27440fd5e9d063f140bc94`.
+Exact patch and manifest: `/tmp/tools-manager-sol-merge-source2-state.patch`,
+`/tmp/tools-manager-sol-merge-source2-manifest.json`. Final backend4 snapshot:
+source diff SHA256 `3155fe6ee80fc5e4de48ea9afc7c55790657f899b77591141273a53575d67a78`,
+executable SHA256 `d5eeca6220f832c55d5b0978341d09a987ea3bc8df64357d6a3fcc7adbe5841a`
+(same executable path). Exact patch/manifest:
+`/tmp/tools-manager-sol-merge-source4-state.patch`,
+`/tmp/tools-manager-sol-merge-source4-manifest.json`. Source1 evidence predates
+only the final ingress guard and CLI fixtures. No build-script changes.
+
+The following status table is for the merged working source. Prior focused
+passes explain implemented fixes but do not certify the post-merge snapshot.
+
+| ID | Status | Remaining evidence / work |
+| --- | --- | --- |
+| T-F1 | in-progress | Withdrawal implemented; fresh endpoint/Tool/fake-flow checks remain. |
+| T-F2 | in-progress | Deletion and route demotion implemented; fresh checks remain. |
+| T-F3 | fixed-verified | Fresh icon assets/eligibility/request audit regression passed backend1-2. |
+| T-F4 | fixed-verified | Fresh role-scoped inactive inventory regression passed backend1-2; CLI inventory acceptance tracked by C-F3. |
+| T-F5 | open | Safe field-name diagnostics and caller inventory pending. |
+| T-F6 | open | Human credential rejection matrix and compatibility documentation pending. |
+| T-F7 | in-progress | Own-connection/no-auth execution matrix pending. |
+| T-F8 | fixed-verified | Empty-discovery actionable failure and retry safety passed CLI2. |
+| T-F9 | fixed-verified | Current server topic vocabulary mock passed CLI2. |
+| T-F10 | fixed-untested | Comment corrected; lint/review pending. |
+| T-F11 | in-progress | D11 per-lane readiness/gates implemented in CLI; tests/docs pending. |
+| T-F12 | fixed-verified | Effective-free and missing-action handoff/pricing mock passed CLI2. |
+| T-F13 | fixed-verified | Production expression helper replaces pipeline surgery; fresh endpoint suite (19 passed) covers semantic/no-op/concurrency and invalid-generation withdrawal. |
+| T-F14 | fixed-verified | Request actor/IP/UA passed backend2; icon uses checked client and identity mock passed CLI2. |
+| T-F15 | fixed-verified | Neutral counter/watcher inventory documented; fresh authority regression passed backend1-2. |
+| C-F1 | fixed-verified | CLI2 redirect refusal, reflected-secret redaction/status/code and client re-entry tests passed. |
+| C-F2 | fixed-verified | Poisoned client env dry-run and lazy credential-source tests passed CLI2. |
+| C-F3 | fixed-verified | Inactive/ambiguous no-create and validate tests passed CLI2; scoped inventory passed backend2. |
+| C-F4 | in-progress | Playbook/wizard wired and R12 authority updated; mocks pending. |
+| C-F5 | in-progress | Not-verified real gates implemented; snapshots/fake E2E pending, external gates open. |
+| C-F6 | fixed-verified | OAuth/device-code/API-key connect-command readiness snapshots passed CLI2. |
+| C-F7 | open | D9 auth scheme and Zoho template compatibility pending. |
+| C-F8 | fixed-verified | Explicit operation create/update/no-op/unmanaged omission tests passed CLI2. |
+| C-F9 | in-progress | Strict literal GET smoke commands implemented; mocks/fake E2E pending. |
+| D9 | open | Auth scheme implementation and HTTP/WS/MCP loopback proofs pending. |
+| D10 | in-progress | Refined by D11 per-lane gates; no real-service verification claimed. |
+| D11 | in-progress | CLI lanes implemented; BYOK/billing backend regression, E2E, docs pending. |
+| P1 | fixed-verified | Fresh fabricated-reference rejection/old-icon preservation passed backend1-2. |
+| P2 | in-progress | See T-F2/R5. |
+| P3 | in-progress | See T-F1/R6/R7. |
+| P4 | in-progress | Secret-free eligibility present; frontend and fresh backend checks pending. |
+| P5 | fixed-verified | Fresh live Admin/legacy kind/revocation publication regression passed backend1-2. |
+| P6 | fixed-verified | Fresh endpoint actor id/IP/UA audit regression passed backend1-2. |
+| P7 | fixed-verified | Fresh Tool transfer/human Admin/kind/receipt checks passed backend1-2; inactive/deleted non-Tool durable replay passed direct1. |
+| P8 | fixed-verified | All-row missing/ineligible server-flag zero-write preflight and pending_admin validation passed CLI2. |
+| P9 | fixed-verified | Fresh exact Manager/Admin twin retry and changed-intent conflict regression passed backend1-2. |
+| P10 | in-progress | Foreground/background parent fences implemented and merged; fresh race tests pending. |
+| P11 | in-progress | Service/create/alternate fences implemented; shared authority integrated, broader acceptance pending. |
+| P12 | fixed-verified | Ambiguous validate/icon and UUID identity mocks passed CLI2 for Tools/Catalog. |
+| P13 | in-progress | Transactional provider-less restriction implemented; fresh link/requirements tests pending. |
+| R1 | fixed-verified | Dedicated selective-fence/system-role/group/user revocation regression passed backend1-2. |
+| R2 | fixed-verified | Dedicated unrelated billing drift/contract projection regression passed backend1-2. |
+| R3 | fixed-verified | Strict icon references and asset checks passed backend1-2; duplicate conversion check removed. |
+| R4 | fixed-untested | Icon clearing implementation/frontend; tests pending. |
+| R5 | fixed-verified | Dedicated description-only versus route-shape demotion regression passed backend1-2. |
+| R6 | fixed-verified | Dedicated background spec kind-drift/no-exposure regression passed backend1-2. |
+| R7 | fixed-verified | Unfenced legacy mutations deleted; ported endpoint suite passed backend1-3. |
+| R8 | fixed-verified | Secret-only redaction retains HTTP status/numeric code; normal nonsecret errors tested in CLI2. |
+| R9 | fixed-verified | Own inactive provider visibility regression passed backend1-2; CLI acceptance tracked C-F3. |
+| R10 | fixed-verified | Batch/single eligibility parity including provider requirement passed backend1-2. |
+| R11 | fixed-verified | Missing-key no-mutation/no-append regression and corrected spec-sync fixtures passed backend1-5. |
+| R12 | in-progress | Check2, backend2 (77 passed), CLI2 (1585 passed), Clippy2 clean. R13 final merge verification and local merge commit pending. |
+| R13 | fixed-verified | Backend4 identity/child-Agent-Key/delegated/SA/OAuth-app published-only listing, human draft visibility, ownership negative capability, Tool preview fallback and DB-error propagation passed. |
+
+R13 merge follow-up changed `backend/src/handlers/endpoints.rs`,
+`services_helpers.rs`, `admin_ownership.rs`, `tools.rs` and
+`tools_manager_tests.rs`.
+The endpoint read probe rejects nonhuman write identity without rejecting its
+published-only listing. Expected policy/guidance/unauthorized/not-found denial
+falls back; database/internal errors propagate. Ownership authorization already
+used `is_forbidden()` (including guidance); it now shares the same classifier,
+including Unauthorized. Tool/catalog role helpers return bool and propagate
+DB errors; first-party identity bool capture is a pure synchronous guard, not a
+DB-error-swallowing probe. The new regression covers Admin and manager-backed
+Agent Keys/child login credentials, delegated account:read, SA identities without
+User rows, OAuth-app tokens, missing actors, human draft visibility and malformed
+stored-user DB error propagation. Tools offering-list Admin preview lookup now falls back on expected denials
+(including SA actor absence) and propagates unexpected errors. The extended
+identity regression includes this listing and its malformed-user DB error case.
+
+`cargo fmt --all` format8 exit 0 (`/tmp/tools-manager-sol-merge-format8.log`).
+Backend3 used the exact backend2 command above, with multiple libtest filters
+in one invocation: exit 0, 78 passed, 0 failed, 1 ignored, runtime 14.70s; log
+`/tmp/tools-manager-sol-merge-backend3.log`. This precedes only the Tool preview
+fallback and its test extension. `cargo fmt --all` format9/10 exit 0, logs
+`/tmp/tools-manager-sol-merge-format9.log` and `format10.log`. Backend4 uses the
+same combined command for that final source, log
+`/tmp/tools-manager-sol-merge-backend4.log`; exit 0, 78 passed, 0 failed,
+1 ignored, build 4m57s/runtime 14.89s. Final combined Clippy3 passed, exit 0, no warnings, 2m45s, with the
+same resource limits and `--tests --locked -- -D warnings`, log
+`/tmp/tools-manager-sol-merge-clippy3.log`. The resolved index has no conflict markers/unmerged entries and
+`git diff --cached --check` passes. Commit the merge locally. Then resume Catalog acceptance, D11 runtime/E2E/docs,
+D9, WP-E/F/G/H and final serialized verification. No delivery actions.
+
 ## Latest-main integration checkpoint — 2026-10-13 (+08), in progress
 
 The user changed priority and authorized local commits/merge for integration.

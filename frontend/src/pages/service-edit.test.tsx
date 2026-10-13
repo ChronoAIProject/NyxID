@@ -40,6 +40,15 @@ vi.mock("@/hooks/use-services", () => ({
   }),
   useUpdateService: () => ({ mutateAsync: mutate, isPending: false }),
 }));
+// The editor's server-resolved effective billing panel is covered in
+// platform-service-fields.test.tsx; it renders nothing here.
+vi.mock("@/hooks/use-admin-billing", () => ({
+  useAdminBillingService: () => ({
+    data: undefined,
+    isLoading: false,
+    error: null,
+  }),
+}));
 vi.mock("@/hooks/use-endpoints", () => ({
   useEndpoints: () => ({ data: [] }),
 }));

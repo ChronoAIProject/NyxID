@@ -1,4 +1,5 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
+import { AccessModeSwitcher, ThreadModelSelect } from "@/components/assistant/nyxbot-access-controls";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { ReviewCardTarget } from "./review-card-target";
@@ -52,7 +53,9 @@ import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-lo
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
-import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
+import { ChatMessageBubble, ChatMessageEntry, ChatMessageList } from "@/components/assistant/chat-message";
+import { WorkingContextPanel } from "@/components/assistant/working-context-panel";
+import type { ChatSessionState } from "@/lib/assistant/chat-types";
 import {
   DirectChatControls,
   DirectModeBanner,
@@ -90,6 +93,30 @@ function sidebarConversation(
     llm_model: conversation.llmModel,
   };
 }
+
+export function AevatarAssistantMessageList({ session, bottomInset, footer, notice, projectionVersion, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly footer?: React.ReactNode; readonly notice?: React.ReactNode; readonly projectionVersion?: string; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} footer={footer} notice={notice} projectionVersion={projectionVersion} emptyDescription={emptyDescription} />; }
+/** How the NyxAgent thread page renders an assistant reply: the entry with
+ * author header and feedback controls, and Retry for a failed reply. */
+export function NyxAgentAssistantEntry({
+  message,
+  conversationId,
+  retry,
+}: {
+  readonly message: import("@/lib/assistant/chat-types").ChatMessage;
+  readonly conversationId: string | undefined;
+  readonly retry: (messageId: string) => Promise<void>;
+}) {
+  return (
+    <ChatMessageEntry
+      message={message}
+      conversationId={conversationId}
+      feedbackEnabled
+      onRetry={message.status === "error" ? () => retry(message.id) : undefined}
+    />
+  );
+}
+
+export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} />; }
 
 export function AssistantChatPage() {
   const navigate = useNavigate();
@@ -345,7 +372,6 @@ export function DirectAssistantChatPage() {
     selectedConversationId: selectedId,
     onConversationAdopted: adoptConversation,
   });
-
   useLayoutEffect(() => {
     const element = composerRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
@@ -443,7 +469,7 @@ export function DirectAssistantChatPage() {
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <DirectModeBanner />
         <AssistantLinkModalHost>
-        <ChatMessageList
+        <AevatarAssistantMessageList
           session={chat.session}
           bottomInset={composerHeight}
           emptyDescription={DIRECT_MODE_COPY}
@@ -542,6 +568,12 @@ function NyxAgentThreadPage() {
     threadsAgentId: selectedAgent?.id,
     draftAgent,
   });
+  // The bubble shows a rejected retry (turn_active, an expired upload, a
+  // network error) next to its Retry button.
+  const retryFailedMessage = useCallback(async (messageId: string) => {
+    if (!selectedId) throw new Error("Select the conversation to retry.");
+    await chat.retry(selectedId, messageId);
+  }, [chat, selectedId]);
   useLayoutEffect(() => {
     const element = composerRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
@@ -621,6 +653,23 @@ function NyxAgentThreadPage() {
           destroyed={destroyed}
           channelPlatform={channelPlatform}
           onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
+          controls={
+            <>
+              <AccessModeSwitcher
+                agentOverride={
+                  agents.data?.agents.find((row) => row.id === headerAgent.id)
+                    ?.access_mode_override
+                }
+              />
+              {selectedId && conversation ? (
+                <ThreadModelSelect
+                  conversationId={selectedId}
+                  model={conversation.model}
+                  disabled={destroyed || chat.isStreaming}
+                />
+              ) : null}
+            </>
+          }
         />
         {headerAgent.kind === "nyxbot" ? (
           <TeamStrip agents={agents.data?.agents ?? []} onOpenConversation={go} />
@@ -631,6 +680,7 @@ function NyxAgentThreadPage() {
         {selectedId && !chat.isStreaming ? (
           <WaitingNote items={chat.waiting} agentName={agentName} />
         ) : null}
+        {selectedId ? <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} /> : null}
       </div>
     </div>
   ) : null;
@@ -720,7 +770,7 @@ function NyxAgentThreadPage() {
           <AssistantLinkModalHost>
             {chat.isStreaming && chat.continuations > 0 ? <p role="status" className="mx-auto w-full max-w-[758px] px-4 pb-2 text-11 text-muted-foreground">Continuing task…</p> : null}
             {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
-            <ChatMessageList
+            <NyxAgentThreadMessageList
               session={chat.session}
               renderMessage={(message) => {
                 if (message.role === "event") return <NyxBotEventNotice message={message} />;
@@ -733,8 +783,17 @@ function NyxAgentThreadPage() {
                   return (
                     <div className="flex flex-col items-end gap-1">
                       <ChannelBadge platform={via} />
-                      <ChatMessageBubble message={message} />
+                      <ChatMessageBubble message={message} onRetry={message.status === "error" ? () => retryFailedMessage(message.id) : undefined} />
                     </div>
+                  );
+                }
+                if (message.role === "assistant") {
+                  return (
+                    <NyxAgentAssistantEntry
+                      message={message}
+                      conversationId={chat.session.conversationId}
+                      retry={retryFailedMessage}
+                    />
                   );
                 }
                 const approval = chat.approvals.find(

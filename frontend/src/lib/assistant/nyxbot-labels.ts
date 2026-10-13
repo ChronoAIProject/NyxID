@@ -1,5 +1,10 @@
 import { getProviderBrand } from "@/lib/provider-branding";
-import type { AssistantAgent, AssistantAgentKind } from "@/schemas/assistant-nyxagent";
+import type {
+  AssistantAgent,
+  AssistantAgentKind,
+  NyxAgentAccessMode,
+  NyxAgentActionConfirmation,
+} from "@/schemas/assistant-nyxagent";
 import type { Conversation } from "@/types/assistant";
 
 const PLATFORM_NAMES: Readonly<Record<string, string>> = {
@@ -313,4 +318,44 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
   return [...groups.values()].sort(
     (a, b) => Number(b.id === "personal") - Number(a.id === "personal"),
   );
+}
+
+export const ACCESS_MODE_LABEL = {
+  autopilot: "Autopilot",
+  nyxmode: "NyxMode",
+  ask_every_time: "Ask Every Time",
+} as const satisfies Record<NyxAgentAccessMode, string>;
+
+/** What each access mode asks before, in one line. */
+export const ACCESS_MODE_DESCRIPTION = {
+  autopilot:
+    "Acts without approval prompts. Webhook, machine and saved-login confirmations still ask.",
+  nyxmode: "Acts on ordinary requests; asks before sensitive or destructive actions.",
+  ask_every_time: "Asks before every action that changes something. Reading never asks.",
+} as const satisfies Record<NyxAgentAccessMode, string>;
+
+/** The mode that governs an agent: its own override, else the workspace mode. */
+export function effectiveAccessMode(
+  workspace: NyxAgentAccessMode | undefined,
+  override: NyxAgentAccessMode | null | undefined,
+): NyxAgentAccessMode {
+  return override ?? workspace ?? "nyxmode";
+}
+
+export const ACTION_RISK_LABEL = {
+  read: "Read",
+  change: "Change",
+  sensitive: "Sensitive",
+  destructive: "Destructive",
+} as const;
+
+/** Why a card asks, for its risk line. */
+export function confirmationReason(confirmation: NyxAgentActionConfirmation): string {
+  if (confirmation.reason === "webhook") return "This automation's confirmation policy asks.";
+  if (confirmation.reason === "policy") {
+    return "This machine's or saved login's confirmation setting asks.";
+  }
+  return confirmation.access_mode
+    ? `Your access mode is ${ACCESS_MODE_LABEL[confirmation.access_mode]}.`
+    : "Your access mode asks.";
 }

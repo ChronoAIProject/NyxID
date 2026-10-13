@@ -8222,6 +8222,22 @@ Human owners and owning-org admins can `PATCH /api/v1/channel-bots/{id}` with `{
 
 Public messages use `post:<conversation_id>` addresses. Agents use `POST /api/v1/channel-relay/reply` with the callback's NyxID `message_id` and reply token. Replies are text-only and target that incoming post; caller metadata cannot change the target. Public callbacks omit owner access tokens. Public initiated sends and edits are unsupported. See [X channel setup and limitations](CHANNEL_BOT_RELAY.md#select-mentions-and-replies) for the CLI, routing, scope and billing details.
 
+## Channel bot health
+
+`GET /api/v1/channel-bots/{id}/health` returns metadata-only delivery diagnostics for anyone who can read the bot:
+- `diagnostics`: inbound, reply and webhook timestamps and errors, `subscription_state`, `consecutive_errors` and the stable `failure_reason`;
+- `mode` (`webhook` or `poll`);
+- the stable `recommended_action` (`none`, `reconnect`, `resubscribe`, `verify`, `wait_rate_limit`, `enable_billing`, `contact_admin`, `gateway`) and `recommended_action_text`;
+- `can_write`.
+
+Unauthorized callers get the not-found shape.
+
+`POST /api/v1/channel-bots/{id}/resubscribe` needs write access and is X-only. It re-registers the X Activity subscription, reads it back live, records a `channel_bot_resubscribed` audit row, and returns fresh health.
+
+Admins can use `GET /api/v1/admin/channel-bots` (`platform`, `status`, `limit` 1-500, `offset`; ordered by id), `GET /api/v1/admin/channel-bots/{id}/health` and `GET /api/v1/admin/channel-bots/webhook-rejections`. The last returns per-platform counters of deliveries refused before a bot was authenticated.
+
+All of these routes are denied to delegated `account:read` tokens. Failure codes and recovery are described in [X channel workflow, health and recovery](CHANNEL_BOT_RELAY.md#x-channel-workflow-health-and-recovery).
+
 ## Telegram New Channel Creation
 
 Telegram New is the separate `telegram-new` channel option. The existing `telegram` registration API and token-based setup remain available. See [Telegram New](TELEGRAM_NEW.md#api-and-storage) for request/response fields, status transitions, recovery rules, and administrator setup.

@@ -27,22 +27,41 @@ A Catalog Manager may:
 
 - create OAuth, device-code and API-key providers;
 - edit every field of a provider they created, including its OAuth client;
-- set the **first** OAuth client on any provider that has none (for example a
-  seeded connector awaiting app registration);
+- on any other provider, including seeded connectors:
+  - edit the name, description, default scopes, documentation URL and icon;
+  - set the first OAuth client on a provider that has none;
+  - edit its authorization, token, revocation and device URLs, credential
+    mode, PKCE and token request settings only **before anyone has connected
+    through it**: no `user_provider_tokens`, `user_provider_credentials` or
+    `user_api_keys` row references it, including org-owned and API-key
+    connections, because those settings decide where users' clients and
+    tokens are sent. This also locks an API-key provider's display-only
+    `api_key_url` and `api_key_instructions` once anyone has connected; ask an
+    Admin to change them then. Once a platform client exists they must also re-enter it in the same
+    request (`nyxid admin provider update <slug> --file f.yaml --with-client`),
+    proving they already hold the secret. Providers whose client has no secret
+    (public device-code clients) cannot be proven this way and stay Admin-only
+    for those settings. After people connect, these settings need an Admin;
+- upload an SVG icon for any provider;
 - create public HTTP catalog services and link them to providers they created;
-- edit descriptive fields, the destination URL and the active flag of services
-  they created, manage their operation endpoints, and deactivate them. The
-  destination URL is fixed once an Admin attaches a shared credential, a
-  platform key, or a provider someone else created, so those credentials
-  cannot be redirected;
+- on services they created, and on every shared catalog row (public, unowned,
+  HTTP, outside the `internal` category, not a Tool offering) including seeded
+  ones: edit descriptive fields and the OpenAPI spec URL, add, update, delete,
+  discover, pause and publish operation endpoints. The destination URL is
+  fixed once an Admin attaches a shared credential, a platform key, or a
+  provider someone else created, so those credentials cannot be redirected;
+- deactivate or reactivate services they created (not other rows);
 - list the services linked to a provider (public rows and their own, without
   credential inspection).
 
 Only an Admin may:
 
 - replace or clear an OAuth client on a provider someone else created, or
-  change any other field on it;
+  deactivate such a provider;
+- change client-bound provider settings once people have connected through a
+  provider someone else created;
 - delete a provider (this revokes every user's tokens);
+- deactivate or delete a service someone else created;
 - link a service to a provider someone else created, so a new service cannot
   borrow an existing OAuth client;
 - set or change a service's shared credential, platform key, billing,
@@ -50,18 +69,29 @@ Only an Admin may:
   exchange, default headers, WebSocket frame injection, anonymous (no-auth)
   endpoint rules (including through the `/services/{id}/anonymous-endpoints`
   routes), operation policy, developer apps, visibility, category, skills, or
-  tool twins.
+  tool twins;
+- write private or person-owned rows, and Tool offerings and their
+  operations.
 
 A Catalog Manager owns the providers they create, including the right to
 change the token URL or clear the client. Admins should therefore not place
 a platform-owned OAuth client on a manager-owned provider; create an
-Admin-owned provider instead.
+Admin-owned provider instead. Before setting a client on any provider a
+Catalog Manager could have edited, an Admin should check its URLs; every
+provider update records its `authority` in the audit log. A Catalog Manager's
+provider write applies only to the version their permission check read, so a
+concurrent Admin change returns a conflict instead of combining with it.
+
+Operations on seeded services that come from a built-in spec are recreated at
+the next startup if deleted; pause them instead. Operation metadata such as
+`risk` drives assistant confirmation cards, so Catalog Managers are trusted
+not to downgrade a destructive operation on shared rows.
 
 A row a Catalog Manager creates is marked `catalog_manager_created`. On
 marked rows a non-admin may change the row or its operation endpoints only
 while holding the role, so revoking it also revokes write access, and
-anonymous rules stay Admin-only. Every other row, including all rows that
-existed before this role, keeps the existing creator rule unchanged. Provider
+anonymous rules stay Admin-only. Rows created before this role keep the
+creator rule for creators without the role. Provider
 and link audit events record
 `"authority": "admin" | "catalog_manager"`; provider updates also record
 whether a client was set, never its value.
@@ -157,6 +187,13 @@ just before sending. OAuth-client requests require HTTPS or exact loopback,
 disable redirects, and redact error bodies while retaining HTTP status and
 NyxID numeric error code. Device-code providers can use an ID without a secret
 when their vendor permits it.
+- `nyxid admin provider update <provider> --file f.yaml --with-client` sends
+  the OAuth client with the change (prompted, or `--client-id-env` /
+  `--client-secret-env`). A Catalog Manager needs it to change client-bound
+  settings on a provider whose client someone else set.
+- `nyxid catalog endpoint add | update | disable <service>` and
+  `nyxid catalog discover <service>` manage a catalog row's operations;
+  `nyxid catalog publish <service> --operation <name>` changes publication.
 - `nyxid admin provider list | show | link | delete` manage single providers. `set-credentials <provider>` sets the NyxID-managed
   client; it is unrelated to `nyxid service credentials`, which stores a
   user's own OAuth app.
@@ -195,7 +232,7 @@ nyxid catalog show api-zoho-mail --output json
 
 The command uploads the file to NyxID, then updates the provider's `icon_url`.
 All catalog services linked to that provider inherit the icon. Admins may update
-any provider; Catalog Managers may update only providers they created.
+any provider; Catalog Managers may also upload icons for seeded and shared providers.
 
 The backend must support `POST /api/v1/providers/{provider_id}/icon` before using
 this command. Assets are stored in MongoDB and served publicly at
@@ -231,7 +268,7 @@ Catalog OAuth onboarding retains the evidence needed to assess each item:
 | C3 | Authorization/token URLs, device-code/device-token URLs where applicable, and configured revocation or sourced `vendor_unsupported`/`nyxid_incompatible` applicability. |
 | C4 | `credential_mode: admin` or `both`. `user` can remain connectable but fails this managed-client playbook item. `both` still needs C1. |
 | C5 | An OpenAPI spec or explicit operations, with at least one active live endpoint. |
-| C6 | A static provider SVG served from `/catalog-icons/{uuid}`. Seeded/foreign provider changes may require an Admin. |
+| C6 | A static provider SVG served from `/catalog-icons/{uuid}`. Catalog Managers may upload icons for seeded and shared providers. |
 
 API-key providers have C1–C4 marked not applicable, retain C5/C6 and the API
 smoke/outside-user gates, and print `service add <slug> --credential-env

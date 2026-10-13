@@ -1349,7 +1349,7 @@ pub async fn run(command: AdminToolsCommands) -> Result<()> {
             let inventory = rows(&inventory, "services");
             let v = super::admin_catalog::unambiguous_row(&inventory, &tool)?
                 .ok_or_else(|| anyhow!("Tool not found"))?;
-            if !tool_shape(&v) {
+            if !tool_shape(v) {
                 bail!("Icon requires a provider-less Tool");
             }
             let result: Value = api
@@ -1956,6 +1956,19 @@ mod tests {
         t.operations = None;
         let mut v = tool();
         v["platform_key"]["allowed_owner_ids"] = json!(["approved-person"]);
+        let free = readiness(&t, Some(&v), &[endpoint("published")]);
+        assert_eq!(
+            free.status, "ready",
+            "intentional free access remains ready"
+        );
+        assert!(
+            free.admin_commands
+                .iter()
+                .any(|command| command.starts_with("Review billing.platform_key_pricing"))
+        );
+        // A configured price needs no advisory; retain coverage of the exact
+        // missing publication/activation/credential commands below.
+        v["billing"] = json!({"platform_key_pricing":{"metric":"requests","credits_per_unit":"1","sync_status":"synced"}});
         let r = readiness(&t, Some(&v), &[endpoint("validated")]);
         assert_eq!(
             r.admin_commands,

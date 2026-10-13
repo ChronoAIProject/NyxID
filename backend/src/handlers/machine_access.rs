@@ -376,6 +376,23 @@ pub async fn native(
             false
         };
         if !approved {
+            let routed = crate::services::assistant_settings_service::get(&state.db, &chat.user_id)
+                .await
+                .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
+                .unwrap_or(false);
+            if !routed {
+                crate::services::assistant_acknowledgement_service::audit_access_request_denied(
+                    &state.db,
+                    chat,
+                    Some(node),
+                    "machine_capabilities",
+                )
+                .await;
+                return Ok((
+                    crate::services::assistant_acknowledgement_service::access_request_denied(),
+                    true,
+                ));
+            }
             let login_scope = selection.saved_login_ids.as_ref().map_or_else(
                 || "inherit the agent's saved-login grants".to_owned(),
                 |ids| format!("limit saved logins to {} selected", ids.len()),

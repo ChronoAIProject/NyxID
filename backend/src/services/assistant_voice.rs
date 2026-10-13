@@ -237,6 +237,8 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                retry_of: None,
+                specialist_id: None,
                 steering: None,
                 voice: None,
                 execution_pending: true,
@@ -249,6 +251,8 @@ pub(crate) async fn enqueue_in_session(
                 text: text.into(),
                 status: "completed".into(),
                 error_code: None,
+                upstream_error_code: None,
+                error_detail: None,
                 created_at: request.created_at,
                 activities: Vec::new(),
                 attachments: Vec::new(),
@@ -342,6 +346,8 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+        retry_of: None,
+                        specialist_id: None,
                         steering: None,
                         id: id.clone(),
                         conversation_id: current.conversation_id,
@@ -352,6 +358,8 @@ pub(crate) async fn publish_result(
                         text,
                         status: source.status,
                         error_code: source.error_code,
+                        upstream_error_code: None,
+                        error_detail: None,
                         created_at: Utc::now(),
                         activities: source.activities,
                         attachments: source.attachments,
@@ -740,6 +748,8 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            retry_of: None,
+            specialist_id: None,
             steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,
@@ -750,6 +760,8 @@ async fn settle_lost_in_session(
             text: LOST_RESTART_NOTE.into(),
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
+            upstream_error_code: None,
+            error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
             attachments: Vec::new(),

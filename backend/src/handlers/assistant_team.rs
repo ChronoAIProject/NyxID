@@ -164,6 +164,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        retry_of: None,
         channel_event_id: None,
         org_access: None,
         attachment_ids: Vec::new(),
@@ -872,6 +873,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            retry_of: None,
             channel_event_id: None,
             org_access: None,
             attachment_ids: Vec::new(),
@@ -910,6 +912,97 @@ pub(crate) async fn target_agent(
             team::ensure_nyxbot(&state.db, owner).await
         }
         Some(name) => team::live_specialist(&state.db, owner, name).await,
+    }
+}
+
+/// The owner-facing description of a native team tool call for its action
+/// card: what it does and the identifiers it names, bounded and free of
+/// message text, instructions or other model-written prose.
+fn action_summary(name: &str, args: &Value) -> String {
+    let what = match name {
+        "spawn_subagent" => "Create a specialist",
+        "grant_subagent" => "Grant a specialist more access",
+        "revoke_subagent" => "Remove access from a specialist",
+        "destroy_subagent" => "Destroy a specialist",
+        "update_subagent" => "Change an agent's profile",
+        "message_subagent" => "Give a specialist work",
+        "set_guest_access" => "Change what guests may do with a specialist's services",
+        "decide_permission" if text_arg(args, "decision") == "allow" => {
+            "Approve a specialist's permission request"
+        }
+        "decide_permission" => "Deny a specialist's permission request",
+        "create_schedule" => "Create a scheduled automation",
+        "update_schedule" => "Change a scheduled automation",
+        "delete_schedule" => "Delete a scheduled automation",
+        "run_schedule_now" => "Run a scheduled automation now",
+        "create_group" => "Create a group chat",
+        "update_group" => "Change a group chat",
+        "delete_group" => "Delete a group chat",
+        "post_to_group" => "Post to a group chat",
+        "post_to_chat" => "Post to a channel chat",
+        "update_settings" => "Change NyxBot settings",
+        "connect_channel_bot" => "Connect a channel bot",
+        "link_channel_bot" => "Change which agent a channel bot reaches",
+        "disconnect_channel_bot" => "Disconnect a channel bot",
+        "update_channel_chat" => "Change who may talk in a channel chat",
+        "update_channel_access" => "Change who may chat privately with a channel bot",
+        "stop_following_thread" => "Stop following a channel thread",
+        "machine_pair" => "Pair a machine",
+        "remember" => "Save a memory note",
+        "forget" => "Delete a memory note",
+        "settings_link" | "channel_bot_setup_link" | "machine_setup_link" => {
+            "Create a NyxID settings link"
+        }
+        _ => "Run a NyxBot action",
+    };
+    let mut details = Vec::new();
+    for field in [
+        "subagent",
+        "agent",
+        "name",
+        "request_id",
+        "bot",
+        "channel_agent_id",
+        "group_id",
+        "id",
+        "note_id",
+        "area",
+        "decision",
+        "model",
+    ] {
+        if let Some(value) = args[field].as_str() {
+            details.push(format!(
+                "{field} {}",
+                crate::services::assistant_nyxagent::identifier(value)
+            ));
+        }
+    }
+    for field in ["services", "machines", "logins"] {
+        let items: Vec<String> = args[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(16)
+            .map(crate::services::assistant_nyxagent::identifier)
+            .collect();
+        if !items.is_empty() {
+            details.push(format!("{field} {}", items.join(", ")));
+        }
+    }
+    if args["account_read"].as_bool() == Some(true) {
+        details.push("account read access".into());
+    }
+    if let Some(access) = args["access"].as_str() {
+        details.push(format!(
+            "guest access {}",
+            crate::services::assistant_nyxagent::identifier(access)
+        ));
+    }
+    if details.is_empty() {
+        what.into()
+    } else {
+        format!("{what}: {}", details.join("; "))
     }
 }
 
@@ -981,9 +1074,10 @@ pub(crate) async fn execute_tool(
             )
             .await?;
         }
-        // Machine updates always consume their own owner card, bound to the
-        // resolved version and inspected Docker identity. It is at least as
-        // strict as either webhook policy; do not consume a second digest.
+        // These tools run their own owner-card lifecycle bound to the exact
+        // widening they make (operations, skills, machine capabilities and
+        // updates, permission decisions) or are specialists' own permission
+        // requests; never consume a second digest for them.
         if !matches!(
             name,
             "set_agent_operations"
@@ -992,24 +1086,23 @@ pub(crate) async fn execute_tool(
                 | "decide_permission"
                 | "machine_update"
                 | "machine_capabilities"
-        ) && let Some(refusal) = acks::webhook_action_gate(
-            &state.db,
-            chat,
-            tool_name,
-            args,
-            assistant_team_tools::read_only(name),
-            assistant_team_tools::destructive(name)
-                // Participant edits can purge hidden threads and credentials;
-                // last-person leave also deletes the shared transcript. Retain
-                // the destructive automation gate without changing personal
-                // group name/agent edits or performing extra lookup reads.
-                || (name == "update_group"
-                    && (args["leave"].as_bool() == Some(true)
-                        || args.get("participant_user_ids").is_some())),
-        )
-        .await?
-        {
-            return Ok((refusal, true));
+                | "request_agent_operations"
+                | "request_agent_skills"
+        ) {
+            let facts = acks::ActionFacts::of(acks::classify_owner_action(tool_name, args));
+            if let Some(need) = acks::confirmation_needed(&state.db, chat, facts, false).await?
+                && let Some(refusal) = acks::confirm_action(
+                    &state.db,
+                    chat,
+                    tool_name,
+                    args,
+                    &need,
+                    &action_summary(name, args),
+                )
+                .await?
+            {
+                return Ok((refusal, true));
+            }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
         dispatch(state, chat, name, args).await
@@ -1311,7 +1404,15 @@ async fn dispatch_specialists(
                 },
             ))
             .await?;
-            let agent = Box::pin(team::set_grants(db, owner, &agent.id, change)).await?;
+            let agent = Box::pin(team::set_grants_as(
+                db,
+                owner,
+                &chat.user_id,
+                Some(&chat.api_key_id),
+                &agent.id,
+                change,
+            ))
+            .await?;
             let summary = team::summaries(db, owner, false, false, 0)
                 .await?
                 .into_iter()
@@ -1579,9 +1680,11 @@ async fn dispatch_agent_settings(
                     true,
                 ));
             }
-            let agent = Box::pin(team::set_grants(
+            let agent = Box::pin(team::set_grants_as(
                 db,
                 owner,
+                &chat.user_id,
+                Some(&chat.api_key_id),
                 &agent.id,
                 team::GrantChange::Guests(levels),
             ))
@@ -1615,7 +1718,17 @@ async fn dispatch_agent_settings(
                         .into(),
                 ));
             }
-            let agent = team::update_agent(
+            // A model change follows the owner's access mode like any other
+            // sensitive change: execute_tool has already required the card.
+            if let Some(model) = args["model"].as_str() {
+                super::assistant_nyxagent::require_available_model(
+                    state,
+                    &owner_auth(owner)?,
+                    model,
+                )
+                .await?;
+            }
+            let mut agent = team::update_agent(
                 db,
                 owner,
                 &agent.id,
@@ -1627,8 +1740,26 @@ async fn dispatch_agent_settings(
                 },
             )
             .await?;
+            if let Some(model) = args["model"].as_str() {
+                agent = team::set_agent_policy(
+                    db,
+                    &crate::services::audit_service::AuditActor {
+                        user_id: owner.into(),
+                        ip_address: None,
+                        user_agent: None,
+                        api_key_id: Some(chat.api_key_id.clone()),
+                        api_key_name: None,
+                    },
+                    &agent.id,
+                    team::AgentPolicy {
+                        model: Some(model),
+                        access_mode_override: None,
+                    },
+                )
+                .await?;
+            }
             (
-                json!({"agent": agent.name, "id": agent.id,
+                json!({"agent": agent.name, "id": agent.id, "model": agent.model,
                     "display_name": agent.display_name, "persona": agent.persona}),
                 false,
             )
@@ -1660,15 +1791,42 @@ async fn dispatch_permission_decisions(
             } else {
                 false
             };
-            if !confirmed && acks::webhook_confirmation_required(chat, false, false) {
-                return operation_owner_card(
+            // Refusals that do not depend on the owner's decision come first,
+            // so a card is never raised for a decision that cannot apply.
+            if !confirmed
+                && acks::find_operation_request(db, owner, request_id, None)
+                    .await?
+                    .is_some()
+            {
+                Box::pin(
+                    crate::services::agent_operation_scope_service::require_configuration_enabled(
+                        db, owner,
+                    ),
+                )
+                .await?;
+            }
+            if !confirmed
+                && let Some(need) = acks::confirmation_needed(
+                    db,
+                    chat,
+                    acks::ActionFacts::of(acks::classify_owner_action(
+                        "nyxid__decide_permission",
+                        args,
+                    )),
+                    false,
+                )
+                .await?
+                && let Some(refusal) = acks::confirm_action(
                     db,
                     chat,
                     "nyxid__decide_permission",
                     args,
-                    &format!("Confirm specialist permission decision {request_id}."),
+                    &need,
+                    &action_summary("decide_permission", args),
                 )
-                .await;
+                .await?
+            {
+                return Ok((refusal, true));
             }
             let row = match Box::pin(acks::decide_as(
                 db,
@@ -1687,9 +1845,12 @@ async fn dispatch_permission_decisions(
             {
                 Ok(row) => row,
                 Err(error) if error.is_forbidden() && !confirmed => {
-                    let pending = db.collection::<AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
-                        .find_one(mongodb::bson::doc!{"_id":request_id,"user_id":owner,"kind":"operations","decider":"orchestrator","status":"pending"}).await?
-                        .ok_or_else(|| AppError::NotFound("Operation request not found".into()))?;
+                    let pending =
+                        acks::find_operation_request(db, owner, request_id, Some("pending"))
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::NotFound("Operation request not found".into())
+                            })?;
                     return operation_owner_card(
                         db,
                         chat,
@@ -1996,11 +2157,9 @@ async fn dispatch_settings(
             let maximum = args["max_auto_continuations"]
                 .as_i64()
                 .and_then(|v| i32::try_from(v).ok())
-                .ok_or_else(|| {
-                    AppError::ValidationError(
-                        "max_auto_continuations must be an integer from 0 to 32".into(),
-                    )
-                })?;
+                .unwrap_or(before.max_auto_continuations);
+            // The access mode is changed only by the owner in NyxID; NyxBot
+            // never relaxes its own approvals.
             let after = settings::update(
                 &state.db,
                 &chat.user_id,
@@ -2497,6 +2656,21 @@ pub struct UpdateAgentRequest {
     /// Empty clears it.
     #[serde(default)]
     persona: Option<String>,
+    /// NyxAgent model for the agent's new threads, from the live list.
+    #[serde(default)]
+    model: Option<String>,
+    /// The agent's own access mode; `null` clears it (follow the workspace).
+    #[serde(default, deserialize_with = "present")]
+    access_mode_override: Option<Option<crate::models::assistant_settings::AccessMode>>,
+}
+
+/// Distinguish an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 pub async fn update_agent(
@@ -2505,9 +2679,13 @@ pub async fn update_agent(
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let agent = team::update_agent(
+    if let Some(model) = body.model.as_deref() {
+        super::assistant_nyxagent::require_available_model(&state, &auth, model).await?;
+    }
+    let mut agent = team::update_agent(
         &state.db,
         &owner,
         &id,
@@ -2519,9 +2697,22 @@ pub async fn update_agent(
         },
     )
     .await?;
+    if body.model.is_some() || body.access_mode_override.is_some() {
+        agent = team::set_agent_policy(
+            &state.db,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            &agent.id,
+            team::AgentPolicy {
+                model: body.model.as_deref(),
+                access_mode_override: body.access_mode_override,
+            },
+        )
+        .await?;
+    }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
-        "persona": agent.persona})))
+        "persona": agent.persona, "model": agent.model,
+        "access_mode_override": agent.access_mode_override})))
 }
 
 #[derive(Deserialize)]
@@ -2547,6 +2738,7 @@ pub async fn set_agent_grants(
     Path(id): Path<String>,
     Json(body): Json<GrantsRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let current = team::maintained_agent(&state.db, &owner, &id).await?;
@@ -2593,6 +2785,7 @@ pub async fn destroy_agent_route(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
@@ -2613,6 +2806,7 @@ pub async fn delete_agent(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     team::purge(&state.db, &owner, &id).await?;
@@ -2632,6 +2826,7 @@ pub async fn set_memory(
     Path(id): Path<String>,
     Json(body): Json<MemoryRequest>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     engine::require_enabled(&state.db, &actor).await?;
     let note = team::remember(
@@ -2650,6 +2845,7 @@ pub async fn delete_memory(
     auth: AuthUser,
     Path((id, note_id)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     team::agent(&state.db, &owner, &id).await?;
@@ -2671,6 +2867,7 @@ pub struct SettingsResponse {
     schedule_minimum_minutes: i32,
     timezone: Option<String>,
     skip_destructive_confirmation: bool,
+    access_mode: crate::models::assistant_settings::AccessMode,
     max_live_subagents: i32,
     max_concurrent_subagent_turns: i32,
     max_live_subagents_limit: i32,
@@ -2679,6 +2876,7 @@ pub struct SettingsResponse {
     max_group_handoffs_per_hour: i32,
     max_group_handoffs_limit: i32,
     max_group_handoffs_per_hour_limit: i32,
+    specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -2691,6 +2889,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             trigger_runs_per_hour: row.trigger_runs_per_hour,
             trigger_runs_per_day: row.trigger_runs_per_day,
             skip_destructive_confirmation: row.skip_destructive_confirmation,
+            access_mode: row.access_mode,
             max_live_subagents: row.max_live_subagents,
             max_concurrent_subagent_turns: row.max_concurrent_subagent_turns,
             max_live_subagents_limit: crate::models::assistant_settings::MAX_LIVE_SUBAGENTS_LIMIT,
@@ -2701,6 +2900,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_group_handoffs_limit: crate::models::assistant_settings::MAX_GROUP_HANDOFFS_LIMIT,
             max_group_handoffs_per_hour_limit:
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
+            specialist_access_requests: row.specialist_access_requests,
         }
     }
 }
@@ -2726,12 +2926,15 @@ pub struct SettingsRequest {
     schedule_minimum_minutes: Option<i32>,
     timezone: Option<String>,
     skip_destructive_confirmation: Option<bool>,
+    access_mode: Option<crate::models::assistant_settings::AccessMode>,
     max_live_subagents: Option<i32>,
     max_concurrent_subagent_turns: Option<i32>,
     #[serde(default)]
     max_group_handoffs: Option<i32>,
     #[serde(default)]
     max_group_handoffs_per_hour: Option<i32>,
+    #[serde(default)]
+    specialist_access_requests: Option<crate::models::assistant_settings::SpecialistAccessRequests>,
 }
 
 pub async fn update_settings(
@@ -2757,14 +2960,24 @@ pub async fn update_settings(
             trigger_runs_per_hour: body.trigger_runs_per_hour,
             trigger_runs_per_day: body.trigger_runs_per_day,
             skip_destructive_confirmation: body.skip_destructive_confirmation,
+            access_mode: body.access_mode,
             max_live_subagents: body.max_live_subagents,
             max_concurrent_subagent_turns: body.max_concurrent_subagent_turns,
             max_group_handoffs: body.max_group_handoffs,
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
+            specialist_access_requests: body.specialist_access_requests,
         },
     )
     .await?;
     settings::audit(&state.db, &owner, &before, &after).await;
+    settings::audit_access_mode(
+        &state.db,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        None,
+        Some(before.access_mode),
+        Some(after.access_mode),
+    )
+    .await;
     Ok(Json(after.into()))
 }
 
@@ -2832,6 +3045,7 @@ pub async fn put_profile_routes(
     auth: AuthUser,
     Json(body): Json<ProfileRoutesRequest>,
 ) -> AppResult<Json<ProfileRoutesResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     crate::handlers::admin_helpers::require_admin(&state, &auth).await?;
     let admin = auth.user_id.to_string();
     let row = crate::services::assistant_profile_routing::set(
@@ -2889,7 +3103,7 @@ pub fn spawn_sweeps(state: AppState) {
                             state.clone(),
                             row,
                             String::new(),
-                            Some(TurnError::new("turn_lost")),
+                            Some(TurnError::internal("turn_lost", "sweep")),
                         )
                         .await;
                     }
@@ -2952,6 +3166,7 @@ pub async fn set_agent_operations(
     Path((id, service_id)): Path<(String, String)>,
     Json(body): Json<crate::models::agent_operation_scope::OperationSelection>,
 ) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = Box::pin(crate::services::agent_operation_scope_service::set(

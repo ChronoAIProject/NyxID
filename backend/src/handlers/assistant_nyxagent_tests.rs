@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     models::{
+        assistant_message::{AssistantErrorDetail, AssistantMessage},
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
@@ -18,6 +19,96 @@ use std::sync::{
 };
 
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
+
+#[test]
+fn upstream_request_id_is_bounded_and_validated() {
+    assert_eq!(
+        sanitize_upstream_request_id("req_123:abc"),
+        Some("req_123:abc".into())
+    );
+    assert_eq!(sanitize_upstream_request_id("bad id"), None);
+    assert_eq!(sanitize_upstream_request_id(&"x".repeat(129)), None);
+}
+
+#[test]
+fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
+    let bounds = STREAM_BOUNDS;
+    // Keepalives every few seconds during a 300 s tool call: the transport
+    // bound keeps resetting, so only the no-progress bound remains.
+    assert_eq!(
+        stream_timeout(bounds, Duration::from_secs(5), Duration::from_secs(300)),
+        Duration::from_secs(115)
+    );
+    assert_eq!(
+        stream_timeout(bounds, Duration::from_secs(0), Duration::from_secs(609)),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        stream_timeout(bounds, Duration::from_secs(119), Duration::from_secs(10)),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        stream_timeout(bounds, Duration::ZERO, Duration::from_secs(611)),
+        Duration::ZERO
+    );
+}
+
+#[test]
+fn failed_message_response_serializes_error_detail_as_rfc3339() {
+    let occurred_at = Utc::now();
+    let response = MessageResponse::from(AssistantMessage {
+        retry_of: None,
+        specialist_id: None,
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "message".into(),
+        conversation_id: "conversation".into(),
+        user_id: OWNER.into(),
+        seq: 1,
+        turn_id: "turn".into(),
+        role: "assistant".into(),
+        text: String::new(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: Some(AssistantErrorDetail {
+            stage: "lease".into(),
+            http_status: Some(504),
+            upstream_request_id: Some("req".into()),
+            response_id: None,
+            continuations: 0,
+            turn_id: "turn".into(),
+            occurred_at,
+        }),
+        created_at: occurred_at,
+        activities: Vec::new(),
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    });
+    let json = serde_json::to_value(response).unwrap();
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["error_detail"]["stage"], "lease");
+    assert_eq!(json["error_detail"]["http_status"], 504);
+    assert_eq!(
+        json["error_detail"]["occurred_at"],
+        occurred_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+    );
+}
+
+#[test]
+fn preexisting_message_row_without_diagnostics_remains_readable() {
+    let row = mongodb::bson::from_document::<AssistantMessage>(mongodb::bson::doc! {
+        "_id": "old-message", "conversation_id": "conversation", "user_id": OWNER,
+        "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "old",
+        "status": "completed", "error_code": mongodb::bson::Bson::Null,
+        "created_at": mongodb::bson::DateTime::now(), "activities": [], "attachments": []
+    })
+    .unwrap();
+    assert!(row.error_detail.is_none());
+    assert!(row.upstream_error_code.is_none());
+}
 const SESSION: &str = "conv_11111111111111111111111111111111";
 const RESPONSE: &str = "resp_11111111111111111111111111111111_22222222222222222222222222222222";
 struct Capture {
@@ -139,6 +230,7 @@ async fn setup_options_with_tool_gate(
                     {
                         return (
                             StatusCode::from_u16(status).unwrap(),
+                            [("x-request-id", "req-5xx")],
                             Json(json!({"error": {
                                 "code": code,
                                 "message": "SECRET upstream failure detail",
@@ -232,6 +324,13 @@ async fn setup_options_with_tool_gate(
             }
         }),
     );
+    let server = register_upstream(&state, upstream).await;
+    (state, calls, server)
+}
+
+/// Serve `upstream` as the `llm-nyx` catalog service of `state`'s database.
+async fn register_upstream(state: &AppState, upstream: Router) -> tokio::task::JoinHandle<()> {
+    let db = &state.db;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -251,7 +350,230 @@ async fn setup_options_with_tool_gate(
         .insert_one(row)
         .await
         .unwrap();
+    server
+}
+
+/// One scripted SSE frame of an upstream response body.
+#[derive(Clone)]
+enum Frame {
+    /// An SSE comment: transport bytes without any data event.
+    Keepalive,
+    Created,
+    Delta(&'static str),
+    /// A data event this decoder ignores, such as MCP tool progress.
+    ToolProgress,
+    Completed,
+    Sleep(Duration),
+}
+
+/// A database with the owner, plus an upstream that answers every request
+/// with `frames` after `header_delay`.
+async fn setup_stream(
+    label: &str,
+    header_delay: Duration,
+    frames: Vec<Frame>,
+) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
+    let db = connect_transaction_test_database(label).await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let calls: Captures = Arc::new(Mutex::new(vec![]));
+    let sink = calls.clone();
+    let upstream = Router::new().route(
+        "/v1/responses",
+        post(move |uri: Uri, headers: HeaderMap, Json(body): Json<Value>| {
+            let sink = sink.clone();
+            let frames = frames.clone();
+            async move {
+                sink.lock().await.push(Capture { uri, headers, body });
+                tokio::time::sleep(header_delay).await;
+                let stream = async_stream::stream! {
+                    let mut sequence = 0u64;
+                    for frame in frames {
+                        let data = match frame {
+                            Frame::Sleep(duration) => {
+                                tokio::time::sleep(duration).await;
+                                continue;
+                            }
+                            Frame::Keepalive => {
+                                yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b": keepalive\n\n"));
+                                continue;
+                            }
+                            Frame::Created => json!({"type": "response.created", "sequence_number": sequence,
+                                "response": {"id": RESPONSE, "conversation": {"id": SESSION}}}),
+                            Frame::Delta(text) => json!({"type": "response.output_text.delta",
+                                "sequence_number": sequence, "delta": text}),
+                            Frame::ToolProgress => json!({"type": "response.mcp_call.in_progress",
+                                "sequence_number": sequence}),
+                            Frame::Completed => json!({"type": "response.completed", "sequence_number": sequence,
+                                "response": {"id": RESPONSE, "conversation": {"id": SESSION}, "status": "completed",
+                                "output": [{"type": "message", "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "Done"}]}]}}),
+                        };
+                        sequence += 1;
+                        yield Ok(axum::body::Bytes::from(format!("data: {data}\n\n")));
+                    }
+                };
+                (
+                    [("content-type", "text/event-stream")],
+                    axum::body::Body::from_stream(stream),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let state = test_app_state(db);
+    let server = register_upstream(&state, upstream).await;
     (state, calls, server)
+}
+
+/// Short execution bounds for this test's thread (current-thread runtime).
+fn short_bounds() {
+    TEST_STREAM_BOUNDS.with(|bounds| {
+        bounds.set(Some(StreamBounds {
+            first_byte: Duration::from_millis(400),
+            transport_idle: Duration::from_millis(500),
+            no_progress: Duration::from_millis(1200),
+            turn_cap: Duration::from_secs(60),
+        }))
+    });
+}
+
+/// Run one browser turn to settlement and return its persisted reply.
+async fn run_turn_to_reply(state: &AppState) -> AssistantMessage {
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let row = settled(state).await;
+    engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn delayed_headers_fail_as_first_byte_with_internal_stage() {
+    short_bounds();
+    let (state, _, server) = setup_stream(
+        "nyxa_first_byte",
+        Duration::from_secs(5),
+        vec![Frame::Completed],
+    )
+    .await;
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(reply.error_code.as_deref(), Some("first_byte_timeout"));
+    assert_eq!(
+        reply.upstream_error_code, None,
+        "a NyxID timeout is not an upstream code"
+    );
+    let detail = reply.error_detail.unwrap();
+    assert_eq!(detail.stage, "first_byte");
+    assert_eq!(detail.response_id, None);
+    server.abort();
+}
+
+#[tokio::test]
+async fn keepalives_before_created_satisfy_first_byte_and_the_turn_completes() {
+    short_bounds();
+    // Keepalives for twice the first-byte bound, then the real response.
+    let mut frames = Vec::new();
+    for _ in 0..8 {
+        frames.push(Frame::Keepalive);
+        frames.push(Frame::Sleep(Duration::from_millis(100)));
+    }
+    frames.extend([Frame::Created, Frame::Delta("Done"), Frame::Completed]);
+    let (state, _, server) = setup_stream("nyxa_keepalive_first", Duration::ZERO, frames).await;
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(reply.status, "completed", "{:?}", reply.error_code);
+    assert_eq!(reply.text, "Done");
+    server.abort();
+}
+
+#[tokio::test]
+async fn keepalive_only_stream_fails_on_no_progress_with_its_response_id() {
+    short_bounds();
+    let mut frames = vec![Frame::Created];
+    for _ in 0..40 {
+        frames.push(Frame::Keepalive);
+        frames.push(Frame::Sleep(Duration::from_millis(100)));
+    }
+    let (state, _, server) = setup_stream("nyxa_no_progress", Duration::ZERO, frames).await;
+    let started = std::time::Instant::now();
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(reply.error_code.as_deref(), Some("idle_timeout"));
+    let detail = reply.error_detail.unwrap();
+    assert_eq!(detail.stage, "no_progress");
+    assert_eq!(detail.response_id.as_deref(), Some(RESPONSE));
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "bounded by no_progress"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn tool_progress_events_reset_the_no_progress_bound() {
+    short_bounds();
+    // 2.4 s of tool progress, twice the no-progress bound, with keepalives.
+    let mut frames = vec![Frame::Created];
+    for _ in 0..8 {
+        frames.extend([
+            Frame::ToolProgress,
+            Frame::Keepalive,
+            Frame::Sleep(Duration::from_millis(300)),
+        ]);
+    }
+    frames.extend([Frame::Delta("Done"), Frame::Completed]);
+    let (state, _, server) = setup_stream("nyxa_tool_progress", Duration::ZERO, frames).await;
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(
+        reply.status,
+        "completed",
+        "{:?}",
+        reply.error_detail.map(|d| d.stage)
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn silent_transport_fails_on_the_idle_bound() {
+    short_bounds();
+    let frames = vec![
+        Frame::Created,
+        Frame::Delta("Partial"),
+        Frame::Sleep(Duration::from_secs(5)),
+        Frame::Completed,
+    ];
+    let (state, _, server) = setup_stream("nyxa_idle", Duration::ZERO, frames).await;
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(reply.error_code.as_deref(), Some("idle_timeout"));
+    assert_eq!(reply.text, "Partial");
+    let detail = reply.error_detail.unwrap();
+    assert_eq!(detail.stage, "idle");
+    assert_eq!(detail.response_id.as_deref(), Some(RESPONSE));
+    server.abort();
+}
+
+#[tokio::test]
+async fn unreachable_upstream_fails_at_connect() {
+    short_bounds();
+    let (state, _, server) = setup_stream("nyxa_connect", Duration::ZERO, vec![]).await;
+    server.abort();
+    let _ = server.await;
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(reply.error_code.as_deref(), Some("assistant_unavailable"));
+    assert_eq!(reply.upstream_error_code, None);
+    assert_eq!(reply.error_detail.unwrap().stage, "connect");
 }
 fn turn_request(id: Option<&str>) -> Request<Body> {
     let mut req = Request::builder()
@@ -285,6 +607,404 @@ async fn settled(state: &AppState) -> AssistantConversation {
     })
     .await
     .expect("turn settled")
+}
+
+#[tokio::test]
+async fn upstream_5xx_without_error_envelope_persists_normalized_failure() {
+    let (state, _calls, server) =
+        setup_options(Some((503, "")), Duration::ZERO, vec![], false).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(stream.contains("\"event\":\"turn.completed\""));
+    assert!(stream.contains("\"code\":\"assistant_unavailable\""));
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let failed = messages.last().expect("failed reply");
+    assert_eq!(failed.error_code.as_deref(), Some("assistant_unavailable"));
+    let detail = failed.error_detail.as_ref().expect("error detail");
+    assert_eq!(detail.stage, "upstream_response");
+    assert_eq!(detail.http_status, Some(503));
+    assert_eq!(detail.upstream_request_id.as_deref(), Some("req-5xx"));
+    assert_eq!(failed.upstream_error_code, None);
+    server.abort();
+}
+
+#[tokio::test]
+async fn retried_turn_names_completed_actions_and_reattaches_bound_uploads() {
+    // Turn 1 succeeds, turn 2 (with an upload) fails, Retry re-runs turn 2.
+    let (state, calls, server) =
+        setup_options(None, Duration::ZERO, vec!["", "stream_failure"], false).await;
+    let first = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let _ = axum::body::to_bytes(first.into_body(), 100_000)
+        .await
+        .unwrap();
+    let conversation = settled(&state).await;
+    let upload = crate::services::assistant_upload_service::upload(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        &conversation.id,
+        "brief.txt",
+        b"launch brief".to_vec(),
+    )
+    .await
+    .unwrap();
+    let request = |body: Value| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/assistant/nyxagent/turns")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut().insert(BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ));
+        req
+    };
+    let second = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        request(
+            json!({"conversation_id": conversation.id, "text": "send it",
+            "attachment_ids": [upload.id]}),
+        ),
+    )
+    .await
+    .unwrap();
+    let _ = axum::body::to_bytes(second.into_body(), 100_000)
+        .await
+        .unwrap();
+    settled(&state).await;
+    let failed = engine::messages(&state.db, OWNER, &conversation.id, 1, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(failed.status, "failed");
+    // The failed turn had completed a call before it failed.
+    state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &failed.id},
+            doc! {"$push": {"activities": {"id": "a1", "label": "mail__send", "digest": "d1",
+            "status": "completed", "started_at": mongodb::bson::DateTime::now()}}},
+        )
+        .await
+        .unwrap();
+    // The client re-sends the text only: the upload is already bound.
+    let retry = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        request(
+            json!({"conversation_id": conversation.id, "text": "send it",
+            "retry_of": failed.turn_id}),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let events = String::from_utf8(
+        axum::body::to_bytes(retry.into_body(), 100_000)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(events.contains("\"status\":\"completed\""), "{events}");
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 3);
+    let input = serde_json::to_string(&calls[2].body["input"]).unwrap();
+    assert!(
+        input.contains(&format!("retrying turn {}", failed.turn_id)),
+        "{input}"
+    );
+    assert!(
+        input.contains("NyxID refuses repeating any of them with the same arguments: mail__send"),
+        "{input}"
+    );
+    assert!(
+        input.contains(&upload.id),
+        "the upload is listed again: {input}"
+    );
+    let retried_input = engine::messages(&state.db, OWNER, &conversation.id, 2, None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(retried_input.role, "user");
+    assert_eq!(retried_input.attachments.len(), 1);
+    assert_eq!(retried_input.attachments[0].id, upload.id);
+    server.abort();
+}
+
+fn conversation_turn(id: &str, text: &str) -> Request<Body> {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/assistant/nyxagent/turns")
+        .body(Body::from(
+            json!({"conversation_id": id, "text": text}).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut().insert(BillingRoutePolicy::Metered(
+        crate::services::billing::BillingIngress::Proxy,
+    ));
+    req
+}
+
+async fn drain(response: Response) -> String {
+    String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn resumed_turn_receives_the_durable_checkpoint_shown_by_the_context_route() {
+    // Turn 1 completes, turn 2 fails after a reply delta, turn 3 resumes.
+    let (state, calls, server) =
+        setup_options(None, Duration::ZERO, vec!["", "stream_failure"], false).await;
+    drain(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    let id = settled(&state).await.id;
+    drain(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            conversation_turn(&id, "Book the venue"),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    settled(&state).await;
+    let context = context(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let value = serde_json::to_value(&context).unwrap();
+    let checkpoint = &value["checkpoint"];
+    assert_eq!(checkpoint["status"], "failed");
+    assert_eq!(checkpoint["error_code"], "assistant_unavailable");
+    assert_eq!(checkpoint["goal"], "Book the venue");
+    let failed_turn = checkpoint["turn_id"].as_str().unwrap().to_owned();
+    let first_turn = checkpoint["last_successful_turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(failed_turn, first_turn);
+    assert_eq!(value["reset_reason"], "turn_failed");
+    assert_eq!(value["binding_state"], "reset");
+    drain(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            conversation_turn(&id, "continue"),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    settled(&state).await;
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 3);
+    let instructions = calls[2].body["instructions"].as_str().unwrap();
+    assert!(instructions.contains("Previous context (after reset)"));
+    assert!(
+        instructions.contains(&format!(
+            "Checkpoint (turn {failed_turn}, failed: assistant_unavailable; last successful turn {first_turn})"
+        )),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains("- goal: Book the venue"),
+        "{instructions}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn context_reset_route_drops_the_recap_of_the_next_turn() {
+    let (state, calls, server) =
+        setup_options(None, Duration::ZERO, vec!["", "stream_failure", ""], false).await;
+    drain(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    let id = settled(&state).await.id;
+    drain(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            conversation_turn(&id, "Book the venue"),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    settled(&state).await;
+    let reset = reset_context(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let value = serde_json::to_value(&reset).unwrap();
+    assert_eq!(value["reset_reason"], "user_reset");
+    assert_eq!(value["checkpoint"], Value::Null);
+    drain(
+        turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            conversation_turn(&id, "new topic"),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    settled(&state).await;
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 3);
+    let instructions = calls[2].body["instructions"].as_str().unwrap();
+    // Without the reset this turn would recap the failed turn (see
+    // `resumed_turn_receives_the_durable_checkpoint_shown_by_the_context_route`).
+    assert!(
+        !instructions.contains("Previous context (after reset)"),
+        "{instructions}"
+    );
+    assert!(!instructions.contains("Book the venue"), "{instructions}");
+    assert!(
+        calls[2].body.get("conversation").is_none(),
+        "a fresh session"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn context_route_lists_running_actions_as_pending() {
+    let db = connect_transaction_test_database("nyxa_checkpoint_pending").await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = engine::begin_turn(
+        &db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: None,
+            agent_id: None,
+            text: "work".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    engine::activity_started(&db, OWNER, &row.id, "mcp.long_call")
+        .await
+        .unwrap();
+    let value = serde_json::to_value(
+        context(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(row.id.clone()),
+        )
+        .await
+        .unwrap()
+        .0,
+    )
+    .unwrap();
+    assert_eq!(value["pending_actions"], json!(["mcp.long_call"]));
+    assert_eq!(
+        value["active_turn_id"],
+        row.active_turn.as_ref().unwrap().turn_id.as_str()
+    );
+    assert_eq!(value["checkpoint"], Value::Null, "no turn has settled yet");
+    // The owner cannot reset while the turn runs.
+    let error = reset_context(State(state), test_auth_user(OWNER), Path(row.id))
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, AppError::AssistantTurnActive));
+}
+
+#[tokio::test]
+async fn stream_failure_persists_stream_diagnostic_stage() {
+    let (state, _calls, server) =
+        setup_options(None, Duration::ZERO, vec!["stream_failure"], false).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let row = settled(&state).await;
+    let failed = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(failed.error_code.as_deref(), Some("assistant_unavailable"));
+    // The upstream's own code from response.failed, and that response's id.
+    assert_eq!(
+        failed.upstream_error_code.as_deref(),
+        Some("stream_failure")
+    );
+    let detail = failed.error_detail.as_ref().unwrap();
+    assert_eq!(detail.stage, "stream");
+    assert_eq!(detail.response_id.as_deref(), Some(RESPONSE));
+    server.abort();
 }
 
 #[tokio::test]
@@ -394,12 +1114,19 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
     );
     let row = settled(&state).await;
     assert!(row.nyxagent_session_id.is_none());
-    assert_eq!(row.context_reset_reason.as_deref(), Some("turn_failed"));
+    assert_eq!(row.context_reset_reason.as_deref(), Some("stopped"));
     let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
         .await
         .unwrap();
     assert_eq!(messages[1].text, "Partial answer");
     assert_eq!(messages[1].error_code.as_deref(), Some("cancelled"));
+    let detail = messages[1].error_detail.as_ref().unwrap();
+    assert_eq!(detail.stage, "stop");
+    assert_eq!(
+        detail.response_id, None,
+        "the stream never sent response.created"
+    );
+    assert_eq!(messages[1].upstream_error_code, None);
     assert_eq!(
         stop(State(state), test_auth_user(OWNER), Path(row.id))
             .await
@@ -416,6 +1143,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -598,6 +1326,8 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("DELETE", format!("conversations/{id}")),
         ("POST", format!("conversations/{id}/stop")),
         ("PATCH", format!("conversations/{id}/access-mode")),
+        ("GET", format!("conversations/{id}/context")),
+        ("POST", format!("conversations/{id}/context/reset")),
         (
             "POST",
             format!("conversations/{id}/acknowledgements/missing"),
@@ -605,6 +1335,12 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("POST", "turns".into()),
         ("GET", "models".into()),
     ];
+    assert!(routes.iter().any(|(_, path)| path.ends_with("/context")));
+    assert!(
+        routes
+            .iter()
+            .any(|(_, path)| path.ends_with("/context/reset"))
+    );
     use base64::Engine;
     let forbidden_tokens: Vec<_> = ["sa", "delegated", "relay"]
         .into_iter()
@@ -673,6 +1409,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -724,6 +1461,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -781,6 +1519,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
     assert!(events.contains("turn.completed"));
     assert!(events.contains("\"status\":\"failed\""));
     assert!(events.contains("assistant_unavailable"));
+    assert!(events.contains("\"stage\":\"settlement\""), "{events}");
     assert!(!events.contains("injected validation failure"));
     assert!(
         engine::get(&state.db, OWNER, &row.id)
@@ -858,11 +1597,17 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .await
         .unwrap();
     assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
-    assert!(!MODELS.lock().await.contains_key(state.db.name()));
+    assert!(
+        !MODELS
+            .lock()
+            .await
+            .contains_key(&format!("{}:{OWNER}", state.db.name()))
+    );
     engine::begin_turn(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -892,7 +1637,12 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
     let _ = models(State(state.clone()), test_auth_user(OWNER), request())
         .await
         .unwrap();
-    assert!(!MODELS.lock().await.contains_key(state.db.name()));
+    assert!(
+        !MODELS
+            .lock()
+            .await
+            .contains_key(&format!("{}:{OWNER}", state.db.name()))
+    );
     for _ in 0..2 {
         let Json(rows) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
@@ -912,6 +1662,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1054,7 +1805,25 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
     let metadata = audit.get_document("event_data").unwrap();
     assert_eq!(metadata.get_str("conversation_id").unwrap(), f.row.id);
     assert_eq!(metadata.get_str("decision").unwrap(), "allow");
-    assert_eq!(metadata.len(), 5);
+    // Metadata only: the original five fields plus who asked and who approved
+    // (Issue 1), never arguments or summaries.
+    let mut keys: Vec<&str> = metadata.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "approver_api_key_id",
+            "approver_kind",
+            "approver_user_id",
+            "conversation_id",
+            "decision",
+            "kind",
+            "requester_agent_id",
+            "service_id",
+            "tool_name",
+        ]
+    );
+    assert_eq!(metadata.get_str("approver_kind").unwrap(), "owner");
     let response = crate::handlers::api_keys::list_keys(
         State(f.state.clone()),
         test_auth_user(&f.owner),
@@ -1111,6 +1880,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1200,6 +1970,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
@@ -1216,6 +1987,8 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        requester_agent_id: None,
+        confirmation: None,
         authored_skill: None,
         voice_request_id: None,
         continuation_receipt_id: None,
@@ -2682,4 +3455,124 @@ async fn upstream_cancelled_image_round_keeps_completed_text() {
     assert_eq!(calls.lock().await.len(), 2);
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+/// The model selector validates against NyxAgent's live list, refuses busy
+/// threads, resets the context on a real change and audits who changed it.
+#[tokio::test]
+async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let upstream = MockServer::start().await;
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(
+            doc! {"slug": engine::SERVICE_SLUG},
+            doc! {"$set": {"base_url": upstream.uri()}},
+        )
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"id": "nyxagent/chat"}, {"id": "nyxagent/research"},
+            {"id": "nyxagent/retired", "available": false},
+        ]})))
+        .mount(&upstream)
+        .await;
+    let row = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: None,
+            text: "pick a model".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let change = |model: &str| {
+        change_model(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(row.id.clone()),
+            Json(ModelRequest {
+                model: model.into(),
+            }),
+        )
+    };
+    // A running turn keeps its model.
+    assert!(matches!(
+        change("nyxagent/research").await,
+        Err(AppError::AssistantTurnActive)
+    ));
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"active_turn": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    for refused in ["nyxagent/retired", "nyxagent/unknown", "openai/gpt-4"] {
+        let error = change(refused).await.err().expect(refused);
+        assert!(
+            matches!(error, AppError::AssistantModelUnavailable),
+            "{refused}"
+        );
+        assert_eq!(error.error_code(), 12103);
+    }
+    let Json(updated) = change("nyxagent/research").await.unwrap();
+    assert_eq!(updated.model, "nyxagent/research");
+    let stored = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(stored.model, "nyxagent/research");
+    assert_eq!(
+        stored.context_reset_reason.as_deref(),
+        Some("model_changed")
+    );
+    assert!(stored.nyxagent_session_id.is_none());
+    let logs = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let audit = logs
+        .find_one(doc! {"event_type": "assistant_model_changed"})
+        .await
+        .unwrap()
+        .expect("model audit");
+    assert_eq!(audit.get_str("user_id").unwrap(), OWNER);
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("conversation_id").unwrap(), row.id);
+    assert_eq!(data.get_str("old").unwrap(), engine::DEFAULT_MODEL);
+    assert_eq!(data.get_str("new").unwrap(), "nyxagent/research");
+    // Reselecting the current model is a no-op: no reset and no audit.
+    let _ = change("nyxagent/research").await.unwrap();
+    assert_eq!(
+        logs.count_documents(doc! {"event_type": "assistant_model_changed"})
+            .await
+            .unwrap(),
+        1
+    );
+    // The list the selector shows marks the retired model unavailable.
+    let mut request = Request::new(Body::empty());
+    request.extensions_mut().insert(BillingRoutePolicy::Metered(
+        crate::services::billing::BillingIngress::Proxy,
+    ));
+    let Json(rows) = models(State(state.clone()), test_auth_user(OWNER), request)
+        .await
+        .unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row.id == "nyxagent/retired" && !row.available)
+    );
+    server.abort();
 }

@@ -72,6 +72,37 @@ async fn update(
     .await
     .map(|Json(v)| v)
 }
+async fn change_test_publication(
+    db: &mongodb::Database,
+    service_id: &str,
+    expected_kind: crate::models::downstream_service::OfferingKind,
+    ids: &[String],
+    publication: crate::models::service_endpoint::PublicationState,
+    actor: &crate::services::audit_service::AuditActor,
+    audit_key: &[u8],
+) -> crate::errors::AppResult<Vec<crate::models::service_endpoint::ServiceEndpoint>> {
+    let mut observed = db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(doc! {"_id":service_id})
+        .await?
+        .unwrap();
+    observed.offering_kind = expected_kind;
+    crate::services::tool_publication_service::change_publication(
+        db,
+        &observed,
+        &crate::services::catalog_mutation_service::Authority {
+            catalog_base_url: "http://localhost:3001".into(),
+            actor: actor.clone(),
+            first_party_human: true,
+            admin_required: false,
+        },
+        ids,
+        publication,
+        audit_key,
+    )
+    .await
+}
+
 fn new(slug: &str) -> Value {
     json!({"name":slug,"slug":slug,"base_url":"https://vendor.example/api","auth_method":"bearer","offering_kind":"tool","service_category":"internal"})
 }
@@ -1968,7 +1999,7 @@ async fn tools_manager_authoritative_discovery_withdraws_and_delete_demotes() {
             .map(|e| e.id.clone())
             .collect::<Vec<_>>();
         let actor = AuditActor::from_auth_user(&test_auth_user(&admin));
-        publication::change_publication(
+        change_test_publication(
             &db,
             &tool.id,
             tool.offering_kind,
@@ -2046,7 +2077,7 @@ async fn tools_manager_authoritative_discovery_withdraws_and_delete_demotes() {
         // Delete a narrow unpublished blocker below an otherwise published route.
         let broad = rows.iter().find(|r| r.name == "renamed").unwrap();
         let narrow = rows.iter().find(|r| r.name == "narrow").unwrap();
-        publication::change_publication(
+        change_test_publication(
             &db,
             &tool.id,
             tool.offering_kind,
@@ -2271,7 +2302,7 @@ async fn tools_manager_twin_create_retry_binds_intent_not_attempt_clock() {
 async fn tools_manager_publication_fences_admin_legacy_kind_and_revocation() {
     use crate::{
         models::{downstream_service::OfferingKind, service_endpoint::PublicationState},
-        services::{audit_service::AuditActor, tool_publication_service::change_publication},
+        services::audit_service::AuditActor,
     };
     let db = connect_test_database("tools_publication_live_parent")
         .await
@@ -2303,7 +2334,7 @@ async fn tools_manager_publication_fences_admin_legacy_kind_and_revocation() {
             .await
             .unwrap();
         assert!(matches!(
-            change_publication(
+            change_test_publication(
                 &db,
                 &tool.id,
                 expected,
@@ -2317,7 +2348,7 @@ async fn tools_manager_publication_fences_admin_legacy_kind_and_revocation() {
         ));
     }
     assert!(
-        change_publication(
+        change_test_publication(
             &db,
             &tool.id,
             OfferingKind::Tool,
@@ -2340,7 +2371,7 @@ async fn tools_manager_publication_fences_admin_legacy_kind_and_revocation() {
         .await
         .unwrap();
     assert!(
-        change_publication(
+        change_test_publication(
             &db,
             &tool.id,
             OfferingKind::Tool,
@@ -3269,5 +3300,511 @@ async fn tools_manager_provider_and_identity_alternate_paths_bind_live_parent_an
         .await
         .is_err()
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owner() {
+    use crate::models::{downstream_service::OfferingKind, service_endpoint::PublicationState};
+    use crate::services::{
+        audit_service::AuditActor, catalog_mutation_service as mutations, tool_publication_service,
+    };
+    let db = connect_test_database("tools_shared_catalog_commit")
+        .await
+        .unwrap();
+    let admin = seed(&db, "admin", false, false).await;
+    let manager = seed(&db, "operator", false, true).await;
+    let legacy = seed(&db, "operator", false, false).await;
+    let mut parent = crate::models::downstream_service::test_helpers::dummy_service();
+    parent.id = Uuid::new_v4().to_string();
+    parent.created_by = "system".into();
+    parent.offering_kind = OfferingKind::AiService;
+    parent.service_category = "provider".into();
+    parent.service_type = "http".into();
+    parent.visibility = "public".into();
+    parent.owner_user_id = None;
+    parent.catalog_manager_created = false;
+    parent.credential_encrypted.clear();
+    parent.platform_key = None;
+    db.collection::<DownstreamService>(SERVICES)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    let authority = mutations::Authority {
+        catalog_base_url: "http://localhost:3001".into(),
+        actor: AuditActor::from_auth_user(&test_auth_user(&manager)),
+        first_party_human: true,
+        admin_required: false,
+    };
+    let key = [2_u8; 32];
+    let fields = doc! {"description":"completed shared connector"};
+    mutations::commit_update(
+        &db,
+        &parent,
+        &authority,
+        &fields,
+        &doc! {"_id":&parent.id},
+        &key,
+    )
+    .await
+    .unwrap();
+    let (rows, _) = operations::commit_mutation(
+        &db,
+        &parent,
+        Some(&authority),
+        operations::Mutation::Create(race_operation()),
+        &key,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    tool_publication_service::change_publication(
+        &db,
+        &parent,
+        &authority,
+        &[rows[0].id.clone()],
+        PublicationState::Paused,
+        &key,
+    )
+    .await
+    .unwrap();
+    // Both drift directions fail before writes; the pending operation never
+    // gains Tool exposure under a Catalog request's legacy authority.
+    for (stored, expected) in [
+        ("tool", OfferingKind::AiService),
+        ("ai_service", OfferingKind::Tool),
+    ] {
+        db.collection::<Document>(SERVICES)
+            .update_one(
+                doc! {"_id":&parent.id},
+                doc! {"$set":{"offering_kind":stored}},
+            )
+            .await
+            .unwrap();
+        let mut observed = parent.clone();
+        observed.offering_kind = expected;
+        assert!(matches!(
+            mutations::commit_update(
+                &db,
+                &observed,
+                &authority,
+                &fields,
+                &doc! {"_id":&parent.id},
+                &key
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            operations::commit_mutation(
+                &db,
+                &observed,
+                Some(&authority),
+                operations::Mutation::Create(race_operation()),
+                &key
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            tool_publication_service::change_publication(
+                &db,
+                &observed,
+                &authority,
+                &[rows[0].id.clone()],
+                PublicationState::Published,
+                &key
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+    }
+    db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&parent.id},
+            doc! {"$set":{"owner_user_id":&admin}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        mutations::commit_update(
+            &db,
+            &parent,
+            &authority,
+            &fields,
+            &doc! {"_id":&parent.id},
+            &key
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&parent.id},
+            doc! {"$set":{"owner_user_id":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        mutations::commit_update(
+            &db,
+            &parent,
+            &authority,
+            &doc! {"is_active":false},
+            &doc! {"_id":&parent.id},
+            &key
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&parent.id},
+            doc! {"$set":{"platform_key":{"enabled":true,"audience":"public"}}},
+        )
+        .await
+        .unwrap();
+    let credential_parent = db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(doc! {"_id":&parent.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        mutations::commit_update(
+            &db,
+            &credential_parent,
+            &authority,
+            &doc! {"base_url":"https://other.example/api"},
+            &doc! {"_id":&parent.id},
+            &key
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    db.collection::<Document>(SERVICES)
+        .update_one(doc! {"_id":&parent.id}, doc! {"$unset":{"platform_key":""}})
+        .await
+        .unwrap();
+    let catalog_role = db
+        .collection::<Role>(ROLES)
+        .find_one(doc! {"slug":"catalog_manager"})
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id":&manager},
+            doc! {"$pull":{"role_ids":catalog_role.id}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        mutations::commit_update(
+            &db,
+            &parent,
+            &authority,
+            &fields,
+            &doc! {"_id":&parent.id},
+            &key
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        operations::commit_mutation(
+            &db,
+            &parent,
+            Some(&authority),
+            operations::Mutation::Delete(rows[0].id.clone()),
+            &key
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        tool_publication_service::change_publication(
+            &db,
+            &parent,
+            &authority,
+            &[rows[0].id.clone()],
+            PublicationState::Published,
+            &key
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    // Legacy creators without the Catalog role keep their non-Tool writes.
+    parent.created_by = legacy.clone();
+    db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&parent.id},
+            doc! {"$set":{"created_by":&legacy}},
+        )
+        .await
+        .unwrap();
+    let legacy_authority = mutations::Authority {
+        actor: AuditActor::from_auth_user(&test_auth_user(&legacy)),
+        ..authority
+    };
+    mutations::commit_update(
+        &db,
+        &parent,
+        &legacy_authority,
+        &fields,
+        &doc! {"_id":&parent.id},
+        &key,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        operations::list_all_endpoints(&db, &parent.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // Manager-created private rows retain their legacy creator field rules.
+    parent.catalog_manager_created = true;
+    parent.visibility = "private".into();
+    parent.credential_encrypted = vec![1, 2, 3];
+    db.collection::<DownstreamService>(SERVICES)
+        .replace_one(doc! {"_id":&parent.id}, &parent)
+        .await
+        .unwrap();
+    mutations::commit_update(
+        &db,
+        &parent,
+        &legacy_authority,
+        &doc! {"base_url":"https://legacy.example/api"},
+        &doc! {"_id":&parent.id},
+        &key,
+    )
+    .await
+    .unwrap();
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn catalog_manager_shared_discovery_rejects_nonhuman_before_vendor_requests() {
+    use crate::mw::auth::AuthMethod;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let db = connect_test_database("catalog_shared_first_party_ingress")
+        .await
+        .unwrap();
+    let manager = seed(&db, "operator", false, true).await;
+    let admin = seed(&db, "admin", false, false).await;
+    let state = test_app_state(db.clone());
+    let vendor = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/spec"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"openapi":"3.0.3","info":{"title":"Shared","version":"1"},"paths":{"/read":{"get":{"operationId":"read","responses":{"200":{"description":"ok"}}}}}})))
+        .mount(&vendor).await;
+    let mut parent = crate::models::downstream_service::test_helpers::dummy_service();
+    parent.id = Uuid::new_v4().to_string();
+    parent.created_by = "system".into();
+    parent.base_url = vendor.uri();
+    parent.openapi_spec_url = Some(format!("{}/spec", vendor.uri()));
+    db.collection::<DownstreamService>(SERVICES)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    for auth_method in [
+        AuthMethod::ApiKey,
+        AuthMethod::ServiceAccount,
+        AuthMethod::Delegated,
+        AuthMethod::Relay,
+        AuthMethod::AccessToken,
+    ] {
+        let mut auth = test_auth_user(&manager);
+        auth.auth_method = auth_method;
+        if auth.auth_method == AuthMethod::AccessToken {
+            auth.oauth_client_id = Some(Uuid::new_v4().to_string());
+        }
+        assert!(
+            endpoints::discover_endpoints(State(state.clone()), auth, Path(parent.id.clone()))
+                .await
+                .is_err()
+        );
+        assert!(vendor.received_requests().await.unwrap().is_empty());
+    }
+    assert_eq!(
+        db.collection::<Document>(crate::models::service_endpoint::COLLECTION_NAME)
+            .count_documents(doc! {"service_id":&parent.id})
+            .await
+            .unwrap(),
+        0
+    );
+    let mut human = test_auth_user(&manager);
+    human.auth_method = AuthMethod::AccessToken;
+    let _ = endpoints::discover_endpoints(State(state.clone()), human, Path(parent.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(vendor.received_requests().await.unwrap().len(), 1);
+    db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&parent.id},
+            doc! {"$set":{"catalog_manager_created":true}},
+        )
+        .await
+        .unwrap();
+    let mut oauth_admin = test_auth_user(&admin);
+    oauth_admin.auth_method = AuthMethod::AccessToken;
+    oauth_admin.oauth_client_id = Some(Uuid::new_v4().to_string());
+    assert!(
+        endpoints::discover_endpoints(State(state.clone()), oauth_admin, Path(parent.id.clone()))
+            .await
+            .is_err()
+    );
+    assert_eq!(vendor.received_requests().await.unwrap().len(), 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn tools_manager_endpoint_readers_keep_published_only_identity_fallback() {
+    use crate::{
+        models::service_endpoint::{PublicationState, ServiceEndpoint},
+        mw::auth::AuthMethod,
+    };
+    use axum::response::IntoResponse;
+    let db = connect_test_database("catalog_endpoint_read_capability")
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let manager = seed(&db, "operator", true, true).await;
+    let admin = seed(&db, "admin", false, false).await;
+    let tool = create(&state, &manager, new("reader-tool")).await.unwrap();
+    let mut shared = crate::models::downstream_service::test_helpers::dummy_service();
+    shared.id = Uuid::new_v4().to_string();
+    shared.slug = "reader-shared".into();
+    shared.created_by = "system".into();
+    db.collection::<DownstreamService>(SERVICES)
+        .insert_one(&shared)
+        .await
+        .unwrap();
+    for service_id in [&tool.id, &shared.id] {
+        for (name, publication) in [
+            ("published", PublicationState::Published),
+            ("draft", PublicationState::Draft),
+            ("paused", PublicationState::Paused),
+        ] {
+            let mut row = crate::test_utils::test_service_endpoint(
+                service_id,
+                name,
+                "GET",
+                &format!("/{name}"),
+            );
+            row.publication = publication;
+            row.is_active = publication == PublicationState::Published;
+            db.collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+                .insert_one(row)
+                .await
+                .unwrap();
+        }
+        // Use an Admin's identity too: an Agent Key never inherits the human
+        // writer's access to draft/paused rows. SA identities have no User row.
+        for actor in [&manager, &admin] {
+            for kind in [
+                "agent_key",
+                "agent_key_login",
+                "delegated",
+                "service_account",
+                "oauth_app",
+            ] {
+                let mut auth = test_auth_user(actor);
+                match kind {
+                    "agent_key" | "agent_key_login" => {
+                        auth.auth_method = AuthMethod::ApiKey;
+                        auth.api_key_id = Some(Uuid::new_v4().to_string());
+                        auth.api_key_credential_id =
+                            (kind == "agent_key_login").then(|| Uuid::new_v4().to_string());
+                    }
+                    "delegated" => {
+                        auth.auth_method = AuthMethod::Delegated;
+                        auth.scope = "account:read".into();
+                        auth.acting_client_id = Some(Uuid::new_v4().to_string());
+                    }
+                    "service_account" => {
+                        auth.auth_method = AuthMethod::ServiceAccount;
+                        auth.user_id = Uuid::new_v4();
+                    }
+                    "oauth_app" => {
+                        auth.auth_method = AuthMethod::AccessToken;
+                        auth.oauth_client_id = Some(Uuid::new_v4().to_string());
+                    }
+                    _ => unreachable!(),
+                }
+                let tools = super::tools::list(State(state.clone()), auth.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(tools.into_response().status(), 200, "{kind} Tool listing");
+                let listed =
+                    endpoints::list_endpoints(State(state.clone()), auth, Path(service_id.clone()))
+                        .await
+                        .unwrap();
+                assert_eq!(listed.endpoints.len(), 1, "{kind}");
+                assert_eq!(listed.endpoints[0].name, "published", "{kind}");
+                assert_eq!(listed.into_response().status(), 200, "{kind}");
+            }
+        }
+        let listed = endpoints::list_endpoints(
+            State(state.clone()),
+            test_auth_user(&manager),
+            Path(service_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            listed.endpoints.len(),
+            3,
+            "human writer sees drafts and pauses"
+        );
+        let missing_actor = test_auth_user(&Uuid::new_v4().to_string());
+        assert_eq!(
+            endpoints::list_endpoints(
+                State(state.clone()),
+                missing_actor,
+                Path(service_id.clone())
+            )
+            .await
+            .unwrap()
+            .endpoints
+            .len(),
+            1
+        );
+    }
+    let denied = super::admin_ownership::authorization(
+        State(state.clone()),
+        test_auth_user(&manager),
+        Path((
+            crate::services::ownership_transfer_service::ResourceKind::Service,
+            tool.id.clone(),
+        )),
+    )
+    .await
+    .unwrap();
+    assert!(!denied.can_transfer);
+    assert_eq!(denied.into_response().status(), 200);
+    // A malformed persisted actor produces a database error rather than a
+    // successful listing with a negative capability.
+    db.collection::<Document>(USERS)
+        .update_one(doc! {"_id":&manager}, doc! {"$set":{"role_ids":123}})
+        .await
+        .unwrap();
+    assert!(matches!(
+        endpoints::list_endpoints(
+            State(state.clone()),
+            test_auth_user(&manager),
+            Path(shared.id)
+        )
+        .await,
+        Err(AppError::DatabaseError(_))
+    ));
+    assert!(matches!(
+        super::tools::list(State(state.clone()), test_auth_user(&manager)).await,
+        Err(AppError::DatabaseError(_))
+    ));
     db.drop().await.unwrap();
 }

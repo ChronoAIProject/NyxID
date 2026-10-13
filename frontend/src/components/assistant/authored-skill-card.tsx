@@ -4,9 +4,10 @@ import { Button } from "@/components/ui/button";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
-import { authoredSkillPreviewSchema } from "@/schemas/agent-skills";
+import { authoredSkillPreviewSchema, learningDraftEditable } from "@/schemas/agent-skills";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
+import { ProposalDraftEditor } from "./learning-draft-editor";
 
 // A `publishing` row whose lease expired was interrupted (for example the
 // request was cancelled). The server offers publish, retry, deny and discard
@@ -23,6 +24,9 @@ function interruptedCopy(actions: readonly string[]): string {
     : "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version.";
 }
 
+export const SAVED_EDIT_NOTICE =
+  "Draft saved. A new review card for this version was posted in this conversation; confirm it there.";
+
 export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly deciding: boolean;
@@ -33,6 +37,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [editing, setEditing] = useState(false);
   const preview = useQuery({
     queryKey: ["authored-skill-review", owner, reference.proposal_id, card.id],
     queryFn: async () => authoredSkillPreviewSchema.parse(await assistantJson(
@@ -123,6 +128,19 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
       <p className="text-[12px] font-medium">{file.path}</p>
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-[11px]">{file.content}</pre>
     </div>)}
+    {data && learningDraftEditable(data.status) ? <div className="space-y-2">
+      <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>
+        {editing ? "Close the editor" : "Edit before publishing"}
+      </Button>
+      {editing ? <>
+        <p className="text-[12px] text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
+        <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => {
+          setEditing(false);
+          setNotice(SAVED_EDIT_NOTICE);
+          void refresh();
+        }} />
+      </> : null}
+    </div> : null}
     {data?.status === "publishing" ? <p role="status" className="text-[12px] text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
     {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
     {preview.isError ? <p role="alert" className="text-[12px] text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}

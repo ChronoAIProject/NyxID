@@ -707,7 +707,28 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Created:        {created}");
                     eprintln!("Updated:        {updated}");
                     print_permission_block(&bot);
+                    // The detail response carries no diagnostics; Health owns them.
+                    match api
+                        .get::<Value>(&format!("/channel-bots/{bot_id}/health"))
+                        .await
+                    {
+                        Ok(health) => {
+                            eprintln!("Health:");
+                            write_health_lines(&mut std::io::stderr(), &health)?;
+                        }
+                        Err(error) => eprintln!("Health:         unavailable ({error})"),
+                    }
                 }
+            }
+            Ok(())
+        }
+
+        ChannelBotCommands::Health { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let health: Value = api.get(&format!("/channel-bots/{id}/health")).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&health)?),
+                OutputFormat::Table => write_health_lines(&mut std::io::stderr(), &health)?,
             }
             Ok(())
         }
@@ -1168,6 +1189,72 @@ fn env_secret(var: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Human-readable channel health, shared by `channel-bot show` and `health`.
+fn write_health_lines(out: &mut dyn Write, health: &Value) -> Result<()> {
+    let text = |value: &Value| value.as_str().unwrap_or("-").to_string();
+    let error = |value: &Value| {
+        if value.is_null() {
+            "-".to_string()
+        } else {
+            format!(
+                "{} at {}",
+                value["reason"]
+                    .as_str()
+                    .unwrap_or_else(|| value["code"].as_str().unwrap_or("-")),
+                text(&value["at"])
+            )
+        }
+    };
+    let d = &health["diagnostics"];
+    let subscription = &d["subscription_state"];
+    let subscription = if subscription.is_null() {
+        "not checked".to_string()
+    } else if subscription["registered"] == true {
+        format!("registered (checked {})", text(&subscription["checked_at"]))
+    } else {
+        format!(
+            "missing: {} (checked {})",
+            text(&subscription["last_error"]),
+            text(&subscription["checked_at"])
+        )
+    };
+    let rows = [
+        ("Mode", text(&health["mode"])),
+        ("Status", text(&health["status"])),
+        (
+            "Last inbound",
+            format!(
+                "{} ({})",
+                text(&d["last_inbound_at"]),
+                text(&d["last_inbound_source"])
+            ),
+        ),
+        ("Last reply sent", text(&d["last_outbound_at"])),
+        ("Last reply error", error(&d["last_outbound_error"])),
+        ("Last webhook", text(&d["last_webhook_at"])),
+        ("Last webhook error", error(&d["last_webhook_error"])),
+        ("Subscription", subscription),
+        ("Failure", text(&d["failure_reason"])),
+        (
+            "Consecutive errors",
+            d["consecutive_errors"].as_u64().unwrap_or(0).to_string(),
+        ),
+        ("Next poll", text(&health["next_poll_at"])),
+        (
+            "Action",
+            format!(
+                "{}: {}",
+                text(&health["recommended_action"]),
+                text(&health["recommended_action_text"])
+            ),
+        ),
+    ];
+    for (label, value) in rows {
+        writeln!(out, "{:<19} {value}", format!("{label}:"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,6 +1263,58 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    #[test]
+    fn health_output_prints_every_diagnostic_and_the_action() {
+        let health = serde_json::json!({
+            "mode": "webhook", "status": "active", "next_poll_at": null,
+            "recommended_action": "wait_rate_limit",
+            "recommended_action_text": "X rate-limited the last reply. Later replies resume automatically.",
+            "diagnostics": {
+                "last_inbound_at": "2026-10-12T08:00:00+00:00", "last_inbound_source": "webhook",
+                "last_outbound_at": "2026-10-12T08:01:00+00:00",
+                "last_outbound_error": {"code": "10005", "reason": "rate_limited", "at": "2026-10-12T09:00:00+00:00"},
+                "last_webhook_at": "2026-10-12T08:00:00+00:00", "last_webhook_error": null,
+                "subscription_state": {"registered": false, "checked_at": "2026-10-12T09:30:00+00:00", "last_error": "subscription_missing"},
+                "consecutive_errors": 2, "failure_reason": "subscription_missing"
+            }
+        });
+        let mut out = Vec::new();
+        super::write_health_lines(&mut out, &health).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\
+Mode:               webhook
+Status:             active
+Last inbound:       2026-10-12T08:00:00+00:00 (webhook)
+Last reply sent:    2026-10-12T08:01:00+00:00
+Last reply error:   rate_limited at 2026-10-12T09:00:00+00:00
+Last webhook:       2026-10-12T08:00:00+00:00
+Last webhook error: -
+Subscription:       missing: subscription_missing (checked 2026-10-12T09:30:00+00:00)
+Failure:            subscription_missing
+Consecutive errors: 2
+Next poll:          -
+Action:             wait_rate_limit: X rate-limited the last reply. Later replies resume automatically.
+"
+        );
+    }
+
+    #[test]
+    fn health_output_handles_a_never_checked_bot() {
+        let health = serde_json::json!({"mode": "poll", "status": "failed", "recommended_action": "reconnect",
+            "recommended_action_text": "Reconnect.", "diagnostics": {"consecutive_errors": 0, "subscription_state": null,
+            "last_outbound_error": null, "last_webhook_error": null}});
+        let mut out = Vec::new();
+        super::write_health_lines(&mut out, &health).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("Subscription:       not checked\n"), "{out}");
+        assert!(out.contains("Last reply error:   -\n"), "{out}");
+        assert!(
+            out.contains("Action:             reconnect: Reconnect.\n"),
+            "{out}"
+        );
+    }
 
     #[tokio::test]
     async fn connect_link_cancel_uses_bot_route_and_validates_uuid() {

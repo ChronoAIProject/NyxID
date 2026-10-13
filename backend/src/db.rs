@@ -121,6 +121,41 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // Poll index groups and migrations sequentially without retaining the
     // large index-construction frame while a migration calls into MongoDB.
     Box::pin(ensure_core_indexes(db)).await?;
+    db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"user_id":1,"message_id":1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"created_at": -1, "_id": -1})
+                .build(),
+        )
+        .await?;
+    // Transactional conversation and group purges delete by parent id.
+    for key in ["conversation_id", "group_id"] {
+        db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {key: 1})
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .sparse(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
+
     Box::pin(ensure_service_indexes(db)).await?;
     backfill_downstream_service_types(db).await?;
     migrate_legacy_ssh_auth_mode(db).await?;
@@ -547,6 +582,22 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    // An agent's skill history (pin changes and learning/authoring events).
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "event_data.agent_id": 1, "event_type": 1, "created_at": -1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("audit_agent_skill_history".to_string())
+                        .partial_filter_expression(
+                            doc! { "event_data.agent_id": { "$exists": true } },
+                        )
+                        .build(),
+                )
                 .build(),
         )
         .await?;

@@ -381,6 +381,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         _ => "Your final reply stays in the web thread.",
     };
     let start = engine::TurnStart {
+        retry_of: None,
         channel_event_id: None,
         org_access: None,
         attachment_ids: Vec::new(),
@@ -968,6 +969,8 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                    retry_of: None,
+                        specialist_id: None,
                         steering: None,
                         voice: None,
                         execution_pending: false,
@@ -980,6 +983,8 @@ pub(crate) async fn webhook(
                         text: text.clone(),
                         status: "completed".into(),
                         error_code: None,
+                        upstream_error_code: None,
+                        error_detail: None,
                         created_at: now,
                         activities: vec![],
                         attachments: vec![],

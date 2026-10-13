@@ -67,6 +67,7 @@ impl SkillActor {
     }
 }
 
+#[derive(Debug)]
 pub struct SkillCommit {
     pub service: DownstreamService,
     pub state: SkillState,
@@ -148,6 +149,11 @@ pub fn resolve_update(current: &SkillState, input: &SkillUpdate) -> AppResult<Sk
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for reference in refs {
+            if reference.disabled {
+                return Err(AppError::BadRequest(
+                    "Catalog recommended skill refs cannot be disabled".into(),
+                ));
+            }
             validate_pin(
                 &reference.source,
                 &reference.skill_id,
@@ -578,6 +584,7 @@ async fn commit_once(
             if let Some((observed, authority)) = &mutation {
                 let (live, admin) = super::catalog_mutation_service::validate_parent(db, session, observed, Some(authority)).await?;
                 super::catalog_mutation_service::require_desired_kind(&live, &metadata, authority, admin)?;
+                super::catalog_mutation_service::validate_update_fields(db, session, &live, &metadata, authority, admin).await?;
                 if metadata.get_str("offering_kind") == Ok("tool") {
                     super::catalog_mutation_service::require_providerless_tool(db, session, &live).await?;
                 }
@@ -749,65 +756,63 @@ pub async fn create_with_endpoints(
                         ));
                     }
                 }
-                if service.tools_manager_created {
-                    if let Some(source) = service.import_source.as_ref().filter(|s| {
+                if service.tools_manager_created
+                    && let Some(source) = service.import_source.as_ref().filter(|s| {
                         matches!(
                             s.kind,
                             crate::models::downstream_service::CatalogImportKind::CatalogTwin
                         )
-                    }) {
-                        let live = db
-                            .collection::<DownstreamService>(SERVICES)
-                            .find_one(doc! {"slug":&source.reference,"is_active":true})
-                            .session(&mut *session)
-                            .await?
-                            .ok_or_else(|| AppError::Conflict("Twin source changed".into()))?;
-                        if source.version.as_deref() != Some(live.updated_at.to_rfc3339().as_str())
-                            || (live.visibility == "private"
-                                && live.owner_user_id.as_deref().unwrap_or(&live.created_by)
-                                    != actor_id)
-                        {
-                            return Err(AppError::Conflict(
-                                "Twin source changed or is no longer visible".into(),
+                    })
+                {
+                    let live = db
+                        .collection::<DownstreamService>(SERVICES)
+                        .find_one(doc! {"slug":&source.reference,"is_active":true})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::Conflict("Twin source changed".into()))?;
+                    if source.version.as_deref() != Some(live.updated_at.to_rfc3339().as_str())
+                        || (live.visibility == "private"
+                            && live.owner_user_id.as_deref().unwrap_or(&live.created_by)
+                                != actor_id)
+                    {
+                        return Err(AppError::Conflict(
+                            "Twin source changed or is no longer visible".into(),
+                        ));
+                    }
+                    use futures::TryStreamExt;
+                    endpoints = db
+                        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                            crate::models::service_endpoint::COLLECTION_NAME,
+                        )
+                        .find(doc! {"service_id":&live.id})
+                        .session(&mut *session)
+                        .await?
+                        .stream(&mut *session)
+                        .try_collect()
+                        .await?;
+                    for row in &mut endpoints {
+                        if row.target_id.is_some() {
+                            return Err(AppError::ValidationError(
+                                "Manager twins cannot inherit destination-bound operations".into(),
                             ));
                         }
-                        use futures::TryStreamExt;
-                        endpoints = db
-                            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
-                                crate::models::service_endpoint::COLLECTION_NAME,
-                            )
-                            .find(doc! {"service_id":&live.id})
-                            .session(&mut *session)
-                            .await?
-                            .stream(&mut *session)
-                            .try_collect()
-                            .await?;
-                        for row in &mut endpoints {
-                            if row.target_id.is_some() {
-                                return Err(AppError::ValidationError(
-                                    "Manager twins cannot inherit destination-bound operations"
-                                        .into(),
-                                ));
-                            }
-                            row.id = Uuid::new_v4().to_string();
-                            row.service_id = service.id.clone();
-                            row.publication =
-                                crate::models::service_endpoint::PublicationState::Draft;
-                            row.is_active = false;
-                            row.operation_generation = 1;
-                            row.created_at = service.created_at;
-                            row.updated_at = service.created_at;
-                            row.async_operation = None;
-                            row.execution = Default::default();
-                        }
-                        db.collection::<mongodb::bson::Document>(SERVICES)
-                            .update_one(
-                                doc! {"_id":&live.id},
-                                doc! {"$inc":{"tools_twin_fence":1_i64}},
-                            )
-                            .session(&mut *session)
-                            .await?;
+                        row.id = Uuid::new_v4().to_string();
+                        row.service_id = service.id.clone();
+                        row.publication = crate::models::service_endpoint::PublicationState::Draft;
+                        row.is_active = false;
+                        row.operation_generation = 1;
+                        row.created_at = service.created_at;
+                        row.updated_at = service.created_at;
+                        row.async_operation = None;
+                        row.execution = Default::default();
                     }
+                    db.collection::<mongodb::bson::Document>(SERVICES)
+                        .update_one(
+                            doc! {"_id":&live.id},
+                            doc! {"$inc":{"tools_twin_fence":1_i64}},
+                        )
+                        .session(&mut *session)
+                        .await?;
                 }
                 if let Some(provider_id) = service.provider_config_id.as_deref() {
                     super::provider_link_service::link_in_session(

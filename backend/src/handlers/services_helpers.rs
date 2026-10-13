@@ -116,6 +116,12 @@ pub async fn compute_viewer_routing(
     Ok(out)
 }
 
+/// Read-only capability probes fall back on policy/identity denials. Database
+/// and internal errors must remain visible as errors, never negative capability.
+pub(crate) fn is_capability_denial(error: &AppError) -> bool {
+    error.is_forbidden() || matches!(error, AppError::Unauthorized(_) | AppError::NotFound(_))
+}
+
 /// Verify that the authenticated user has admin privileges.
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     if !is_admin(state, auth_user).await? {

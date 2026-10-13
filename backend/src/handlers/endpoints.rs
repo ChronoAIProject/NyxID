@@ -13,7 +13,7 @@ use crate::services::service_endpoint_service::{
 };
 use crate::services::{openapi_parser, service_endpoint_service};
 
-use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
+use super::services_helpers::{fetch_service, require_http_service};
 
 // --- Request / Response types ---
 
@@ -239,14 +239,24 @@ pub async fn list_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
 
-    let endpoints = if super::services_helpers::require_admin(&state, &auth_user)
-        .await
-        .is_ok()
-        || (service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
-            && super::catalog_authority::require_tool_writer(&state, &auth_user, Some(&service))
+    let may_write =
+        if let Err(error) = super::login_client_context::require_first_party_human(&auth_user) {
+            Err(error)
+        } else if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            super::catalog_authority::require_tool_writer(&state, &auth_user, Some(&service))
                 .await
-                .is_ok())
-    {
+                .map(|_| true)
+        } else {
+            super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service)
+                .await
+                .map(|authority| authority.is_some())
+        };
+    let may_write = match may_write {
+        Ok(allowed) => allowed,
+        Err(error) if super::services_helpers::is_capability_denial(&error) => false,
+        Err(error) => return Err(error),
+    };
+    let endpoints = if may_write {
         service_endpoint_service::list_all_endpoints(&state.db, &service_id).await?
     } else {
         service_endpoint_service::list_endpoints(&state.db, &service_id).await?
@@ -299,8 +309,7 @@ pub async fn create_endpoint(
         super::catalog_authority::require_tool_writer(&state, &auth_user, Some(&service)).await?
             == super::catalog_authority::CatalogAuthority::ToolsManager
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
         false
     };
 
@@ -388,8 +397,7 @@ pub async fn update_endpoint(
         super::catalog_authority::require_tool_writer(&state, &auth_user, Some(&service)).await?
             == super::catalog_authority::CatalogAuthority::ToolsManager
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
         false
     };
 
@@ -481,8 +489,7 @@ pub async fn delete_endpoint(
         super::login_client_context::require_first_party_human(&auth_user)?;
         super::services_helpers::require_admin(&state, &auth_user).await?;
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
     }
 
     service_endpoint_service::commit_mutation(
@@ -528,8 +535,7 @@ pub async fn discover_endpoints(
     if tool {
         super::catalog_authority::require_tool_writer(&state, &auth_user, Some(&service)).await?;
     } else {
-        require_admin_or_creator(&state, &auth_user, &service).await?;
-        super::catalog_authority::require_public_row_writer(&state, &auth_user, &service).await?;
+        super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service).await?;
     }
 
     let api_spec_url = service
@@ -795,6 +801,23 @@ pub struct BulkPublicationRequest {
     pub endpoint_names: Vec<String>,
 }
 
+/// Tool operations stay Admin-only. Other catalog operations may be paused or
+/// published by anyone with catalog authority over the row.
+async fn require_publication_writer(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &crate::models::downstream_service::DownstreamService,
+) -> AppResult<()> {
+    if service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
+        && super::catalog_authority::require_catalog_row_writer(state, auth_user, service)
+            .await?
+            .is_some()
+    {
+        return Ok(());
+    }
+    super::services_helpers::require_admin(state, auth_user).await
+}
+
 pub async fn change_publication(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -814,16 +837,21 @@ pub async fn change_publication(
             ));
         }
     } else {
-        super::services_helpers::require_admin(&state, &auth_user).await?;
+        require_publication_writer(&state, &auth_user, &service).await?;
     }
     require_http_service(&service)?;
     let mut rows = crate::services::tool_publication_service::change_publication(
         &state.db,
-        &service_id,
-        service.offering_kind,
+        &service,
+        &crate::services::catalog_mutation_service::Authority {
+            catalog_base_url: state.config.base_url.clone(),
+            actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+            first_party_human: super::login_client_context::require_first_party_human(&auth_user)
+                .is_ok(),
+            admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
+        },
         &[endpoint_id],
         body.state,
-        &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         state.audit_chain_hmac_key.as_ref().as_ref(),
     )
     .await?;
@@ -849,7 +877,7 @@ pub async fn change_publication_bulk(
             ));
         }
     } else {
-        super::services_helpers::require_admin(&state, &auth_user).await?;
+        require_publication_writer(&state, &auth_user, &service).await?;
     }
     require_http_service(&service)?;
     let ids = crate::services::tool_publication_service::ids_by_name(
@@ -860,11 +888,16 @@ pub async fn change_publication_bulk(
     .await?;
     let rows = crate::services::tool_publication_service::change_publication(
         &state.db,
-        &service_id,
-        service.offering_kind,
+        &service,
+        &crate::services::catalog_mutation_service::Authority {
+            catalog_base_url: state.config.base_url.clone(),
+            actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+            first_party_human: super::login_client_context::require_first_party_human(&auth_user)
+                .is_ok(),
+            admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
+        },
         &ids,
         body.state,
-        &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         state.audit_chain_hmac_key.as_ref().as_ref(),
     )
     .await?;

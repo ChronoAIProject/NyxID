@@ -287,12 +287,23 @@ pub(super) fn package_with_snapshot(
     // Source-specific validation runs before this function. All file names are safe,
     // unique UTF-8 text paths; the archive is never extracted on the API host.
     for file in &draft.files {
-        zip.start_file(format!("{name}/{}", file.path), options)
+        zip.start_file(format!("{name}/{}", package_path(&file.path)), options)
             .map_err(|_| invalid())?;
         zip.write_all(file.content.as_bytes())
             .map_err(|_| invalid())?;
     }
     Ok(zip.finish().map_err(|_| invalid())?.into_inner())
+}
+
+/// Ornn accepts only `SKILL.md`, `scripts/`, `references/` and `assets/` at
+/// a package root. Supporting files elsewhere are references. Paths already
+/// under an allowed folder are unchanged, so existing packages keep their
+/// bytes (and reviewed hashes).
+pub(crate) fn package_path(path: &str) -> std::borrow::Cow<'_, str> {
+    match path.split_once('/') {
+        Some(("references" | "scripts" | "assets", _)) => path.into(),
+        _ => format!("references/{path}").into(),
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,6 +585,18 @@ pub(super) async fn verify_base(
 }
 
 pub(super) async fn validate(reader: &impl OrnnReader, bytes: &[u8]) -> PublicationResult<()> {
+    match validate_report(reader, bytes).await? {
+        None => Ok(()),
+        Some(_) => Err(PublicationError::Validation(None)),
+    }
+}
+
+/// Ornn's verdict on a package: `None` when valid, otherwise its violated
+/// rule identifiers (possibly empty). Messages are never retained.
+pub(super) async fn validate_report(
+    reader: &impl OrnnReader,
+    bytes: &[u8],
+) -> PublicationResult<Option<Vec<String>>> {
     let response = match reader
         .classified(
             Method::POST,
@@ -590,20 +613,42 @@ pub(super) async fn validate(reader: &impl OrnnReader, bytes: &[u8]) -> Publicat
         } => {
             return Err(PublicationError::Validation(Some(status)));
         }
-        other => return read_result(other).map(|_| ()),
+        other => return read_result(other).map(|_| None),
     };
     let response: Value = serde_json::from_slice(&response).map_err(|_| malformed())?;
     let valid = response["data"]["valid"].as_bool().ok_or_else(malformed)?;
     let violations = match &response["data"]["violations"] {
-        Value::Null => false,
-        Value::Array(items) => !items.is_empty(),
+        Value::Null => Vec::new(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item["rule"].as_str().map(str::to_owned))
+            .collect(),
         _ => return Err(malformed()),
     };
     // Only an explicit verdict refuses the package.
-    if !valid || violations {
-        return Err(PublicationError::Validation(None));
+    if !valid || !violations.is_empty() {
+        return Ok(Some(violations));
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Ask Ornn to validate the parts of a package the draft controls (layout,
+/// name, description, body) before the owner is asked to review it. An
+/// improvement's interface metadata comes from a version Ornn already
+/// accepted, so it is not read here: no extra reads or approval requests.
+pub(super) async fn preflight(
+    validator: &impl OrnnReader,
+    draft: &GeneratedProposal,
+) -> PublicationResult<Option<Vec<String>>> {
+    let name = draft
+        .base_skill
+        .as_ref()
+        .map_or(draft.name.as_str(), |base| base.name.as_str());
+    let version =
+        next_version(draft.base_skill.as_ref()).map_err(|_| PublicationError::Integrity)?;
+    let bytes = package_with_snapshot(draft, "preflight", name, &version, None)
+        .map_err(|_| PublicationError::Integrity)?;
+    validate_report(validator, &bytes).await
 }
 
 pub(super) enum PublishOutcome {
@@ -867,6 +912,52 @@ mod tests {
     use super::*;
     use std::io::Read;
     use uuid::Uuid;
+
+    #[test]
+    fn package_paths_follow_ornn_root_rules() {
+        assert_eq!(package_path("references/faq.md"), "references/faq.md");
+        assert_eq!(package_path("assets/a/b.txt"), "assets/a/b.txt");
+        assert_eq!(package_path("scripts/run.md"), "scripts/run.md");
+        assert_eq!(package_path("faq.md"), "references/faq.md");
+        assert_eq!(package_path("README.md"), "references/README.md");
+        assert_eq!(package_path("docs/guide.md"), "references/docs/guide.md");
+        assert_eq!(package_path("references"), "references/references");
+        // Already-valid paths are borrowed unchanged, keeping package bytes.
+        assert!(matches!(
+            package_path("references/faq.md"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_report_keeps_rule_ids_only() {
+        struct Verdict(&'static [u8]);
+        #[async_trait::async_trait]
+        impl OrnnReader for Verdict {
+            async fn get(&self, _path: &str) -> AppResult<Vec<u8>> {
+                unreachable!()
+            }
+            async fn classified(&self, _m: Method, _p: &str, _b: Vec<u8>) -> OrnnOutcome {
+                OrnnOutcome::Ok(self.0.to_vec())
+            }
+        }
+        let rules = validate_report(
+            &Verdict(br#"{"data":{"valid":false,"violations":[{"rule":"allowed-root-items","message":"Root item \"x.md\""},{"message":"no rule"}]}}"#),
+            b"zip",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rules, Some(vec!["allowed-root-items".to_owned()]));
+        assert_eq!(
+            validate_report(
+                &Verdict(br#"{"data":{"valid":true,"violations":[]}}"#),
+                b"zip"
+            )
+            .await
+            .unwrap(),
+            None
+        );
+    }
 
     struct ClassifiedReader(OrnnCode, u16);
     #[async_trait::async_trait]

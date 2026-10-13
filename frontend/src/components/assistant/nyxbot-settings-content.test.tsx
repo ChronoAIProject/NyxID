@@ -233,25 +233,26 @@ function renderPage() {
   return userEvent.setup();
 }
 
-it("confirms destructive actions by default and saves only a changed toggle", async () => {
+// The legacy "Confirm destructive actions" switch is now the access mode:
+// NyxMode (the default) confirms sensitive and destructive actions, Autopilot
+// is the old "off" position and carries the same warning.
+it("confirms destructive actions by default and saves only a changed access mode", async () => {
   const user = renderPage();
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
-  const toggle = await within(page).findByRole("switch", {
-    name: "Confirm destructive actions",
-  });
-  expect(toggle).toHaveAttribute("aria-checked", "true");
+  const mode = await within(page).findByRole("combobox", { name: "Access mode" });
+  expect(mode).toHaveTextContent("NyxMode");
+  expect(
+    within(page).getByText("Acts on ordinary requests; asks before sensitive or destructive actions."),
+  ).toBeVisible();
   const save = within(page).getByRole("button", { name: "Save settings" });
   expect(save).toBeDisabled();
-  expect(
-    within(page).queryByText(/without asking you first/),
-  ).not.toBeInTheDocument();
+  expect(within(page).queryByText(/without asking you first/)).not.toBeInTheDocument();
 
-  await user.click(toggle);
-  expect(toggle).toHaveAttribute("aria-checked", "false");
+  await user.click(mode);
+  await user.click(await screen.findByRole("option", { name: "Autopilot" }));
+  expect(mode).toHaveTextContent("Autopilot");
   expect(
-    within(page).getByText(
-      /will delete keys, channel bots, services and nodes without asking/,
-    ),
+    within(page).getByText(/deletes keys, channel bots, services and\s+nodes and changes access without asking you first/),
   ).toBeVisible();
   expect(save).toBeEnabled();
   await user.click(save);
@@ -260,12 +261,37 @@ it("confirms destructive actions by default and saves only a changed toggle", as
       {
         method: "PUT",
         endpoint: "/assistant/nyxagent/settings",
-        body: { skip_destructive_confirmation: true },
+        body: { access_mode: "autopilot" },
       },
     ]),
   );
   await waitFor(() => expect(save).toBeDisabled());
-  expect(toggle).toHaveAttribute("aria-checked", "false");
+  expect(mode).toHaveTextContent("Autopilot");
+});
+
+it("asks before every change in Ask Every Time and explains the specialist request policy", async () => {
+  const user = renderPage();
+  const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
+  const requests = await within(page).findByRole("combobox", { name: "Specialist access requests" });
+  expect(requests).toHaveTextContent("Deny requests");
+  expect(
+    within(page).getByText(/you can still grant it in the specialist's details/),
+  ).toBeVisible();
+  await user.click(within(page).getByRole("combobox", { name: "Access mode" }));
+  await user.click(await screen.findByRole("option", { name: "Ask Every Time" }));
+  expect(
+    within(page).getByText("Asks before every action that changes something. Reading never asks."),
+  ).toBeVisible();
+  await user.click(requests);
+  await user.click(await screen.findByRole("option", { name: "Route to NyxBot" }));
+  expect(within(page).getByText(/goes to NyxBot, which approves or denies it/)).toBeVisible();
+  await user.click(within(page).getByRole("button", { name: "Save settings" }));
+  await waitFor(() =>
+    expect(writes.at(-1)?.body).toEqual({
+      access_mode: "ask_every_time",
+      specialist_access_requests: "routed_to_nyxbot",
+    }),
+  );
 });
 
 it("validates specialist limits against the server limits before saving", async () => {

@@ -129,6 +129,9 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
         AdminProviderCommands::Update {
             provider,
             file,
+            with_client,
+            client_id_env,
+            client_secret_env,
             auth,
         } => {
             let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
@@ -151,15 +154,39 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
-            let updated: Value = if body.as_object().is_some_and(Map::is_empty) {
+            let client = if with_client {
+                api.require_credential_transport()?;
+                Some(read_client_values(
+                    current["provider_type"] != "device_code",
+                    client_id_env.as_deref(),
+                    client_secret_env.as_deref(),
+                )?)
+            } else {
+                None
+            };
+            let updated: Value = if body.as_object().is_some_and(Map::is_empty) && client.is_none()
+            {
                 eprintln!("No changes.");
                 current
             } else {
-                api.put(&format!("/providers/{}", text(&current, "id")), &body)
-                    .await?
+                let request = ClientRequest {
+                    fields: &body,
+                    client_id: client.as_ref().map(|(id, _)| id.as_str()),
+                    client_secret: client
+                        .as_ref()
+                        .and_then(|(_, secret)| secret.as_ref().map(|s| s.as_str())),
+                };
+                let result = api
+                    .put(&format!("/providers/{}", text(&current, "id")), &request)
+                    .await;
+                if client.is_some() {
+                    result.map_err(redacted_client_error)?
+                } else {
+                    result?
+                }
             };
             print_provider(&updated, &auth)?;
-            if file.is_none() {
+            if file.is_none() && !with_client {
                 offer_client(&mut api, &updated, &auth).await?;
             }
             Ok(())
@@ -1562,6 +1589,14 @@ fn read_client(
     client_secret_env: Option<&str>,
 ) -> Result<ClientValues> {
     eprintln!("{slug}: register this redirect URI in the vendor's OAuth app: {redirect}");
+    read_client_values(needs_secret, client_id_env, client_secret_env)
+}
+
+fn read_client_values(
+    needs_secret: bool,
+    client_id_env: Option<&str>,
+    client_secret_env: Option<&str>,
+) -> Result<ClientValues> {
     let client_id = match client_id_env {
         Some(name) => env_secret(name)?,
         None => Zeroizing::new(ask_required("Client ID", None)?),
@@ -2155,6 +2190,51 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn provider_update_with_client_sends_the_client_with_the_change() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let server = MockServer::start().await;
+        listing(&server, json!([provider_row(true)]), json!([])).await;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "token_url: https://accounts.zoho.eu/oauth/v2/token\n",
+        )
+        .unwrap();
+        Mock::given(method("PUT"))
+            .and(path(
+                "/api/v1/providers/11111111-1111-4111-8111-111111111111",
+            ))
+            .and(body_json(json!({
+                "token_url": "https://accounts.zoho.eu/oauth/v2/token",
+                "client_id": "current-id",
+                "client_secret": "current-secret",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(provider_row(true)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        unsafe {
+            std::env::set_var("NYXID_TEST_WITH_CLIENT_ID", "current-id");
+            std::env::set_var("NYXID_TEST_WITH_CLIENT_SECRET", " current-secret ");
+        }
+        let result = run_provider(AdminProviderCommands::Update {
+            provider: "zoho-mail".into(),
+            file: Some(file.path().into()),
+            with_client: true,
+            client_id_env: Some("NYXID_TEST_WITH_CLIENT_ID".into()),
+            client_secret_env: Some("NYXID_TEST_WITH_CLIENT_SECRET".into()),
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        unsafe {
+            std::env::remove_var("NYXID_TEST_WITH_CLIENT_ID");
+            std::env::remove_var("NYXID_TEST_WITH_CLIENT_SECRET");
+        }
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn apply_creates_provider_then_links_the_new_service_to_it() {
         let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
@@ -2496,7 +2576,7 @@ mod tests {
                 "https://nyx.example/catalog-icons/33333333-3333-4333-8333-333333333333".into();
             listing(&server, json!([provider]), json!([service_row()])).await;
             Mock::given(method("GET")).and(path("/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[{"id":"ep","name":"accounts","method":"GET","path":"/accounts","is_active":true}]}))).mount(&server).await;
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[{"id":"ep","name":"accounts","method":"GET","path":"/accounts","is_active":true}]}))).with_priority(1).mount(&server).await;
             let mut api = ApiClient::from_auth(&mock_auth(server.uri()))
                 .unwrap()
                 .without_token_refresh();
@@ -2565,7 +2645,13 @@ mod tests {
             &me,
         );
         assert_eq!(proof["c2"]["state"], "not_applicable");
-        assert_eq!(proof["c6"]["requires_admin"], true);
+        assert_eq!(proof["c6"]["requires_admin"], false);
+        assert!(
+            proof["client_bound_write_requirement"]
+                .as_str()
+                .unwrap()
+                .contains("existing_client_reentry")
+        );
         authored["playbook"]["scope_source"]["kind"] = "documented_minimum".into();
         let (missing, _, _) = playbook::report(
             desired,
@@ -2716,7 +2802,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("server echoed client-canary"));
-        let auth = mock_auth("http://example.invalid".into());
+        let auth = mock_auth("http://example.invalid");
         assert!(ApiClient::from_auth_with_credential_transport(&auth).is_err());
     }
 

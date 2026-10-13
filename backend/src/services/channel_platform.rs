@@ -348,6 +348,30 @@ impl std::fmt::Debug for OutboundEdit {
     }
 }
 
+/// Result of a live webhook subscription check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveWebhookStatus {
+    pub registered: bool,
+    /// Stable `channel_bot_health::codes` value when not registered.
+    pub error: Option<&'static str>,
+}
+
+impl LiveWebhookStatus {
+    pub fn registered() -> Self {
+        Self {
+            registered: true,
+            error: None,
+        }
+    }
+
+    pub fn missing(code: &'static str) -> Self {
+        Self {
+            registered: false,
+            error: Some(code),
+        }
+    }
+}
+
 /// Decrypted, platform-specific webhook verification material prepared by the
 /// handler. Secrets never live on persisted model structs.
 #[derive(Clone, Default)]
@@ -730,6 +754,18 @@ pub trait PlatformAdapter: Send + Sync {
         _bot_id: &str,
     ) -> AppResult<()> {
         Err(super::channel_managed::unavailable())
+    }
+
+    /// Read-only check of the platform's live webhook subscription for this
+    /// bot. `None` means the platform has no such check.
+    async fn connection_webhook_status(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &PlatformVerifySecrets,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _webhook_url: &str,
+    ) -> AppResult<Option<LiveWebhookStatus>> {
+        Ok(None)
     }
 
     fn platform_subscription_handshake(

@@ -1,5 +1,5 @@
 import type { UploadedMessage } from "@/lib/assistant/uploads";
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type {
@@ -42,6 +42,7 @@ function liveSend(
   onAdopt: (id: string) => void,
   agent?: NyxAgentConversationAgent,
   attachmentIds?: string[],
+  attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
   adoptExisting?: boolean,
 ) {
   const actorId = currentCreditsActor();
@@ -51,6 +52,7 @@ function liveSend(
     return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
       ...(!conversationId && agent ? { agent } : {}),
       attachmentIds,
+      attachments,
       adoptExisting,
     });
   }
@@ -107,6 +109,14 @@ export function useNyxAgentAssistantChat({
     nyxAgentTransport.getRevision,
   );
   const streaming = nyxAgentTransport.isRunning(selectedConversationId);
+  // A new thread's first send with uploads goes to the server draft that holds
+  // them. Show that draft's live turn (and its images) at once, as a new thread
+  // without uploads is shown, rather than only once the page adopts the id.
+  const [sendingDraft, setSendingDraft] = useState<string>();
+  const viewId =
+    selectedConversationId ??
+    (sendingDraft && nyxAgentTransport.isRunning(sendingDraft) ? sendingDraft : undefined);
+  const viewSession = nyxAgentTransport.session(viewId);
   useNyxAgentLive(enabled);
   const live = useNyxAgentLiveConnected();
   const threadsKey = nyxBotQueryKeys.threads(userId);
@@ -164,13 +174,19 @@ export function useNyxAgentAssistantChat({
   });
   const send = useCallback(
     async (text: string, uploads?: UploadedMessage) => {
+      let draft: string | undefined;
       try {
         const id = selectedConversationId ?? uploads?.conversationId;
+        if (id && !selectedConversationId) {
+          draft = id;
+          setSendingDraft(id);
+        }
         await liveSend(
           id, text, onConversationAdopted, draftAgent,
-          uploads?.attachmentIds, Boolean(id && !selectedConversationId),
+          uploads?.attachmentIds, uploads?.attachments, Boolean(id && !selectedConversationId),
         );
       } finally {
+        if (draft) setSendingDraft((current) => (current === draft ? undefined : current));
         // A new thread changes its agent's summary. (Model routing is
         // server-side, so there is no profile list to refresh.)
         await queryClient.invalidateQueries({ queryKey: agentsKey });
@@ -318,12 +334,21 @@ export function useNyxAgentAssistantChat({
     threadsLoaded: threads.isSuccess,
     /** The selected thread's row, once loaded. */
     conversation: selected,
-    session: nyxAgentTransport.session(selectedConversationId),
-    continuations: nyxAgentTransport.continuations(selectedConversationId),
-    isStreaming: nyxAgentTransport.isRunning(selectedConversationId),
+    // Until adoption the page treats the draft as a new thread (no conversation id).
+    session: viewId === selectedConversationId
+      ? viewSession
+      : { ...viewSession, clientId: "nyxagent-draft", conversationId: undefined },
+    continuations: nyxAgentTransport.continuations(viewId),
+    isStreaming: nyxAgentTransport.isRunning(viewId),
     isLoading: history.isLoading,
     error: history.error?.message ?? threads.error?.message ?? agents.error?.message,
     send,
+    retry: (id: string, messageId: string) =>
+      nyxAgentTransport.retry(id, messageId, onConversationAdopted),
+    /** Reload the selected thread's transcript (after a context reset). */
+    refreshHistory: async () => {
+      if (selectedConversationId) await nyxAgentTransport.history(selectedConversationId);
+    },
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],
     decideAcknowledgement: decision.mutateAsync,

@@ -435,6 +435,46 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
         1
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    let loaded = crate::services::channel_bot_service::get_bot(&db, "bot")
+        .await
+        .unwrap();
+    // Telegram's 403 on the tail chunk is a recipient refusal.
+    let refusal = crate::errors::AppError::ChannelConversationNotReachable(String::new())
+        .error_code()
+        .to_string();
+    assert_eq!(
+        loaded.diagnostics.last_outbound_error.unwrap().code,
+        refusal
+    );
+    // The stored BSON is a string, so every reader (not only the lenient
+    // model deserializer) can load the row.
+    let raw = db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id": "bot"})
+        .await
+        .unwrap()
+        .unwrap();
+    let error = raw
+        .get_document("diagnostics")
+        .unwrap()
+        .get_document("last_outbound_error")
+        .unwrap();
+    assert_eq!(error.get_str("code").unwrap(), refusal);
+    assert_eq!(error.get_str("reason").unwrap(), "recipient_unreachable");
+    let owner_rows = crate::services::channel_bot_service::list_bots(&db, "owner")
+        .await
+        .unwrap();
+    assert_eq!(owner_rows.len(), 1);
+    let admin_rows = crate::services::channel_bot_service::list_all_filtered(
+        &db,
+        Some("telegram"),
+        Some("active"),
+        100,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(admin_rows.len(), 1);
     db.collection::<bson::Document>(CHANNELS)
         .update_one(doc! {"_id":"link"}, doc! {"$set":{"transport":"gateway"}})
         .await

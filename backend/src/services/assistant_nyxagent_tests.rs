@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: None,
         conversation_id: id.map(str::to_owned),
@@ -13,6 +14,7 @@ fn request(id: Option<&str>, text: &str) -> TurnRequest {
         access_mode: None,
     }
 }
+
 fn terminal(kind: &str, seq: u64, text: &str) -> Value {
     let sid = "1234567890abcdef1234567890abcdef";
     json!({"type":kind,"sequence_number":seq,"response":{
@@ -260,6 +262,8 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            retry_of: None,
+            specialist_id: None,
             steering: None,
             voice: None,
             execution_pending: false,
@@ -272,6 +276,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             text: format!("marker{i}:{}", "界".repeat(400)),
             status: "completed".into(),
             error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -287,11 +293,297 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let base = context.instructions(&[], false);
     let prompt = context.instructions(&messages, true);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
-    assert!(prompt.contains("Prior conversation history"));
+    assert!(prompt.contains("Previous context (after reset)"));
     assert!(prompt.contains("marker29"));
     assert!(!prompt.contains("marker0:"));
     assert!(prompt.contains(SCHEDULE_PROMPT));
-    assert!(prompt.len() <= base.len() + 8192);
+    assert!(prompt.len() <= base.len() + 16384);
+}
+
+#[test]
+fn failure_diagnostics_normalize_unknown_upstream_codes() {
+    let error = TurnError::new("provider_rate_limit");
+    assert_eq!(error.code, "assistant_unavailable");
+    assert_eq!(error.upstream_code.as_deref(), Some("provider_rate_limit"));
+    let known = TurnError::new("first_byte_timeout");
+    assert_eq!(known.code, "first_byte_timeout");
+    assert_eq!(known.upstream_code.as_deref(), Some("first_byte_timeout"));
+}
+
+#[test]
+fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
+    assert_eq!(
+        TurnError::new("first_byte_timeout").code,
+        "first_byte_timeout"
+    );
+    assert_eq!(TurnError::new("idle_timeout").code, "idle_timeout");
+    assert_eq!(TurnError::new("invalid_stream").code, "invalid_stream");
+    assert_eq!(TurnError::new("upstream_503").code, "assistant_unavailable");
+    assert_eq!(
+        TurnError::new("settlement_deadline").code,
+        "assistant_unavailable"
+    );
+}
+
+#[test]
+fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
+    let rows = vec![
+        AssistantMessage {
+            retry_of: None,
+            specialist_id: None,
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "goal".into(),
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            seq: 1,
+            turn_id: "t1".into(),
+            role: "user".into(),
+            text: "ORIGINATING GOAL".into(),
+            status: "completed".into(),
+            error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
+            created_at: Utc::now(),
+            activities: Vec::new(),
+            attachments: Vec::new(),
+            origin: None,
+            via: None,
+        },
+        AssistantMessage {
+            retry_of: None,
+            specialist_id: None,
+            steering: None,
+            voice: None,
+            execution_pending: false,
+            id: "last".into(),
+            conversation_id: "c".into(),
+            user_id: "u".into(),
+            seq: 2,
+            turn_id: "t2".into(),
+            role: "assistant".into(),
+            text: format!("HEAD {} TAIL", "x".repeat(6000)),
+            status: "completed".into(),
+            error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
+            created_at: Utc::now(),
+            activities: Vec::new(),
+            attachments: Vec::new(),
+            origin: None,
+            via: None,
+        },
+    ];
+    let recap = bounded_recap(&rows);
+    assert!(recap.contains("ORIGINATING GOAL"));
+    assert!(recap.contains("HEAD"));
+    assert!(recap.contains("TAIL"));
+    assert!(recap.len() <= 16384);
+    assert!(recap.contains("ORIGINATING GOAL"));
+}
+
+#[test]
+fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
+    let row = AssistantMessage {
+        retry_of: None,
+        specialist_id: None,
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "cap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "goal".into(),
+        status: "completed".into(),
+        error_code: None,
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: (0..40)
+            .map(|i| crate::models::assistant_conversation::TurnActivity {
+                machine: None,
+                id: i.to_string(),
+                digest: None,
+                label: format!("tool-{i}"),
+                status: "completed".into(),
+                started_at: Utc::now(),
+                ended_at: None,
+            })
+            .collect(),
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    };
+    // Thirty such rows with long labels: each list is capped at ten entries
+    // and the whole recap stays inside its budget, newest rows first.
+    let rows: Vec<_> = (0..30)
+        .map(|seq| {
+            let mut row = row.clone();
+            row.id = format!("cap-{seq}");
+            row.seq = seq;
+            row.text = format!("row{seq}");
+            for activity in &mut row.activities {
+                activity.label = format!("{}-{}", activity.label, "x".repeat(100));
+            }
+            row
+        })
+        .collect();
+    let recap = bounded_recap(&rows);
+    assert!(recap.len() <= 16384, "{}", recap.len());
+    assert!(recap.contains("row29"));
+    assert!(
+        !recap.contains("row9 ["),
+        "rows beyond the 20-row window are omitted"
+    );
+    assert!(recap.contains(", +30 more]"));
+    assert!(
+        !recap.contains("tool-10-"),
+        "an action list stops after ten entries"
+    );
+}
+
+#[test]
+fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
+    let row = AssistantMessage {
+        retry_of: None,
+        specialist_id: None,
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "m".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "head goal details tail".into(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: Some("upstream_x".into()),
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "a".into(),
+            digest: None,
+            label: "tool.check".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            image_input: None,
+            origin: "tool".into(),
+            pages: None,
+            id: "att".into(),
+            content_type: "text/plain".into(),
+            size: 4,
+            label: "result.txt".into(),
+        }],
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap(std::slice::from_ref(&row));
+    assert!(recap.contains("Previous context (after reset)"));
+    assert!(recap.contains("tool.check=completed"));
+    assert!(recap.contains("result.txt"));
+    assert!(recap.contains("partial, failed"));
+}
+
+#[test]
+fn guest_recap_omits_owner_tool_metadata() {
+    let row = AssistantMessage {
+        retry_of: None,
+        specialist_id: None,
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "guest-recap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "Visible channel reply".into(),
+        status: "completed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "owner-action".into(),
+            digest: None,
+            label: "owner.secret_tool".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            image_input: None,
+            origin: "tool".into(),
+            pages: None,
+            id: "owner-attachment".into(),
+            content_type: "text/plain".into(),
+            size: 1,
+            label: "private.txt".into(),
+        }],
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap_with_checkpoint(std::slice::from_ref(&row), true, None);
+    assert!(recap.contains("Visible channel reply"));
+    assert!(!recap.contains("owner.secret_tool"));
+    assert!(!recap.contains("private.txt"));
+    assert!(!recap.contains("turn_lost"));
+}
+
+#[test]
+fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
+    let row = AssistantMessage {
+        retry_of: None,
+        specialist_id: None,
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: "retry-recap".into(),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: 1,
+        turn_id: "t".into(),
+        role: "assistant".into(),
+        text: "partial".into(),
+        status: "failed".into(),
+        error_code: Some("turn_lost".into()),
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: vec![crate::models::assistant_conversation::TurnActivity {
+            machine: None,
+            id: "activity-42".into(),
+            digest: None,
+            label: "mail.send".into(),
+            status: "completed".into(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }],
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    };
+    let recap = bounded_recap(std::slice::from_ref(&row));
+    assert!(
+        recap.contains("assistant (partial, failed): partial"),
+        "{recap}"
+    );
+    assert!(recap.contains("[actions: mail.send=completed]"), "{recap}");
+    assert!(recap.contains("[error: turn_lost]"), "{recap}");
+    // Activity ids are internal; the model sees labels and statuses only.
+    assert!(!recap.contains("activity-42"));
 }
 
 #[tokio::test]
@@ -391,7 +683,7 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
     assert_eq!(cancelled.code, "cancelled");
     let row = get(&db, &owner, &row.id).await.unwrap();
     assert!(row.nyxagent_session_id.is_none());
-    assert_eq!(row.context_reset_reason.as_deref(), Some("turn_failed"));
+    assert_eq!(row.context_reset_reason.as_deref(), Some("stopped"));
     let latest = messages(&db, &owner, &row.id, 2, None).await.unwrap();
     assert_eq!(latest.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![3, 4]);
     assert_eq!(latest[1].error_code.as_deref(), Some("cancelled"));
@@ -470,7 +762,17 @@ async fn every_failed_turn_clears_binding_and_retains_partial_reply() {
         .unwrap();
         let saved = get(&db, "owner", &row.id).await.unwrap();
         assert!(saved.nyxagent_session_id.is_none(), "{code}");
-        assert_eq!(saved.context_reset_reason.as_deref(), Some("turn_failed"));
+        // Stop records its own reason so the reset notice can say so.
+        let reason = if code == "cancelled" {
+            "stopped"
+        } else {
+            "turn_failed"
+        };
+        assert_eq!(
+            saved.context_reset_reason.as_deref(),
+            Some(reason),
+            "{code}"
+        );
         let messages = messages(&db, "owner", &row.id, 2, None).await.unwrap();
         assert_eq!(messages[1].text, "partial");
         assert_eq!(messages[1].status, "failed");
@@ -506,6 +808,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            retry_digests: Vec::new(),
+            retry_of: None,
             running_response: None,
             channel_event_id: None,
             initiating_message_seq: None,
@@ -577,6 +881,13 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     )
     .await
     .unwrap();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &old.id},
+            doc! {"$set": {"active_turn.activities": [{"id": "act-1", "label": "nyxid__check", "status": "running", "started_at": bson::DateTime::now(), "ended_at": bson::Bson::Null}], "active_turn.attachments": [{"id": "att-1", "content_type": "text/plain", "size": 4i64, "label": "result.txt", "origin": "tool"}]}},
+        )
+        .await
+        .unwrap();
     expire_turn(&db, &old).await;
     let next = begin_turn(
         &db,
@@ -600,6 +911,11 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     assert_eq!(lost.status, "failed");
     assert_eq!(lost.error_code.as_deref(), Some("turn_lost"));
     assert!(lost.text.is_empty());
+    assert_eq!(lost.activities[0].status, "error");
+    assert_eq!(lost.attachments[0].id, "att-1");
+    let detail = lost.error_detail.as_ref().expect("reclaim diagnostics");
+    assert_eq!(detail.stage, "lease_expiry");
+    assert_eq!(lost.upstream_error_code, None);
     assert_eq!(
         lost.created_at.timestamp_millis(),
         next.context_reset_at.unwrap().timestamp_millis()
@@ -803,6 +1119,22 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
             .unwrap()
             .active_turn
             .is_none()
+    );
+    let reclaimed = messages(&db, "owner", &stale.id, 1, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(reclaimed.error_code.as_deref(), Some("turn_lost"));
+    assert_eq!(
+        reclaimed.upstream_error_code, None,
+        "a NyxID class, not an upstream code"
+    );
+    assert_eq!(reclaimed.error_detail.as_ref().unwrap().stage, "sweep");
+    let saved = checkpoint(&db, "owner", &stale.id).await.unwrap().unwrap();
+    assert_eq!(
+        (saved.status.as_str(), saved.error_code.as_deref()),
+        ("failed", Some("turn_lost"))
     );
     assert!(
         get(&db, "owner", &fresh.id)
@@ -1030,6 +1362,433 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
             .count(),
         MAX_ACTIVITY_LABEL_CHARS
     );
+}
+
+async fn settle(
+    db: &Database,
+    keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    owner: &str,
+    row: &AssistantConversation,
+    text: &str,
+    error: Option<&str>,
+) {
+    let credential = credentials::load_for_conversation(db, keys, owner, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    finish_turn(
+        db,
+        row,
+        &credential.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: text.into(),
+            session_id: None,
+            response_id: None,
+            error: error.map(TurnError::new),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+fn retry(id: &str, text: &str, retry_of: &str) -> TurnRequest {
+    TurnRequest {
+        retry_of: Some(retry_of.into()),
+        ..request(Some(id), text)
+    }
+}
+
+#[tokio::test]
+async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
+    let db = connect_transaction_test_database("nyxa_retry_fence").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    let first = begin_turn(&db, &user, &request(None, "hello"), keys)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &first, "hi", None).await;
+    let upload = crate::services::assistant_upload_service::upload(
+        &db,
+        keys,
+        &user,
+        &first.id,
+        "brief.txt",
+        b"the brief".to_vec(),
+    )
+    .await
+    .unwrap();
+    let failed = begin_turn(
+        &db,
+        &user,
+        &TurnRequest {
+            attachment_ids: vec![upload.id.clone()],
+            ..request(Some(&first.id), "send the brief")
+        },
+        keys,
+    )
+    .await
+    .unwrap();
+    let failed_turn = failed.active_turn.as_ref().unwrap().turn_id.clone();
+    let sent =
+        activity_started_with_digest(&db, &user, &first.id, "mail__send", Some("digest-send"))
+            .await
+            .unwrap()
+            .unwrap();
+    activity_finished(&db, &user, &first.id, &sent, true)
+        .await
+        .unwrap();
+    let broken = activity_started_with_digest(
+        &db,
+        &user,
+        &first.id,
+        "drive__upload",
+        Some("digest-upload"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    activity_finished(&db, &user, &first.id, &broken, false)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &failed, "partial", Some("idle_timeout")).await;
+
+    // Only a failed owner turn of this conversation can be retried.
+    for target in [
+        first.active_turn.as_ref().unwrap().turn_id.as_str(),
+        "missing-turn",
+    ] {
+        let error = begin_turn(
+            &db,
+            &user,
+            &retry(&first.id, "send the brief", target),
+            keys,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, AppError::BadRequest(message) if message == RETRY_INVALID),
+            "{error:?}"
+        );
+    }
+    // The retry re-sends no upload id: the bound upload is carried over.
+    let retried = begin_turn(
+        &db,
+        &user,
+        &retry(&first.id, "send the brief", &failed_turn),
+        keys,
+    )
+    .await
+    .unwrap();
+    let turn = retried.active_turn.as_ref().unwrap();
+    assert_eq!(turn.retry_of.as_deref(), Some(failed_turn.as_str()));
+    assert_eq!(turn.retry_digests, ["digest-send"]);
+    let note = turn.note.as_deref().unwrap();
+    assert_eq!(
+        note,
+        format!(
+            "[NyxID retry context: the owner is retrying turn {failed_turn}, which failed (idle_timeout). These actions already completed there; use their results. NyxID refuses repeating any of them with the same arguments: mail__send. These did not complete; check their effect before running them again: drive__upload. The original message's attachments are attached again.]"
+        )
+    );
+    let input = messages(&db, &user, &first.id, 1, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(input.turn_id, turn.turn_id);
+    assert_eq!(
+        input
+            .attachments
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        [upload.id.as_str()]
+    );
+    assert!(
+        retry_duplicate(&db, &user, &first.id, "digest-send")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !retry_duplicate(&db, &user, &first.id, "digest-upload")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !retry_duplicate(&db, &user, &first.id, "digest-other")
+            .await
+            .unwrap()
+    );
+    // The refused repeat is recorded as completed, so a retry of this retry
+    // inherits the fence even though the call did not run again here.
+    record_retry_duplicate(&db, &user, &first.id, "mail__send", "digest-send")
+        .await
+        .unwrap();
+    let retried_turn = turn.turn_id.clone();
+    settle(
+        &db,
+        keys,
+        &user,
+        &retried,
+        "",
+        Some("assistant_unavailable"),
+    )
+    .await;
+    let chained = begin_turn(
+        &db,
+        &user,
+        &retry(&first.id, "send the brief", &retried_turn),
+        keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        chained.active_turn.as_ref().unwrap().retry_digests,
+        ["digest-send"]
+    );
+    assert!(
+        retry_duplicate(&db, &user, &first.id, "digest-send")
+            .await
+            .unwrap()
+    );
+    // An ordinary turn is never fenced.
+    settle(&db, keys, &user, &chained, "done", None).await;
+    let ordinary = begin_turn(&db, &user, &request(Some(&first.id), "again"), keys)
+        .await
+        .unwrap();
+    assert!(
+        ordinary
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .retry_digests
+            .is_empty()
+    );
+    assert!(
+        !retry_duplicate(&db, &user, &first.id, "digest-send")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn durable_checkpoint_accumulates_failures_resets_on_success_and_is_purged() {
+    let db = connect_transaction_test_database("nyxa_checkpoint").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    let first = begin_turn(&db, &user, &request(None, "Plan the launch"), keys)
+        .await
+        .unwrap();
+    let id = first.id.clone();
+    assert!(checkpoint(&db, &user, &id).await.unwrap().is_none());
+    settle(&db, keys, &user, &first, "Here is the plan", None).await;
+    let saved = checkpoint(&db, &user, &id).await.unwrap().unwrap();
+    let first_turn = first.active_turn.as_ref().unwrap().turn_id.clone();
+    assert_eq!(saved.status, "completed");
+    assert_eq!(saved.goal.as_deref(), Some("Plan the launch"));
+    assert_eq!(saved.output.as_deref(), Some("Here is the plan"));
+    assert_eq!(
+        saved.last_successful_turn_id.as_deref(),
+        Some(first_turn.as_str())
+    );
+
+    let failing = begin_turn(&db, &user, &request(Some(&id), "Send the invites"), keys)
+        .await
+        .unwrap();
+    let call = activity_started_with_digest(&db, &user, &id, "mail__send", None)
+        .await
+        .unwrap()
+        .unwrap();
+    activity_finished(&db, &user, &id, &call, true)
+        .await
+        .unwrap();
+    activity_started_with_digest(&db, &user, &id, "calendar__create", None)
+        .await
+        .unwrap()
+        .unwrap();
+    settle(&db, keys, &user, &failing, "", Some("idle_timeout")).await;
+    let failed_turn = failing.active_turn.as_ref().unwrap().turn_id.clone();
+    let saved = checkpoint(&db, &user, &id).await.unwrap().unwrap();
+    assert_eq!(saved.status, "failed");
+    assert_eq!(saved.turn_id, failed_turn);
+    assert_eq!(saved.error_code.as_deref(), Some("idle_timeout"));
+    assert_eq!(saved.goal.as_deref(), Some("Send the invites"));
+    assert_eq!(
+        saved.completed_actions,
+        [CheckpointAction {
+            label: "mail__send".into(),
+            turn_id: failed_turn.clone()
+        }]
+    );
+    assert_eq!(
+        saved.failed_actions,
+        [CheckpointAction {
+            label: "calendar__create".into(),
+            turn_id: failed_turn.clone()
+        }]
+    );
+    assert_eq!(
+        saved.last_successful_turn_id.as_deref(),
+        Some(first_turn.as_str())
+    );
+    assert!(saved.output.is_none());
+
+    // A second failure keeps the open window's actions.
+    let again = begin_turn(
+        &db,
+        &user,
+        &request(Some(&id), "Try the invites again"),
+        keys,
+    )
+    .await
+    .unwrap();
+    let call = activity_started_with_digest(&db, &user, &id, "slack__post", None)
+        .await
+        .unwrap()
+        .unwrap();
+    activity_finished(&db, &user, &id, &call, true)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &again, "", Some("assistant_unavailable")).await;
+    let saved = checkpoint(&db, &user, &id).await.unwrap().unwrap();
+    assert_eq!(
+        saved
+            .completed_actions
+            .iter()
+            .map(|a| a.label.as_str())
+            .collect::<Vec<_>>(),
+        ["mail__send", "slack__post"]
+    );
+    assert_eq!(saved.failed_actions.len(), 1);
+
+    // The checkpoint leads the recap and names its scope, even though the
+    // goal message itself is outside the recap window.
+    let summary = checkpoint_summary(&db, &user, &id).await.unwrap();
+    let recap = bounded_recap_with_checkpoint(&[], false, summary.checkpoint.as_ref());
+    assert!(recap.contains(&format!("Checkpoint (turn {}, failed: assistant_unavailable; last successful turn {first_turn})", again.active_turn.as_ref().unwrap().turn_id)), "{recap}");
+    assert!(recap.contains("- goal: Try the invites again"), "{recap}");
+    assert!(
+        recap.contains("- completed: mail__send, slack__post"),
+        "{recap}"
+    );
+    assert!(
+        recap.contains("- failed or interrupted (check before rerunning): calendar__create"),
+        "{recap}"
+    );
+    // A guest audience never sees the owner's checkpoint.
+    let guest = bounded_recap_with_checkpoint(&[], true, summary.checkpoint.as_ref());
+    assert!(!guest.contains("mail__send"));
+
+    // Success closes the window.
+    let done = begin_turn(&db, &user, &request(Some(&id), "Thanks"), keys)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &done, "All sent", None).await;
+    let saved = checkpoint(&db, &user, &id).await.unwrap().unwrap();
+    assert_eq!(saved.status, "completed");
+    assert!(saved.completed_actions.is_empty() && saved.failed_actions.is_empty());
+    assert_eq!(saved.goal.as_deref(), Some("Thanks"));
+
+    // Another owner cannot read it; deleting the conversation purges it.
+    assert!(checkpoint_summary(&db, "someone-else", &id).await.is_err());
+    delete(&db, &user, &id).await.unwrap();
+    assert_eq!(
+        db.collection::<bson::Document>(CHECKPOINTS)
+            .count_documents(doc! {"_id": &id})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn reset_context_is_fenced_and_drops_the_checkpoint() {
+    let db = connect_transaction_test_database("nyxa_reset_fence").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    let row = begin_turn(&db, &user, &request(None, "goal"), keys)
+        .await
+        .unwrap();
+    // A live turn wins: nothing is reset.
+    assert!(matches!(
+        reset_context(&db, &user, &row.id).await,
+        Err(AppError::AssistantTurnActive)
+    ));
+    settle(&db, keys, &user, &row, "answer", None).await;
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"nyxagent_session_id": "conv_bound"}},
+        )
+        .await
+        .unwrap();
+    assert!(checkpoint(&db, &user, &row.id).await.unwrap().is_some());
+    reset_context(&db, &user, &row.id).await.unwrap();
+    let reset = get(&db, &user, &row.id).await.unwrap();
+    assert!(reset.nyxagent_session_id.is_none());
+    assert_eq!(reset.context_reset_reason.as_deref(), Some("user_reset"));
+    assert!(checkpoint(&db, &user, &row.id).await.unwrap().is_none());
+    // Unknown and foreign conversations are not found.
+    assert!(matches!(
+        reset_context(&db, "someone-else", &row.id).await,
+        Err(AppError::NotFound(_))
+    ));
+}
+
+#[test]
+fn recap_reserves_the_goal_before_long_recent_rows() {
+    let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        retry_of: None,
+        specialist_id: None,
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: format!("m{seq}"),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq,
+        turn_id: format!("t{seq}"),
+        role: role.into(),
+        text,
+        status: "completed".into(),
+        error_code: None,
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: Vec::new(),
+        attachments: Vec::new(),
+        origin: None,
+        via: None,
+    };
+    // The goal plus 19 rows of 2 KiB: newest-first, the goal would be the
+    // 20th row and no budget would remain for it.
+    let mut history = vec![row(1, "user", "ORIGINATING GOAL".into())];
+    history
+        .extend((2..=20).map(|seq| row(seq, "assistant", format!("r{seq}:{}", "x".repeat(2048)))));
+    let recap = bounded_recap(&history);
+    assert!(recap.len() <= 16384);
+    assert!(recap.contains("\nuser: ORIGINATING GOAL"), "goal kept");
+    assert!(recap.contains("r20:"), "newest row kept");
+    // The goal leads the recap.
+    assert!(recap.find("ORIGINATING GOAL").unwrap() < recap.find("r20:").unwrap());
 }
 
 #[tokio::test]
@@ -1683,12 +2442,25 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
                 version: "1.0.0".into(),
                 sha256: "a".repeat(64),
                 dependencies: vec![],
+                disabled: false,
             }),
             "machines" => changed.machine_node_ids.push("machine".into()),
             "owner" => changed.user_id = "organization".into(),
             _ => unreachable!(),
         }
         let prepared = prepare(&row, &changed);
+        if field == "memory" {
+            assert!(
+                !prepared.reset,
+                "memory changes are per-turn input, not stable instructions"
+            );
+            assert!(
+                prepared
+                    .input_with_memory("Current preferences", "continue", true)
+                    .contains("Current preferences")
+            );
+            continue;
+        }
         assert!(
             prepared.reset,
             "stable field {field} must invalidate the binding"
@@ -1720,6 +2492,65 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
 }
 
 #[test]
+fn model_validation_and_unavailable_copy_are_stable() {
+    assert!(super::valid_model("nyxagent/chat"));
+    assert!(super::valid_model("nyxagent/reasoning_v2"));
+    assert!(!super::valid_model("openai/gpt-4"));
+    assert!(!super::valid_model("nyxagent/"));
+}
+
+#[test]
+fn memory_remembered_in_one_thread_keeps_another_threads_binding() {
+    use crate::models::assistant_agent::{AssistantAgent, MemoryNote};
+    use crate::services::assistant_instruction_context::Prepared;
+    let now = Utc::now();
+    let mut agent: AssistantAgent = bson::from_document(doc! {
+        "_id":"agent", "user_id":"owner", "kind":"nyxbot", "name":"nyxbot",
+        "created_by":"user", "model":DEFAULT_MODEL,
+        "created_at":bson::DateTime::from_chrono(now), "updated_at":bson::DateTime::from_chrono(now)
+    })
+    .unwrap();
+    // Two bound threads of the same agent.
+    let bind = |agent: &AssistantAgent| {
+        let mut row = stale_test_row(now);
+        row.nyxagent_session_id = None;
+        let mut binding = Prepared::new(&[2; 32], &row, Some(agent), &[])
+            .unwrap()
+            .binding;
+        binding.session_id = format!("conv_{}", row.id);
+        row.nyxagent_session_id = Some(binding.session_id.clone());
+        row.nyxagent_instruction_binding = Some(binding);
+        row
+    };
+    let _thread_a = bind(&agent);
+    let thread_b = bind(&agent);
+    // `nyxid__remember` in thread A adds a note to the agent.
+    agent.memory.push(MemoryNote {
+        id: "note".into(),
+        text: "Prefers metric units".into(),
+        created_at: now,
+        updated_at: now,
+    });
+    let prepared = Prepared::new(&[2; 32], &thread_b, Some(&agent), &[]).unwrap();
+    assert!(!prepared.reset, "thread B keeps its live context");
+    assert_eq!(
+        prepared.binding.session_id,
+        thread_b.nyxagent_session_id.clone().unwrap()
+    );
+    assert!(
+        prepared
+            .input_with_memory("", "next question", true)
+            .contains("Prefers metric units"),
+        "thread B's next turn sees the new note in its input"
+    );
+    assert!(
+        !prepared
+            .instructions(&[], false)
+            .contains("Prefers metric units")
+    );
+}
+
+#[test]
 fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
     let mut row = stale_test_row(Utc::now());
     row.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
@@ -1739,4 +2570,24 @@ fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
     );
     let note = events_text(&[event]);
     assert!(note.ends_with("Attach it now."));
+}
+
+#[test]
+fn upstream_model_rejections_report_model_unavailable_with_guidance() {
+    for code in [
+        "model_not_found",
+        "model_unavailable",
+        "unknown_model",
+        "invalid_model",
+    ] {
+        let error = super::TurnError::new(code);
+        assert_eq!(error.code, "model_unavailable", "{code}");
+        assert!(error.message.contains("model selector"), "{code}");
+        assert_eq!(error.upstream_code.as_deref(), Some(code));
+    }
+    assert!(
+        super::TurnError::new("model_not_configured")
+            .message
+            .contains("model selector")
+    );
 }

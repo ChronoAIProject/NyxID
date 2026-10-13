@@ -19,6 +19,7 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly feedback?: { readonly vote: "up" | "down"; readonly comment?: string | null } | null;
   readonly steering?: import("@/schemas/assistant-nyxagent").NyxAgentSteering | null;
   readonly artifacts?: ArtifactContentBlock[];
   readonly id: string;
@@ -31,6 +32,8 @@ export interface ChatMessage {
   readonly authorName?: string | null;
   readonly authorizationBlockers?: ChatAuthorizationBlocker[];
   readonly error?: string | null;
+  readonly errorDetail?: { readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string; readonly occurredAt?: string } | null;
+  readonly errorCode?: string | null;
   readonly events?: RuntimeEvent[];
   readonly pendingApproval?: RuntimeToolApprovalRequestInfo;
   readonly pendingRunIntervention?: RuntimeRunInterventionInfo;

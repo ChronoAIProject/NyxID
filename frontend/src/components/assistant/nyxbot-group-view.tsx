@@ -1,5 +1,7 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { MachineToolCard } from "./machine-tool-card";
+import { ThumbsDown, ThumbsUp } from "lucide-react";
+import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import {
   Fragment,
   useLayoutEffect,
@@ -20,6 +22,7 @@ import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
+import { AccessModeSwitcher } from "@/components/assistant/nyxbot-access-controls";
 import { Button } from "@/components/ui/button";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
@@ -34,6 +37,20 @@ import {
   workingLabel,
 } from "@/lib/assistant/nyxbot-labels";
 import { mentionSegments } from "@/lib/assistant/nyxbot-mentions";
+import {
+  NO_RECIPIENT_EDITS,
+  resolveRecipients,
+  withAdded,
+  withDraft,
+  withRemoved,
+  type RecipientSelection,
+} from "@/lib/assistant/nyxbot-recipients";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn, formatClockTime } from "@/lib/utils";
 import type {
   AssistantGroup,
@@ -43,7 +60,8 @@ import type {
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
 
-export const GROUP_COMPOSER_PLACEHOLDER = "Message the group — @mention an agent";
+export const GROUP_COMPOSER_PLACEHOLDER =
+  "Message the group — @mention an agent";
 
 function WorkingDots() {
   return (
@@ -59,7 +77,13 @@ function WorkingDots() {
   );
 }
 
-function UserText({ text, names }: { readonly text: string; readonly names: readonly string[] }) {
+function UserText({
+  text,
+  names,
+}: {
+  readonly text: string;
+  readonly names: readonly string[];
+}) {
   return (
     <>
       {mentionSegments(text, names).map((segment, index) =>
@@ -75,22 +99,52 @@ function UserText({ text, names }: { readonly text: string; readonly names: read
   );
 }
 
+/** "to Luna, researcher": the agents a sent message was addressed to. */
+export function recipientLine(
+  ids: readonly string[],
+  members: readonly AssistantGroupMember[],
+): string {
+  return `to ${ids
+    .map((id) => {
+      const member = members.find((row) => row.id === id);
+      return member ? agentTitle(member) : "a removed agent";
+    })
+    .join(", ")}`;
+}
+
 export function GroupMessageRow({
   groupId,
   message,
   names,
+  members = [],
   onOpenAgent,
 }: {
   readonly groupId: string;
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
+  readonly members?: readonly AssistantGroupMember[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
+  const feedback = useAssistantFeedback("group", groupId, message.id);
+  const [vote, setVote] = useState<"up" | "down" | undefined>(
+    message.feedback?.vote,
+  );
+  const [commentOpen, setCommentOpen] = useState(false);
+  const [comment, setComment] = useState(message.feedback?.comment ?? "");
+  const [feedbackError, setFeedbackError] = useState(false);
   if (message.role === "notice") {
     return (
       <div className="min-w-0 px-8">
-        <p role="note" aria-label="Group notice" className="text-center text-11 text-text-tertiary">{message.text}</p>
-          {message.activities?.filter((activity) => activity.machine).map((activity) => (
+        <p
+          role="note"
+          aria-label="Group notice"
+          className="text-center text-11 text-text-tertiary"
+        >
+          {message.text}
+        </p>
+        {message.activities
+          ?.filter((activity) => activity.machine)
+          .map((activity) => (
             <MachineToolCard key={activity.id} receipt={activity.machine!} />
           ))}
       </div>
@@ -101,6 +155,11 @@ export function GroupMessageRow({
       <div className="ml-[30px] flex justify-end">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
           {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+          {message.recipient_agent_ids?.length ? (
+            <p className="mb-1 text-11 text-muted-foreground">
+              {recipientLine(message.recipient_agent_ids, members)}
+            </p>
+          ) : null}
           <UserText text={message.text} names={names} />
           {message.attachments?.map((item) => (
             <ToolImage
@@ -120,7 +179,11 @@ export function GroupMessageRow({
       </div>
     );
   }
-  const agent = message.agent ?? { id: "unknown", name: "Agent", kind: "specialist" as const };
+  const agent = message.agent ?? {
+    id: "unknown",
+    name: "Agent",
+    kind: "specialist" as const,
+  };
   const title = agentTitle(agent);
   const handle = agentHandle(agent);
   const time = formatClockTime(message.created_at);
@@ -141,21 +204,104 @@ export function GroupMessageRow({
       <div className="min-w-0">
         <div className="mb-0.5 flex items-baseline gap-2">
           <span className="text-12 font-medium text-foreground">{title}</span>
-          {handle ? <span className="text-11 text-text-tertiary">{handle}</span> : null}
+          {handle ? (
+            <span className="text-11 text-text-tertiary">{handle}</span>
+          ) : null}
           {agent.kind === "nyxbot" ? (
             <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
           {time ? (
-            <time dateTime={message.created_at} className="font-mono text-11 text-text-tertiary">
+            <time
+              dateTime={message.created_at}
+              className="font-mono text-11 text-text-tertiary"
+            >
               {time}
             </time>
           ) : null}
         </div>
         <div className="px-px text-foreground">
-          {message.activities?.filter((activity) => activity.machine).map((activity) => (
+          {message.activities
+            ?.filter((activity) => activity.machine)
+            .map((activity) => (
             <MachineToolCard key={activity.id} receipt={activity.machine!} />
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
+          <div className="mt-2 flex gap-1">
+            {(["up", "down"] as const).map((next) => (
+              <button
+                key={next}
+                type="button"
+                disabled={feedback.isPending}
+                aria-label={next === "up" ? "Helpful" : "Not helpful"}
+                aria-pressed={vote === next}
+                onClick={() => {
+                  const selected = vote === next ? undefined : next;
+                  setVote(selected);
+                  void feedback
+                    .mutateAsync(selected ? { vote: selected } : {})
+                    .then(() => setFeedbackError(false))
+                    .catch(() => {
+                      setVote(vote);
+                      setFeedbackError(true);
+                    });
+                }}
+                className={`rounded p-1 text-text-tertiary hover:bg-overlay disabled:opacity-50 ${vote === next ? "text-nyx-secondary-400" : ""}`}
+              >
+                {next === "up" ? (
+                  <ThumbsUp className="h-3.5 w-3.5" />
+                ) : (
+                  <ThumbsDown className="h-3.5 w-3.5" />
+                )}
+              </button>
+            ))}
+            <button
+              type="button"
+              aria-label="Add feedback comment"
+              aria-expanded={commentOpen}
+              onClick={() => setCommentOpen((open) => !open)}
+              className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
+            >
+              Comment
+            </button>
+          </div>
+          {commentOpen ? (
+            <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
+              <textarea
+                autoFocus
+                aria-label="Optional feedback comment"
+                value={comment}
+                maxLength={1000}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setCommentOpen(false);
+                }}
+                onChange={(event) => setComment(event.target.value)}
+                className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none"
+                placeholder={vote ? "Optional comment" : "Choose helpful or not helpful first"}
+              />
+              <button
+                type="button"
+                disabled={!vote || feedback.isPending}
+                className="self-end rounded bg-nyx-secondary-400/20 px-2 py-1 text-10 disabled:opacity-50"
+                onClick={() => {
+                  if (!vote) return;
+                  void feedback
+                    .mutateAsync({ vote, comment })
+                    .then(() => {
+                      setFeedbackError(false);
+                      setCommentOpen(false);
+                    })
+                    .catch(() => setFeedbackError(true));
+                }}
+              >
+                Send
+              </button>
+            </div>
+          ) : null}
+          {feedbackError ? (
+            <p role="alert" className="mt-1 text-11 text-destructive">
+              Unable to save feedback. Try again.
+            </p>
+          ) : null}
         </div>
       </div>
     </article>
@@ -209,9 +355,11 @@ function GroupTranscript({
 
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget;
-    const distance = element.scrollHeight - element.clientHeight - element.scrollTop;
+    const distance =
+      element.scrollHeight - element.clientHeight - element.scrollTop;
     if (distance <= 48) following.current = true;
-    else if (element.scrollTop < lastScrollTop.current - 1) following.current = false;
+    else if (element.scrollTop < lastScrollTop.current - 1)
+      following.current = false;
     lastScrollTop.current = element.scrollTop;
   }
 
@@ -267,6 +415,7 @@ function GroupTranscript({
             message={message}
             groupId={group.id}
             names={names}
+            members={group.members}
             onOpenAgent={onOpenAgent}
           />
         ))}
@@ -302,7 +451,11 @@ function MemberButton({
       type="button"
       onClick={onOpen}
       aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
-      title={agentHandle(member) ? `${agentTitle(member)} (${agentHandle(member)!})` : agentTitle(member)}
+      title={
+        agentHandle(member)
+          ? `${agentTitle(member)} (${agentHandle(member)!})`
+          : agentTitle(member)
+      }
       className={cn(
         "relative rounded-full transition-opacity hover:opacity-80",
         member.destroyed && "opacity-50",
@@ -328,7 +481,9 @@ function GroupHeader({
   readonly onOpenAgent: (agentId: string) => void;
   readonly onOpenSettings: () => void;
 }) {
-  const lead = group.members.find((member) => member.id === group.lead_agent_id);
+  const lead = group.members.find(
+    (member) => member.id === group.lead_agent_id,
+  );
   const working = group.working_agent_ids.length;
   return (
     <div className="shrink-0 px-4 pt-3 sm:px-6">
@@ -337,7 +492,11 @@ function GroupHeader({
           <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">
             {group.name}
           </h2>
-          <div aria-label="Members" role="group" className="flex items-center gap-1">
+          <div
+            aria-label="Members"
+            role="group"
+            className="flex items-center gap-1"
+          >
             {group.members.map((member) => (
               <MemberButton
                 key={member.id}
@@ -348,7 +507,10 @@ function GroupHeader({
           </div>
           {working ? (
             <span className="flex items-center gap-1.5 text-11 text-muted-foreground">
-              <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
+              <span
+                aria-hidden="true"
+                className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
+              />
               {working} working
             </span>
           ) : null}
@@ -364,8 +526,7 @@ function GroupHeader({
           </Button>
         </div>
         <p className="text-11 text-text-tertiary">
-          {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"} unless you
-          @mention someone. Agents hand work to each other the same way.
+          {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
         </p>
       </div>
     </div>
@@ -386,10 +547,17 @@ export function GroupPendingActions({
   onDecide,
 }: {
   readonly actions: readonly AssistantGroupPendingAction[];
-  readonly members: readonly { readonly id: string; readonly name: string; readonly display_name?: string | null }[];
+  readonly members: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly display_name?: string | null;
+  }[];
   readonly sending: boolean;
   readonly onAnswer: (text: string) => Promise<void>;
-  readonly onDecide?: (action: AssistantGroupPendingAction, decision: "allow" | "deny") => Promise<void>;
+  readonly onDecide?: (
+    action: AssistantGroupPendingAction,
+    decision: "allow" | "deny",
+  ) => Promise<void>;
 }) {
   const actorId = useAuthStore((state) => state.user?.id);
   if (!actions.length) return null;
@@ -401,9 +569,14 @@ export function GroupPendingActions({
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
       />
-      <div className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2" aria-label="Actions waiting for you">
+      <div
+        className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2"
+        aria-label="Actions waiting for you"
+      >
         {actions.map((action) => {
-          const member = members.find((candidate) => candidate.id === action.agent_id);
+          const member = members.find(
+            (candidate) => candidate.id === action.agent_id,
+          );
           const who = member?.display_name ?? member?.name ?? "An agent";
           const code = action.confirm_phrase?.slice(4);
           return (
@@ -414,19 +587,40 @@ export function GroupPendingActions({
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
               <p className="min-w-0 flex-1 text-12 text-foreground">
-                <span className="font-medium">{who}</span> wants to: {action.summary}
+                <span className="font-medium">{who}</span> wants to:{" "}
+                {action.summary}
               </p>
               {action.authored_skill ? (
                 action.acknowledgement_id && (!action.triggering_person || action.triggering_person.id === actorId) ? (
                   <Button size="sm" variant="outline" asChild><Link to="/assistant" search={{ c: action.conversation_id, card: action.acknowledgement_id }}>Review draft</Link></Button>
                 ) : <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
-              ) : action.triggering_person ? <>
-                <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person.display_name}</span>
-                {action.can_decide ? <>
-                  <Button size="sm" variant="outline" disabled={sending} onClick={() => void onDecide?.(action, "deny")}>Deny</Button>
-                  <Button size="sm" disabled={sending} onClick={() => void onDecide?.(action, "allow")}>Allow</Button>
-                </> : null}
-              </> : action.confirm_phrase ? <>
+              ) : action.triggering_person ? (
+                <>
+                  <span className="text-11 text-muted-foreground">
+                    Awaiting {action.triggering_person.display_name}
+                  </span>
+                  {action.can_decide ? (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={sending}
+                        onClick={() => void onDecide?.(action, "deny")}
+                      >
+                        Deny
+                      </Button>
+                      <Button
+                        size="sm"
+                        disabled={sending}
+                        onClick={() => void onDecide?.(action, "allow")}
+                      >
+                        Allow
+                      </Button>
+                    </>
+                  ) : null}
+                </>
+              ) : action.confirm_phrase ? (
+                <>
               <Button
                 size="sm"
                 variant="outline"
@@ -435,14 +629,92 @@ export function GroupPendingActions({
               >
                 Cancel
               </Button>
-              <Button size="sm" disabled={sending} onClick={() => void onAnswer(action.confirm_phrase!)}>
+                  <Button
+                    size="sm"
+                    disabled={sending}
+                    onClick={() => void onAnswer(action.confirm_phrase!)}
+                  >
                 Confirm
               </Button>
-              </> : null}
+                </>
+              ) : null}
             </div>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Who the next message goes to: removable pills plus a picker of the other
+ * live members. Announced as a group so screen readers hear the set.
+ */
+export function GroupRecipientPills({
+  members,
+  recipientIds,
+  onRemove,
+  onAdd,
+}: {
+  readonly members: readonly AssistantGroupMember[];
+  readonly recipientIds: readonly string[];
+  readonly onRemove: (id: string) => void;
+  readonly onAdd: (id: string) => void;
+}) {
+  const live = members.filter((member) => !member.destroyed);
+  const others = live.filter((member) => !recipientIds.includes(member.id));
+  return (
+    <div
+      role="group"
+      aria-label="Message recipients"
+      className="mb-2 flex flex-wrap items-center gap-1.5"
+    >
+      <span className="text-11 text-muted-foreground">To</span>
+      {recipientIds.flatMap((id) => {
+        const member = live.find((row) => row.id === id);
+        return member
+          ? [
+              <Button
+                key={id}
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="rounded-full"
+                aria-label={`Remove recipient ${agentTitle(member)}`}
+                onClick={() => onRemove(id)}
+              >
+                {agentTitle(member)} ×
+              </Button>,
+            ]
+          : [];
+      })}
+      {recipientIds.length ? null : (
+        <span role="status" className="text-11 text-destructive">
+          Choose at least one recipient.
+        </span>
+      )}
+      {others.length ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="rounded-full"
+              aria-label="Add recipient"
+            >
+              + Add
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {others.map((member) => (
+              <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
+                {agentTitle(member)}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
     </div>
   );
 }
@@ -464,13 +736,34 @@ export function NyxAgentGroupPage({
   const [composerHeight, setComposerHeight] = useState(0);
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [recipientSelection, setRecipientSelection] =
+    useState<RecipientSelection>(NO_RECIPIENT_EDITS);
   // Group payloads name agents by handle; their display names live on the agent list.
-  const group = transcript.data && !transcript.error
+  const group =
+    transcript.data && !transcript.error
     ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
     : undefined;
-  const messages = (transcript.error ? [] : transcript.data?.messages ?? []).map((message) =>
-    message.agent ? { ...message, agent: withDisplayName(message.agent, agents.data?.agents) } : message,
+  const messages = (
+    transcript.error ? [] : (transcript.data?.messages ?? [])
+  ).map((message) =>
+    message.agent
+      ? {
+          ...message,
+          agent: withDisplayName(message.agent, agents.data?.agents),
+        }
+      : message,
   );
+  const recipients = resolveRecipients(
+    recipientSelection,
+    group?.default_recipient_ids ?? [],
+    group?.members ?? [],
+  );
+  const onComposerContentChange = (content: string) => {
+    if (!group) return;
+    setRecipientSelection((current) =>
+      withDraft(current, content, group.members),
+    );
+  };
 
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -483,10 +776,12 @@ export function NyxAgentGroupPage({
   }, []);
 
   function goTo(search: { c?: string } = {}) {
-    void navigateWithBuildUpdate(() => navigate({
+    void navigateWithBuildUpdate(() =>
+      navigate({
       to: "/assistant" as never,
       search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
-    }));
+      }),
+    );
   }
 
   const mentions = (group?.members ?? [])
@@ -501,7 +796,7 @@ export function NyxAgentGroupPage({
   return (
     <AssistantShell
       title={group?.name ?? "Group"}
-      headerActions={<NyxBotSettingsButton />}
+      headerActions={<div className="flex items-center gap-2"><AccessModeSwitcher /><NyxBotSettingsButton /></div>}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
@@ -569,27 +864,45 @@ export function NyxAgentGroupPage({
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <GroupPendingActions
-            actions={transcript.error ? [] : transcript.data?.pending_actions ?? []}
+            actions={
+              transcript.error ? [] : (transcript.data?.pending_actions ?? [])
+            }
             members={group?.members ?? []}
             sending={transcript.post.isPending || deciding}
             onDecide={async (action, decision) => {
               setDeciding(true);
               try {
                 if (action.approval_request_id) {
-                  await decideApproval.mutateAsync({ requestId: action.approval_request_id, approved: decision === "allow" });
+                  await decideApproval.mutateAsync({
+                    requestId: action.approval_request_id,
+                    approved: decision === "allow",
+                  });
                 } else if (action.acknowledgement_id) {
-                  await nyxAgentTransport.decide(action.conversation_id, action.acknowledgement_id, decision);
+                  await nyxAgentTransport.decide(
+                    action.conversation_id,
+                    action.acknowledgement_id,
+                    decision,
+                  );
                 }
                 await transcript.refetch();
-              } catch (error) { toast.error(error instanceof Error ? error.message : "Could not decide this action."); }
-              finally { setDeciding(false); }
+              } catch (error) {
+                toast.error(
+                  error instanceof Error
+                    ? error.message
+                    : "Could not decide this action.",
+                );
+              } finally {
+                setDeciding(false);
+              }
             }}
             onAnswer={async (text) => {
               try {
                 await transcript.post.mutateAsync(text);
               } catch (error) {
                 toast.error(
-                  error instanceof Error ? error.message : "The answer was not delivered.",
+                  error instanceof Error
+                    ? error.message
+                    : "The answer was not delivered.",
                 );
               }
             }}
@@ -600,23 +913,52 @@ export function NyxAgentGroupPage({
             active={false}
             sending={transcript.post.isPending}
             // Read-only once every member is gone (destroyed or removed).
-            disabled={Boolean(transcript.error) || Boolean(group && !mentions.length)}
+            disabled={
+              Boolean(transcript.error) || Boolean(group && !mentions.length)
+            }
             ownerUserId={user?.id ?? null}
             draftKey={`group:${groupId}`}
             placeholder={GROUP_COMPOSER_PLACEHOLDER}
             mentions={mentions}
             onSend={async (text, uploads) => {
+              if (recipients.edited && !recipients.ids.length) {
+                const error = new Error("Choose at least one recipient.");
+                toast.error(error.message);
+                throw error;
+              }
               try {
-                await transcript.post.mutateAsync(
-                  uploads ? { text, attachmentIds: uploads.attachmentIds } : text,
-                );
+                await transcript.post.mutateAsync({
+                  text,
+                  attachmentIds: uploads?.attachmentIds ?? [],
+                  ...(recipients.edited
+                    ? { recipientAgentIds: recipients.ids }
+                    : {}),
+                });
+                setRecipientSelection(NO_RECIPIENT_EDITS);
               } catch (error) {
                 toast.error(
-                  error instanceof Error ? error.message : "The message was not delivered.",
+                  error instanceof Error
+                    ? error.message
+                    : "The message was not delivered.",
                 );
                 throw error;
               }
             }}
+            onContentChange={onComposerContentChange}
+            recipients={
+              group ? (
+                <GroupRecipientPills
+                  members={group.members}
+                  recipientIds={recipients.ids}
+                  onRemove={(id) =>
+                    setRecipientSelection((current) => withRemoved(current, id))
+                  }
+                  onAdd={(id) =>
+                    setRecipientSelection((current) => withAdded(current, id))
+                  }
+                />
+              ) : undefined
+            }
             onStop={async () => undefined}
           />
         </div>

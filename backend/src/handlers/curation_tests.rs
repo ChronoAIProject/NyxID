@@ -37,6 +37,7 @@ pub(super) struct Fixture {
 
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
+    crate::db::ensure_indexes(&db).await.unwrap();
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
     crate::services::role_service::seed_system_roles(&db)
         .await

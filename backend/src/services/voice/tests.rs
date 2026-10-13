@@ -73,6 +73,7 @@ fn preferences() -> VoicePreferences {
 }
 fn turn(id: Option<&str>, text: &str) -> engine::TurnRequest {
     engine::TurnRequest {
+        retry_of: None,
         attachment_ids: vec![],
         conversation_id: id.map(str::to_string),
         agent_id: None,
@@ -486,6 +487,8 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
+            retry_of: None,
+            specialist_id: None,
             steering: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: task_id,
@@ -496,6 +499,8 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             text: "Calendar result".into(),
             status: "completed".into(),
             error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
             created_at: chrono::Utc::now(),
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -572,6 +577,8 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 crate::models::assistant_message::COLLECTION_NAME,
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
+                retry_of: None,
+                specialist_id: None,
                 steering: None,
                 id: result_id.clone(),
                 conversation_id: thread.id.clone(),
@@ -582,6 +589,8 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 text: format!("Voice result {index}"),
                 status: "completed".into(),
                 error_code: None,
+                upstream_error_code: None,
+                error_detail: None,
                 created_at: result_created_at,
                 activities: Vec::new(),
                 attachments: Vec::new(),

@@ -1883,3 +1883,76 @@ Only one setup attempt can hold a link's renewable claim. Bot insertion and its 
 Existing bot creation entry points pass no link claim, and existing frontend callers use their original endpoints outside the hosted context. Existing service callbacks retain their HTTP client, signature contract, timestamp behavior, and `developer_webhook` rate bucket. Bot callbacks opt into public-address validation, DNS pinning, redirects disabled, and the separate `developer_channel_webhook` bucket. Their sweep runs in a separate task while sharing the [configured sweep interval](ENV.md#hosted-connect-links).
 
 Regression coverage lives beside the new service and handlers, in [`telegram_new_tests.rs`](../backend/src/services/telegram_new_tests.rs), and in the [hosted page tests](../frontend/src/pages/channel-connect-link.test.tsx). Existing `connect_link_service`, `connect_links`, `developer_webhook_service`, and CLI `commands::connect` tests cover the shared compatibility boundary.
+
+### X channel workflow, health and recovery
+
+**Supported workflow.** An X DM channel delivers through X Activity webhooks:
+
+1. X posts `dm.received` to `POST /api/v1/webhooks/channel/x/platform`.
+2. NyxID verifies the platform signature (`x-twitter-webhooks-signature[-oauth2]`) with the shared X app secret. It reads the target from `data.filter.user_id` and requires the subscription tag `nyxid:{bot_id}`.
+3. The bot is found by `platform: "x"` and its X user id. Inbound billing admission runs, and the route (`channel_conversations`) forwards the message.
+4. A bot linked to NyxBot over NyxID's direct relay calls back `/api/v1/nyxbot/relay/{channel_id}`. The owner's verified X user (`owner_sender_ids`, set with the link code) continues NyxBot's home thread. With private chats open to everyone, other X users get their own guest thread with no tools.
+5. NyxBot's reply leaves through `POST /api/v1/channel-relay/reply` (`async_reply`) and becomes `POST /2/dm_conversations/{id}/messages` on X.
+
+Polling remains a legacy DM-only fallback while `BILLING_ENABLED=false`. Paid deployments fail polling X bots with `webhook_required`. The Agent Event Gateway takes X only when `nyxbot:gateway-x` is on. Health then reports `recommended_action: "gateway"`, because delivery diagnostics live on the gateway.
+
+**Platform limitations.**
+- Mentions, replies and other public events need webhook credentials and `tweet.write`.
+- Public replies are text-only.
+- X rate limits are honoured: a poll backs off until the reset; a refused reply is not retried.
+- `402` means the shared X app has run out of its own X API credits. Only an administrator can restore them. This is separate from NyxID credits; NyxID billing suspension is `billing_suspended`.
+
+**Health endpoints.** All reads are metadata only:
+
+| Method | Route | Access |
+| --- | --- | --- |
+| GET | `/api/v1/channel-bots/{id}/health` | Owner or org member who can read the bot; `can_write` says whether the caller may act |
+| POST | `/api/v1/channel-bots/{id}/resubscribe` | Owner write access; X only. Re-runs subscription setup, then a live read-back. Audited as `channel_bot_resubscribed` |
+| GET | `/api/v1/admin/channel-bots?platform=x&status=failed&limit=&offset=` | Admin; ordered by id |
+| GET | `/api/v1/admin/channel-bots/{id}/health` | Admin |
+| GET | `/api/v1/admin/channel-bots/webhook-rejections` | Admin; per-platform counters of unauthenticated rejections |
+
+CLI: `nyxid channel-bot health <id>` prints the diagnostics and the recommended action, and `nyxid channel-bot show <id>` appends the same block.
+
+**Diagnostics.** Only authenticated deliveries write the bot row:
+- `last_inbound_at`/`last_inbound_source` and `last_webhook_at` are stamped after billing admission.
+- `last_outbound_at`/`last_outbound_error` are written by every send path: NyxBot and agent replies through `/channel-relay/reply`, thread replies, and `/channel-relay/send`. The error has the numeric `code` and the stable `reason`.
+- `last_webhook_error` and `failure_reason` hold stable codes, and `subscription_state` holds `{registered, checked_at, last_error}`.
+- A successful authenticated delivery clears webhook errors and delivery-shaped failure reasons.
+
+Forged or mis-targeted deliveries (`signature`, `target`, `platform_mismatch`) never touch a bot. They are counted per platform in `channel_webhook_rejections`, with at most one write per platform and reason every 30 seconds on each replica.
+
+Verify and Resubscribe finish with a live read-only check: NyxID's callback must be a valid webhook in `GET /2/webhooks`, and every selected event must be subscribed with the bot's tag in `GET /2/activity/subscriptions`. A missing subscription persists `registered: false` with `subscription_missing` or `webhook_missing`. Missing platform webhook credentials on Resubscribe persist `webhook_unconfigured`.
+
+**Failure codes and actions.** One recommendation function (`services/channel_bot_health.rs`) serves Health, the `channel_bot_failed` audit and the owner notice:
+
+| `failure_reason` / reply `reason` | Meaning | `recommended_action` |
+| --- | --- | --- |
+| `reconnect_required`, `auth_revoked` (401), `scopes_missing` (403 scope), `access_denied` (other 403) | The account connection cannot be used | `reconnect` |
+| `app_access_denied` (403 client-not-enrolled / code 453), `provider_credits` (402), `webhook_unconfigured` | The shared X app or platform credentials need an administrator | `contact_admin` |
+| `billing_suspended` | NyxID billing stopped the channel | `enable_billing` |
+| `webhook_required`, `webhook_setup_failed`, `webhook_missing`, `subscription_missing`, `unregistered` | The subscription is missing or incomplete | `resubscribe` |
+| `rate_limited` (429) | Poll backoff is active (compared with now) or the last reply was limited | `wait_rate_limit` |
+| `provider_unavailable` (5xx), `provider_error` | X failed; NyxID retries | `verify` |
+| `recipient_unreachable` | The last reply's recipient does not accept DMs | `none` |
+
+The first transition to `failed` sends one best-effort notice through the owner's Telegram and push channels. For an org-owned bot it goes to every org admin. A repeated failure sends nothing; a later failure after recovery, such as a billing suspension, sends one again. Notification failures never undo the status change.
+
+**Reproduce locally** (MongoDB replica set plus wiremock; no X credentials):
+- `handlers::nyxbot::tests::x_bus_tests::x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics` covers the full chain:
+  - a signed DM is relayed over HTTP to NyxBot;
+  - it lands in the home thread, and NyxBot's reply is posted to X;
+  - a guest DM gets its own thread with no tools;
+  - an X 403 and then a 429 on the reply are recorded with the Health action.
+- `handlers::channel_webhooks::diagnostics_tests` shows that only authenticated deliveries write diagnostics.
+- `services::channel_x_tests::webhooks::verify_live_check_persists_a_missing_subscription_and_resubscribe_restores_it` and `resubscribe_without_platform_webhook_credentials_asks_an_admin` cover the live check and Resubscribe.
+- `services::channel_bot_health` holds the recommendation table, failure codes, rejection counters and org-admin notices.
+
+**Staging verification** needs a staging X app with OAuth consent for the DM scopes, X API credits and Activity API access, and the platform webhook credentials (`app_bearer_token`, `consumer_secret`) in Admin > Platform Credentials.
+1. Connect an account, then run Verify. Health should show `subscription_state.registered: true` and `recommended_action: "none"`.
+2. Link the bot to NyxBot and send the link code from the owner's X account.
+3. DM the bot. Confirm the reply arrives and Health shows `last_inbound_at` and `last_outbound_at`.
+4. Delete the subscription in X, run Verify, and expect `resubscribe`.
+5. Run Resubscribe and expect `none`.
+
+Production credentials are never used in local tests.

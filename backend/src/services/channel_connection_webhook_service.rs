@@ -86,6 +86,7 @@ pub async fn configure(
         if result.is_err()
             && setup_failure_requires_stop(&current, billing.billing_enabled(), &progress) {
             super::channel_credentials::fail_bot(db, &current,
+                super::channel_bot_health::codes::WEBHOOK_SETUP_FAILED,
                 "Webhook setup needs attention. Check the channel configuration, then select Verify.").await?;
         }
         result
@@ -97,6 +98,7 @@ pub async fn configure(
         super::channel_credentials::fail_bot(
             db,
             bot,
+            super::channel_bot_health::codes::WEBHOOK_SETUP_FAILED,
             "Webhook setup did not complete. Check the channel configuration, then select Verify.",
         )
         .await?;
@@ -211,7 +213,10 @@ async fn configure_inner(
         let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
             doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
             doc! {"$set": {"webhook_registered": true, "status": "active", "error": null,
-                "poll_lease_until": null, "poll_error_count": 0, "updated_at": bson::DateTime::now()}},
+                "poll_lease_until": null, "poll_backoff_until": null, "poll_error_count": 0,
+                "diagnostics.subscription_state": {"registered": true, "checked_at": bson::DateTime::now(), "last_error": null},
+                "diagnostics.failure_reason": null, "diagnostics.last_webhook_error": null, "diagnostics.consecutive_errors": 0,
+                "updated_at": bson::DateTime::now()}},
         ).await?;
         if result.matched_count == 0 {
             let latest = super::channel_bot_service::get_bot(db, &current.id).await?;
@@ -222,6 +227,47 @@ async fn configure_inner(
         }
         Ok(true)
     }.await
+}
+
+/// Read-only live subscription check, persisted as the bot's subscription
+/// state. `None` when the platform has no connection webhooks.
+pub async fn check_live(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    base_url: &str,
+) -> AppResult<Option<super::channel_platform::LiveWebhookStatus>> {
+    use super::channel_platform::LiveWebhookStatus;
+    if !supports(adapter) {
+        return Ok(None);
+    }
+    let descriptor = adapter
+        .platform_credentials()
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let platform =
+        super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
+    let status = if adapter.connection_webhook_configured(&platform) {
+        let url = callback_url(base_url, adapter.platform_id());
+        match adapter
+            .connection_webhook_status(http, &platform, bot, &url)
+            .await?
+        {
+            Some(status) => status,
+            None => return Ok(None),
+        }
+    } else {
+        LiveWebhookStatus::missing(super::channel_bot_health::codes::WEBHOOK_UNCONFIGURED)
+    };
+    super::channel_bot_service::record_subscription_state(
+        db,
+        &bot.id,
+        status.registered,
+        status.error,
+    )
+    .await?;
+    Ok(Some(status))
 }
 
 /// Recheck failed/deleted state under the Verify lease so a recovered channel

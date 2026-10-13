@@ -569,3 +569,120 @@ async fn machine_receipt_records_correlated_cards_without_arguments_or_output() 
 
 #[path = "machine_discovery_tests.rs"]
 mod discovery;
+
+/// Machine work follows each machine's own confirmation setting in Autopilot
+/// and NyxMode; Ask Every Time asks before every change, with one card that
+/// runs the exact command once.
+#[tokio::test]
+async fn ask_every_time_cards_machine_changes_once() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = orchestrator_fixture("machine_ask_every_time").await;
+    let node = node(&f, &f.owner).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &node.id},
+            doc! {"$set": {"machine_confirm": "none"}},
+        )
+        .await
+        .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(AccessMode::AskEveryTime),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = authenticated_machine_chat(&f).await;
+    let (task, mut requests) = peer(&f, &node, json!({"exit_code":0,"status":"finished"})).await;
+    let args = json!({"machine":node.id,"command":"true"});
+    let card = machine_mcp_call(&f, &auth, "nyx__machine_exec", args.clone()).await;
+    assert_eq!(card["error"], "acknowledgement_required");
+    assert!(requests.try_recv().is_err());
+    let row = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let confirmation = row.confirmation.unwrap();
+    assert_eq!(confirmation.risk, "change");
+    assert_eq!(confirmation.access_mode, Some(AccessMode::AskEveryTime));
+    assert_eq!(confirmation.reason, "access_mode");
+    acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        card["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let mut approved = args;
+    approved["acknowledgement_id"] = card["acknowledgement_id"].clone();
+    assert_eq!(
+        machine_mcp_call(&f, &auth, "nyx__machine_exec", approved.clone()).await["exit_code"],
+        0
+    );
+    requests.recv().await.unwrap();
+    // The used card never runs the command again: machine confirmation asks
+    // with a fresh card for the same arguments.
+    let again = machine_mcp_call(&f, &auth, "nyx__machine_exec", approved).await;
+    assert_eq!(again["error"], "acknowledgement_required");
+    assert_ne!(again["acknowledgement_id"], card["acknowledgement_id"]);
+    assert!(requests.try_recv().is_err());
+    task.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+/// Autopilot never bypasses a machine's own confirmation setting.
+#[tokio::test]
+async fn autopilot_keeps_the_machine_confirmation_floor() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = orchestrator_fixture("machine_autopilot_floor").await;
+    let node = node(&f, &f.owner).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &node.id},
+            doc! {"$set": {"machine_confirm": "changes"}},
+        )
+        .await
+        .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = authenticated_machine_chat(&f).await;
+    let (task, mut requests) = peer(&f, &node, json!({"exit_code":0,"status":"finished"})).await;
+    let card = machine_mcp_call(
+        &f,
+        &auth,
+        "nyx__machine_exec",
+        json!({"machine":node.id,"command":"true"}),
+    )
+    .await;
+    assert_eq!(card["error"], "acknowledgement_required");
+    assert!(requests.try_recv().is_err());
+    let confirmation = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+        .confirmation
+        .unwrap();
+    assert_eq!(confirmation.reason, "policy");
+    assert_eq!(confirmation.access_mode, None);
+    task.abort();
+    f.state.db.drop().await.unwrap();
+}

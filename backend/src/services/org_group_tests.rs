@@ -61,6 +61,7 @@ async fn enqueue(
         Some(&id),
         uploads,
         Some(request),
+        std::slice::from_ref(&agent.id),
     )
     .await
     .unwrap();
@@ -82,6 +83,7 @@ async fn start(
     .await
     .unwrap();
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        retry_of: None,
         conversation_id: Some(row.id),
         attachment_ids: vec![],
         text: "Shared request".into(),
@@ -569,8 +571,7 @@ async fn org_group_cards_leave_revocation_and_queue_drop() {
     f.state.db.drop().await.unwrap();
 }
 
-#[tokio::test]
-async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() {
+async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants_impl() {
     use super::assistant_live::LiveEvent;
     use http_body_util::BodyExt;
     let f = Fixture::new("org_group_live").await;
@@ -631,6 +632,221 @@ async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() 
         );
     }
     f.state.db.drop().await.unwrap();
+}
+
+async fn post_as(
+    f: &Fixture,
+    actor: &str,
+    group: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    crate::handlers::assistant_group::post_message(
+        State(f.state.clone()),
+        test_auth_user(actor),
+        Path(group.into()),
+        axum::Json(serde_json::from_value(body).unwrap()),
+    )
+    .await
+    .map(|(_, axum::Json(value))| value)
+}
+
+async fn previewed(f: &Fixture, actor: &str, group: &str) -> serde_json::Value {
+    let axum::Json(response) = crate::handlers::assistant_group::get_group(
+        State(f.state.clone()),
+        test_auth_user(actor),
+        Path(group.into()),
+    )
+    .await
+    .unwrap();
+    serde_json::to_value(response).unwrap()["default_recipient_ids"].clone()
+}
+
+#[tokio::test]
+async fn org_group_sticky_recipients_are_per_actor() {
+    let f = Fixture::new("org_group_sticky").await;
+    let (researcher, _) = f.create().await;
+    let writer = super::assistant_team_service::create_specialist_for(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.admin,
+        &f.org,
+        f.request("writer"),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .0;
+    engine_flag(&f).await;
+    let group = groups::create(
+        &f.state.db,
+        &f.admin,
+        &f.org,
+        "Sticky",
+        &[researcher.id.clone(), writer.id.clone()],
+        std::slice::from_ref(&f.member),
+        "user",
+    )
+    .await
+    .unwrap()
+    .group;
+    // Both start at the lead.
+    for actor in [&f.admin, &f.member] {
+        assert_eq!(
+            previewed(&f, actor, &group.id).await,
+            serde_json::json!([researcher.id])
+        );
+    }
+    // The admin's pills are honoured, stored on the message and kept as the
+    // admin's own selection.
+    let posted = post_as(
+        &f,
+        &f.admin,
+        &group.id,
+        serde_json::json!({"text":"draft the plan","recipient_agent_ids":[writer.id]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        posted["addressed_agent_ids"],
+        serde_json::json!([writer.id])
+    );
+    assert_eq!(
+        posted["message"]["recipient_agent_ids"],
+        serde_json::json!([writer.id])
+    );
+    let stored = personal::messages(&f.state.db, &f.org, &group.id, 10, None)
+        .await
+        .unwrap();
+    let mine = stored
+        .iter()
+        .find(|row| row.author_user_id.as_deref() == Some(f.admin.as_str()))
+        .unwrap();
+    assert_eq!(mine.recipient_agent_ids, vec![writer.id.clone()]);
+    // The member's unaddressed message is not routed by the admin's choice.
+    let posted = post_as(
+        &f,
+        &f.member,
+        &group.id,
+        serde_json::json!({"text":"status?"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        posted["addressed_agent_ids"],
+        serde_json::json!([researcher.id])
+    );
+    assert_eq!(
+        previewed(&f, &f.admin, &group.id).await,
+        serde_json::json!([writer.id])
+    );
+    assert_eq!(
+        previewed(&f, &f.member, &group.id).await,
+        serde_json::json!([researcher.id])
+    );
+    // A selection naming a non-member is refused without a message.
+    // `post_message` advances eligible member turns inline. A member can
+    // therefore append its own reply while this assertion is running; that
+    // background activity is unrelated to whether the rejected request wrote
+    // a message. Count only owner-authored user messages, which is the state
+    // this validation is expected to leave unchanged.
+    let before = personal::messages(&f.state.db, &f.org, &group.id, 50, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.role == "user")
+        .count();
+    let refused = post_as(
+        &f,
+        &f.admin,
+        &group.id,
+        serde_json::json!({"text":"x","recipient_agent_ids":[Uuid::new_v4().to_string()]}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&refused, AppError::ValidationError(m) if m == "Choose 1 to 8 current group members as recipients"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        personal::messages(&f.state.db, &f.org, &group.id, 50, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.role == "user")
+            .count(),
+        before
+    );
+    // The admin's bare follow-up goes to the admin's sticky writer.
+    let posted = post_as(&f, &f.admin, &group.id, serde_json::json!({"text":"and?"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        posted["addressed_agent_ids"],
+        serde_json::json!([writer.id])
+    );
+    // A departing participant's selection is dropped; removing an agent
+    // prunes the others' selections. Leaving waits for settled turns.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while groups::threads(&f.state.db, &group)
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| engine::live_turn(row, Utc::now()).is_some())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "member turns never settled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    groups::update(
+        &f.state.db,
+        access(&f, &f.member, &group.id).await,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    let stored = groups::get(&f.state.db, &f.admin, &group.id, None)
+        .await
+        .unwrap()
+        .group;
+    assert!(!stored.last_recipient_ids_by_actor.contains_key(&f.member));
+    assert_eq!(
+        stored.last_recipient_ids_by_actor.get(&f.admin),
+        Some(&vec![writer.id.clone()])
+    );
+    groups::update(
+        &f.state.db,
+        access(&f, &f.admin, &group.id).await,
+        None,
+        Some(std::slice::from_ref(&researcher.id)),
+        None,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    let stored = groups::get(&f.state.db, &f.admin, &group.id, None)
+        .await
+        .unwrap()
+        .group;
+    assert_eq!(
+        stored.last_recipient_ids_by_actor.get(&f.admin),
+        Some(&Vec::new())
+    );
+    assert_eq!(
+        previewed(&f, &f.admin, &group.id).await,
+        serde_json::json!([researcher.id])
+    );
+}
+
+#[tokio::test]
+async fn org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants() {
+    org_group_live_fanout_rechecks_delivery_and_excludes_nonparticipants_impl().await;
 }
 
 #[tokio::test]
@@ -988,6 +1204,7 @@ async fn org_group_request_upload_isolation_retention_and_rotated_key_revocation
     let row = start(&f, &b, &agent, &first).await;
     finish(&f, &row).await;
     let mut resumed = engine::TurnStart::from(&engine::TurnRequest {
+        retry_of: None,
         conversation_id: Some(row.id.clone()),
         attachment_ids: vec![],
         text: "Direct hidden-thread post".into(),

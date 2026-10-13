@@ -235,60 +235,55 @@ pub async fn call(
     // Arbitrary commands, writes and mutating desktop input can destroy data.
     // Filling a checked login field and asking the owner for control change
     // state, but do not themselves remove data or grant arbitrary execution.
+    // One digest-bound owner card satisfies every reason to confirm: the
+    // webhook policy, the owner's access mode, machine_confirm and per-login
+    // confirmation. Never consume it twice.
     let read_only = !machines::changing(operation, &arguments);
-    let destructive = matches!(
-        operation,
-        Operation::Exec | Operation::WriteFile | Operation::SaveAttachment | Operation::JobCancel
-    ) || (matches!(operation, Operation::Computer | Operation::Browser)
-        && !read_only);
-    let webhook_confirmation = acks::webhook_confirmation_required(chat, read_only, destructive);
-    if webhook_confirmation {
-        if let Some(refusal) =
-            acks::webhook_action_gate(&state.db, chat, name, &arguments, read_only, destructive)
-                .await?
+    let facts = acks::ActionFacts {
+        class: acks::classify_owner_action(name, &arguments),
+        read_only,
+        destructive: matches!(
+            operation,
+            Operation::Exec
+                | Operation::WriteFile
+                | Operation::EditFile
+                | Operation::SaveAttachment
+                | Operation::JobCancel
+        ) || (matches!(operation, Operation::Computer | Operation::Browser)
+            && !read_only),
+    };
+    let floor = machines::confirmation(&node, operation, &arguments)
+        || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);
+    if let Some(need) = acks::confirmation_needed(&state.db, chat, facts, floor).await? {
+        let summary = format!(
+            "Allow {name} on {}{}",
+            node.name,
+            if operation == Operation::Exec {
+                format!(
+                    "; declared services: {}",
+                    declared_services
+                        .iter()
+                        .map(|row| row.slug.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                String::new()
+            }
+        );
+        // Outside webhook automations a mismatched card id raises a fresh
+        // card for the exact arguments, as machine confirmation always has.
+        let on_invalid = if need.webhook {
+            acks::InvalidCard::Refuse
+        } else {
+            acks::InvalidCard::Reissue
+        };
+        if let Some(refusal) = acks::confirm_action_with(
+            &state.db, chat, name, &arguments, &need, &summary, on_invalid,
+        )
+        .await?
         {
             return Ok(refusal);
-        }
-        // One digest-bound owner decision satisfies both policies. Never
-        // consume it twice when machine_confirm also requires confirmation.
-    } else if machines::confirmation(&node, operation, &arguments)
-        || login.as_ref().is_some_and(|row| row.confirm_each_sign_in)
-    {
-        let approved = if let Some(id) = arguments["acknowledgement_id"].as_str() {
-            acks::consume_action(&state.db, chat, id, name, &arguments).await?
-        } else {
-            false
-        };
-        if !approved {
-            let row = acks::request(
-                &state.db,
-                chat,
-                acks::Request {
-                    kind: "action",
-                    service: None,
-                    tool: Some(name),
-                    arguments: Some(&arguments),
-                    summary: &format!(
-                        "Allow {name} on {}{}",
-                        node.name,
-                        if operation == Operation::Exec {
-                            format!(
-                                "; declared services: {}",
-                                declared_services
-                                    .iter()
-                                    .map(|row| row.slug.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        } else {
-                            String::new()
-                        }
-                    ),
-                    platform: false,
-                },
-            )
-            .await?;
-            return Ok(acks::refusal(&row));
         }
     }
     // Fence against Stop/settlement before issuing any signed machine work.

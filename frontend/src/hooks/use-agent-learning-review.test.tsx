@@ -24,3 +24,40 @@ it("rejects the proposal at its current revision", async () => {
     { method: "POST", body: { revision: 3 } },
   );
 });
+
+
+it("sends the revision and draft when editing a proposal", async () => {
+  const { result } = renderHook(() => useAgentLearningReview("agent", false), { wrapper });
+  const draft = {
+    schema_version: 1, kind: "new", name: "updated", description: "Updated", skill_md: "# Updated",
+    files: [], base_skill: null, rationale: "Reusable", safety_notes: "None",
+  };
+  await result.current.edit.mutateAsync({ proposalId: "proposal", revision: 4, draft });
+  expect(assistantJson).toHaveBeenCalledWith(
+    "/assistant/nyxagent/agents/agent/learning/proposals/proposal",
+    { method: "PUT", body: { revision: 4, draft } },
+  );
+});
+
+it("sends the enabled consent body", async () => {
+  const { result } = renderHook(() => useAgentLearningReview("agent", false), { wrapper });
+  await result.current.consent.mutateAsync(true);
+  expect(assistantJson).toHaveBeenCalledWith(
+    "/assistant/nyxagent/agents/agent/learning/consent",
+    { method: "PUT", body: { enabled: true, threshold: 1 } },
+  );
+});
+
+it("posts the draft to the proposal's validate route and parses the result", async () => {
+  assistantJson.mockResolvedValueOnce({ valid: true, bytes: 87 });
+  const { result } = renderHook(() => useAgentLearningReview("agent", false), { wrapper });
+  const draft = {
+    schema_version: 1, kind: "new", name: "checked", description: "Checked", skill_md: "# Checked",
+    files: [], base_skill: null, rationale: "Reusable", safety_notes: "None",
+  };
+  await expect(result.current.validate.mutateAsync({ proposalId: "proposal", draft })).resolves.toEqual({ valid: true, bytes: 87 });
+  expect(assistantJson).toHaveBeenCalledWith(
+    "/assistant/nyxagent/agents/agent/learning/proposals/proposal/validate",
+    { method: "POST", body: { draft } },
+  );
+});

@@ -228,6 +228,7 @@ async fn authored_refusal_creates_no_proposal_or_card() {
         &f.chat,
         parse_input(&value).unwrap(),
         &review::UnavailableReader,
+        &review::UnavailableReader,
     )
     .await
     .unwrap_err();

@@ -10,6 +10,7 @@ import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { ChatComposer } from "./chat-composer";
 
 const baseProps = {
+  draftKey: "test-draft",
   active: false,
   sending: false,
   ownerUserId: "user-1",
@@ -18,6 +19,36 @@ const baseProps = {
 };
 
 describe("ChatComposer drafts", () => {
+  it("accepts pasted clipboard items when files is empty", () => {
+    const onFiles = vi.fn();
+    render(<ChatComposer {...baseProps} onFiles={onFiles} />);
+    const file = new File(["png"], "image.png", { type: "image/png" });
+    fireEvent.paste(screen.getByRole("textbox"), {
+      clipboardData: { files: [], items: [{ getAsFile: () => file }] },
+    });
+    expect(onFiles).toHaveBeenCalledWith([expect.objectContaining({ name: "pasted-image-1.png" })]);
+  });
+  it("names each pasted image uniquely across pastes and keeps its format", () => {
+    const onFiles = vi.fn();
+    render(<ChatComposer {...baseProps} onFiles={onFiles} />);
+    const paste = (file: File) =>
+      fireEvent.paste(screen.getByRole("textbox"), {
+        clipboardData: { files: [], items: [{ getAsFile: () => file }] },
+      });
+    paste(new File(["jpg"], "", { type: "image/jpeg" }));
+    paste(new File(["jpg"], "image.jpeg", { type: "image/jpeg" }));
+    paste(new File(["gif"], "image.gif", { type: "image/gif" }));
+    paste(new File(["webp"], "", { type: "image/webp" }));
+    paste(new File(["named"], "diagram.png", { type: "image/png" }));
+    const pasted = onFiles.mock.calls.map((call) => (call[0] as File[]).map((file) => [file.name, file.type]));
+    expect(pasted).toEqual([
+      [["pasted-image-1.jpg", "image/jpeg"]],
+      [["pasted-image-2.jpg", "image/jpeg"]],
+      [["pasted-image-3.gif", "image/gif"]],
+      [["pasted-image-4.webp", "image/webp"]],
+      [["diagram.png", "image/png"]],
+    ]);
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
@@ -132,6 +163,23 @@ describe("ChatComposer drafts", () => {
     expect(onSend).toHaveBeenCalledWith("Keep me");
     expect(screen.getByRole("textbox")).toHaveValue("Keep me");
     expect(screen.getByRole("textbox")).toBeEnabled();
+  });
+
+  it.each([
+    [true, ""],
+    [false, "Keep me"],
+  ])("after a send failure admitted by the server (%s) leaves the field with %j", async (admitted, expected) => {
+    const failure = Object.assign(new Error("The connection was interrupted."), admitted ? { admitted: true } : {});
+    const onSend = vi.fn().mockRejectedValue(failure);
+    render(<ChatComposer {...baseProps} onSend={onSend} draftKey="conv:one" />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep me" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    });
+    act(() => vi.advanceTimersByTime(300));
+    expect(onSend).toHaveBeenCalledWith("Keep me");
+    expect(screen.getByRole("textbox")).toHaveValue(expected);
+    expect(useAssistantDraftStore.getState().getDraft("conv:one")).toBe(expected);
   });
 
   it("flushes immediately on unmount", () => {

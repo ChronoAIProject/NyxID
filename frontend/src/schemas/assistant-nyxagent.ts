@@ -96,6 +96,7 @@ export const nyxAgentConversationSchema = z.object({
     })
     .nullable(),
   context_reset_at: z.string().nullable(),
+  context_reset_reason: z.string().nullable().optional(),
   /** `orchestrator` on NyxBot's threads, `subagent` on a specialist's. */
   role: z.enum(["orchestrator", "subagent"]).default("orchestrator"),
   /** The owning agent; null only when the server could not resolve it. */
@@ -121,6 +122,7 @@ export const nyxAgentCapabilitiesSchema = z.object({
   steer: z.object({ max_chars: z.number().int().positive(), max_per_turn: z.number().int().positive() }).nullable(),
 });
 export const nyxAgentMessageSchema = z.object({
+  feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),
   id: z.string(),
   seq: z.number().int().positive(),
@@ -129,6 +131,16 @@ export const nyxAgentMessageSchema = z.object({
   text: z.string(),
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
+  upstream_error_code: z.string().nullable().optional(),
+  error_detail: z.object({
+    stage: z.string(),
+    http_status: z.number().int().nullable(),
+    upstream_request_id: z.string().nullable(),
+    response_id: z.string().nullable(),
+    continuations: z.number().int().nonnegative(),
+    turn_id: z.string(),
+    occurred_at: z.string(),
+  }).nullable().optional(),
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -136,6 +148,27 @@ export const nyxAgentMessageSchema = z.object({
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
 });
+/** How NyxBot asks before acting: never, for sensitive/destructive actions, or for every change. */
+export const nyxAgentAccessModeSchema = z.enum(["autopilot", "nyxmode", "ask_every_time"]);
+export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
+
+/** Why an action card was raised: its risk, the access mode that asked, and which policy. */
+export const nyxAgentActionConfirmationSchema = z.object({
+  risk: z.enum(["read", "change", "sensitive", "destructive"]),
+  access_mode: nyxAgentAccessModeSchema.nullish(),
+  reason: z.enum(["access_mode", "webhook", "policy"]),
+});
+export type NyxAgentActionConfirmation = z.infer<typeof nyxAgentActionConfirmationSchema>;
+
+/** One NyxAgent model offered for selection. */
+export const nyxAgentModelSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  available: z.boolean(),
+  description: z.string().nullish(),
+});
+export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
+
 export const nyxAgentAcknowledgementSchema = z.object({
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
@@ -149,6 +182,7 @@ export const nyxAgentAcknowledgementSchema = z.object({
   decider: z.enum(["user", "orchestrator"]).default("user"),
   decided_by: z.enum(["user", "orchestrator"]).nullable().default(null),
   reason: z.string().nullable().default(null),
+  confirmation: nyxAgentActionConfirmationSchema.nullish(),
   service_slug: z.string().nullable(),
   service_name: z.string().nullable(),
   tool_name: z.string().nullable(),
@@ -248,6 +282,7 @@ export const voicePreferencesSchema = z.object({
   notify_on_completion: z.boolean(),
 });
 export const nyxAgentSettingsSchema = z.object({
+  access_mode: nyxAgentAccessModeSchema.default("nyxmode"),
   voice: voicePreferencesSchema.nullish(),
   timezone: z.string().nullable().optional(),
   schedule_minimum_minutes: z
@@ -274,6 +309,7 @@ export const nyxAgentSettingsSchema = z.object({
     .int()
     .nonnegative()
     .default(600),
+  specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]).default("denied"),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
@@ -285,15 +321,17 @@ export type NyxAgentSettingsUpdate = Partial<
     | "trigger_runs_per_hour"
     | "trigger_runs_per_day"
     | "skip_destructive_confirmation"
+    | "access_mode"
     | "max_auto_continuations"
     | "max_live_subagents"
     | "max_concurrent_subagent_turns"
     | "max_group_handoffs"
     | "max_group_handoffs_per_hour"
+    | "specialist_access_requests"
   >
 >;
 
-/** The settings form. Confirmation is presented positively, the API stores the opt-out. */
+/** The settings form. The access mode replaces the legacy destructive-action switch. */
 export function nyxAgentSettingsFormSchema(limits: {
   readonly max_live_subagents_limit: number;
   readonly max_concurrent_subagent_turns_limit: number;
@@ -307,12 +345,13 @@ export function nyxAgentSettingsFormSchema(limits: {
       .min(min, `Must be at least ${String(min)}`)
       .max(max, `Must be at most ${String(max)}`);
   return z.object({
+    access_mode: nyxAgentAccessModeSchema,
     max_auto_continuations: whole(0, 32),
-    confirm_destructive: z.boolean(),
     max_live_subagents: whole(0, limits.max_live_subagents_limit),
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),
     max_group_handoffs: whole(0, limits.max_group_handoffs_limit),
     max_group_handoffs_per_hour: whole(0, limits.max_group_handoffs_per_hour_limit),
+    specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]),
   });
 }
 export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFormSchema>>;
@@ -352,6 +391,8 @@ export const assistantAgentSchema = z.object({
   /** Personality and tone the user asked for; style only, never authority. */
   persona: z.string().nullable().default(null),
   description: z.string().default(""),
+  model: z.string().optional(),
+  access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
@@ -481,19 +522,34 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         display_name: agentDisplayName,
         description: z.string().trim().max(2048, "Keep the notes under 2048 characters"),
         persona: agentPersona,
+        model: z.string().optional(),
+        access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
       })
     : z.object({
         name: agentName,
         display_name: agentDisplayName,
         description: agentDescription,
         persona: agentPersona,
+        model: z.string().optional(),
+        access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
       });
 }
+/** A PATCH to an agent: only the fields that changed. `null` clears the override. */
+export type AssistantAgentUpdate = {
+  name?: string;
+  description?: string;
+  display_name?: string;
+  persona?: string;
+  model?: string;
+  access_mode_override?: NyxAgentAccessMode | null;
+};
 export type AssistantAgentProfile = {
   name: string;
   display_name: string;
   description: string;
   persona: string;
+  model?: string;
+  access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
 };
 
 export const assistantAgentGrantsSchema = z.object({
@@ -653,6 +709,7 @@ export const assistantGroupSchema = z.object({
   members: z.array(assistantGroupMemberSchema),
   /** Answers user messages that mention no one: NyxBot when it is a member. */
   lead_agent_id: z.string(),
+  default_recipient_ids: z.array(z.string()).optional(),
   working_agent_ids: z.array(z.string()).default([]),
   message_count: z.number().int().nonnegative().default(0),
   last_message_at: z.string().nullable().default(null),
@@ -663,6 +720,7 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullable().optional(), updated_at: z.string().optional() }).nullable().optional(),
   activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
   attachments: z.array(nyxAgentAttachmentSchema).optional(),
@@ -676,6 +734,7 @@ export const assistantGroupMessageSchema = z.object({
     .nullable()
     .default(null),
   text: z.string(),
+  recipient_agent_ids: z.array(z.string()).optional(),
   created_at: z.string(),
 });
 export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;

@@ -60,7 +60,10 @@ async fn check_parent(
     let tool = live.offering_kind == OfferingKind::Tool;
     let mut admin = false;
     if let Some(authority) = authority {
-        let catalog = live.catalog_manager_created && live.visibility != "private";
+        // Foreign shared rows and public manager-created rows require a live
+        // Catalog permission. Legacy creators retain their existing fallback.
+        let catalog = (live.catalog_manager_created && live.visibility != "private")
+            || (is_shared_catalog_row(&live) && live.created_by != authority.actor.user_id);
         if (tool || catalog) && !authority.first_party_human {
             return Err(AppError::Forbidden(
                 "Catalog mutation requires first-party human authority".into(),
@@ -99,7 +102,8 @@ async fn check_parent(
                     )
                     .await?
             } else {
-                live.owner_user_id.is_none() && live.created_by == authority.actor.user_id
+                live.owner_user_id.is_none()
+                    && (live.created_by == authority.actor.user_id || is_shared_catalog_row(&live))
             };
             if !allowed {
                 return Err(AppError::Forbidden(
@@ -118,6 +122,16 @@ async fn check_parent(
             .await?;
     }
     Ok((live, admin))
+}
+
+/// Catalog Managers can complete seeded and shared connectors. Tools keep
+/// their separate authority, even when otherwise publicly visible.
+pub fn is_shared_catalog_row(service: &DownstreamService) -> bool {
+    service.owner_user_id.is_none()
+        && service.visibility == "public"
+        && service.service_type == "http"
+        && service.service_category != "internal"
+        && service.offering_kind != OfferingKind::Tool
 }
 
 fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
@@ -139,6 +153,7 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "auth_key_name",
         "oauth_client_id",
         "credential_encrypted",
+        "platform_key",
         "tools_credential_frozen",
         "destination_targets",
         "identity_propagation_mode",
@@ -177,6 +192,7 @@ pub async fn commit_update(
             let (live, admin) = fence(&db, session, &observed, Some(&authority)).await?;
             let tool = live.offering_kind == OfferingKind::Tool;
             require_desired_kind(&live, &fields, &authority, admin)?;
+            validate_update_fields(&db, session, &live, &fields, &authority, admin).await?;
             if fields.get_str("offering_kind") == Ok("tool") {
                 require_providerless_tool(&db, session, &live).await?;
             }
@@ -211,6 +227,67 @@ pub async fn commit_update(
         }.await;
         super::api_key_mutation_service::transaction_result(result)
     }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Recheck the field-dependent boundaries against live rows within the same
+/// transaction as the mutation (also used by skill metadata updates).
+pub(crate) async fn validate_update_fields(
+    db: &Database,
+    session: &mut ClientSession,
+    live: &DownstreamService,
+    fields: &Document,
+    authority: &Authority,
+    admin: bool,
+) -> AppResult<()> {
+    if admin || live.offering_kind == OfferingKind::Tool {
+        return Ok(());
+    }
+    // Unmarked legacy creators keep their existing field permissions. Their
+    // ingress field validation is bound by the parent contract projection.
+    if live.created_by == authority.actor.user_id
+        && (!live.catalog_manager_created || live.visibility == "private")
+    {
+        return Ok(());
+    }
+    if fields.contains_key("is_active") && live.created_by != authority.actor.user_id {
+        return Err(AppError::Forbidden(
+            "Only an Admin may change activation on someone else's service".into(),
+        ));
+    }
+    if fields
+        .get_str("base_url")
+        .is_ok_and(|url| url != live.base_url)
+    {
+        if !live.credential_encrypted.is_empty() || live.platform_key.is_some() {
+            return Err(AppError::Forbidden(
+                "Only an Admin may move a service carrying a shared credential or platform key"
+                    .into(),
+            ));
+        }
+        if let Some(provider_id) = &live.provider_config_id {
+            let provider = db
+                .collection::<crate::models::provider_config::ProviderConfig>(
+                    crate::models::provider_config::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id":provider_id})
+                .session(&mut *session)
+                .await?
+                .ok_or_else(|| AppError::Conflict("Provider no longer exists".into()))?;
+            if provider.created_by != authority.actor.user_id {
+                return Err(AppError::Forbidden(
+                    "Only an Admin may move a service using someone else's provider".into(),
+                ));
+            }
+            db.collection::<Document>(crate::models::provider_config::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":provider_id},
+                    doc! {"$inc":{"authority_fence":1_i64}},
+                )
+                .session(&mut *session)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn require_desired_kind(
