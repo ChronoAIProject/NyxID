@@ -49,6 +49,29 @@ describe("attachment mentions", () => {
     ).toHaveLength(32_768);
   });
 
+  it("keeps handle-like text inside a pasted document verbatim", () => {
+    const pastes = [
+      { handle: "pasted-text-1", label: "pasted-text-1.txt", kind: "pasted-text" as const, text: "example: @pasted-text-2" },
+      { handle: "pasted-text-2", label: "pasted-text-2.txt", kind: "pasted-text" as const, text: "second document" },
+    ];
+    expect(draftWithoutHandles("@pasted-text-1 and @pasted-text-2", pastes)).toBe(
+      "example: @pasted-text-2 and second document",
+    );
+  });
+
+  it("stops a saved draft at the textbox limit without expanding what it drops", () => {
+    const huge = "y".repeat(8 * 1024 * 1024);
+    const draft = draftWithoutHandles("@pasted-text-1 @pasted-text-1 @pasted-text-1 @pasted-text-1", [
+      { handle: "pasted-text-1", label: "p.txt", kind: "pasted-text", text: huge },
+    ]);
+    expect(draft).toHaveLength(32_768);
+    // A cut never leaves half of a surrogate pair.
+    const emoji = draftWithoutHandles("@pasted-text-1", [
+      { handle: "pasted-text-1", label: "p.txt", kind: "pasted-text", text: `${"x".repeat(32_767)}😀` },
+    ]);
+    expect(emoji).toBe("x".repeat(32_767));
+  });
+
   it("leaves a handle with no attachment as typed", () => {
     expect(resolveAttachmentMentions("see @image-3", mentions)).toBe("see @image-3");
   });
