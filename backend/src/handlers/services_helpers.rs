@@ -322,6 +322,7 @@ pub async fn service_to_response_with_viewer(
             })
             .collect();
     ServiceResponse {
+        catalog_manager_created: s.catalog_manager_created,
         tools_manager_created: s.tools_manager_created,
         tools_manager_eligible: crate::services::tools_manager_service::eligible_manager_tool(&s),
         tools_credential_frozen: s.offering_kind

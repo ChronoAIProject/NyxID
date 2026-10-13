@@ -170,6 +170,9 @@ pub struct XChannelBillingResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    /// Server-owned provenance marker; lets clients mirror Catalog Manager
+    /// own-row field rules (for example `auth_scheme`). Not an authority grant.
+    pub catalog_manager_created: bool,
     pub tools_manager_created: bool,
     /// Safe shape eligibility; never exposes token-exchange configuration.
     pub tools_manager_eligible: bool,

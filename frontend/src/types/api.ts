@@ -293,6 +293,7 @@ export interface OAuthClient {
 
 export interface DownstreamService {
   readonly icon_url?: string | null;
+  readonly catalog_manager_created?: boolean;
   readonly tools_manager_created?: boolean;
   readonly tools_manager_eligible?: boolean;
   readonly tools_credential_frozen?: boolean;

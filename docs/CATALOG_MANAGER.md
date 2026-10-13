@@ -88,8 +88,9 @@ the next startup if deleted; pause them instead. Operation metadata such as
 `risk` drives assistant confirmation cards, so Catalog Managers are trusted
 not to downgrade a destructive operation on shared rows.
 
-A row a Catalog Manager creates is marked `catalog_manager_created`. On
-marked rows a non-admin may change the row or its operation endpoints only
+A row a Catalog Manager creates is marked `catalog_manager_created`, and
+service responses report this server-owned marker so clients can mirror
+own-row field rules such as `auth_scheme`. On marked rows a non-admin may change the row or its operation endpoints only
 while holding the role, so revoking it also revokes write access, and
 anonymous rules stay Admin-only. Rows created before this role keep the
 creator rule for creators without the role. Provider
