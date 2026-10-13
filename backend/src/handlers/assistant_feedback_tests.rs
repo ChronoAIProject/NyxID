@@ -1377,10 +1377,16 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
         "has_comment=true",
         "comment_chars=16",
     ] {
-        assert!(line.contains(expected), "missing {expected}: {line}");
+        assert!(
+            line.contains(expected),
+            "feedback log line is missing {expected}"
+        );
     }
-    for secret in ["COMMENT-SENTINEL", "REPLY-SENTINEL", "PROMPT-SENTINEL"] {
-        assert!(!line.contains(secret), "{secret} leaked: {line}");
+    for sentinel in ["COMMENT-SENTINEL", "REPLY-SENTINEL", "PROMPT-SENTINEL"] {
+        assert!(
+            !line.contains(sentinel),
+            "{sentinel} leaked into the feedback log line"
+        );
     }
     let audits = feedback_audits(&f, "ctx-reply", 1).await;
     assert_eq!(audits.len(), 1);
