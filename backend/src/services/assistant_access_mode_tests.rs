@@ -72,7 +72,7 @@ async fn account_tools_follow_each_access_mode_with_risk_on_the_card() {
         ("delete_agent_key", json!({"api_key_id": key})),
     ] {
         let result = account(&f, tool, &args).await;
-        assert!(!result.is_error, "{tool}: {}", result.value);
+        assert!(!result.is_error, "{tool} returned an error");
     }
     assert!(cards(&f).await.is_empty());
 
@@ -97,14 +97,16 @@ async fn account_tools_follow_each_access_mode_with_risk_on_the_card() {
     assert_eq!(confirmation.reason, "access_mode");
     assert!(
         card.summary.starts_with("Change agent key 'ci-bot'"),
-        "{}",
-        card.summary
+        "card summary must mention Change agent key ci-bot"
     );
     let id = allow(&f, &refusal.value).await;
     let mut approved = rename(&key);
     approved["acknowledgement_id"] = json!(id);
     let done = account(&f, "update_agent_key", &approved).await;
-    assert!(!done.is_error, "{}", done.value);
+    assert!(
+        !done.is_error,
+        "approved account tool call returned an error"
+    );
     assert_eq!(done.value["name"], "renamed");
     // The card is single-use.
     assert_eq!(
@@ -150,8 +152,7 @@ async fn foreign_and_assistant_keys_are_refused_before_any_card() {
             .as_str()
             .unwrap()
             .contains("Assistant chat keys cannot be modified"),
-        "{}",
-        refused.value
+        "refusal must name the assistant chat key rule"
     );
     assert!(cards(&f).await.is_empty());
     // Positive control: an ordinary key does get a card in this mode.
@@ -183,14 +184,16 @@ async fn webhook_account_tool_card_satisfies_mode_and_policy_once() {
     );
     assert!(
         card.summary.contains("Delete agent key 'ci-bot'"),
-        "{}",
-        card.summary
+        "card summary must mention Delete agent key ci-bot"
     );
     let id = allow(&f, &refusal.value).await;
     let mut approved = args.clone();
     approved["acknowledgement_id"] = json!(id);
     let done = account(&f, "delete_agent_key", &approved).await;
-    assert!(!done.is_error, "{}", done.value);
+    assert!(
+        !done.is_error,
+        "approved account tool call returned an error"
+    );
     assert!(
         super::key_service::get_api_key(&f.state.db, &f.owner, &key)
             .await
@@ -249,7 +252,7 @@ async fn every_changing_account_tool_has_a_card_summary() {
         &json!({"bot_id": bot, "agent_api_key_id": key, "platform_conversation_id": "c2"}),
     )
     .await;
-    assert!(!route.is_error, "{}", route.value);
+    assert!(!route.is_error, "channel route creation returned an error");
     let route = route.value["id"].as_str().unwrap().to_owned();
     let tools = f.tools();
     let cases = [
@@ -322,7 +325,10 @@ async fn every_changing_account_tool_has_a_card_summary() {
     }
     for (name, args, expected) in cases {
         let summary = tools.action_summary(&f.owner, name, &args).await.unwrap();
-        assert!(summary.starts_with(expected), "{name}: {summary}");
+        assert!(
+            summary.starts_with(expected),
+            "{name}: action summary has the wrong prefix"
+        );
     }
     db.drop().await.unwrap();
 }
