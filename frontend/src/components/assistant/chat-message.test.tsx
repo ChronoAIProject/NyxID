@@ -496,6 +496,36 @@ describe("canonical chat presentation", () => {
     }
   });
 
+  it("starts windowing only while the reader follows the newest message", () => {
+    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    try {
+      const session = (count: number): ChatSessionState => ({
+        clientId: "c", conversationId: "nyxagent-growing", status: "completed_text", title: "T",
+        expectedTurnCount: 0,
+        messages: Array.from({ length: count }, (_, index): ChatMessage => ({ ...BASE, id: `m-${String(index)}` })),
+      });
+      const { container, rerender } = render(<ChatMessageList session={session(30)} bottomInset={0} />);
+      const scroller = container.querySelector<HTMLDivElement>("[id^=message-]")!.closest<HTMLDivElement>(".overflow-y-auto")!;
+      let top = 0;
+      Object.defineProperty(scroller, "scrollHeight", { configurable: true, get: () => 5000 });
+      Object.defineProperty(scroller, "clientHeight", { configurable: true, get: () => 600 });
+      Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => top, set: (value: number) => { top = value; } });
+      const scrollTo = (value: number) => { top = value; fireEvent.scroll(scroller); };
+      scrollTo(4400);
+      scrollTo(1000); // the reader scrolls up
+      rerender(<ChatMessageList session={session(31)} bottomInset={0} />);
+      expect(container.querySelectorAll("[id^=message-]")).toHaveLength(31);
+      expect(top).toBe(1000);
+      scrollTo(4400); // back at the newest message
+      rerender(<ChatMessageList session={session(32)} bottomInset={0} />);
+      expect(container.querySelectorAll("[id^=message-]").length).toBeLessThan(32);
+    } finally {
+      width.mockRestore();
+      height.mockRestore();
+    }
+  });
+
   it("shows a reply's images, and a message's attachments, above its text", () => {
     // The image stays loading: only its position matters here.
     globalThis.__nyxidAssistantHttpMock = () => new Promise<Response>(() => undefined);

@@ -21,6 +21,7 @@ import {
 } from "@/lib/assistant/uploads";
 import {
   attachmentKind,
+  draftWithoutHandles,
   pastedTextFile,
   resolveAttachmentMentions,
   type AttachmentKind,
@@ -33,6 +34,8 @@ type Pending = {
   /** What the writer types after `@` to mention this file, e.g. `image-1`. */
   handle: string;
   kind: AttachmentKind;
+  /** A long paste's own text, so a saved draft can restore it inline. */
+  text?: string;
   name: string;
   preview?: string;
   progress: number;
@@ -88,7 +91,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     requestAnimationFrame(() => attach.current?.focus());
   }
   /** Queues `incoming` for upload and returns the handles it was given. */
-  function add(incoming: File[], kind?: AttachmentKind): string[] {
+  function add(incoming: File[], kind?: AttachmentKind, text?: string): string[] {
     if (locked) return [];
     setNotice(undefined);
     const handles: string[] = [];
@@ -105,6 +108,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         key: crypto.randomUUID(),
         handle: `${fileKind}-${String(handleCounts.current[fileKind])}`,
         kind: fileKind,
+        ...(text === undefined ? {} : { text }),
         name: file.name,
         progress: 0,
         controller: new AbortController(),
@@ -192,8 +196,19 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
         if (locked || pending.current.size >= 10) return undefined;
         // Named like its handle: @pasted-text-2 is pasted-text-2.md.
         const file = pastedTextFile(text, handleCounts.current["pasted-text"] + 1);
-        return add([file], "pasted-text")[0];
+        return add([file], "pasted-text", text)[0];
       }}
+      draftText={(content) =>
+        draftWithoutHandles(
+          content,
+          [...pending.current.values()].map((file) => ({
+            handle: file.handle,
+            label: file.item?.label ?? file.name,
+            kind: file.kind,
+            text: file.text,
+          })),
+        )
+      }
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
           {files.length > 0 && (

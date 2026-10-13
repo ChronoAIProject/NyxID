@@ -371,6 +371,21 @@ describe("Assistant uploads composer", () => {
     );
   });
 
+  it("restores a long paste inline when the composer comes back, never a dangling handle", async () => {
+    vi.mocked(uploadFile).mockImplementation(async (_scope, file) => ({
+      ...item, id: file.name, label: file.name,
+    }));
+    const props = { ...base, draftKey: "conv:nyxa-thread" };
+    const { unmount } = render(<UploadComposer {...props} scope={{ kind: "conversations", id: "one" }} />);
+    const wall = Array.from({ length: 8 }, (_, line) => `line ${String(line)}`).join("\n");
+    fireEvent.paste(screen.getByRole("textbox"), { clipboardData: { files: [], items: [], getData: () => wall } });
+    await screen.findByText("Ready");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Summarize @pasted-text-1" } });
+    unmount();
+    render(<UploadComposer {...props} scope={{ kind: "conversations", id: "one" }} />);
+    expect(screen.getByRole("textbox")).toHaveValue(`Summarize ${wall}`);
+  });
+
   it("lets the writer mention an attached image, and drops the mention with the file", async () => {
     vi.mocked(uploadFile).mockImplementation(async (_scope, file) => ({
       ...item, id: file.name, label: file.name, content_type: "image/png",

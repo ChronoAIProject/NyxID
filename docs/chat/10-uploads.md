@@ -165,7 +165,10 @@ servers that route `@name` to agents never see a handle; removing a chip removes
 its references. Pasting more than six lines, or more than 1,500 characters, of
 text attaches it as `pasted-text-N.md` (when it looks like Markdown) or `.txt` and
 places its handle at the caret. While a reply runs, uploads are closed, so a long
-paste stays ordinary text. Images show above the text of the message they belong to.
+paste stays ordinary text. Attachments do not survive leaving the composer, so a
+saved draft never keeps a handle: pasted text returns inline (bounded like the
+textbox) and other files become their description. File names never add an
+`@mention`. Images show above the text of the message they belong to.
 
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,

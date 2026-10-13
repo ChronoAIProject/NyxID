@@ -231,6 +231,7 @@ export class NyxAgentTransport {
       this.index.delete(row.id);
       this.histories.delete(row.id);
       this.reviewCards.delete(row.id);
+      this.views.delete(row.id);
     }
     this.changed();
   }

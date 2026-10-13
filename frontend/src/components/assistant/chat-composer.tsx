@@ -174,6 +174,8 @@ interface ChatComposerProps {
    * at the caret. Undefined keeps it as ordinary pasted text.
    */
   readonly onLongText?: (text: string) => string | undefined;
+  /** The text a saved draft keeps, when it differs from what is on screen. */
+  readonly draftText?: (content: string) => string;
   readonly onSend: (content: string) => Promise<void>;
   readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
@@ -212,6 +214,7 @@ function DraftedChatComposer({
   mentions,
   attachmentMentions,
   onLongText,
+  draftText,
   onSend,
   onContentChange,
   onStop,
@@ -282,6 +285,9 @@ function DraftedChatComposer({
   const textMeasureRef = useRef<HTMLSpanElement>(null);
   const composingRef = useRef(false);
   const pendingTransitionRef = useRef<PendingDraftTransition | null>(null);
+  const draftTextRef = useRef(draftText);
+  draftTextRef.current = draftText;
+  const savedText = (text: string) => draftTextRef.current?.(text) ?? text;
 
   if (
     renderedOwnerUserIdRef.current !== ownerUserId ||
@@ -360,7 +366,7 @@ function DraftedChatComposer({
     const key = draftKeyRef.current;
     const store = useAssistantDraftStore.getState();
     if (userId && key && store.ownerUserId === userId) {
-      store.saveDraft(userId, key, contentRef.current);
+      store.saveDraft(userId, key, savedText(contentRef.current));
     }
   }, [cancelScheduledSave]);
 
@@ -385,14 +391,14 @@ function DraftedChatComposer({
         store.saveDraft(
           transition.nextUserId,
           transition.previousKey,
-          transition.liveContent,
+          savedText(transition.liveContent),
         );
         if (transition.migrateScreenDraft && transition.nextKey) {
           store.clearDraft(transition.nextUserId, transition.previousKey);
           store.saveDraft(
             transition.nextUserId,
             transition.nextKey,
-            transition.liveContent,
+            savedText(transition.liveContent),
           );
         }
       }

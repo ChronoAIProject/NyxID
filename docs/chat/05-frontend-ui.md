@@ -162,7 +162,10 @@ reconstructed after reload.
 Rows re-render only when their message or the page's projection version changes,
 so a streamed token re-renders the streaming row alone. Transcripts longer than
 30 messages are windowed: only rows near the viewport are mounted, measured at
-their real heights, while the thread still opens at its newest message, follows a
+their real heights and the rendered row gap (display spacing scales it). Windowing
+starts when a thread opens long or while the reader follows the newest message,
+never under a reader who scrolled up, and then stays on for that thread. The
+thread still opens at its newest message, follows a
 streaming reply, keeps the reader's place when older messages load above, and
 brings an unmounted row into view for a linked review card or a
 `#message-<id>` link. Shorter transcripts stay whole so find-in-page works.

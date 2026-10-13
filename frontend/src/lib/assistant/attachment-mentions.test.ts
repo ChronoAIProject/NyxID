@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   attachmentKind,
+  draftWithoutHandles,
   isLongPaste,
   pastedTextFile,
   resolveAttachmentMentions,
@@ -24,6 +25,28 @@ describe("attachment mentions", () => {
     ).toBe(
       'Compare image "chart.png" with image "other.png", see (file "report.pdf") and pasted text "pasted-text-1.md". Mail me@image-1.',
     );
+  });
+
+  it("never lets a file name add an @mention", () => {
+    expect(
+      resolveAttachmentMentions("Summarize @file-1", [
+        { handle: "file-1", label: "@researcher notes.txt", kind: "file" },
+      ]),
+    ).toBe('Summarize file "researcher notes.txt"');
+  });
+
+  it("saves drafts with pasted text inline and other files described, never a dangling handle", () => {
+    expect(
+      draftWithoutHandles("Compare @pasted-text-1 with @image-1", [
+        { handle: "pasted-text-1", label: "pasted-text-1.txt", kind: "pasted-text", text: "line 1\nline 2" },
+        { handle: "image-1", label: "chart.png", kind: "image" },
+      ]),
+    ).toBe('Compare line 1\nline 2 with image "chart.png"');
+    expect(
+      draftWithoutHandles("@pasted-text-1", [
+        { handle: "pasted-text-1", label: "p.txt", kind: "pasted-text", text: "x".repeat(40_000) },
+      ]),
+    ).toHaveLength(32_768);
   });
 
   it("leaves a handle with no attachment as typed", () => {

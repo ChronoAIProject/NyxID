@@ -41,7 +41,9 @@ export function pastedTextFile(text: string, index: number): File {
 
 function describe(mention: AttachmentMention): string {
   const noun = mention.kind === "image" ? "image" : mention.kind === "pasted-text" ? "pasted text" : "file";
-  return `${noun} "${mention.label}"`;
+  // A label can never add an `@mention` (group chats route on them). Server
+  // labels already drop `@`; this keeps the guarantee local.
+  return `${noun} "${mention.label.replace(/@/g, "")}"`;
 }
 
 /** Same word rule as agent mentions: `@` starts a word and the handle ends one. */
@@ -60,6 +62,28 @@ export function resolveAttachmentMentions(
       resolved.replace(mentionPattern(mention.handle), (_, before: string) => `${before}${describe(mention)}`),
     text,
   );
+}
+
+/** The textbox's own limit. */
+const MAX_DRAFT_CHARS = 32_768;
+
+/**
+ * What a saved draft keeps. Attachments do not survive the composer, so a
+ * restored draft must not point at one: pasted text returns inline, other files
+ * become their description. Bounded like the textbox.
+ */
+export function draftWithoutHandles(
+  text: string,
+  mentions: readonly (AttachmentMention & { readonly text?: string })[],
+): string {
+  const expanded = mentions.reduce(
+    (draft, mention) =>
+      draft.replace(mentionPattern(mention.handle), (_, before: string) =>
+        `${before}${mention.kind === "pasted-text" && mention.text !== undefined ? mention.text : describe(mention)}`,
+      ),
+    text,
+  );
+  return expanded.length > MAX_DRAFT_CHARS ? Array.from(expanded).slice(0, MAX_DRAFT_CHARS).join("") : expanded;
 }
 
 /** Remove a removed attachment's `@handle`, with the space that followed it. */

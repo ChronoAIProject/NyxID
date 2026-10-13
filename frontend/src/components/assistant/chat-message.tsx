@@ -1,6 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -715,7 +716,8 @@ const MessageRow = memo(
  * keeps the browser's find-in-page working where it matters most.
  */
 export const WINDOW_AFTER_MESSAGES = 30;
-const ROW_GAP_PX = 16;
+/** `gap-4` at default display spacing; the rendered gap is read back. */
+const DEFAULT_ROW_GAP_PX = 16;
 const ROW_OVERSCAN = 6;
 
 /** A first guess at a row's height; real heights replace it once measured. */
@@ -768,8 +770,22 @@ export function ChatMessageList({
   const previousUserMessageRef = useRef<string | undefined>(undefined);
   const previousWindowedRef = useRef(false);
   const messages = session?.messages ?? EMPTY_MESSAGES;
-  const windowed = messages.length > WINDOW_AFTER_MESSAGES;
+  // Windowing starts when a thread opens long, or while the reader follows the
+  // newest message; never under a reader who scrolled up, whose place a mode
+  // switch would lose. Once on, it stays on for that thread.
+  const long = messages.length > WINDOW_AFTER_MESSAGES;
+  const conversationKey = session?.conversationId ?? session?.clientId;
+  const modeRef = useRef<{ readonly conversation?: string; readonly windowed: boolean }>({
+    windowed: false,
+  });
+  if (modeRef.current.conversation !== conversationKey) {
+    modeRef.current = { conversation: conversationKey, windowed: long };
+  } else if (!modeRef.current.windowed && long && followingRef.current) {
+    modeRef.current = { conversation: conversationKey, windowed: true };
+  }
+  const windowed = modeRef.current.windowed;
   const [scrollMargin, setScrollMargin] = useState(0);
+  const [rowGap, setRowGap] = useState(DEFAULT_ROW_GAP_PX);
   const virtualizer = useVirtualizer({
     count: messages.length,
     enabled: windowed,
@@ -777,7 +793,7 @@ export function ChatMessageList({
     estimateSize: (index) => estimateRowHeight(messages[index]),
     getItemKey: (index) => messages[index]?.id ?? index,
     overscan: ROW_OVERSCAN,
-    gap: ROW_GAP_PX,
+    gap: rowGap,
     scrollMargin,
     // Keep the rows on screen in place when older messages load above them.
     anchorTo: "end",
@@ -809,6 +825,12 @@ export function ChatMessageList({
     if (!element || typeof ResizeObserver === "undefined") return;
     // The viewport resizing, a streamed reply growing, or an image loading.
     const observer = new ResizeObserver(() => {
+      // Display spacing scales the gap between rows; keep the windowed
+      // geometry on the rendered value.
+      if (content) {
+        const gap = Number.parseFloat(getComputedStyle(content).rowGap);
+        if (Number.isFinite(gap)) setRowGap((current) => (current === gap ? current : gap));
+      }
       if (followingRef.current) pinRef.current(false);
     });
     observer.observe(element);
@@ -892,17 +914,24 @@ export function ChatMessageList({
   }, [focusIndex, focusMessageId, virtualizer, windowed]);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
-  useEffect(() => {
-    const reveal = () => {
-      const id = hashMessageId();
-      const index = id ? messagesRef.current.findIndex((message) => message.id === id) : -1;
-      if (index < 0 || !windowedRef.current) return;
-      followingRef.current = false;
-      virtualizer.scrollToIndex(index, { align: "center" });
-    };
-    window.addEventListener("hashchange", reveal);
-    return () => window.removeEventListener("hashchange", reveal);
+  const revealedHashRef = useRef<string | undefined>(undefined);
+  const revealHash = useCallback(() => {
+    const id = hashMessageId();
+    const index = id ? messagesRef.current.findIndex((message) => message.id === id) : -1;
+    if (index < 0 || !windowedRef.current) return;
+    revealedHashRef.current = id;
+    followingRef.current = false;
+    virtualizer.scrollToIndex(index, { align: "center" });
   }, [virtualizer]);
+  useEffect(() => {
+    window.addEventListener("hashchange", revealHash);
+    return () => window.removeEventListener("hashchange", revealHash);
+  }, [revealHash]);
+  // A link opened with the hash already set: reveal it once its row has loaded.
+  const hashTargetLoaded = messages.some((message) => message.id === hashMessageId());
+  useEffect(() => {
+    if (hashTargetLoaded && windowed && revealedHashRef.current !== hashMessageId()) revealHash();
+  }, [hashTargetLoaded, revealHash, windowed]);
 
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget;
