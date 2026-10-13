@@ -119,7 +119,7 @@ function AgentPicker({
   return (
     <ul
       aria-label="Agents"
-      className="assistant-scrollbar max-h-56 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
+      className="assistant-scrollbar relative max-h-56 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
     >
       {rows.map((row) => {
         const id = `group-member-${row.id}`;
@@ -192,7 +192,7 @@ export function GroupParticipantPicker({ org, value, onChange }: {
   const eligible = (members.data ?? []).filter((member) => !member.revoked_at && ["admin", "member"].includes(member.role));
   return <div className="space-y-2">
     <p className="text-12 font-medium">Participants ({value.length} of 16)</p>
-    <ul aria-label="Participants" className="assistant-scrollbar max-h-44 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+    <ul aria-label="Participants" className="assistant-scrollbar relative max-h-44 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
       {eligible.map((member) => <li key={member.user_id}>
         <label className="flex items-center gap-2 text-12">
           <Checkbox checked={value.includes(member.user_id)} disabled={value.length >= 16 && !value.includes(member.user_id)}

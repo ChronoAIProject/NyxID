@@ -214,7 +214,7 @@ describe("canonical chat presentation", () => {
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /2 actions/i }));
     expect(screen.getByText("Inspect")).toBeVisible();
-    expect(screen.getByText("catalog.read")).toBeVisible();
+    expect(screen.getAllByText("catalog.read")[0]).toBeVisible();
     expect(screen.queryByText(/secret/)).not.toBeInTheDocument();
     expect(screen.getByText("after").tagName).toBe("STRONG");
     expect(screen.getByText("Run failed")).toBeVisible();
@@ -326,6 +326,30 @@ describe("canonical chat presentation", () => {
     expect(container.querySelector("[data-streaming-caret]")).not.toBeNull();
   });
 
+  it("shows each action's outcome and counts failures", () => {
+    render(
+      <ChatMessageBubble
+        message={{
+          ...BASE,
+          toolCalls: [
+            { id: "a", name: "nyx__search_tools", status: "done", startedAt: 1, finishedAt: 2 },
+            { id: "b", name: "api-github-4__get_issue", status: "error", startedAt: 2, finishedAt: 3 },
+            { id: "c", name: "api-github-4__get_file_contents", status: "running", startedAt: 3 },
+          ],
+        }}
+      />,
+    );
+    const header = screen.getByRole("button", { name: /3 actions/i });
+    expect(header).toHaveTextContent("· 1 failed");
+    fireEvent.click(header);
+    expect(screen.getByText("Searched for tools").closest("summary")).toHaveAttribute("data-tool-status", "done");
+    expect(screen.getByLabelText("Succeeded")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't get issue on GitHub").closest("summary")).toHaveAttribute("data-tool-status", "error");
+    expect(screen.getByLabelText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Reading file contents on GitHub").closest("summary")).toHaveAttribute("data-tool-status", "running");
+    expect(screen.getByText("api-github-4__get_issue")).toBeInTheDocument();
+  });
+
   it("names the running tool beside the streaming dots until text arrives", () => {
     const running = {
       ...BASE,
@@ -351,9 +375,24 @@ describe("canonical chat presentation", () => {
       <ChatMessageBubble message={running} />,
     );
     expect(container.querySelector("[data-running-tool]")).toHaveTextContent(
-      "github__list_issues",
+      "Listing issues on GitHub…",
     );
     expect(screen.getByRole("button", { name: /2 actions/i })).toBeVisible();
+    rerender(
+      <ChatMessageBubble
+        message={{
+          ...running,
+          toolCalls: running.toolCalls.map((tool) => ({
+            ...tool,
+            status: "done" as const,
+          })),
+        }}
+      />,
+    );
+    expect(container.querySelector("[data-running-tool]")).toBeNull();
+    expect(container.querySelector("[data-last-tool]")).toHaveTextContent(
+      "Listed issues on GitHub",
+    );
     rerender(
       <ChatMessageBubble message={{ ...running, content: "Found 3 issues" }} />,
     );
