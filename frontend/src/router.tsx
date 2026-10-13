@@ -35,7 +35,7 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { CreditsDeniedHost } from "@/components/billing/credits-denied-host";
 import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite, canReadAdminUsage, hasAdminRead } from "@/types/api";
+import { canAdminWrite, canManageCatalog, canReadAdminUsage, hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
@@ -507,13 +507,12 @@ const adminToolsRoute = createRoute({
   component: AdminToolsPage,
 });
 
-const servicesRedirectRoute = createRoute({
+export const servicesRedirectRoute = createRoute({
   path: "/services",
   getParentRoute: () => dashboardLayout,
   beforeLoad: async () => {
     const { user } = useAuthStore.getState();
-    if (user?.is_admin) {
-      // Admin users can still access the services management pages
+    if (canManageCatalog(user)) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });
@@ -548,7 +547,7 @@ const connectionsRedirectRoute = createRoute({
   component: () => null,
 });
 
-const providersRedirectRoute = createRoute({
+export const providersRedirectRoute = createRoute({
   path: "/providers",
   getParentRoute: () => dashboardLayout,
   beforeLoad: ({ location }) => {
@@ -560,8 +559,7 @@ const providersRedirectRoute = createRoute({
       return;
     }
     const { user } = useAuthStore.getState();
-    if (user?.is_admin) {
-      // Admin users can still access the providers management pages
+    if (canManageCatalog(user)) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });

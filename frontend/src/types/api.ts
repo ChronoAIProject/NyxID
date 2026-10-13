@@ -52,6 +52,8 @@ export interface ProfileConfig {
 }
 
 export interface UserCapabilities {
+  /** Admin, or Operator holding Catalog Manager. Older backends omit it. */
+  readonly manage_catalog?: boolean;
   readonly billing_available?: boolean;
   /** Admin, or Operator with the Credits Manager role. Older backends omit it. */
   readonly manage_credit_grants?: boolean;
@@ -120,6 +122,15 @@ export function canManageCreditGrants(
     | undefined,
 ): boolean {
   return canAdminWrite(user) || user?.capabilities?.manage_credit_grants === true;
+}
+
+export function canManageCatalog(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return canAdminWrite(user) || user?.capabilities?.manage_catalog === true;
 }
 
 /// True if the user may open the admin Usage page: everyone with admin read

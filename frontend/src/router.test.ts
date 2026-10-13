@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { channelBotSetupRoute, loginAgentKeyRoute, loginDeviceRoute, loginCodeRoute, oauthCompleteRoute } from "./router";
 import { isPublicPath } from "./lib/public-paths";
 
@@ -40,4 +40,49 @@ it("protects per-platform setup routes and accepts scalar prefill values", () =>
   if (typeof validate !== "function") throw new Error("Expected a search validator");
   expect(validate({ label: "a".repeat(150), target_org_id: ["org"], request_id: "invalid", bot_token: "private", future_field: "value", nested: { value: "ignored" } }))
     .toEqual({ label: "a".repeat(128), target_org_id: undefined, request_id: undefined, bot_token: "private", future_field: "value" });
+});
+
+
+import { providersRedirectRoute, servicesRedirectRoute } from "./router";
+import { useAuthStore } from "./stores/auth-store";
+import type { User } from "./types/api";
+
+const initialAuth = useAuthStore.getState();
+afterEach(() => useAuthStore.setState(initialAuth));
+
+const catalogUser: User = {
+  id: "catalog-user", email: "catalog@example.test", display_name: "Catalog Manager",
+  avatar_url: null, email_verified: true, mfa_enabled: false, is_admin: false,
+  is_operator: true, role: "operator", is_active: true, created_at: "2026-10-13T00:00:00Z",
+  capabilities: { manage_catalog: true },
+};
+
+for (const route of [providersRedirectRoute, servicesRedirectRoute]) {
+  describe(`Catalog management guard ${route.fullPath}`, () => {
+    const guard = route.options.beforeLoad!;
+    const context = { location: { pathname: route.fullPath } } as never;
+    it("allows Catalog Managers", async () => {
+      useAuthStore.setState({ user: catalogUser });
+      await expect(Promise.resolve().then(() => guard(context))).resolves.toBeUndefined();
+    });
+    it("allows admins without the capability field", async () => {
+      useAuthStore.setState({ user: { ...catalogUser, role: "admin", is_admin: true, capabilities: undefined } });
+      await expect(Promise.resolve().then(() => guard(context))).resolves.toBeUndefined();
+    });
+    it.each([
+      { ...catalogUser, role: "user" as const, is_operator: false, capabilities: undefined },
+      { ...catalogUser, capabilities: { manage_catalog: false } },
+      { ...catalogUser, capabilities: undefined },
+      null,
+    ])("redirects users without catalog access", async (user) => {
+      useAuthStore.setState({ user });
+      await expect(Promise.resolve().then(() => guard(context))).rejects.toMatchObject({ options: { to: "/keys" } });
+    });
+  });
+}
+
+it("keeps the provider OAuth callback accessible without catalog permission", async () => {
+  useAuthStore.setState({ user: { ...catalogUser, role: "user", is_operator: false, capabilities: undefined } });
+  const guard = providersRedirectRoute.options.beforeLoad!;
+  await expect(Promise.resolve().then(() => guard({ location: { pathname: "/providers/callback" } } as never))).resolves.toBeUndefined();
 });
