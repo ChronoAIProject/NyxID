@@ -32,9 +32,12 @@ A Catalog Manager may:
   - set the first OAuth client on a provider that has none;
   - edit its authorization, token, revocation and device URLs, credential
     mode, PKCE and token request settings only **before anyone has connected
-    through it** (no user tokens, connections or own OAuth clients reference
-    it), because those settings decide where users' clients and tokens are
-    sent. Once a platform client exists they must also re-enter it in the same
+    through it**: no `user_provider_tokens`, `user_provider_credentials` or
+    `user_api_keys` row references it, including org-owned and API-key
+    connections, because those settings decide where users' clients and
+    tokens are sent. This also locks an API-key provider's display-only
+    `api_key_url` and `api_key_instructions` once anyone has connected; ask an
+    Admin to change them then. Once a platform client exists they must also re-enter it in the same
     request (`nyxid admin provider update <slug> --file f.yaml --with-client`),
     proving they already hold the secret. Providers whose client has no secret
     (public device-code clients) cannot be proven this way and stay Admin-only
