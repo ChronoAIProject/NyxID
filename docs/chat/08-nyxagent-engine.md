@@ -192,39 +192,49 @@ Native chat tools cannot delete, widen, relabel, bind credentials to, or select 
 assistant key as a route agent, including keys belonging to another chat. The user
 deletes the conversation instead. Rotation and revocation remain available to the human user.
 
-## Authority: Full-only NyxBot, granted specialists
+## Authority: NyxBot access modes and granted specialists
 
-The Ask/Full choice is retired. Every owner has one persistent **NyxBot** agent;
-its threads run with Full access: `allow_all_services=true`, `allow_all_nodes=true`,
-auto-connected access and the internal `assistant:account` scope. Service and
-account cards are never created for NyxBot and `chat_access` is `granted` for
-every listed service/tool. Existing per-service proxy approval policies still
-apply. Destructive account tools still require a single-use **action** card
-unless the owner turned confirmations off in NyxBot settings
-(`skip_destructive_confirmation`, default `false`).
+Every owner has one persistent **NyxBot** agent. The workspace access mode is
+selected in NyxBot settings and is visible in the conversation and group
+headers; an agent may have its own override, shown on the agent page and in its
+thread. The server resolves the effective mode from that persisted policy, so a
+client cannot widen access by submitting a different mode. The three modes are:
 
-A **specialist** agent (see NyxBot agents below) holds only its grants on every
-one of its threads: `allow_all_services=false`, `allow_auto_connected_services=false`,
-`allowed_service_ids`/`allowed_platform_service_ids` from the agent's `grants`, and
-`assistant:account` only with an `account_read` grant, which reaches read-only
-account tools. The agent document is the durable source; thread keys mirror it
-at every turn start, rotation and replacement. NyxAgent calls its model through
-NyxID's proxy (`/api/v1/proxy/s/{model service}`, e.g. `chrono-llm-public`,
-`llm-deepseek`) with the thread's own key. The proxy therefore lets a live
-assistant conversation key (an `assistant_agent_credentials` row, which people
-cannot create) reach any active catalog service with `inference` metadata even
-outside its grants (`proxy::assistant_model_call`), whether the owner's own row,
-an org row or the catalog row resolves it. Nothing else widens: the key's
-allowlist, inventory, delegation tokens, consent screens and MCP tools stay its
-grants.
+- **Autopilot** proceeds without ordinary action cards. Webhook, machine, and
+  saved-login confirmation floors still apply.
+- **NyxMode** proceeds automatically for ordinary actions and asks before
+  sensitive or destructive actions.
+- **Ask Every Time** asks before every action that changes something; reads do
+  not prompt.
 
-Legacy conversations deserialize with `access_mode: ask` and no `agent_id`. The
-next `begin_turn` adopts them as NyxBot threads inside the transaction that
-claims the turn: the row is set to `full`, the key converges to Full, and pending
-service/account cards expire. There is no startup sweep, so no upgrade races a
-live turn. `PATCH /conversations/{id}/access-mode` answers `410 Gone` with
-`{"error":"access_mode_retired"}`; `POST /turns` still accepts `access_mode` from
-older clients and ignores it. DTOs report `access_mode: "full"`.
+Confirmation cards identify the action and requested scope, the risk class
+(`change`, `sensitive`, or `destructive`), the effective mode, and why the card
+was required. Existing per-service proxy approval policies remain an independent
+floor. Specialist requests and grants are still owner/orchestrator-authorized;
+specialists hold only their explicit grants on every thread:
+`allow_all_services=false`, `allow_auto_connected_services=false`,
+`allowed_service_ids`/`allowed_platform_service_ids` from the agent's `grants`,
+and `assistant:account` only with an `account_read` grant. Lower-scoped agents
+cannot mutate grants or assistant management state through conversation keys or
+delegated routes.
+
+The agent document is the durable source; thread keys mirror it at every turn
+start, rotation and replacement. NyxAgent calls its model through NyxID's proxy
+(`/api/v1/proxy/s/{model service}`, e.g. `chrono-llm-public`, `llm-deepseek`)
+with the thread's own key. The proxy therefore lets a live assistant
+conversation key (an `assistant_agent_credentials` row, which people cannot
+create) reach any active catalog service with `inference` metadata even outside
+its grants (`proxy::assistant_model_call`), whether the owner's own row, an org
+row or the catalog row resolves it. Nothing else widens: the key's allowlist,
+inventory, delegation tokens, consent screens and MCP tools stay its grants.
+
+Legacy settings rows without `access_mode` are read with the NyxMode default and
+are migrated on settings writes. The retired
+`PATCH /conversations/{id}/access-mode` endpoint remains a compatibility route
+that returns `410 Gone` with `{"error":"access_mode_retired"}`; current clients
+change the workspace mode through settings or the thread switcher. Agent
+overrides are changed through the human-only agent policy route and may be
+cleared to inherit the workspace mode.
 
 ## Acknowledgements
 

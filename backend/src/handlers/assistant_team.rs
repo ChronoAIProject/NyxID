@@ -1794,12 +1794,7 @@ async fn dispatch_permission_decisions(
             // Refusals that do not depend on the owner's decision come first,
             // so a card is never raised for a decision that cannot apply.
             if !confirmed
-                && db
-                    .collection::<AssistantAcknowledgement>(
-                        crate::models::assistant_acknowledgement::COLLECTION_NAME,
-                    )
-                    .find_one(mongodb::bson::doc! {"_id": request_id, "user_id": owner,
-                    "decider": "orchestrator", "kind": "operations"})
+                && acks::find_operation_request(db, owner, request_id, None)
                     .await?
                     .is_some()
             {
@@ -1850,9 +1845,12 @@ async fn dispatch_permission_decisions(
             {
                 Ok(row) => row,
                 Err(error) if error.is_forbidden() && !confirmed => {
-                    let pending = db.collection::<AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
-                        .find_one(mongodb::bson::doc!{"_id":request_id,"user_id":owner,"kind":"operations","decider":"orchestrator","status":"pending"}).await?
-                        .ok_or_else(|| AppError::NotFound("Operation request not found".into()))?;
+                    let pending =
+                        acks::find_operation_request(db, owner, request_id, Some("pending"))
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::NotFound("Operation request not found".into())
+                            })?;
                     return operation_owner_card(
                         db,
                         chat,
