@@ -111,8 +111,12 @@ bypass. Human UI reads retain ordinary browser-session behavior.
 ## Owner-requested authoring
 
 Reuse comes first: `search_agent_skills` → `preview_agent_skill` →
-`set_agent_skills` with an owner card. Personal NyxBot gains `draft_agent_skill`
-only under the existing default-off `assistant:agent-learning` flag. Authored
+`set_agent_skills` with an owner card. Personal NyxBot (for any agent it
+maintains) and specialists (for their own agent) gain `draft_agent_skill` only
+under the existing default-off `assistant:agent-learning` flag. Ornn validates
+the exact package before the owner card is raised; refusals return
+`ornn_format_rejected` with Ornn's rule identifiers. Raw Ornn create, pull and
+update routes are refused for assistant chat keys, so agents never handle a ZIP. Authored
 drafts share L1's encrypted review store and publisher; they do not enroll the
 agent in automatic learning. Description is role/scope; persona is tone/style;
 skills contain repeatable procedures, references, checklists and templates.

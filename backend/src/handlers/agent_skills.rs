@@ -243,6 +243,18 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     }
 }
 
+/// Ornn routes that publish skill content or change a skill directly: create
+/// (`POST /skills`, `POST /skills/pull`) and update (`PUT /skills/{id}`).
+pub(crate) fn raw_skill_publication(method: &http::Method, path: &str) -> bool {
+    let route = path.split('?').next().unwrap_or(path).trim_matches('/');
+    let segments: Vec<_> = route.split('/').collect();
+    match segments.as_slice() {
+        ["api", "v1", "skills"] | ["api", "v1", "skills", "pull"] => method == http::Method::POST,
+        ["api", "v1", "skills", id] => method == http::Method::PUT && !id.is_empty(),
+        _ => false,
+    }
+}
+
 /// The learning publisher is deliberately narrower than the general Ornn
 /// catalog adapter.  A proposal can validate/create (or update) a private
 /// package and then read back the exact metadata needed for integrity and
@@ -481,8 +493,15 @@ pub async fn improve(
         scopes: None,
         chat: Some(std::sync::Arc::new(chat.clone())),
     };
+    let validator = Reader {
+        state: &state,
+        person: &owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
     let result = crate::services::assistant_skill_authoring::create_improve_draft(
-        &state, &chat, &id, &skill_id, &reader,
+        &state, &chat, &id, &skill_id, &reader, &validator,
     )
     .await?;
     let text = |key: &str| result[key].as_str().unwrap_or_default().to_owned();
@@ -528,9 +547,17 @@ pub(crate) async fn dispatch(
             scopes: None,
             chat: Some(std::sync::Arc::new(chat.clone())),
         };
+        // Ornn's format check runs as the person, like publication itself.
+        let validator = Reader {
+            state,
+            person: &chat.user_id,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        };
         return Ok((
             Box::pin(crate::services::assistant_skill_authoring::create(
-                state, chat, input, &reader,
+                state, chat, input, &reader, &validator,
             ))
             .await?,
             true,
@@ -789,6 +816,36 @@ pub(crate) async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_skill_publication_matches_only_content_writes() {
+        use http::Method;
+        for (verb, path, expected) in [
+            (Method::POST, "/api/v1/skills", true),
+            (Method::POST, "api/v1/skills/?skip_validation=true", true),
+            (Method::POST, "/api/v1/skills/pull", true),
+            (
+                Method::PUT,
+                "/api/v1/skills/0c263626-03ee-4937-a3b5-aace86e15b30",
+                true,
+            ),
+            (
+                Method::GET,
+                "/api/v1/skills/0c263626-03ee-4937-a3b5-aace86e15b30",
+                false,
+            ),
+            (Method::POST, "/api/v1/skill-format/validate", false),
+            (Method::GET, "/api/v1/skill-search", false),
+            (Method::PUT, "/api/v1/skills/x/permissions", false),
+            (Method::PUT, "/api/v1/skills/pull", false),
+        ] {
+            assert_eq!(
+                raw_skill_publication(&verb, path),
+                expected,
+                "{verb} {path}"
+            );
+        }
+    }
     use crate::services::{
         agent_skill_service::OrnnReader, assistant_authority_tests::orchestrator_fixture,
     };

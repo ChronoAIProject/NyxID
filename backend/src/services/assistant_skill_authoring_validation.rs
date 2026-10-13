@@ -183,6 +183,19 @@ pub(crate) fn validate(body: &GeneratedProposal) -> AppResult<Vec<u8>> {
     Ok(encoded.into_bytes())
 }
 
+/// Ornn's frontmatter rules for fields NyxID copies into SKILL.md, checked
+/// when a draft is authored. Stored drafts keep decoding with `validate`.
+pub(crate) fn ornn_rules(body: &GeneratedProposal) -> AppResult<()> {
+    if body.description.contains(['<', '>']) {
+        return Err(invalid("angle_brackets", "description"));
+    }
+    let name = body.name.to_ascii_lowercase();
+    if name.contains("claude") || name.contains("anthropic") {
+        return Err(invalid("reserved_name", "name"));
+    }
+    Ok(())
+}
+
 pub(crate) fn decode(value: &str) -> AppResult<GeneratedProposal> {
     limit("draft", "bytes", value.len(), MAX_BYTES)?;
     let value: serde_json::Value =

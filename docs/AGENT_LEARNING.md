@@ -760,15 +760,29 @@ proposals with a valid card are adopted. A legacy orphan without recorded origin
 must be reviewed or discarded before retrying; NyxID refuses to guess a different
 review conversation or silently create a duplicate.
 
-`draft_agent_skill` is NyxBot-only: it drafts for review, never publishes on a
-model's authority. It reuses the default-off `assistant:agent-learning` flag,
+`draft_agent_skill` drafts for review and never publishes on a model's
+authority. NyxBot drafts for any agent it maintains; a specialist drafts only for
+its own agent. It reuses the default-off `assistant:agent-learning` flag,
 encrypted proposal store, and the one-card fenced publication saga. The additive
 proposal source defaults to `learned`; `authored` proposals do not require
 automatic learning enrollment or conversation evidence. Flag discovery skips
-membership resolution when no relevant rollout is enabled. Only owner NyxBot
-chats read the authoring flag during tool discovery; a failed lookup hides only
-the drafting tool. Guests and specialists cannot draft; specialists can ask
-NyxBot with `request_agent_skills`.
+membership resolution when no relevant rollout is enabled. Owner NyxBot and
+specialist chats read the authoring flag during tool discovery; a failed lookup
+hides only the drafting tool. Guests cannot draft.
+
+Before the owner card is raised, NyxID builds the package exactly as publication
+will (the improvement's interface metadata comes from its already-accepted base)
+and asks Ornn's `/skill-format/validate` as the owner. An explicit refusal
+returns `ornn_format_rejected` with Ornn's rule identifiers in `ornn_rules`
+(sanitized, at most 10; Ornn's messages are never relayed because they can quote
+filenames), so the author fixes the draft first; nothing is stored. An
+unavailable Ornn leaves the draft flow unchanged, and publication validates again
+after approval. Supporting files outside `references/`, `scripts/` or `assets/`
+are placed under `references/` both in the reviewed draft and in the package
+(existing packages keep their bytes). Authoring also refuses `<`/`>` in the
+description and `claude`/`anthropic` in the name. Assistant chat keys cannot call
+Ornn's raw create, pull or update routes; they are told to use
+`draft_agent_skill`, so no agent ever needs or asks for a ZIP.
 
 Build agents from description (role/scope), persona (tone/style), and Ornn skills
 (repeatable procedures, checklists, references, templates and workflows). Search,

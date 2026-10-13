@@ -1951,13 +1951,16 @@ async fn execute_turn_inner(
     );
     // Rollout-gated authoring rules are instructions, so they belong in the
     // stable (fingerprinted) part rather than the per-turn quoted context.
-    let guidance = if !row.is_subagent()
-        && !row.guest_turn
+    let guidance = if !row.guest_turn
         && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
             .await
             .unwrap_or(false)
     {
-        crate::services::assistant_skill_authoring::GUIDANCE
+        if row.is_subagent() {
+            crate::services::assistant_skill_authoring::SPECIALIST_GUIDANCE
+        } else {
+            crate::services::assistant_skill_authoring::GUIDANCE
+        }
     } else {
         ""
     };

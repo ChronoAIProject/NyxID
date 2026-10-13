@@ -2142,6 +2142,7 @@ async fn authored_org_skill_refuses_personal_fallback() {
         &f.chat,
         input,
         &UnavailableReader,
+        &UnavailableReader,
     )
     .await
     .unwrap_err();

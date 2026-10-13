@@ -3982,6 +3982,22 @@ async fn execute_resolved_proxy_inner(
         return Err(AppError::Forbidden("Ornn skills require your own signed identity; shared master credentials are not supported".into()));
     }
 
+    // Assistant agents publish skills only through the reviewed draft flow,
+    // which builds the package server-side; raw uploads need a ZIP they
+    // cannot produce and would skip the owner's review.
+    if auth_user.assistant_chat.is_some()
+        && catalog_service_slug.as_deref() == Some("ornn-api")
+        && request
+            .extensions()
+            .get::<super::agent_skills::OrnnSkillPublication>()
+            .is_none()
+        && super::agent_skills::raw_skill_publication(request.method(), path)
+    {
+        return Err(AppError::Forbidden(
+            "Create or update Ornn skills with nyxid__draft_agent_skill (name, description, skill_md, files); NyxID packages, validates and publishes it after the owner's review. Never ask for a ZIP.".into(),
+        ));
+    }
+
     // Record the resolved service slug so the outer wrapper can attach it
     // to `TelemetryEvent::ProxyError` if any downstream error branch fires
     // before the handler returns `Ok`.
