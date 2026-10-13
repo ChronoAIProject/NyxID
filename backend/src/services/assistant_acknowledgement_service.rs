@@ -1184,6 +1184,32 @@ pub async fn request(
     Ok(request_tracked(db, chat, request).await?.0)
 }
 
+/// Find an operation-scope request owned by `owner`.
+///
+/// Callers use this before deciding whether an owner confirmation card is
+/// applicable; keeping the lookup here preserves the acknowledgement service
+/// boundary and its ownership filter.
+pub async fn find_operation_request(
+    db: &Database,
+    owner: &str,
+    request_id: &str,
+    status: Option<&str>,
+) -> AppResult<Option<AssistantAcknowledgement>> {
+    let mut filter = doc! {
+        "_id": request_id,
+        "user_id": owner,
+        "decider": "orchestrator",
+        "kind": "operations",
+    };
+    if let Some(status) = status {
+        filter.insert("status", status);
+    }
+    db.collection::<AssistantAcknowledgement>(ACKS)
+        .find_one(filter)
+        .await
+        .map_err(AppError::from)
+}
+
 /// Create the same owner action card used by native machine tools, while
 /// retaining a bounded typed payload for the graphical context editor.
 pub async fn request_machine_context(
