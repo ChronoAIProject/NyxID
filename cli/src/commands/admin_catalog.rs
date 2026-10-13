@@ -1186,6 +1186,7 @@ async fn validate(
     let services = list_services(api).await?;
     let providers = list_providers(api).await?;
     let mut report = Vec::new();
+    let mut icon_presence = std::collections::HashMap::new();
     for desired in &manifest.services {
         let slug = text(desired, "slug");
         let mut failures = Vec::new();
@@ -1328,6 +1329,18 @@ async fn validate(
         } else {
             vec![]
         };
+        let icon_present = if let Some(provider) = provider {
+            let id = text(provider, "id");
+            if let Some(present) = icon_presence.get(&id) {
+                *present
+            } else {
+                let present = playbook::served_icon(api.base_url_root(), provider).await?;
+                icon_presence.insert(id, present);
+                present
+            }
+        } else {
+            false
+        };
         let (mut checklist, verification, smoke_command) = playbook::report(
             desired,
             desired_provider,
@@ -1335,6 +1348,7 @@ async fn validate(
             provider_ref.is_some(),
             &endpoints,
             &me,
+            icon_present,
         );
         if failures
             .iter()
@@ -2059,6 +2073,19 @@ mod tests {
             manifest.services[0]["base_url"],
             "https://mail.zoho.com/api"
         );
+        assert_eq!(manifest.services[0]["auth_scheme"], "Zoho-oauthtoken");
+        assert_eq!(
+            playbook::operations(&manifest.services[0]).unwrap().len(),
+            3
+        );
+        assert_eq!(
+            playbook::smoke_command(&manifest.services[0]).as_deref(),
+            Some("nyxid proxy request api-zoho-mail /accounts --method GET")
+        );
+        assert_eq!(
+            manifest.providers[0]["playbook"]["revocation"]["kind"],
+            "nyxid_incompatible"
+        );
         let eu = zoho(&["zoho_domain=zoho.eu"]).unwrap();
         assert_eq!(eu.services[0]["base_url"], "https://mail.zoho.eu/api");
         assert!(zoho(&["zoho_domain=evil.example"]).is_err());
@@ -2134,10 +2161,25 @@ mod tests {
             if let Some(id) = service["id"].as_str() {
                 Mock::given(method("GET"))
                     .and(path(format!("/api/v1/services/{id}/endpoints")))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[]})))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(json!({"endpoints":template_operations()})),
+                    )
                     .mount(server)
                     .await;
             }
+        }
+        if services.as_array().is_some_and(Vec::is_empty) {
+            Mock::given(method("GET"))
+                .and(path(
+                    "/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"endpoints":template_operations()})),
+                )
+                .mount(server)
+                .await;
         }
         Mock::given(method("GET"))
             .and(path("/api/v1/providers"))
@@ -2151,6 +2193,44 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "services": services })))
             .mount(server)
             .await;
+    }
+
+    fn template_operations() -> Vec<Value> {
+        playbook::operations(&zoho(&[]).unwrap().services[0])
+            .unwrap()
+            .into_iter()
+            .map(|operation| {
+                let mut row = serde_json::to_value(operation).unwrap();
+                row["id"] = format!("ep-{}", row["name"].as_str().unwrap()).into();
+                row["is_active"] = true.into();
+                row
+            })
+            .collect()
+    }
+
+    #[test]
+    fn catalog_auth_scheme_manifest_validation_is_strict_and_passes_api_field() {
+        assert!(
+            Manifest::from_document(
+                json!({"services":[{"slug":"scheme","auth_scheme":"Zoho-oauthtoken"}]}),
+                &[],
+                false
+            )
+            .is_err()
+        );
+        for scheme in [
+            json!(""),
+            json!("two words"),
+            json!("Bearer\r\n"),
+            json!("a".repeat(65)),
+            json!(3),
+        ] {
+            assert!(Manifest::from_document(json!({"services":[{"slug":"scheme","auth_method":"bearer","auth_scheme":scheme}]}), &[], false).is_err());
+        }
+        assert!(Manifest::from_document(json!({"services":[{"slug":"scheme","auth_method":"header","auth_scheme":"Zoho-oauthtoken"}]}), &[], false).is_err());
+        let row = &zoho(&[]).unwrap().services[0];
+        assert_eq!(playbook::api_fields(row)["auth_scheme"], "Zoho-oauthtoken");
+        assert!(playbook::api_fields(row).get("operations").is_none());
     }
 
     #[tokio::test]
@@ -2261,6 +2341,30 @@ mod tests {
             .mount(&server)
             .await;
 
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[]})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        for operation in playbook::operations(&manifest.services[0]).unwrap() {
+            let body = serde_json::to_value(operation).unwrap();
+            let mut response = body.clone();
+            response["id"] = format!("ep-{}", response["name"].as_str().unwrap()).into();
+            response["is_active"] = true.into();
+            Mock::given(method("POST"))
+                .and(path(
+                    "/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints",
+                ))
+                .and(body_json(body))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
         let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
         // Without a client the managed provider is planned with a note and
         // refused on a real run.
@@ -2269,7 +2373,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             plan.iter().map(|row| row.action).collect::<Vec<_>>(),
-            ["create", "create"]
+            ["create", "create", "create", "create", "create"]
         );
         assert!(
             plan[0]
@@ -2304,7 +2408,7 @@ mod tests {
         let rows = result.unwrap();
         assert_eq!(
             rows.iter().map(|row| row.action).collect::<Vec<_>>(),
-            ["created", "created"]
+            ["created", "created", "created", "created", "created"]
         );
     }
 
@@ -2371,8 +2475,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows[0].action, "unchanged");
-        assert_eq!(rows[1].action, "updated");
-        assert_eq!(rows[1].changed, ["description"]);
+        let service = rows.iter().find(|row| row.kind == "service").unwrap();
+        assert_eq!(service.action, "updated");
+        assert_eq!(service.changed, ["description"]);
     }
 
     #[tokio::test]
@@ -2402,8 +2507,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(plan[0].action, "create");
-        assert_eq!(plan[1].action, "update");
-        assert_eq!(plan[1].changed, ["provider"]);
+        let service = plan.iter().find(|row| row.kind == "service").unwrap();
+        assert_eq!(service.action, "update");
+        assert_eq!(service.changed, ["provider"]);
     }
 
     #[tokio::test]
@@ -2572,8 +2678,19 @@ mod tests {
             if provider_type == "device_code" {
                 provider["has_client_secret"] = false.into();
             }
-            provider["icon_url"] =
-                "https://nyx.example/catalog-icons/33333333-3333-4333-8333-333333333333".into();
+            provider["icon_url"] = format!(
+                "{}/catalog-icons/33333333-3333-4333-8333-333333333333",
+                server.uri()
+            )
+            .into();
+            Mock::given(method("GET"))
+                .and(path("/catalog-icons/33333333-3333-4333-8333-333333333333"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_raw("<svg viewBox=\"0 0 1 1\"/>", "image/svg+xml"),
+                )
+                .mount(&server)
+                .await;
             listing(&server, json!([provider]), json!([service_row()])).await;
             Mock::given(method("GET")).and(path("/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[{"id":"ep","name":"accounts","method":"GET","path":"/accounts","is_active":true}]}))).with_priority(1).mount(&server).await;
@@ -2623,11 +2740,18 @@ mod tests {
         let me = json!({"id":"manager","is_admin":false,"capabilities":{"manage_catalog":true}});
         let endpoints = vec![json!({"is_active":true})];
         let desired = &manifest.services[0];
-        let (missing, _, _) = playbook::report(desired, None, None, true, &endpoints, &me);
+        let (missing, _, _) = playbook::report(desired, None, None, true, &endpoints, &me, false);
         assert_eq!(missing["complete"], false);
         assert_eq!(missing["c1"]["reason"], "referenced_provider_missing");
-        let (na, verification, _) =
-            playbook::report(&json!({"slug":"internal"}), None, None, false, &[], &me);
+        let (na, verification, _) = playbook::report(
+            &json!({"slug":"internal"}),
+            None,
+            None,
+            false,
+            &[],
+            &me,
+            false,
+        );
         assert_eq!(na["c1"]["state"], "not_applicable");
         assert_eq!(verification["pending_gates"], json!([]));
         let mut provider = provider_row(true);
@@ -2643,6 +2767,7 @@ mod tests {
             true,
             &endpoints,
             &me,
+            false,
         );
         assert_eq!(proof["c2"]["state"], "not_applicable");
         assert_eq!(proof["c6"]["requires_admin"], false);
@@ -2660,6 +2785,7 @@ mod tests {
             true,
             &endpoints,
             &me,
+            false,
         );
         assert_eq!(missing["c2"]["state"], "missing");
         provider["created_by"] = "manager".into();
@@ -2670,8 +2796,85 @@ mod tests {
             true,
             &endpoints,
             &me,
+            false,
         );
         assert_eq!(own["c6"]["requires_admin"], false);
+    }
+
+    #[tokio::test]
+    async fn catalog_icon_readiness_requires_owned_served_asset_without_credentials_or_redirects() {
+        for case in [
+            "valid",
+            "missing",
+            "foreign",
+            "redirect",
+            "not_svg",
+            "oversized",
+            "query",
+        ] {
+            let server = MockServer::start().await;
+            let foreign = MockServer::start().await;
+            let asset = "/catalog-icons/33333333-3333-4333-8333-333333333333";
+            let mut provider = provider_row(true);
+            let icon_url = match case {
+                "foreign" => format!("{}{asset}", foreign.uri()),
+                "query" => format!("{}{asset}?ignored=1", server.uri()),
+                _ => format!("{}{asset}", server.uri()),
+            };
+            provider["icon_url"] = icon_url.into();
+            let response = match case {
+                "missing" => ResponseTemplate::new(404),
+                "redirect" => ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/redirected", foreign.uri())),
+                "not_svg" => ResponseTemplate::new(200).set_body_json(json!({})),
+                "oversized" => ResponseTemplate::new(200)
+                    .set_body_raw("x".repeat(128 * 1024 + 1), "image/svg+xml"),
+                _ => ResponseTemplate::new(200)
+                    .set_body_raw("<svg viewBox=\"0 0 1 1\"/>", "image/svg+xml"),
+            };
+            Mock::given(method("GET"))
+                .and(path(asset))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            listing(&server, json!([provider]), json!([service_row()])).await;
+            let mut api = ApiClient::from_auth(&mock_auth(server.uri()))
+                .unwrap()
+                .without_token_refresh();
+            let report = validate(&mut api, &evidenced_manifest(), "https://nyx.example/cb")
+                .await
+                .unwrap();
+            assert_eq!(
+                report[0].playbook["c6"]["state"],
+                if case == "valid" { "met" } else { "missing" },
+                "{case}"
+            );
+            assert_eq!(report[0].verification["status"], "not_verified");
+            let requests = server.received_requests().await.unwrap();
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.method == wiremock::http::Method::GET)
+            );
+            let assets: Vec<_> = requests
+                .iter()
+                .filter(|request| request.url.path() == asset)
+                .collect();
+            assert_eq!(
+                assets.len(),
+                usize::from(!matches!(case, "foreign" | "query")),
+                "{case}"
+            );
+            assert!(
+                assets
+                    .iter()
+                    .all(|request| !request.headers.contains_key("authorization"))
+            );
+            assert!(
+                foreign.received_requests().await.unwrap().is_empty(),
+                "{case}"
+            );
+        }
     }
 
     #[tokio::test]

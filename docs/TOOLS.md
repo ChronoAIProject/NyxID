@@ -1,6 +1,6 @@
 # Tools
 
-Tools are catalog services offered through NyxID-held credentials or without authentication. `/tools` groups them by supplier with topics, prices and published operations. `/admin/tools` provides Admin and Tools Manager workspaces. Tools Managers may edit their own marked offerings; provider administration remains under Catalog Manager/Admin authority. AI Services (`/keys`) retains a person's BYOK bindings to tool rows while hiding their platform bindings.
+Tools are catalog services users call through a NyxID-held credential, their own API key, or without authentication. `/tools` groups them by supplier with topics, prices and published operations. `/admin/tools` provides Admin and Tools Manager workspaces. Tools Managers may edit their own marked offerings; provider administration remains under Catalog Manager/Admin authority. AI Services (`/keys`) retains a person's BYOK bindings to Tool rows while hiding their platform bindings.
 
 ## Model and execution boundary
 
@@ -75,6 +75,7 @@ tools:
     auth_notes: Vendor bearer key required
     credential_env: EXAMPLE_TOOL_CREDENTIAL
     operations: [search]
+    lanes: [platform, byok]
 ```
 
 ```sh
@@ -91,6 +92,9 @@ The Firecrawl template uses `twin_of: api-firecrawl`, selects `search` and
 `auth_key_name`; bearer/basic/none omit it. Unknown manifest fields are rejected
 before writes. Raw credentials, authorization headers, audience, billing,
 provider links and provenance cannot be authored in this document.
+The optional CLI-only `lanes` field declares a unique, nonempty subset of
+`platform` and `byok`; it defaults to `[platform]` and never reaches the service
+API. A no-auth Tool cannot declare `byok`.
 `name` is optional for twins: creation inherits the source name and reapply
 preserves the existing name. New APIs require a nonempty `name`.
 
@@ -119,6 +123,24 @@ membership is explicitly unevaluated; an Admin preview does not establish user
 eligibility. Legacy Lago plan prices unavailable through metadata are reported
 as unknown. Exit codes: `0` ready (or successful apply/dry-run), `2` pending setup,
 `1` failed. Saved manifests and reports never contain credential values.
+
+Validate reports readiness separately for every declared lane. The platform
+lane checks the shared credential (or no-auth), live audience configuration,
+publication and effective platform prices. The BYOK lane checks authenticated
+injection, publication and effective BYOK prices, and prints the existing
+`nyxid service add <tool-slug> --credential-env VENDOR_API_KEY` connection command. Overall
+`ready` requires every declared lane. Missing BYOK or platform pricing is an
+Admin advisory; an intentionally free lane remains allowed. The Lark row
+records the declared lanes and its status means configuration readiness.
+
+Every report retains `verification.status: not_verified`. For each declared
+lane, `pending_gates` contains `outside_user_platform_call_admin_confirmed`
+or `outside_user_byok_call_admin_confirmed`. An Admin must confirm that an
+outside user called the published Tool against the real vendor and that usage
+was billed to that person on the declared lane. For BYOK the user connects
+their own vendor API key; for no-auth only the call needs confirmation. Record
+the confirmation in the Lark row and a redacted verification-report line.
+Local fake-vendor tests establish software behavior and leave these gates open.
 
 The historical `scripts/tools/add-tool-twin.sh` remains a compatibility wrapper
 that generates a secret-free manifest and invokes apply/validate. New automation
@@ -152,7 +174,7 @@ Catalog targets accept UUIDs or slugs; endpoint targets accept IDs or names. Tab
 
 ## Billing and planned Phase 2
 
-Tools reuse `ServiceBilling.platform_key_pricing` and optional `byok_pricing`. Free/absent platform lanes display Free; priced lanes display decimal credits per metric. Cost-class metadata does not override prices. A Requests lane can also price published operations individually by endpoint name (see [Operation prices](PLATFORM_KEYS_AND_INFERENCE.md#operation-prices)). The tools card shows the effective request price range and each operation's price in its operation list; pending prices show the base rate until they sync. Upgrade every replica before authoring operation prices: older binaries ignore them and charge the base rate. Existing platform ACLs, personal billing ownership, allowances, grants and metering remain authoritative.
+Tools reuse `ServiceBilling.platform_key_pricing` and optional `byok_pricing`. The platform lane uses NyxID's master credential and audience ACL; a user binds a BYOK key through AI Services (`/keys`). A restricted-empty platform audience does not deny that user's published BYOK operation. Both lanes require published operations and bill the acting person. OAuth user-account connections remain on provider-linked Catalog services; Tools remain provider-less. Free/absent lanes display Free; priced lanes display decimal credits per metric. Cost-class metadata does not override prices. A Requests lane can also price published operations individually by endpoint name (see [Operation prices](PLATFORM_KEYS_AND_INFERENCE.md#operation-prices)). The tools card shows the effective request price range and each operation's price in its operation list; pending prices show the base rate until they sync. Upgrade every replica before authoring operation prices: older binaries ignore them and charge the base rate. Existing platform ACLs, personal billing ownership, allowances, grants and metering remain authoritative.
 
 Runtime curated overlay storage, an Imports tab and `catalog spec import|show|delete` are planned for Phase 2 and are absent from Phase 1. Existing embedded hosted specs remain supported.
 
@@ -163,6 +185,12 @@ fake-vendor integration test against its own ephemeral loopback MongoDB replica
 set. Requires local `mongod`, `mongosh`, Python 3 and Rust. It uses fake credentials
 and fake Lago; no vendor or production service is contacted. Evidence and
 limitations are recorded in [the implementation verification report](plans/2026-10-13-tools-manager-verification.md).
+
+Pass `tools` explicitly for the Tool flow or `catalog` for the Catalog CLI and
+fake OAuth flow. Both modes own a separate temporary replica set, require an
+elected writable primary before dispatch, and retain bounded Mongo diagnostics
+on failure. Local software-flow proof leaves every real-service confirmation
+gate open.
 
 ## Commit-time authority and recovery helpers
 

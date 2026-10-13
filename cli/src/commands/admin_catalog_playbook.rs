@@ -100,6 +100,22 @@ pub(super) fn validate(provider: &Value, service: bool) -> Result<()> {
         return Ok(());
     }
     let operations = operations(provider)?;
+    if let Some(scheme) = provider.get("auth_scheme").filter(|value| !value.is_null()) {
+        let valid = scheme.as_str().is_some_and(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+        });
+        if !valid
+            || !provider
+                .get("auth_method")
+                .is_some_and(|method| method == "bearer" || method == "oauth2")
+        {
+            bail!("auth_scheme requires bearer auth and an RFC 9110 token of 1–64 bytes");
+        }
+    }
     if provider.get("operations").is_some()
         && provider["openapi_spec_url"]
             .as_str()
@@ -169,6 +185,7 @@ pub(super) fn report(
     provider_expected: bool,
     endpoints: &[Value],
     me: &Value,
+    icon_present: bool,
 ) -> (Value, Value, Option<String>) {
     let Some(provider) = provider else {
         if provider_expected || desired["offering_kind"] == "tool" {
@@ -308,19 +325,7 @@ pub(super) fn report(
         "active_operations_missing",
         false,
     );
-    let icon = provider["icon_url"].as_str().is_some_and(|url| {
-        url::Url::parse(url).is_ok_and(|url| {
-            url.query().is_none()
-                && url.fragment().is_none()
-                && url
-                    .path()
-                    .strip_prefix("/catalog-icons/")
-                    .is_some_and(|id| {
-                        uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id)
-                    })
-        })
-    });
-    let c6 = item(icon, "provider_svg_icon_missing", !can_write);
+    let c6 = item(icon_present, "provider_svg_icon_missing", !can_write);
     let smoke = smoke_command(desired);
     let complete = [&c1, &c2, &c3, &c4, &c5, &c6]
         .iter()
@@ -331,6 +336,57 @@ pub(super) fn report(
         json!({"status":"not_verified","pending_gates":["api_smoke_test_real_vendor","outside_user_connection_admin_confirmed"]}),
         smoke,
     )
+}
+
+/// A path-shaped reference alone cannot prove an uploaded asset. Fetch only
+/// the configured server's public, canonical asset route, without credentials
+/// or redirects, and bound the response just like the server's SVG upload.
+pub(super) async fn served_icon(base_url: &str, provider: &Value) -> Result<bool> {
+    let Some(url) = provider["icon_url"].as_str() else {
+        return Ok(false);
+    };
+    let prefix = format!("{}/catalog-icons/", base_url.trim_end_matches('/'));
+    if !url
+        .strip_prefix(&prefix)
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id))
+    {
+        return Ok(false);
+    }
+    let mut response = crate::tls::client_builder()?
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| anyhow!("Cannot check catalog SVG asset"))?;
+    if response.status() != reqwest::StatusCode::OK
+        || !response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|header| header.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("image/svg+xml"))
+            })
+    {
+        return Ok(false);
+    }
+    let mut size = 0usize;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| anyhow!("Cannot read catalog SVG asset"))?
+    {
+        size += chunk.len();
+        if size > 128 * 1024 {
+            return Ok(false);
+        }
+    }
+    Ok(size != 0)
 }
 pub(super) fn smoke_command(row: &Value) -> Option<String> {
     let smoke: Smoke = serde_json::from_value(row.get("smoke_test")?.clone()).ok()?;

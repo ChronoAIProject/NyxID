@@ -93,6 +93,7 @@ pub async fn prepare_create_for_actor(
     // silently enter manager twins.
     if manager.is_none() {
         let privileged = json!({
+            "auth_scheme":source.auth_scheme,
             "destination_targets":source.destination_targets,
             "asyncapi_spec_url":source.asyncapi_spec_url,
             "default_request_headers":source.default_request_headers,

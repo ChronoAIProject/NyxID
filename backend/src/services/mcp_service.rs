@@ -9920,6 +9920,7 @@ mod tests {
         provider_service::seed_default_services(&db, &encryption)
             .await
             .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
@@ -10283,6 +10284,7 @@ mod tests {
         provider_service::seed_default_services(&db, &encryption)
             .await
             .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
@@ -12956,6 +12958,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,

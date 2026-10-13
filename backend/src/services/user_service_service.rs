@@ -2853,6 +2853,7 @@ mod tests {
             credential_encrypted: Vec::new(),
             platform_key: None,
             auth_type: Some("ssh".to_string()),
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,

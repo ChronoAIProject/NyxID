@@ -19,6 +19,9 @@ use mongodb::bson::{Document, doc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[path = "catalog_manager_e2e_tests.rs"]
+mod catalog_e2e;
+
 async fn seed(db: &mongodb::Database, platform: &str, manager: bool, catalog: bool) -> String {
     role_service::seed_system_roles(db).await.unwrap();
     let id = Uuid::new_v4().to_string();
@@ -105,6 +108,944 @@ async fn change_test_publication(
 
 fn new(slug: &str) -> Value {
     json!({"name":slug,"slug":slug,"base_url":"https://vendor.example/api","auth_method":"bearer","offering_kind":"tool","service_category":"internal"})
+}
+
+#[tokio::test]
+async fn tools_manager_service_ingress_unknown_fields_name_only_and_type_errors_redact() {
+    use super::curation_tests::request;
+    let db = connect_test_database("service_request_diagnostics")
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let admin = seed(&db, "admin", false, false).await;
+    let service = create(&state, &admin, json!({"name":"Diagnostics", "slug":"diagnostics", "base_url":"https://api.example.test", "auth_method":"none"})).await.unwrap();
+    let token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(&admin).unwrap(),
+        "openid profile email admin write",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    for (method, route, body, field) in [
+        (
+            "POST",
+            "/api/v1/services".to_string(),
+            json!({"name":"Bad", "unknown_option":"REQUEST_VALUE_CANARY"}),
+            Some("unknown_option"),
+        ),
+        (
+            "PUT",
+            format!("/api/v1/services/{}", service.id),
+            json!({"unknown_option":"REQUEST_VALUE_CANARY"}),
+            Some("unknown_option"),
+        ),
+        (
+            "POST",
+            "/api/v1/services".to_string(),
+            json!({"name":"Bad", "offering_kind":"REQUEST_VALUE_CANARY"}),
+            None,
+        ),
+        (
+            "PUT",
+            format!("/api/v1/services/{}", service.id),
+            json!({"offering_kind":"REQUEST_VALUE_CANARY"}),
+            None,
+        ),
+        (
+            "PUT",
+            format!("/api/v1/services/{}", service.id),
+            json!({"is_active":"REQUEST_VALUE_CANARY"}),
+            None,
+        ),
+    ] {
+        let (status, result) = request(&state, method, &route, &token, Some(body)).await;
+        assert_eq!(status, 400);
+        let output = result.to_string();
+        assert!(!output.contains("REQUEST_VALUE_CANARY"));
+        if let Some(field) = field {
+            assert!(output.contains(field));
+        } else {
+            assert!(output.contains("Invalid service request fields"));
+        }
+    }
+    assert_eq!(
+        db.collection::<DownstreamService>(SERVICES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn tools_manager_all_tool_creation_fences_live_roles_but_receipt_replay_is_durable() {
+    use crate::services::catalog_skill_service::{self, SkillUpdate};
+    let db = connect_test_database("tool_create_live_authority")
+        .await
+        .unwrap();
+    let admin = seed(&db, "admin", false, false).await;
+    let manager = seed(&db, "operator", true, false).await;
+    for (actor, marked, role_slug) in [(&admin, false, "admin"), (&manager, true, "tools_manager")]
+    {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = format!("create-fence-{}", service.id);
+        service.created_by = actor.clone();
+        service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        service.auth_method = "none".into();
+        service.service_category = "internal".into();
+        service.requires_user_credential = false;
+        service.tools_manager_created = marked;
+        let request_id = Uuid::new_v4().to_string();
+        let input = SkillUpdate::default();
+        let committed = catalog_skill_service::create_with_endpoints(
+            &db,
+            &service,
+            actor,
+            &input,
+            &request_id,
+            "stable-local-intent",
+            &[],
+        )
+        .await
+        .unwrap();
+        let role = db
+            .collection::<Role>(ROLES)
+            .find_one(doc! {"slug":role_slug})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<Document>(USERS)
+            .update_one(doc! {"_id":actor}, doc! {"$pull":{"role_ids":role.id}})
+            .await
+            .unwrap();
+        let replay = catalog_skill_service::create_with_endpoints(
+            &db,
+            &service,
+            actor,
+            &input,
+            &request_id,
+            "stable-local-intent",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            replay.id, committed.id,
+            "receipt replay performs no new write"
+        );
+        service.id = Uuid::new_v4().to_string();
+        service.slug = format!("new-create-fence-{}", service.id);
+        assert!(
+            matches!(
+                catalog_skill_service::create_with_endpoints(
+                    &db,
+                    &service,
+                    actor,
+                    &input,
+                    &Uuid::new_v4().to_string(),
+                    "new-local-intent",
+                    &[]
+                )
+                .await,
+                Err(AppError::Forbidden(_))
+            ),
+            "unmarked Admin and marked Manager creations both fence live authority"
+        );
+        assert!(
+            db.collection::<Document>(SERVICES)
+                .find_one(doc! {"_id":&service.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(
+        db.collection::<Document>(SERVICES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        2
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn tools_manager_catalog_provider_and_service_writes_require_human_identity_matrix() {
+    use crate::mw::auth::AuthMethod;
+    use axum::response::IntoResponse;
+    let db = connect_test_database("catalog_mutation_identity_matrix")
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let admin = seed(&db, "admin", false, false).await;
+    let manager = seed(&db, "operator", false, true).await;
+    let service = create(&state, &admin, json!({"name":"Legacy", "slug":"legacy-identity", "base_url":"https://api.example.test", "auth_method":"none"})).await.unwrap();
+    let provider = super::providers::create_provider(State(state.clone()), test_auth_user(&admin),
+        Json(serde_json::from_value(json!({"name":"Local provider", "slug":"local-identity", "provider_type":"api_key"})).unwrap())).await.unwrap().0;
+    let before_service = db
+        .collection::<Document>(SERVICES)
+        .find_one(doc! {"_id":&service.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let before_provider = db
+        .collection::<Document>(crate::models::provider_config::COLLECTION_NAME)
+        .find_one(doc! {"_id":&provider.id})
+        .await
+        .unwrap()
+        .unwrap();
+    for actor in [&admin, &manager] {
+        for kind in [
+            "api_key",
+            "agent_key_login",
+            "delegated",
+            "service_account",
+            "oauth_app",
+        ] {
+            let mut auth = test_auth_user(actor);
+            match kind {
+                "api_key" | "agent_key_login" => {
+                    auth.auth_method = AuthMethod::ApiKey;
+                    auth.api_key_id = Some(Uuid::new_v4().to_string());
+                    auth.api_key_credential_id =
+                        (kind == "agent_key_login").then(|| Uuid::new_v4().to_string());
+                }
+                "delegated" => {
+                    auth.auth_method = AuthMethod::Delegated;
+                    auth.acting_client_id = Some(Uuid::new_v4().to_string());
+                }
+                "service_account" => {
+                    auth.auth_method = AuthMethod::ServiceAccount;
+                    auth.user_id = Uuid::new_v4();
+                }
+                "oauth_app" => {
+                    auth.auth_method = AuthMethod::AccessToken;
+                    auth.oauth_client_id = Some(Uuid::new_v4().to_string());
+                }
+                _ => unreachable!(),
+            }
+            let create_service = services::create_service_request(State(state.clone()), auth.clone(), crate::telemetry::TelemetryContext::default(),
+                Json(json!({"name":"Denied", "slug":"denied-identity", "base_url":"https://api.example.test", "auth_method":"none"}))).await.unwrap_err();
+            let update_service = services::update_service_request(
+                State(state.clone()),
+                auth.clone(),
+                crate::telemetry::TelemetryContext::default(),
+                Path(service.id.clone()),
+                Json(json!({"description":"Denied"})),
+            )
+            .await
+            .unwrap_err();
+            let create_provider = super::providers::create_provider(State(state.clone()), auth.clone(),
+                Json(serde_json::from_value(json!({"name":"Denied", "slug":"denied-provider", "provider_type":"api_key"})).unwrap())).await.unwrap_err();
+            let update_provider = super::providers::update_provider(
+                State(state.clone()),
+                auth,
+                Path(provider.id.clone()),
+                Json(serde_json::from_value(json!({"description":"Denied"})).unwrap()),
+            )
+            .await
+            .unwrap_err();
+            for error in [
+                create_service,
+                update_service,
+                create_provider,
+                update_provider,
+            ] {
+                assert!(
+                    matches!(error, AppError::ForbiddenWithGuidance { .. }),
+                    "{kind}"
+                );
+                assert_eq!(error.into_response().status(), 403, "{kind}");
+            }
+        }
+    }
+    assert_eq!(
+        db.collection::<Document>(SERVICES)
+            .find_one(doc! {"_id":&service.id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before_service
+    );
+    assert_eq!(
+        db.collection::<Document>(crate::models::provider_config::COLLECTION_NAME)
+            .find_one(doc! {"_id":&provider.id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before_provider
+    );
+    assert_eq!(
+        db.collection::<Document>(SERVICES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.collection::<Document>(crate::models::provider_config::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_manager_no_auth_http_ws_mcp_acl_preserves_provider_own_connection() {
+    use axum::{
+        extract::ws::{Message, WebSocketUpgrade},
+        routing::get,
+    };
+    use futures::StreamExt;
+    use std::{
+        future::IntoFuture,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    use tokio_tungstenite::tungstenite::{Error as WsError, client::IntoClientRequest};
+    let db = connect_test_database("no_auth_transport_matrix")
+        .await
+        .unwrap();
+    let admin = seed(&db, "admin", false, false).await;
+    let manager = seed(&db, "operator", true, false).await;
+    let person = seed(&db, "user", false, false).await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let http_hits = hits.clone();
+    let ws_hits = hits.clone();
+    let vendor_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let vendor = format!("http://{}", vendor_listener.local_addr().unwrap());
+    let vendor_server = tokio::spawn(
+        axum::serve(
+            vendor_listener,
+            axum::Router::new()
+                .route(
+                    "/read",
+                    get(move || {
+                        let hits = http_hits.clone();
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"ok":true}))
+                        }
+                    }),
+                )
+                .route(
+                    "/socket",
+                    get(move |ws: WebSocketUpgrade| {
+                        ws_hits.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            ws.on_upgrade(|mut socket| async move {
+                                socket
+                                    .send(Message::Text("no-auth-ready".into()))
+                                    .await
+                                    .unwrap();
+                            })
+                        }
+                    }),
+                ),
+        )
+        .into_future(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let mut config = crate::test_utils::test_app_config();
+    config.base_url = base.clone();
+    config.rate_limit_per_second = 1000;
+    config.rate_limit_burst = 2000;
+    let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+    let mut body = new("no-auth-matrix-tool");
+    body["base_url"] = vendor.clone().into();
+    body["auth_method"] = "none".into();
+    body["capabilities"] = json!({"supports_websocket":true});
+    let tool = create(&state, &manager, body).await.unwrap();
+    let mut ids = Vec::new();
+    for (name, path) in [("read", "/read"), ("socket", "/socket")] {
+        ids.push(
+            endpoints::create_endpoint(
+                State(state.clone()),
+                test_auth_user(&manager),
+                Path(tool.id.clone()),
+                Json(
+                    serde_json::from_value(json!({"name":name,"method":"GET","path":path}))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap()
+            .0
+            .id,
+        );
+    }
+    change_test_publication(
+        &db,
+        &tool.id,
+        tool.offering_kind,
+        &ids,
+        crate::models::service_endpoint::PublicationState::Published,
+        &crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(&admin)),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+    )
+    .await
+    .unwrap();
+    let (public, private) = crate::routes::build_router_with_state(state.clone());
+    let server = tokio::spawn(
+        axum::serve(listener, public.merge(private).with_state(state.clone())).into_future(),
+    );
+    let token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(&person).unwrap(),
+        "openid profile email proxy write",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let http = reqwest::Client::new();
+    let initialized = http.post(format!("{base}/mcp")).bearer_auth(&token).header("Accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"local-no-auth","version":"1"}}})).send().await.unwrap();
+    let session = initialized.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    for public in [true, false] {
+        let _ = update(&state, &admin, &tool.id, json!({"platform_key":{"enabled":true,"audience":if public {"public"} else {"restricted"},"allowed_owner_ids":[]}})).await.unwrap();
+        let before = hits.load(Ordering::SeqCst);
+        let response = http
+            .get(format!("{base}/api/v1/proxy/s/{}/read", tool.slug))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().is_success(), public);
+        let mut request = format!(
+            "{}/api/v1/proxy/s/{}/socket",
+            base.replacen("http://", "ws://", 1),
+            tool.slug
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        match tokio_tungstenite::connect_async(request).await {
+            Ok((mut socket, response)) => {
+                assert!(public);
+                assert_eq!(response.status(), 101);
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap().into_text().unwrap(),
+                    "no-auth-ready"
+                );
+            }
+            Err(WsError::Http(response)) => {
+                assert!(!public);
+                assert!(!response.status().is_success());
+            }
+            Err(error) => panic!("unexpected local WS transport error: {error}"),
+        }
+        let response = http.post(format!("{base}/mcp")).bearer_auth(&token).header("Mcp-Session-Id",&session).header("Accept","application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":format!("{}__read",tool.slug),"arguments_json":"{}"}}})).send().await.unwrap();
+        let result = response.text().await.unwrap();
+        if public {
+            assert!(
+                !result.contains("\"isError\":true") && !result.contains("\"error\":"),
+                "{result}"
+            );
+        } else {
+            assert!(result.contains("\"isError\":true") || result.contains("\"error\":"));
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst) - before,
+            if public { 3 } else { 0 }
+        );
+    }
+    // Provider-linked `none` is a connector contract, not provider-less no-auth.
+    // Its restricted platform audience must not deny the person's own binding.
+    let provider = super::providers::create_provider(State(state.clone()), test_auth_user(&admin),
+        Json(serde_json::from_value(json!({"name":"Own provider", "slug":"own-none-provider", "provider_type":"api_key"})).unwrap())).await.unwrap().0;
+    let linked = create(&state, &admin, json!({"name":"Own none", "slug":"own-none-linked", "base_url":vendor,"auth_method":"none"})).await.unwrap();
+    // Provider-backed none uses a delegated requirement. Configure that
+    // existing supported contract before linking, rather than asking creation
+    // to manufacture a requirement that its safety checks deliberately reject.
+    let admin_token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(&admin).unwrap(),
+        "openid profile email proxy write admin",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let added = http
+        .post(format!("{base}/api/v1/services/{}/requirements", linked.id))
+        .bearer_auth(&admin_token)
+        .json(
+            &json!({"provider_config_id":provider.id,"required":true,"injection_method":"bearer"}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(added.status().is_success());
+    let attached = http
+        .put(format!(
+            "{base}/api/v1/providers/{}/services/{}",
+            provider.id, linked.id
+        ))
+        .bearer_auth(&admin_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(attached.status().is_success());
+    let connected = http
+        .post(format!(
+            "{base}/api/v1/providers/{}/connect/api-key",
+            provider.id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({"api_key":"local-owned-provider-key"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(connected.status().is_success());
+    let _ = update(
+        &state,
+        &admin,
+        &linked.id,
+        json!({"platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids":[]}}),
+    )
+    .await
+    .unwrap();
+    let endpoint = crate::test_utils::test_user_endpoint(
+        &Uuid::new_v4().to_string(),
+        &person,
+        "Own none",
+        &vendor,
+        None,
+        Some(&linked.id),
+    );
+    let mut connection = crate::test_utils::test_user_service(
+        &Uuid::new_v4().to_string(),
+        &person,
+        "own-none-personal",
+        &endpoint.id,
+        Some(&linked.id),
+        None,
+    );
+    connection.auth_method = "none".into();
+    connection.credential_binding = Some("user".into());
+    db.collection::<crate::models::user_endpoint::UserEndpoint>(
+        crate::models::user_endpoint::COLLECTION_NAME,
+    )
+    .insert_one(endpoint)
+    .await
+    .unwrap();
+    db.collection::<crate::models::user_service::UserService>(
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .insert_one(connection)
+    .await
+    .unwrap();
+    let before = hits.load(Ordering::SeqCst);
+    let response = http
+        .get(format!("{base}/api/v1/proxy/s/own-none-personal/read"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(hits.load(Ordering::SeqCst), before + 1);
+    let usage: Vec<crate::models::usage_meter::UsageMeterRow> = db
+        .collection(crate::models::usage_meter::COLLECTION_NAME)
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(
+        usage
+            .iter()
+            .all(|row| row.funding.as_ref().is_none_or(|funding| funding
+                .total_charge
+                .is_none_or(|amount| amount == crate::models::credits::Credits::ZERO))),
+        "no-auth is not charged"
+    );
+    server.abort();
+    vendor_server.abort();
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn tools_manager_catalog_auth_scheme_authority_validation_and_demotion() {
+    use crate::models::service_endpoint::PublicationState;
+    let db = connect_test_database("catalog_auth_scheme_authority")
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let manager = seed(&db, "operator", true, true).await;
+    let other = seed(&db, "operator", false, true).await;
+    let admin = seed(&db, "admin", false, false).await;
+    let bearer = json!({"name":"Scheme", "slug":"catalog-scheme", "base_url":"https://vendor.example/api", "auth_method":"bearer", "auth_scheme":"Zoho-oauthtoken"});
+    let service = create(&state, &manager, bearer.clone()).await.unwrap();
+    assert_eq!(service.auth_scheme.as_deref(), Some("Zoho-oauthtoken"));
+    assert_eq!(
+        update(
+            &state,
+            &manager,
+            &service.id,
+            json!({"auth_scheme":"Bearer"})
+        )
+        .await
+        .unwrap()
+        .auth_scheme
+        .as_deref(),
+        Some("Bearer")
+    );
+    // D9 restricts this credential-injection field to Admin or the owning
+    // marked manager, while PR 1872's shared descriptive edits stay available.
+    for value in [json!("Zoho-oauthtoken"), json!(null)] {
+        assert!(matches!(
+            update(&state, &other, &service.id, json!({"auth_scheme":value})).await,
+            Err(AppError::Forbidden(_))
+        ));
+    }
+    assert_eq!(
+        update(
+            &state,
+            &other,
+            &service.id,
+            json!({"description":"Shared metadata"})
+        )
+        .await
+        .unwrap()
+        .description
+        .as_deref(),
+        Some("Shared metadata")
+    );
+    assert!(
+        update(&state, &manager, &service.id, json!({"auth_scheme":null}))
+            .await
+            .unwrap()
+            .auth_scheme
+            .is_none()
+    );
+    for actor in [&manager, &admin] {
+        for scheme in ["", "two words", "Bearer\r\n", &"a".repeat(65)] {
+            let mut body = bearer.clone();
+            body["slug"] = Uuid::new_v4().to_string().into();
+            body["auth_scheme"] = scheme.into();
+            assert!(matches!(
+                create(&state, actor, body).await,
+                Err(AppError::ValidationError(_))
+            ));
+            assert!(matches!(
+                update(&state, actor, &service.id, json!({"auth_scheme":scheme})).await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+    // An Admin may make a marked row private; the creator's ordinary fallback
+    // must not retain auth-scheme authority after their manager role is revoked.
+    let role_ids = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": &manager})
+        .await
+        .unwrap()
+        .unwrap()
+        .role_ids;
+    db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &service.id},
+            doc! {"$set": {"visibility": "private"}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(USERS)
+        .update_one(doc! {"_id": &manager}, doc! {"$set": {"role_ids": []}})
+        .await
+        .unwrap();
+    assert!(matches!(
+        update(
+            &state,
+            &manager,
+            &service.id,
+            json!({"auth_scheme":"Bearer"})
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    db.collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id": &manager},
+            doc! {"$set": {"role_ids": role_ids}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &service.id},
+            doc! {"$set": {"visibility": "public"}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &service.id},
+            doc! {"$set": {"catalog_manager_created": false}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        update(
+            &state,
+            &manager,
+            &service.id,
+            json!({"auth_scheme":"Bearer"})
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert_eq!(
+        update(
+            &state,
+            &admin,
+            &service.id,
+            json!({"auth_scheme":"Zoho-oauthtoken"})
+        )
+        .await
+        .unwrap()
+        .auth_scheme
+        .as_deref(),
+        Some("Zoho-oauthtoken")
+    );
+    let mut invalid_method = bearer.clone();
+    invalid_method["auth_method"] = "header".into();
+    invalid_method["slug"] = "scheme-header".into();
+    assert!(matches!(
+        create(&state, &admin, invalid_method).await,
+        Err(AppError::ValidationError(_))
+    ));
+    let mut tool_body = new("scheme-tool");
+    tool_body["auth_scheme"] = "Zoho-oauthtoken".into();
+    assert!(matches!(
+        create(&state, &manager, tool_body.clone()).await,
+        Err(AppError::Forbidden(_))
+    ));
+    tool_body["credential"] = "local-scheme-platform-key".into();
+    let tool = create(&state, &admin, tool_body).await.unwrap();
+    let operation = endpoints::create_endpoint(
+        State(state.clone()),
+        test_auth_user(&admin),
+        Path(tool.id.clone()),
+        Json(serde_json::from_value(json!({"name":"read","method":"GET","path":"/read"})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    change_test_publication(
+        &db,
+        &tool.id,
+        tool.offering_kind,
+        std::slice::from_ref(&operation.id),
+        PublicationState::Published,
+        &crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(&admin)),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+    )
+    .await
+    .unwrap();
+    let published = operations::list_all_endpoints(&db, &tool.id).await.unwrap();
+    let _ = update(&state, &admin, &tool.id, json!({"auth_scheme":null}))
+        .await
+        .unwrap();
+    let changed = operations::list_all_endpoints(&db, &tool.id).await.unwrap();
+    assert_eq!(changed[0].publication, PublicationState::Draft);
+    assert_eq!(
+        changed[0].operation_generation,
+        published[0].operation_generation + 1
+    );
+    let own_tool = create(&state, &manager, new("manager-scheme-tool"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        update(
+            &state,
+            &manager,
+            &own_tool.id,
+            json!({"auth_scheme":"Bearer"})
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_manager_catalog_auth_scheme_reaches_http_ws_and_mcp_user_connections() {
+    use axum::{
+        extract::ws::{Message, WebSocketUpgrade},
+        http::HeaderMap,
+        response::IntoResponse,
+        routing::get,
+    };
+    use futures::StreamExt;
+    use std::{
+        future::IntoFuture,
+        sync::{Arc, Mutex},
+    };
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let db = connect_test_database("catalog_auth_scheme_transports")
+        .await
+        .unwrap();
+    let manager = seed(&db, "operator", false, true).await;
+    let person = seed(&db, "user", false, false).await;
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let http_seen = seen.clone();
+    let ws_seen = seen.clone();
+    let vendor_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let vendor = format!("http://{}", vendor_listener.local_addr().unwrap());
+    let vendor_routes = axum::Router::new()
+        .route(
+            "/read",
+            get(move |headers: HeaderMap| {
+                let seen = http_seen.clone();
+                async move {
+                    seen.lock()
+                        .unwrap()
+                        .push(headers["authorization"].to_str().unwrap().to_owned());
+                    Json(json!({"ok":true}))
+                }
+            }),
+        )
+        .route(
+            "/socket",
+            get(move |headers: HeaderMap, ws: WebSocketUpgrade| {
+                let seen = ws_seen.clone();
+                async move {
+                    seen.lock()
+                        .unwrap()
+                        .push(headers["authorization"].to_str().unwrap().to_owned());
+                    ws.on_upgrade(|mut socket| async move {
+                        socket
+                            .send(Message::Text("local-ready".into()))
+                            .await
+                            .unwrap();
+                    })
+                    .into_response()
+                }
+            }),
+        );
+    let vendor_server = tokio::spawn(axum::serve(vendor_listener, vendor_routes).into_future());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let mut config = crate::test_utils::test_app_config();
+    config.base_url = base.clone();
+    config.rate_limit_per_second = 1000;
+    config.rate_limit_burst = 2000;
+    let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+    let service = create(&state, &manager, json!({"name":"Scheme transports","slug":"scheme-transports","base_url":vendor,"auth_method":"bearer", "auth_scheme":"Zoho-oauthtoken", "capabilities":{"supports_websocket":true}})).await.unwrap();
+    for (name, path) in [("read", "/read"), ("socket", "/socket")] {
+        let _ = endpoints::create_endpoint(
+            State(state.clone()),
+            test_auth_user(&manager),
+            Path(service.id.clone()),
+            Json(serde_json::from_value(json!({"name":name,"method":"GET","path":path})).unwrap()),
+        )
+        .await
+        .unwrap();
+    }
+    let (public, private) = crate::routes::build_router_with_state(state.clone());
+    let server = tokio::spawn(
+        axum::serve(listener, public.merge(private).with_state(state.clone())).into_future(),
+    );
+    let token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(&person).unwrap(),
+        "openid profile email proxy write",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let http = reqwest::Client::new();
+    let connected = http.post(format!("{base}/api/v1/keys")).bearer_auth(&token)
+        .json(&json!({"service_slug":service.slug,"slug":"scheme-personal","label":"Local scheme","credential":"local-scheme-key"})).send().await.unwrap();
+    assert!(connected.status().is_success());
+    let initialized = http.post(format!("{base}/mcp")).bearer_auth(&token).header("Accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"local-scheme","version":"1"}}})).send().await.unwrap();
+    assert!(initialized.status().is_success());
+    let session = initialized.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let discovered = http.post(format!("{base}/mcp")).bearer_auth(&token).header("Mcp-Session-Id", &session).header("Accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nyx__search_tools","arguments":{"query":"scheme-personal"}}})).send().await.unwrap();
+    assert!(discovered.status().is_success());
+    let discovered = discovered.text().await.unwrap();
+    assert!(
+        discovered.contains("scheme-personal__read") && !discovered.contains("\"isError\":true")
+    );
+    for (scheme, wire) in [
+        (Some("Zoho-oauthtoken"), "Zoho-oauthtoken local-scheme-key"),
+        (None, "Bearer local-scheme-key"),
+    ] {
+        let _ = update(&state, &manager, &service.id, json!({"auth_scheme":scheme}))
+            .await
+            .unwrap();
+        let response = http
+            .get(format!("{base}/api/v1/proxy/s/scheme-personal/read"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut request = format!(
+            "{}/api/v1/proxy/s/scheme-personal/socket",
+            base.replacen("http://", "ws://", 1)
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(response.status(), 101);
+        assert_eq!(
+            socket.next().await.unwrap().unwrap().into_text().unwrap(),
+            "local-ready"
+        );
+        let response = http.post(format!("{base}/mcp")).bearer_auth(&token).header("Mcp-Session-Id", &session).header("Accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":"scheme-personal__read","arguments_json":"{}"}}})).send().await.unwrap();
+        assert!(response.status().is_success());
+        let result = response.text().await.unwrap();
+        assert!(
+            !result.contains("\"isError\":true") && !result.contains("\"error\":"),
+            "MCP scheme call failed: {result}"
+        );
+        let captured = seen.lock().unwrap().clone();
+        assert_eq!(&captured[captured.len() - 3..], &[wire, wire, wire]);
+    }
+    assert_eq!(seen.lock().unwrap().len(), 6);
+    server.abort();
+    vendor_server.abort();
+    db.drop().await.unwrap();
 }
 
 fn race_operation() -> operations::EndpointInput {
@@ -961,13 +1902,21 @@ impl crate::services::billing::lago_client::LagoApi for LocalLago {
         &self,
         _: &str,
     ) -> crate::errors::AppResult<Vec<crate::services::billing::lago_client::Entitlement>> {
-        Ok(["tools-fake-twin", "tools-fake-new"]
-            .into_iter()
-            .map(|code| crate::services::billing::lago_client::Entitlement {
-                code: code.into(),
-                raw: json!({}),
-            })
-            .collect())
+        // Entitlement checks bind the resolved instance slug, including custom
+        // BYOK connections rather than only catalog platform rows.
+        Ok([
+            "tools-fake-twin",
+            "tools-fake-new",
+            "tools-manager-byok",
+            "my-tool-byok",
+            "local-e2e-byok",
+        ]
+        .into_iter()
+        .map(|code| crate::services::billing::lago_client::Entitlement {
+            code: code.into(),
+            raw: json!({}),
+        })
+        .collect())
     }
     async fn sync_standard_charge(
         &self,
@@ -976,6 +1925,285 @@ impl crate::services::billing::lago_client::LagoApi for LocalLago {
     ) -> crate::errors::AppResult<()> {
         Ok(())
     }
+}
+
+async fn fund_local_person(db: &mongodb::Database, person: &str) {
+    let now = bson::DateTime::now();
+    db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME).insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(),"owner_id":person,"lago_customer_id":person,
+        "lago_wallet_id":format!("local-wallet-{person}"),"lago_subscription_id":"local-plan",
+        "plan_kind":"prepaid","balance_credits":crate::models::credits::Credits::from_whole(100),
+        "reserved_credits":crate::models::credits::Credits::ZERO,"pending_lago_debits":crate::models::credits::Credits::ZERO,
+        "overdraft_cap_credits":crate::models::credits::Credits::ZERO,"has_payment_instrument":false,
+        "suspended":false,"collection_state":"good","balance_synced_at":now,"created_at":now,"updated_at":now
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_manager_published_byok_bills_user_without_platform_audience() {
+    use crate::models::usage_meter::{CredentialClass, UsageMeterRow};
+    use std::{future::IntoFuture, sync::Arc};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+    let db = connect_test_database("tools_manager_byok_lanes")
+        .await
+        .unwrap();
+    let admin = seed(&db, "admin", false, false).await;
+    let manager = seed(&db, "operator", true, false).await;
+    let person = seed(&db, "user", false, false).await;
+    let vendor = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/read"))
+        .and(header("Authorization", "Bearer local-user-byok-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&vendor)
+        .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let mut config = crate::test_utils::test_app_config();
+    config.billing_enabled = true;
+    config.base_url = base.clone();
+    config.rate_limit_per_second = 1000;
+    config.rate_limit_burst = 2000;
+    let mut state = crate::test_utils::test_app_state_with_config(db.clone(), config.clone());
+    state.billing = Arc::new(crate::services::billing::BillingService::new_with_lago(
+        db.clone(),
+        Arc::new(config),
+        Arc::new(LocalLago),
+    ));
+    let (public, private) = crate::routes::build_router_with_state(state.clone());
+    let server = tokio::spawn(
+        axum::serve(listener, public.merge(private).with_state(state.clone())).into_future(),
+    );
+    let token = |id: &str| {
+        crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(id).unwrap(),
+            "openid profile email proxy write",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let admin_token = token(&admin);
+    let person_token = token(&person);
+    let http = reqwest::Client::new();
+    let mut body = new("tools-manager-byok");
+    body["base_url"] = vendor.uri().into();
+    let tool = create(&state, &manager, body).await.unwrap();
+    let _ = update(
+        &state,
+        &manager,
+        &tool.id,
+        json!({"credential":"local-shared-platform-key"}),
+    )
+    .await
+    .unwrap();
+    let operation = endpoints::create_endpoint(
+        State(state.clone()),
+        test_auth_user(&manager),
+        Path(tool.id.clone()),
+        Json(serde_json::from_value(json!({"name":"read","method":"GET","path":"/read"})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        operation.publication,
+        crate::models::service_endpoint::PublicationState::Draft
+    );
+    let connected = http.post(format!("{base}/api/v1/keys")).bearer_auth(&person_token)
+        .json(&json!({"service_slug":tool.slug,"slug":"my-tool-byok","label":"Local BYOK", "credential":"local-user-byok-key"}))
+        .send().await.unwrap();
+    assert!(
+        connected.status().is_success(),
+        "BYOK binding must be allowed with an empty platform audience"
+    );
+    let connected: Value = connected.json().await.unwrap();
+    assert_eq!(connected["credential_binding"], "user");
+    let own_slug = connected["slug"].as_str().unwrap();
+    fund_local_person(&db, &person).await;
+    let _ = update(
+        &state,
+        &admin,
+        &tool.id,
+        json!({"platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]},
+        "billing":{"byok_pricing":{"metric":"requests","credits_per_unit":"0.000000000001"}}}),
+    )
+    .await
+    .unwrap();
+    // Public audience makes the platform denial exercise publication, rather
+    // than stopping earlier at its ACL. The BYOK binding stays independent.
+    for slug in [tool.slug.as_str(), own_slug] {
+        let denied = http
+            .get(format!("{base}/api/v1/proxy/s/{slug}/read"))
+            .bearer_auth(&person_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 404);
+        assert_eq!(denied.json::<Value>().await.unwrap()["error_code"], 12700);
+    }
+    assert!(vendor.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    let published = http
+        .post(format!("{base}/api/v1/services/{}/publication", tool.id))
+        .bearer_auth(&admin_token)
+        .json(&json!({"state":"published","endpoint_names":["read"]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(published.status().is_success());
+    let _ = update(
+        &state,
+        &admin,
+        &tool.id,
+        json!({"platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids":[]}}),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let service = db
+                .collection::<DownstreamService>(SERVICES)
+                .find_one(doc! {"_id":&tool.id})
+                .await
+                .unwrap()
+                .unwrap();
+            if service
+                .billing
+                .as_ref()
+                .and_then(|b| b.byok_pricing.as_ref())
+                .is_some_and(|price| {
+                    price.sync_status == crate::models::service_billing::PricingSyncStatus::Synced
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("local BYOK price sync");
+    let denied = http
+        .get(format!("{base}/api/v1/proxy/s/{}/read", tool.slug))
+        .bearer_auth(&person_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !denied.status().is_success(),
+        "restricted-empty platform lane stays denied"
+    );
+    assert!(vendor.received_requests().await.unwrap().is_empty());
+    let called = http
+        .get(format!("{base}/api/v1/proxy/s/{own_slug}/read"))
+        .bearer_auth(&person_token)
+        .send()
+        .await
+        .unwrap();
+    let status = called.status();
+    let body: Value = called.json().await.unwrap();
+    assert_eq!(
+        status, 200,
+        "published BYOK ignores the platform audience: {body}"
+    );
+    assert_eq!(vendor.received_requests().await.unwrap().len(), 1);
+    let row = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(row) = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .find_one(doc! {"actor_user_id":&person,"credential_class":"user_owned"})
+                .await
+                .unwrap()
+                && row.funding.as_ref().is_some_and(|funding| funding.settled)
+            {
+                break row;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("local BYOK usage settles");
+    assert_eq!(row.credential_class, CredentialClass::UserOwned);
+    assert_eq!(row.billing_owner_id, person);
+    assert_eq!(row.lago_metric_code, "platform_svc_tools-manager-byok_byok");
+    assert_eq!(
+        row.funding.unwrap().wallet_charge_credits,
+        Some(crate::models::credits::Credits::from_pico(1).unwrap())
+    );
+    assert_ne!(row.billing_owner_id, admin);
+    assert_ne!(row.billing_owner_id, manager);
+    let _ = update(
+        &state,
+        &admin,
+        &tool.id,
+        json!({"platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]}}),
+    )
+    .await
+    .unwrap();
+    let paused = endpoints::change_publication_bulk(
+        State(state.clone()),
+        test_auth_user(&manager),
+        Path(tool.id.clone()),
+        Json(endpoints::BulkPublicationRequest {
+            state: crate::models::service_endpoint::PublicationState::Paused,
+            endpoint_names: vec!["read".into()],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        paused.0.endpoints[0].publication,
+        crate::models::service_endpoint::PublicationState::Paused
+    );
+    let usage = db
+        .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    for slug in [tool.slug.as_str(), own_slug] {
+        let denied = http
+            .get(format!("{base}/api/v1/proxy/s/{slug}/read"))
+            .bearer_auth(&person_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 404);
+        assert_eq!(denied.json::<Value>().await.unwrap()["error_code"], 12700);
+    }
+    assert_eq!(vendor.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        usage
+    );
+    assert!(
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME
+        )
+        .find_one(doc! {"_id":connected["id"].as_str().unwrap(),"is_active":true})
+        .await
+        .unwrap()
+        .is_some(),
+        "Tool mutations preserve the BYOK binding"
+    );
+    server.abort();
+    db.drop().await.unwrap();
 }
 
 /// Executed by scripts/tools/test-tools-manager-e2e.sh, never against a remote
@@ -1017,6 +2245,7 @@ async fn tools_manager_local_fake_vendor_e2e() {
     let admin = seed(&db, "admin", false, false).await;
     let manager = seed(&db, "operator", false, false).await;
     let user = seed(&db, "user", false, false).await;
+    let byok_user = seed(&db, "user", false, false).await;
     let vendor = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v2/search"))
@@ -1024,6 +2253,12 @@ async fn tools_manager_local_fake_vendor_e2e() {
             "Authorization",
             "Bearer fake-tool-credential-local-only",
         ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"data":[]})))
+        .mount(&vendor)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/search"))
+        .and(header("Authorization", "Bearer fake-user-byok-local-only"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true,"data":[]})))
         .mount(&vendor)
         .await;
@@ -1061,6 +2296,7 @@ async fn tools_manager_local_fake_vendor_e2e() {
     let admin_token = token(&admin);
     let manager_token = token(&manager);
     let user_token = token(&user);
+    let byok_token = token(&byok_user);
     let http = reqwest::Client::new();
     let initialized = http
         .post(format!("{base}/mcp"))
@@ -1129,7 +2365,7 @@ async fn tools_manager_local_fake_vendor_e2e() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("tools.json");
     let manifest = json!({"version":1,"tools":[
-        {"slug":"tools-fake-twin","name":"Fake Twin","twin_of":"api-fake-vendor","supplier":"Local fake vendor","topics":["web-search"],"credential_env":"TOOLS_LOCAL_FAKE_CREDENTIAL","operations":["search"]},
+        {"slug":"tools-fake-twin","name":"Fake Twin","twin_of":"api-fake-vendor","supplier":"Local fake vendor","topics":["web-search"],"credential_env":"TOOLS_LOCAL_FAKE_CREDENTIAL","operations":["search"],"lanes":["platform","byok"]},
         {"slug":"tools-fake-new","name":"Fake New API","base_url":vendor.uri(),"auth_method":"bearer","openapi_spec_url":source.openapi_spec_url,"credential_env":"TOOLS_LOCAL_FAKE_CREDENTIAL","operations":["search"]}
     ]});
     std::fs::write(&file, manifest.to_string()).unwrap();
@@ -1267,6 +2503,27 @@ async fn tools_manager_local_fake_vendor_e2e() {
         .await
         .unwrap()
         .unwrap();
+    let connected = http.post(format!("{base}/api/v1/keys")).bearer_auth(&byok_token)
+        .json(&json!({"service_slug":twin.slug,"slug":"local-e2e-byok","label":"Local BYOK","credential":"fake-user-byok-local-only"}))
+        .send().await.unwrap();
+    assert!(
+        connected.status().is_success(),
+        "second person connects a BYOK key"
+    );
+    let connected: Value = connected.json().await.unwrap();
+    assert_eq!(connected["credential_binding"], "user");
+    let byok_slug = connected["slug"].as_str().unwrap();
+    fund_local_person(&db, &byok_user).await;
+    let denied = http
+        .post(format!("{base}/api/v1/proxy/s/{byok_slug}/v2/search"))
+        .bearer_auth(&byok_token)
+        .json(&json!({"query":"local"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+    assert_eq!(denied.json::<Value>().await.unwrap()["error_code"], 12700);
+    assert!(vendor.received_requests().await.unwrap().is_empty());
     let svg_file = tmp.path().join("tool.svg");
     std::fs::write(&svg_file,r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M1 1L23 23" /></svg>"#).unwrap();
     let (code, out, err) = run_cli(
@@ -1340,7 +2597,7 @@ async fn tools_manager_local_fake_vendor_e2e() {
             .await
             .unwrap()
             .unwrap();
-        let configured=http.put(format!("{base}/api/v1/services/{}",service.id)).bearer_auth(&admin_token).json(&json!({"platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]},"billing":{"platform_key_pricing":{"metric":"requests","credits_per_unit":"0.000000000001"}}})).send().await.unwrap();
+        let configured=http.put(format!("{base}/api/v1/services/{}",service.id)).bearer_auth(&admin_token).json(&json!({"platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]},"billing":{"platform_key_pricing":{"metric":"requests","credits_per_unit":"0.000000000001"},"byok_pricing":{"metric":"requests","credits_per_unit":"0.000000000001"}}})).send().await.unwrap();
         assert!(
             configured.status().is_success(),
             "Admin audience and price setup"
@@ -1509,6 +2766,15 @@ async fn tools_manager_local_fake_vendor_e2e() {
         .await
         .unwrap();
     assert!(paused.status().is_success());
+    let denied = http
+        .post(format!("{base}/api/v1/proxy/s/{byok_slug}/v2/search"))
+        .bearer_auth(&byok_token)
+        .json(&json!({"query":"local"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+    assert_eq!(denied.json::<Value>().await.unwrap()["error_code"], 12700);
     let count = vendor
         .received_requests()
         .await
@@ -1602,6 +2868,205 @@ async fn tools_manager_local_fake_vendor_e2e() {
             .filter(|r| r.url.path() == "/v2/search")
             .count()
     );
+    // Restricted-empty audience denies the platform lane while the published
+    // operation remains available through the second person's own key.
+    let called = http
+        .post(format!("{base}/api/v1/proxy/s/{byok_slug}/v2/search"))
+        .bearer_auth(&byok_token)
+        .json(&json!({"query":"local"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(called.status(), 200);
+    let row = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(row) = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .find_one(doc! {"actor_user_id":&byok_user,"credential_class":"user_owned"})
+                .await
+                .unwrap()
+                && row.funding.as_ref().is_some_and(|f| f.settled)
+            {
+                break row;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("second person's BYOK usage settles");
+    assert_eq!(row.billing_owner_id, byok_user);
+    assert_eq!(
+        row.credential_class,
+        crate::models::usage_meter::CredentialClass::UserOwned
+    );
+    assert_eq!(row.lago_metric_code, "platform_svc_tools-fake-twin_byok");
+    assert_eq!(
+        row.funding.unwrap().wallet_charge_credits,
+        Some(crate::models::credits::Credits::from_pico(1).unwrap())
+    );
+    assert_ne!(row.billing_owner_id, admin);
+    assert_ne!(row.billing_owner_id, manager);
+    assert_ne!(row.billing_owner_id, user);
+    let requests = vendor.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r
+                .headers
+                .get("authorization")
+                .is_some_and(|h| h == "Bearer fake-user-byok-local-only"))
+            .count(),
+        1
+    );
+    let exposure_hits = vendor.received_requests().await.unwrap().len();
+    let exposure_usage = db
+        .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    // A renamed authoritative spec withdraws the old published contract in
+    // both credential lanes, without dispatch or new metering.
+    let withdrawal_spec = Arc::new(std::sync::RwLock::new(
+        json!({"openapi":"3.0.3","info":{"title":"Local withdrawal","version":"1"},"paths":{"/v2/search":{"post":{"operationId":"search","responses":{"200":{"description":"ok"}}}}}}),
+    ));
+    let served_spec = withdrawal_spec.clone();
+    Mock::given(method("GET"))
+        .and(path("/withdrawal-spec"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(200).set_body_json(served_spec.read().unwrap().clone())
+        })
+        .mount(&vendor)
+        .await;
+    let changed=http.put(format!("{base}/api/v1/services/{}",twin.id)).bearer_auth(&admin_token)
+        .json(&json!({"openapi_spec_url":format!("{}/withdrawal-spec",vendor.uri()),"platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]}})).send().await.unwrap();
+    assert!(changed.status().is_success());
+    // Changing the spec URL demotes the stored operations. Publish the current
+    // contract, then change the vendor response at the same URL so this explicit
+    // authoritative discovery proves withdrawal of a live operation.
+    let republished = http
+        .post(format!("{base}/api/v1/services/{}/publication", twin.id))
+        .bearer_auth(&admin_token)
+        .json(&json!({"state":"published","endpoint_names":["search"]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(republished.status().is_success());
+    withdrawal_spec.write().unwrap()["paths"]["/v2/search"]["post"]["operationId"] =
+        json!("renamed_search");
+    let discovered = http
+        .post(format!(
+            "{base}/api/v1/services/{}/discover-endpoints",
+            twin.id
+        ))
+        .bearer_auth(&manager_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert!(discovered.status().is_success());
+    let discovered: Value = discovered.json().await.unwrap();
+    assert!(
+        discovered["withdrawn"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("search"))
+    );
+    for (slug, bearer) in [(twin.slug.as_str(), &user_token), (byok_slug, &byok_token)] {
+        let denied = http
+            .post(format!("{base}/api/v1/proxy/s/{slug}/v2/search"))
+            .bearer_auth(bearer)
+            .json(&json!({"query":"local"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 404);
+        assert_eq!(denied.json::<Value>().await.unwrap()["error_code"], 12700);
+    }
+    let denied=http.post(format!("{base}/mcp")).bearer_auth(&user_token).header("Mcp-Session-Id",&mcp_session).header("Accept","application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tools-fake-twin__search","arguments":{"query":"local"}}})).send().await.unwrap().text().await.unwrap();
+    assert!(
+        denied.contains("12700"),
+        "withdrawn MCP operation: {denied}"
+    );
+    // Deleting a paused narrow blocker must demote the published broad route.
+    let separate = db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(doc! {"slug":"tools-fake-new"})
+        .await
+        .unwrap()
+        .unwrap();
+    let broad=http.post(format!("{base}/api/v1/services/{}/endpoints",separate.id)).bearer_auth(&manager_token)
+        .json(&json!({"name":"broad_search","method":"POST","path":"/v2/{operation}","parameters":[{"name":"operation","in":"path","required":true,"schema":{"type":"string"}}]})).send().await.unwrap();
+    assert!(broad.status().is_success());
+    let changed = http
+        .post(format!(
+            "{base}/api/v1/services/{}/publication",
+            separate.id
+        ))
+        .bearer_auth(&admin_token)
+        .json(&json!({"state":"published","endpoint_names":["broad_search"]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(changed.status().is_success());
+    let paused = http
+        .post(format!(
+            "{base}/api/v1/services/{}/publication",
+            separate.id
+        ))
+        .bearer_auth(&manager_token)
+        .json(&json!({"state":"paused","endpoint_names":["search"]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(paused.status().is_success());
+    let search = operations::list_all_endpoints(&db, &separate.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.name == "search")
+        .unwrap();
+    let deleted = http
+        .delete(format!(
+            "{base}/api/v1/services/{}/endpoints/{}",
+            separate.id, search.id
+        ))
+        .bearer_auth(&admin_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(deleted.status().is_success());
+    let denied = http
+        .post(format!("{base}/api/v1/proxy/s/{}/v2/search", separate.slug))
+        .bearer_auth(&user_token)
+        .json(&json!({"query":"local"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+    assert_eq!(denied.json::<Value>().await.unwrap()["error_code"], 12700);
+    let rows = operations::list_all_endpoints(&db, &separate.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.name == "broad_search")
+            .unwrap()
+            .publication,
+        crate::models::service_endpoint::PublicationState::Draft
+    );
+    assert_eq!(
+        vendor.received_requests().await.unwrap().len(),
+        exposure_hits + 1,
+        "only explicit discovery fetched the loopback spec"
+    );
+    assert_eq!(
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        exposure_usage
+    );
     let audits = db
         .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
         .find(doc! {})
@@ -1610,9 +3075,11 @@ async fn tools_manager_local_fake_vendor_e2e() {
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-    assert!(!format!("{audits:?}").contains("fake-tool-credential-local-only"));
+    let audit_text = format!("{audits:?}");
+    assert!(!audit_text.contains("fake-tool-credential-local-only"));
+    assert!(!audit_text.contains("fake-user-byok-local-only"));
     println!(
-        "LOCAL_E2E_EVIDENCE: role grant, twin/new creation, credential injection, discovery, manager publication/replacement denial, Admin setup/publication, ordinary-user proxy, exact personal charge=0.000000000001, paused ingress denial without usage/vendor calls, write-free CLI reapply, redacted audit: PASS"
+        "LOCAL_E2E_EVIDENCE: role grant, twin/new creation, shared and second-person BYOK injection, discovery and authoritative withdrawal, delete demotion without broader-route exposure, manager publication/replacement denial, Admin setup/publication, exact personal charges=0.000000000001 on platform/BYOK lanes, draft/paused ingress denial without usage/vendor calls, restricted-empty platform denial with BYOK success, write-free CLI reapply, redacted audit: PASS"
     );
     server.abort();
     db.drop().await.unwrap();
@@ -1689,37 +3156,38 @@ async fn tools_manager_icons_and_operation_fences_recheck_live_authority() {
         .await
         .is_err()
     );
-    let row = operations::endpoint_from_input(
-        &tool.id,
-        operations::EndpointInput {
-            name: "search".into(),
-            description: None,
-            method: "GET".into(),
-            path: "/search".into(),
-            parameters: None,
-            request_body_schema: None,
-            request_content_type: None,
-            request_body_required: false,
-            response_description: None,
-            response: Default::default(),
-            risk: None,
-            supports_idempotency_key: false,
-            data_scope: None,
-            cost_class: None,
-            execution: Default::default(),
-            async_operation: None,
-            target_id: None,
-        },
-        crate::models::service_endpoint::PublicationState::Draft,
-    );
+    let input = operations::EndpointInput {
+        name: "search".into(),
+        description: None,
+        method: "GET".into(),
+        path: "/search".into(),
+        parameters: None,
+        request_body_schema: None,
+        request_content_type: None,
+        request_body_required: false,
+        response_description: None,
+        response: Default::default(),
+        risk: None,
+        supports_idempotency_key: false,
+        data_scope: None,
+        cost_class: None,
+        execution: Default::default(),
+        async_operation: None,
+        target_id: None,
+    };
+    let authority = crate::services::catalog_mutation_service::Authority {
+        actor: actor.clone(),
+        first_party_human: true,
+        admin_required: false,
+        catalog_base_url: state.config.base_url.clone(),
+    };
     assert!(
-        crate::services::tools_manager_service::commit_operations(
+        operations::commit_mutation(
             &db,
             &observed,
-            &manager,
-            vec![(None, mongodb::bson::to_document(&row).unwrap())],
+            Some(&authority),
+            operations::Mutation::Create(input),
             state.audit_chain_hmac_key.as_ref().as_ref(),
-            &actor
         )
         .await
         .is_err()

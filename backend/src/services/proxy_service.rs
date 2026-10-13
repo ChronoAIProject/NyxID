@@ -3266,6 +3266,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    auth_scheme: Option<String>,
     platform_key_configured: bool,
     no_auth_platform_service: bool,
     offering_kind: crate::models::downstream_service::OfferingKind,
@@ -3298,6 +3299,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        auth_scheme: service.auth_scheme.clone(),
         platform_key_configured: service.platform_key.is_some(),
         no_auth_platform_service: super::platform_key_service::no_auth_platform_service(&service),
         offering_kind: service.offering_kind,
@@ -3318,6 +3320,7 @@ fn apply_catalog_proxy_authorization(
     authorization: &CatalogProxyAuthorization,
 ) {
     service.offering_kind = authorization.offering_kind;
+    service.auth_scheme = authorization.auth_scheme.clone();
     service.concurrency_policy = authorization.concurrency_policy.clone();
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
@@ -3882,6 +3885,7 @@ fn build_minimal_downstream_service(
         credential_encrypted: vec![],
         platform_key: None,
         auth_type: None,
+        auth_scheme: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
         streaming_supported: true,
@@ -4356,7 +4360,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             request = request.header(&target.auth_key_name, &target.credential);
         }
         "bearer" => {
-            request = request.bearer_auth(&target.credential);
+            request = request.header(
+                reqwest::header::AUTHORIZATION,
+                super::catalog_auth_scheme::header_value(
+                    target.service.auth_scheme.as_deref(),
+                    &target.credential,
+                )?,
+            );
         }
         "bot_bearer" => {
             // Discord bot tokens use `Authorization: Bot <token>` instead of
@@ -6133,6 +6143,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -7515,6 +7526,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -7869,6 +7881,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -8109,6 +8122,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -8368,6 +8382,7 @@ mod tests {
             credential_encrypted: vec![],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,

@@ -59,6 +59,38 @@ const STALE_TEST_DB_DROP_CLAIM_LEASE: Duration = Duration::from_secs(30);
 const STALE_TEST_DB_SWEEP_BUDGET: Duration = Duration::from_secs(45);
 const STALE_TEST_DB_SWEEP_LEASE: Duration = Duration::from_secs(90);
 
+// Exact owned mock URLs only. This module and the caller's exception are absent
+// from production binaries; unrelated tests retain the public HTTPS guard.
+static LOOPBACK_REVOCATION_URLS: std::sync::LazyLock<dashmap::DashMap<String, ()>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+pub(crate) struct LoopbackRevocationGuard(String);
+
+impl Drop for LoopbackRevocationGuard {
+    fn drop(&mut self) {
+        LOOPBACK_REVOCATION_URLS.remove(&self.0);
+    }
+}
+
+pub(crate) fn register_loopback_revocation_url(url: &str) -> LoopbackRevocationGuard {
+    let parsed = url::Url::parse(url).expect("owned revocation mock URL");
+    assert_eq!(parsed.scheme(), "http");
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(parsed.port().is_some());
+    assert!(parsed.username().is_empty() && parsed.password().is_none());
+    assert!(parsed.query().is_none() && parsed.fragment().is_none());
+    assert!(
+        LOOPBACK_REVOCATION_URLS
+            .insert(url.to_owned(), ())
+            .is_none()
+    );
+    LoopbackRevocationGuard(url.to_owned())
+}
+
+pub(crate) fn is_registered_loopback_revocation_url(url: &str) -> bool {
+    LOOPBACK_REVOCATION_URLS.contains_key(url)
+}
+
 /// Shared DB-backed rate limiters (`RateWindowStore`) bin their windows to
 /// epoch-aligned `$dateTrunc` boundaries. A burst that straddles a boundary
 /// observes a fresh window and gets an extra admission exactly where a test
@@ -1857,6 +1889,20 @@ pub(crate) fn test_encryption_keys() -> EncryptionKeys {
     EncryptionKeys::from_config(&test_app_config())
 }
 
+/// Spec-sync fixtures model startup, which initializes the audit-chain key
+/// before any background catalog mutation. Keep isolated filters independent
+/// of which other test happened to initialize that process-wide key first.
+pub(crate) fn init_test_audit_chain_hmac_key() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        if crate::services::audit_service::audit_chain_hmac_key().is_none() {
+            crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
+                [2; 32],
+            ));
+        }
+    });
+}
+
 /// A throwaway 2048-bit RSA private key (PKCS#8 PEM) for GCP service-account
 /// mint tests. A mock token server never verifies the signature, so this
 /// only needs to be a parseable, signable key.
@@ -2225,9 +2271,13 @@ pub(crate) async fn register_test_node_connection(
 
 /// Build an `AppState` for tests that never perform MongoDB operations.
 pub(crate) async fn test_app_state_no_db() -> AppState {
-    let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
-        .await
-        .expect("build inert test MongoDB client");
+    // An inert client must not monitor or accidentally write to a developer's
+    // default MongoDB. Any unexpected database operation fails on this endpoint.
+    let client = mongodb::Client::with_uri_str(
+        "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=100",
+    )
+    .await
+    .expect("build inert test MongoDB client");
     test_app_state(client.database("nyxid_unit_unused"))
 }
 
@@ -2663,6 +2713,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         credential_encrypted: vec![],
         platform_key: None,
         auth_type: None,
+        auth_scheme: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
         streaming_supported: false,

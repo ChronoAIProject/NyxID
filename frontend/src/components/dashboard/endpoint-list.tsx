@@ -232,27 +232,24 @@ function EndpointListEditor({
                       </Button>
                       {canWrite &&
                         (service?.offering_kind !== "tool" || admin) && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                            onClick={() =>
-                              deletion.review(
-                                { serviceId, endpointId: ep.id },
-                                [
-                                  {
-                                    field: "Delete endpoint",
-                                    before: `${ep.method} ${ep.path} (${ep.name})`,
-                                    after: "Deleted",
-                                  },
-                                ],
-                              )
-                            }
-                            disabled={deletingId === ep.id}
-                          >
-                            <Trash2 className="h-3 w-3 text-destructive" />
-                            <span className="sr-only">Delete endpoint</span>
-                          </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        onClick={() =>
+                          deletion.review({ serviceId, endpointId: ep.id }, [
+                            {
+                              field: "Delete endpoint",
+                              before: `${ep.method} ${ep.path} (${ep.name})`,
+                              after: "Deleted",
+                            },
+                          ])
+                        }
+                        disabled={deletingId === ep.id}
+                      >
+                        <Trash2 className="h-3 w-3 text-destructive" />
+                        <span className="sr-only">Delete endpoint</span>
+                      </Button>
                         )}
                     </div>
                   </td>

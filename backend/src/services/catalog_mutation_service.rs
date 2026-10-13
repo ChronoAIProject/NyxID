@@ -150,6 +150,7 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "service_category",
         "base_url",
         "auth_method",
+        "auth_scheme",
         "auth_key_name",
         "oauth_client_id",
         "credential_encrypted",
@@ -239,6 +240,35 @@ pub(crate) async fn validate_update_fields(
     authority: &Authority,
     admin: bool,
 ) -> AppResult<()> {
+    if let Some(scheme) = fields.get("auth_scheme") {
+        let scheme: Option<String> = bson::from_bson(scheme.clone())
+            .map_err(|_| AppError::ValidationError("Invalid auth_scheme".into()))?;
+        super::catalog_auth_scheme::validate(&live.auth_method, scheme.as_deref())?;
+        if !admin
+            && (!authority.first_party_human
+                || live.offering_kind == OfferingKind::Tool
+                || !live.catalog_manager_created
+                || live.created_by != authority.actor.user_id)
+        {
+            return Err(AppError::Forbidden(
+                "Only an Admin or the owning Catalog Manager may change an authorization scheme"
+                    .into(),
+            ));
+        }
+        // Public marked rows already fence Catalog authority in check_parent.
+        // Private rows retain creator semantics for other fields, but D9's
+        // credential-injection field still requires a live Catalog Manager.
+        if !admin && live.visibility == "private" {
+            tools_manager_service::role_authority(
+                db,
+                session,
+                &authority.actor.user_id,
+                Some(crate::models::role::CATALOG_SERVICES_WRITE_PERMISSION),
+                true,
+            )
+            .await?;
+        }
+    }
     if admin || live.offering_kind == OfferingKind::Tool {
         return Ok(());
     }

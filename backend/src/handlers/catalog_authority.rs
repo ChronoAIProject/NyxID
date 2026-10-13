@@ -456,6 +456,7 @@ fn service_create_denied_fields(body: &CreateServiceRequest) -> Vec<&'static str
         service_type,
         base_url: _,
         auth_method,
+        auth_scheme: _,
         auth_key_name: _,
         credential,
         service_category,
@@ -542,6 +543,7 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
 
 fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
     let UpdateServiceRequest {
+        auth_scheme: _,
         service_category,
         offering_kind,
         topics: _,
@@ -709,6 +711,9 @@ pub fn check_tool_create(body: &CreateServiceRequest) -> AppResult<()> {
     if body.provider_config_id.is_some() {
         denied.push("provider_config_id");
     }
+    if body.auth_scheme.is_some() {
+        denied.push("auth_scheme");
+    }
     forbid_tool_fields(denied)?;
     if body
         .service_category
@@ -744,6 +749,9 @@ pub fn check_tool_create(body: &CreateServiceRequest) -> AppResult<()> {
 
 pub fn check_tool_update(body: &UpdateServiceRequest) -> AppResult<()> {
     let mut denied = service_update_denied_fields(body);
+    if body.auth_scheme.is_some() {
+        denied.push("auth_scheme");
+    }
     denied.retain(|field| *field != "credential");
     forbid_tool_fields(denied)?;
     if body.offering_kind.is_some()

@@ -104,6 +104,12 @@ human CLI profile. Catalog Editor/Curation service accounts retain their
 separate scoped skill-management routes (`/keys/{catalog_uuid}` and
 `/catalog-curation`); this guard does not change those non-Tool workflows.
 
+Service create/update requests use a strict documented DTO. Unknown request
+fields return a validation error naming the bounded field name, without its
+value; invalid types return a generic error so credentials and header values
+cannot appear in diagnostics. CLI-only `playbook`, `operations` and `smoke_test`
+are removed before service API writes. Use the endpoint routes for operations.
+
 The field rules live in `backend/src/handlers/catalog_authority.rs`. They
 destructure every request field, so a new field does not compile until it is
 classified.
@@ -216,9 +222,32 @@ nyxid proxy request api-zoho-mail accounts
 ```
 
 The template pins one Zoho data center. Zoho expects comma-separated scopes,
-so they are one entry. NyxID sends `Authorization: Bearer`, while Zoho
-documents `Zoho-oauthtoken`; a 401 with a fresh token means Zoho rejected the
-scheme and NyxID needs a dedicated auth method.
+so they are one entry. Its three read-only operations use the documented
+`ZohoMail.accounts.READ,ZohoMail.folders.READ,ZohoMail.messages.READ` minimum.
+`auth_scheme: Zoho-oauthtoken` makes NyxID send Zoho's documented authorization
+header for HTTP, WebSocket and MCP calls. Upload a static SVG with
+`nyxid admin catalog icon zoho-mail --file zoho-mail.svg` after checking its brand
+terms. The template includes no vendor icon or account credentials.
+
+Zoho documents refresh-token revocation as POST with the token in the URL
+query. NyxID's provider revocation transport supports form and JSON payloads,
+so the template records sourced `nyxid_incompatible` applicability and leaves
+remote revocation unconfigured. Disconnect still removes the NyxID connection.
+The source pages are the [Mail API index](https://www.zoho.com/mail/help/api/),
+[accounts operation](https://www.zoho.com/mail/help/api/get-all-users-accounts.html)
+and [OAuth revocation](https://www.zoho.com/mail/help/api/using-oauth-2.html#revoke).
+Configuration readiness and loopback tests leave the real Zoho smoke and
+outside-user confirmation gates open.
+
+Bearer catalog services may set optional `auth_scheme` to a vendor's
+documented RFC 9110 token of 1–64 ASCII bytes. Omission means `Bearer`, preserving
+existing wire values. Spaces, CRLF and non-token characters are rejected. The
+field belongs to the catalog row; a user connection cannot override it.
+Catalog Managers may set it on creation and on their own marked rows;
+changes on foreign or unmarked rows require an Admin. Tools Managers cannot
+set it. Admin changes to a Tool's
+scheme demote its operations. Clear an existing scheme with `auth_scheme: null`
+in an update to restore `Bearer`.
 
 ## Uploading provider SVG icons
 
@@ -318,3 +347,14 @@ Admin, slug and HTTP status class in the verification report and update the
 Lark row manually; do not record tokens, account identifiers or client values.
 Lark configuration says `configured; not verified`. Local fake-vendor tests
 prove the software flow only and never close these real-service gates.
+
+The local acceptance harness is `bash scripts/tools/test-tools-manager-e2e.sh
+catalog`. It builds the CLI and uses an owned temporary MongoDB replica set,
+fake OAuth authorize/token/revoke endpoints and one loopback GET API. The test
+runs manager apply and SVG upload, checks all six playbook items, connects a
+second person through OAuth ingress, executes the printed smoke command and
+disconnects. It also checks write-free reapply, unreadable credential environment
+values during dry run/validate, and redacted CLI output, manifests and audits.
+Requires local `mongod`, `mongosh`, Python 3 and Rust; uses no production account.
+Recorded results and source snapshots belong in
+[the implementation verification report](plans/2026-10-13-tools-manager-verification.md).

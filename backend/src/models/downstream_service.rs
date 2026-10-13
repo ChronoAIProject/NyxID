@@ -330,6 +330,9 @@ pub struct DownstreamService {
     /// - `path`: inject credential into URL path (Telegram bot token style)
     /// - `none`: no credential injection
     pub auth_method: String,
+    /// Optional RFC 9110 bearer scheme. Absent retains `Bearer`; catalog-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
     /// Header name, query param name, body field name, or path placeholder
     /// for the credential (depends on `auth_method`).
     pub auth_key_name: String,
@@ -620,6 +623,7 @@ pub mod test_helpers {
             credential_encrypted: Vec::new(),
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -735,6 +739,7 @@ mod tests {
             credential_encrypted: vec![1, 2, 3],
             platform_key: None,
             auth_type: Some("bearer".to_string()),
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -833,6 +838,7 @@ mod tests {
             credential_encrypted: vec![1],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,

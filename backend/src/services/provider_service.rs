@@ -3444,6 +3444,10 @@ fn validate_revocation_url_shape(url: &str) -> AppResult<()> {
 }
 
 pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
+    #[cfg(test)]
+    if crate::test_utils::is_registered_loopback_revocation_url(url) {
+        return Ok(());
+    }
     validate_revocation_url_shape(url)?;
     crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
 }
@@ -6356,6 +6360,7 @@ pub async fn seed_default_services(
             credential_encrypted: empty_credential,
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url,
             asyncapi_spec_url: None,
             streaming_supported,

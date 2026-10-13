@@ -145,6 +145,7 @@ pub(crate) async fn seed(db: &mongodb::Database) {
     provider_service::seed_default_services(db, &keys)
         .await
         .unwrap();
+    crate::test_utils::init_test_audit_chain_hmac_key();
     catalog_spec_sync::sync_seeded_service_endpoints(db)
         .await
         .unwrap();
@@ -178,6 +179,7 @@ pub(crate) async fn seed_legacy(db: &mongodb::Database) {
                 "destination_targets": {}, "description":description, "known_limitations":limitations,
             }}).await.unwrap();
     }
+    crate::test_utils::init_test_audit_chain_hmac_key();
     catalog_spec_sync::sync_seeded_service_endpoints(db)
         .await
         .unwrap();

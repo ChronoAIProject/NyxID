@@ -351,6 +351,7 @@ pub async fn service_to_response_with_viewer(
         service_type: s.service_type,
         visibility: s.visibility,
         auth_method: s.auth_method,
+        auth_scheme: s.auth_scheme,
         auth_type: s.auth_type,
         auth_key_name: s.auth_key_name,
         is_active: s.is_active,

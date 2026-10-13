@@ -218,3 +218,93 @@ until final delivery.
 7. **Tests.** Rerun fmt, check and Clippy, the #1872 and Catalog Manager
    tests, the focused Tools tests and the CLI tests. Record everything in the
    verification report.
+
+### Round 3: merge-in-progress review (2026-10-14 00:10 +08)
+
+The merge preserves #1872's semantics. Main's `is_shared_catalog_row` moved into
+`catalog_mutation_service`. Provider client-bound rules, client re-entry and the
+version guard are intact. `--with-client` now goes through the credential
+transport, and Catalog writers still see paused/draft operations. Finding:
+
+| ID | Sev | Location | Finding | Required resolution and test | Status |
+| --- | --- | --- | --- | --- | --- |
+| R13 | M | `handlers/endpoints.rs::list_endpoints` (merged "may_write" probe) | Only `Forbidden`/`Unauthorized` count as "not a writer". `require_tool_writer` → `require_first_party_human`, and `require_catalog_row_writer` → `require_catalog_writer`, return `ForbiddenWithGuidance` for Agent Keys, delegated `account:read`, service accounts and OAuth-app tokens. A service-account actor can also hit `NotFound("User not found")`. All of these now return 403/404 from a read-only listing. That breaks agent and API-key discovery of published Tool and catalog operations; main returned the published list. | Treat every identity or authority denial (`Forbidden`, `ForbiddenWithGuidance`, `Unauthorized`, actor-not-found) as `may_write = false` and return the published-only list. Propagate only database/internal errors. Audit every other new "may_write"/capability probe for the same variant mismatch, including the ownership `/authorization` and the Tool/catalog capability helpers. Tests: an Agent Key, a delegated `account:read` token and a service account each list Tool and shared-catalog endpoints with 200 and published-only rows; a human writer sees paused/draft rows. | open |
+
+### Round 3 outcome: merge commit `7c62cac3` reviewed (2026-10-14 00:35 +08)
+
+Parents are `88dc48e8` (WIP) and `4faec86b` (`origin/main`). I reviewed the
+remerge diff for the conflict files.
+
+**`services.rs`.** PR 1872's `require_catalog_row_writer`, Catalog Manager
+field limits, foreign `is_active` refusal and destination guard are retained.
+Tool authority comes first.
+
+**`tool_publication_service`.** Publication is now bound to the shared
+`catalog_mutation_service::fence` with the observed parent:
+- Tool publish is Admin-only.
+- Non-Tool publication by a non-Admin requires the live Catalog permission and
+  first-party human authority. That matches main's `require_publication_writer`:
+  Admin or a Catalog writer; legacy creators without the role are denied.
+
+**Unchanged from main.** Provider client-bound rules, client re-entry and the
+version guard. `--with-client` now uses the credential transport.
+
+**Sol's evidence.** All of it was recorded by Sol; the PM has not rerun any of
+it.
+
+| Check | Result | Log |
+| --- | --- | --- |
+| Combined compile check | exit 0 | `/tmp/tools-manager-sol-merge-check2.log` |
+| Focused backend run (backend4) | 78 passed, 1 E2E ignored | `/tmp/tools-manager-sol-merge-backend4.log` |
+| CLI suite (cli2) | 1507 + 78 passed, 6 ignored | `/tmp/tools-manager-sol-merge-cli2.log` |
+| Combined Clippy (clippy3) | exit 0 | `/tmp/tools-manager-sol-merge-clippy3.log` |
+
+R12 and R13: `fixed-verified` at this checkpoint. The full backend suite and
+both fake E2Es remain pending for final sign-off.
+
+### Round 4: final-candidate review in progress (2026-10-14 02:50 +08)
+
+Source-reviewed and accepted:
+- `admin_catalog_playbook.rs`: evidence is stripped before the API, applicability holds per provider type, device-code URLs are checked, the icon is proven by a credential-free, redirect-free, size-bounded fetch of the canonical asset, and smoke tests are literal GET only.
+- Explicit operations reconcile by name and never delete omitted rows (reported as `unmanaged`).
+- D9 `catalog_auth_scheme`: one shared builder; the default bytes are unchanged; the digest field is omitted when absent.
+- D11 Tool docs and lanes.
+- The Catalog docs: six items, gates, `not_verified`, the inactive-row correction.
+- The ownership-transfer Tool exception docs.
+- The unrelated test-fixture change (two inert MongoDB clients on 27017 moved to unreachable loopback port 1) is accepted as isolation hygiene; the PR description will list it.
+
+| ID | Sev | Location | Finding | Required resolution and test | Status |
+| --- | --- | --- | --- | --- | --- |
+| R14 | L | `frontend/src/pages/service-edit.tsx` (1,605 changed lines, only 145 non-whitespace), `frontend/src/components/dashboard/endpoint-list.tsx` (49/17) | Whole-file reformatting churn in files that main did not format. It hides the semantic changes from review and raises conflict risk with later main changes. | Revert formatting-only hunks; keep only semantic edits, in the file's existing style. `git diff -w` and `git diff` against `origin/main` should then be close in size for these files. Rerun the frontend tests, lint and build. | open |
+| R15 | L | `service-edit.tsx` `auth_scheme` field (`service.auth_method === "bearer" && canManageCatalog(user)`) | The input is shown to every Catalog Manager on every bearer service, but the server accepts `auth_scheme` changes only from an Admin or the owning Catalog Manager (marked row created by the caller). Non-owners get a rejected save. | Show or enable the input only when `user.is_admin` or (`canManageCatalog(user)` and `service.catalog_manager_created` and `service.created_by === user.id`), mirroring the server; Tool rows stay Admin-only. Add a component test covering Admin, owning manager, foreign manager and plain user. | open |
+
+### R16 (M): debug-build stack overflow from the enlarged service-update future (2026-10-14 04:25 +08)
+
+Full2 aborted with exit 134 after 2,542 passes. The test was
+`catalog_manager_builds_owned_provider_and_service_within_limits`, from main's
+#1872. It passes with an 8 MiB stack but overflows the 2 MiB default test
+thread.
+
+Our transactional changes enlarged `update_service_inner`'s future (and
+probably `create_service_inner`'s). `Box::pin` in the test helper alone is
+symptomatic. The future is still awaited unboxed by other callers, for example
+`handlers/admin_billing.rs:340`. Large futures are also materialized on the
+stack in debug builds before boxing, so any later test, or CI's debug
+`cargo test`, can overflow the same way, aborting the whole test binary.
+
+**Required.** Cap the future size at the source:
+- `Box::pin` the large sub-futures inside `update_service_inner` and
+  `create_service_inner`: the `catalog_mutation_service::commit_update` and
+  skill-commit transactions, billing price sync, and the other large awaited
+  helpers;
+- box any remaining direct unboxed callers (`admin_billing.rs:340`);
+- keep the test-only box only if it is still needed.
+
+**Proof.**
+- The stack-overflow test passes on the **default** stack (no `RUST_MIN_STACK`
+  or thread-stack overrides).
+- A focused run of the services, admin_billing and tools_manager modules passes
+  on the default stack.
+- Then one uninterrupted full backend run on the final source.
+- Record the before/after evidence in the verification report.
+- Do not add stack-size overrides to tests or CI.

@@ -7320,8 +7320,13 @@ pub(crate) fn build_downstream_ws_request(
             headers.insert(name, value);
         }
         "bearer" => {
-            let (_, value) =
-                make_header(b"authorization", &format!("Bearer {}", target.credential))?;
+            let (_, value) = make_header(
+                b"authorization",
+                &crate::services::catalog_auth_scheme::header_value(
+                    target.service.auth_scheme.as_deref(),
+                    &target.credential,
+                )?,
+            )?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         "basic" => {

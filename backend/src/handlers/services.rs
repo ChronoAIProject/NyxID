@@ -57,6 +57,8 @@ pub struct CreateServiceRequest {
     /// Accepts "auth_method" or "auth_type" from frontend
     #[serde(alias = "auth_type")]
     pub auth_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
     pub auth_key_name: Option<String>,
     pub credential: Option<String>,
     /// "provider", "connection", or "internal". Defaults to "connection".
@@ -192,6 +194,8 @@ pub struct ServiceResponse {
     pub service_type: String,
     pub visibility: String,
     pub auth_method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
     pub auth_type: Option<String>,
     pub auth_key_name: String,
     pub is_active: bool,
@@ -470,6 +474,13 @@ impl std::ops::DerefMut for BillingUpdate {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateServiceRequest {
+    /// Omitted preserves the catalog scheme; null clears it to Bearer.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_scheme: Option<Option<String>>,
     pub service_category: Option<String>,
     pub offering_kind: Option<crate::models::downstream_service::OfferingKind>,
     pub topics: Option<Vec<String>>,
@@ -583,6 +594,7 @@ impl UpdateServiceRequest {
     /// billing editor shares this handler's write path and audit.
     pub(crate) fn billing_only(billing: BillingUpdate) -> Self {
         Self {
+            auth_scheme: None,
             service_category: None,
             offering_kind: None,
             topics: None,
@@ -1170,8 +1182,7 @@ pub async fn create_service_request(
         // caller-provided values so malformed names still fail validation.
         validation_body["name"] = String::new().into();
     }
-    let request: CreateServiceRequest = serde_json::from_value(validation_body)
-        .map_err(|_| AppError::ValidationError("Invalid service request fields".into()))?;
+    let request: CreateServiceRequest = decode_service_request(validation_body)?;
     if manager {
         super::catalog_authority::check_tool_create(&request)?;
     }
@@ -1182,9 +1193,30 @@ pub async fn create_service_request(
     } else {
         crate::services::tool_twin_service::prepare_create(&state.db, body).await?
     };
-    let body = serde_json::from_value(prepared)
-        .map_err(|_| AppError::ValidationError("Invalid service request fields".into()))?;
+    let body = decode_service_request(prepared)?;
     create_service(State(state), auth_user, tele, Json(body)).await
+}
+
+/// Surface only bounded field names from unknown-field failures. Other serde
+/// diagnostics can contain supplied values, including credentials or headers.
+fn decode_service_request<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> AppResult<T> {
+    serde_json::from_value(body).map_err(|error| {
+        let detail = error.to_string();
+        let field = detail
+            .strip_prefix("unknown field `")
+            .and_then(|rest| rest.split_once('`').map(|(field, _)| field))
+            .filter(|field| {
+                !field.is_empty()
+                    && field.len() <= 80
+                    && field
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            });
+        AppError::ValidationError(field.map_or_else(
+            || "Invalid service request fields".into(),
+            |field| format!("Unknown service request field `{field}`"),
+        ))
+    })
 }
 
 async fn create_service_inner(
@@ -1193,6 +1225,8 @@ async fn create_service_inner(
     tele: TelemetryContext,
     mut body: CreateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
+    // Keep large transaction and billing futures out of this handler's state.
+    // Direct callers and debug tests must fit the default thread stack too.
     if let Some(inference) = body.inference.as_mut() {
         if let Some(voice) = &inference.voice {
             crate::services::inference_voice::validate(voice)?;
@@ -1247,7 +1281,7 @@ async fn create_service_inner(
     )
     .await?
     {
-        state.billing.sync_service_price(&created).await?;
+        Box::pin(state.billing.sync_service_price(&created)).await?;
         if catalog_spec_sync::should_auto_sync_service_endpoints(&created) {
             catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), created.id.clone());
         }
@@ -1347,7 +1381,7 @@ async fn create_service_inner(
         )
         .await?
         {
-            state.billing.sync_service_price(&created).await?;
+            Box::pin(state.billing.sync_service_price(&created)).await?;
             if catalog_spec_sync::should_auto_sync_service_endpoints(&created) {
                 catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), created.id.clone());
             }
@@ -1419,6 +1453,7 @@ async fn create_service_inner(
             Some(other) => other.to_string(),
             None => "header".to_string(),
         };
+        crate::services::catalog_auth_scheme::validate(&auth_method, body.auth_scheme.as_deref())?;
 
         let auth_key_name =
             body.auth_key_name
@@ -1541,7 +1576,7 @@ async fn create_service_inner(
         let (encrypted_cred, oauth_client_id) = if auth_method == "oidc" {
             let callback_url = format!("{}/callback", base_url.trim_end_matches('/'));
             let client_name = format!("{} OIDC Client", body.name);
-            let (client, raw_secret) = oauth_client_service::create_client(
+            let (client, raw_secret) = Box::pin(oauth_client_service::create_client(
                 &state.db,
                 &client_name,
                 &[callback_url],
@@ -1554,7 +1589,7 @@ async fn create_service_inner(
                 None,
                 None,
                 &[],
-            )
+            ))
             .await?;
 
             let secret_to_encrypt = raw_secret.unwrap_or_default();
@@ -1573,12 +1608,12 @@ async fn create_service_inner(
             (enc, None)
         };
 
-        let docs_metadata = api_docs_service::discover_service_docs_for_category(
+        let docs_metadata = Box::pin(api_docs_service::discover_service_docs_for_category(
             &service_category,
             base_url,
             None,
             None,
-        )
+        ))
         .await;
 
         (
@@ -1598,6 +1633,7 @@ async fn create_service_inner(
         )
     } else {
         if body.base_url.is_some()
+            || body.auth_scheme.is_some()
             || body.auth_method.is_some()
             || body.auth_key_name.is_some()
             || body.credential.is_some()
@@ -1789,6 +1825,7 @@ async fn create_service_inner(
         service_type: service_type.clone(),
         visibility,
         auth_method: auth_method.clone(),
+        auth_scheme: body.auth_scheme.clone(),
         auth_type,
         auth_key_name,
         credential_encrypted: encrypted_cred,
@@ -1880,25 +1917,27 @@ async fn create_service_inner(
         }
     }
     let new_service = if body.twin_of_service_id.is_some() {
-        crate::services::catalog_skill_service::create_with_endpoints(
-            &state.db,
-            &new_service,
-            &auth_user.user_id.to_string(),
-            &initial_skills,
-            &skill_request_id,
-            &create_fingerprint,
-            &twin_endpoints,
+        Box::pin(
+            crate::services::catalog_skill_service::create_with_endpoints(
+                &state.db,
+                &new_service,
+                &auth_user.user_id.to_string(),
+                &initial_skills,
+                &skill_request_id,
+                &create_fingerprint,
+                &twin_endpoints,
+            ),
         )
         .await?
     } else {
-        crate::services::catalog_skill_service::create(
+        Box::pin(crate::services::catalog_skill_service::create(
             &state.db,
             &new_service,
             &auth_user.user_id.to_string(),
             &initial_skills,
             &skill_request_id,
             &create_fingerprint,
-        )
+        ))
         .await?
     };
     let id = new_service.id.clone();
@@ -1923,7 +1962,7 @@ async fn create_service_inner(
             || billing.byok_pricing.is_some()
             || billing.platform_key_pricing.is_some()
     }) {
-        state.billing.sync_service_price(&new_service).await?;
+        Box::pin(state.billing.sync_service_price(&new_service)).await?;
         audit_service::log_for_user(
             state.db.clone(),
             &auth_user,
@@ -2020,14 +2059,14 @@ pub async fn delete_service(
             == crate::models::downstream_service::OfferingKind::Tool
             || super::services_helpers::is_admin(&state, &auth_user).await?,
     };
-    crate::services::catalog_mutation_service::commit_update(
+    Box::pin(crate::services::catalog_mutation_service::commit_update(
         &state.db,
         &service,
         &authority,
         &doc! {"is_active": false, "updated_at": bson::DateTime::from_chrono(now)},
         &doc! {"_id": &service_id},
         state.audit_chain_hmac_key.as_ref().as_ref(),
-    )
+    ))
     .await?;
 
     // SEC-M2: Cascade deactivation - wipe all user credentials for this service
@@ -2166,6 +2205,25 @@ pub async fn update_service(
     .await
 }
 
+/// Raw ingress retains the typed handler's authorization and mutation path,
+/// while preventing serde's type/enum errors from echoing request values.
+pub async fn update_service_request(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    Path(service_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> AppResult<Json<ServiceResponse>> {
+    update_service(
+        State(state),
+        auth_user,
+        tele,
+        Path(service_id),
+        Json(decode_service_request(body)?),
+    )
+    .await
+}
+
 pub(crate) async fn update_service_inner(
     state: AppState,
     auth_user: AuthUser,
@@ -2173,6 +2231,9 @@ pub(crate) async fn update_service_inner(
     service_id: String,
     mut body: UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
+    // Keep large transaction and billing futures out of this handler's state.
+    // Direct callers and debug tests must fit the default thread stack too.
+    super::login_client_context::require_first_party_human(&auth_user)?;
     if let Some(inference) = body.inference.as_mut().and_then(Option::as_mut) {
         if let Some(voice) = &inference.voice {
             crate::services::inference_voice::validate(voice)?;
@@ -2273,7 +2334,7 @@ pub(crate) async fn update_service_inner(
         )
         .await?
     {
-        let result = crate::services::catalog_skill_service::commit_with_audit(
+        let result = Box::pin(crate::services::catalog_skill_service::commit_with_audit(
             &state.db,
             &service_id,
             &crate::services::catalog_skill_service::SkillActor::Human {
@@ -2291,9 +2352,15 @@ pub(crate) async fn update_service_inner(
                 state.audit_chain_hmac_key.as_ref().as_ref(),
             )),
             None, // Durable receipt replay does not perform a new mutation.
-        )
+        ))
         .await?;
-        return complete_replayed_skill_update(&state, &auth_user, &result.service, &body).await;
+        return Box::pin(complete_replayed_skill_update(
+            &state,
+            &auth_user,
+            &result.service,
+            &body,
+        ))
+        .await;
     }
     if body.inference.is_some()
         || body.platform_key.is_some()
@@ -2417,6 +2484,13 @@ pub(crate) async fn update_service_inner(
         require_admin(&state, &auth_user).await?;
     }
     let mut proposed = service.clone();
+    if let Some(scheme) = &body.auth_scheme {
+        proposed.auth_scheme = scheme.clone();
+    }
+    crate::services::catalog_auth_scheme::validate(
+        &proposed.auth_method,
+        proposed.auth_scheme.as_deref(),
+    )?;
     if let Some(category) = &body.service_category {
         proposed.service_category =
             derive_http_service_category(&service.auth_method, Some(category))?;
@@ -2449,6 +2523,12 @@ pub(crate) async fn update_service_inner(
     }
     crate::services::tool_topics::validate_tool_service(&proposed)?;
     let mut set_doc = doc! {};
+    if body.auth_scheme.is_some() {
+        set_doc.insert(
+            "auth_scheme",
+            bson::to_bson(&proposed.auth_scheme).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
     if body.clear_credential {
         if body.credential.is_some() {
             return Err(AppError::ValidationError(
@@ -2752,11 +2832,11 @@ pub(crate) async fn update_service_inner(
                 None
             } else {
                 Some(
-                    api_docs_service::discover_service_docs(
+                    Box::pin(api_docs_service::discover_service_docs(
                         docs_base_url,
                         explicit_openapi,
                         explicit_asyncapi,
-                    )
+                    ))
                     .await,
                 )
             };
@@ -3219,7 +3299,7 @@ pub(crate) async fn update_service_inner(
             .skills_request_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let result = crate::services::catalog_skill_service::commit_with_audit(
+        let result = Box::pin(crate::services::catalog_skill_service::commit_with_audit(
             &state.db,
             &service_id,
             &crate::services::catalog_skill_service::SkillActor::Human {
@@ -3237,11 +3317,16 @@ pub(crate) async fn update_service_inner(
                 state.audit_chain_hmac_key.as_ref().as_ref(),
             )),
             Some((&service, &mutation_authority)),
-        )
+        ))
         .await?;
         if result.replayed {
-            return complete_replayed_skill_update(&state, &auth_user, &result.service, &body)
-                .await;
+            return Box::pin(complete_replayed_skill_update(
+                &state,
+                &auth_user,
+                &result.service,
+                &body,
+            ))
+            .await;
         }
         if !result.mutated {
             let mut routing = compute_viewer_routing(
@@ -3274,14 +3359,14 @@ pub(crate) async fn update_service_inner(
         }
         result.service
     } else {
-        crate::services::catalog_mutation_service::commit_update(
+        Box::pin(crate::services::catalog_mutation_service::commit_update(
             &state.db,
             &service,
             &mutation_authority,
             &set_doc,
             &catalog_filter,
             state.audit_chain_hmac_key.as_ref().as_ref(),
-        )
+        ))
         .await?
     };
 
@@ -3304,7 +3389,7 @@ pub(crate) async fn update_service_inner(
         );
     }
     if lane_price_changed {
-        state.billing.sync_service_price(&committed_service).await?;
+        Box::pin(state.billing.sync_service_price(&committed_service)).await?;
         audit_service::log_for_user(
             state.db.clone(),
             &auth_user,
@@ -3326,7 +3411,7 @@ pub(crate) async fn update_service_inner(
             .as_ref()
             .and_then(|billing| billing.platform_pricing.as_ref())
             .is_some();
-        state.billing.sync_service_price(&committed_service).await?;
+        Box::pin(state.billing.sync_service_price(&committed_service)).await?;
         audit_service::log_for_user(
             state.db.clone(),
             &auth_user,
@@ -3346,13 +3431,13 @@ pub(crate) async fn update_service_inner(
     }
 
     if identity_changed {
-        catalog_identity_service::propagate_catalog_update(
+        Box::pin(catalog_identity_service::propagate_catalog_update(
             &state.db,
             &audit_service::AuditActor::from_auth_user(&auth_user),
             &service_id,
             catalog_identity_service::CatalogIdentityState::from_service(&service),
             catalog_identity_service::CatalogIdentityState::from_service(&committed_service),
-        )
+        ))
         .await?;
     }
 
@@ -3461,7 +3546,7 @@ async fn complete_replayed_skill_update(
     body: &UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
     if body.billing.is_some() {
-        state.billing.sync_service_price(current).await?;
+        Box::pin(state.billing.sync_service_price(current)).await?;
     }
     if current.service_type == "http"
         && body.base_url.is_some()
@@ -4005,6 +4090,7 @@ mod tests {
             service_type: Some("http".to_string()),
             base_url: Some(base_url),
             auth_method: Some("none".to_string()),
+            auth_scheme: None,
             auth_key_name: None,
             credential: None,
             platform_key: None,
@@ -6635,6 +6721,67 @@ mod tests {
 #[cfg(test)]
 mod platform_key_request_tests {
     use super::*;
+    #[test]
+    fn first_party_service_payloads_keep_the_strict_request_contract() {
+        for (caller, payload) in [
+            (
+                "frontend HTTP",
+                serde_json::json!({"name":"Mail","description":"Mail","service_type":"http","visibility":"public","base_url":"https://mail.example.test","auth_type":"bearer","auth_key_name":"Authorization","auth_scheme":"Zoho-oauthtoken","provider_config_id":null,"inference":null,"platform_key":{"enabled":false,"audience":"restricted","allowed_owner_ids":[]},"proxy_operation_policy":null,"billing":{"byok_pricing":null,"platform_key_pricing":null},"service_category":"connection"}),
+            ),
+            (
+                "frontend SSH",
+                serde_json::json!({"name":"SSH","service_type":"ssh","visibility":"private","ssh_config":{"host":"host.example.test","port":22,"certificate_auth_enabled":true,"certificate_ttl_minutes":30,"allowed_principals":[]}}),
+            ),
+            (
+                "service CLI/catalog-admin and twin script",
+                serde_json::json!({"slug":"tools-example","name":"Example","twin_of_service_id":"api-example","offering_kind":"tool","topics":["web-search"],"supplier":"Local","credential":"local-only"}),
+            ),
+            (
+                "Catalog manifest API fields",
+                serde_json::json!({"slug":"api-mail","name":"Mail","base_url":"https://mail.example.test","auth_method":"bearer","auth_scheme":"Zoho-oauthtoken","provider_config_id":"provider","homepage_url":"https://mail.example.test","auth_notes":"Documented scheme","known_limitations":"One region"}),
+            ),
+            (
+                "Tools manifest API fields",
+                serde_json::json!({"slug":"tools-example","name":"Example","base_url":"https://api.example.test","auth_method":"bearer","offering_kind":"tool","service_category":"internal","openapi_spec_url":"https://api.example.test/openapi.json","topics":["web-search"],"supplier":"Example"}),
+            ),
+            (
+                "API documentation create",
+                serde_json::json!({"name":"Internal API","slug":"internal-api","base_url":"https://api.example.test","auth_type":"bearer","credential":"local-only","service_category":"internal"}),
+            ),
+        ] {
+            assert!(
+                decode_service_request::<CreateServiceRequest>(payload).is_ok(),
+                "{caller}"
+            );
+        }
+        for (caller, payload) in [
+            (
+                "frontend HTTP patch",
+                serde_json::json!({"name":"Mail","description":"Mail","visibility":"public","base_url":"https://mail.example.test","auth_scheme":null,"offering_kind":"ai_service","topics":[],"supplier":null,"openapi_spec_url":"","asyncapi_spec_url":"","identity_propagation_mode":"none","identity_include_user_id":false,"identity_include_email":false,"identity_include_name":false,"identity_jwt_audience":"","forward_access_token":false,"inject_delegation_token":false,"delegation_token_scope":"","homepage_url":"","repository_url":"","issues_url":"","auth_notes":"","known_limitations":"","required_permissions":[],"examples_url":"","developer_app_ids":[],"inference":null,"platform_key":null,"billing":{"byok_pricing":null,"platform_key_pricing":null},"ws_frame_injections":[],"default_request_headers":null,"proxy_operation_policy":null}),
+            ),
+            (
+                "service CLI/catalog-admin",
+                serde_json::json!({"name":"Renamed","base_url":"https://api.example.test","is_active":true,"platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids":[]},"billing":{"byok_pricing":{"metric":"requests","credits_per_unit":"0.1"}}}),
+            ),
+            (
+                "Catalog manifest drift",
+                serde_json::json!({"description":"Read mail","auth_scheme":"Zoho-oauthtoken","auth_notes":"Vendor scheme","homepage_url":"https://mail.example.test"}),
+            ),
+            (
+                "Tools manifest drift",
+                serde_json::json!({"description":"Search","topics":["web-search"],"supplier":"Local","custom_user_agent":"Local/1","credential":"local-only"}),
+            ),
+            (
+                "API documentation update/legacy spec alias",
+                serde_json::json!({"name":"Updated API","description":"Updated description","base_url":"https://api.example.test","api_spec_url":"https://api.example.test/openapi.json"}),
+            ),
+        ] {
+            assert!(
+                decode_service_request::<UpdateServiceRequest>(payload).is_ok(),
+                "{caller}"
+            );
+        }
+    }
     #[test]
     fn old_admin_payloads_leave_new_metadata_and_lanes_absent() {
         let request: UpdateServiceRequest =

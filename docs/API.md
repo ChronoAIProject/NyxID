@@ -1347,6 +1347,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 | `base_url`         | string | HTTP only | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
 | `auth_type`        | string | HTTP only | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
 | `auth_key_name`    | string | HTTP only | Header or query param name. Defaults based on `auth_type`.                            |
+| `auth_scheme` | string | No | Catalog bearer authorization scheme: an RFC 9110 token of 1–64 ASCII bytes. Omitted means `Bearer`. Valid only with bearer auth (including the `oauth2` alias). No user-connection override. |
 | `credential`       | string | HTTP only | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
 | `service_category` | string | No       | `"connection"` or `"internal"` for SSH services; `"connection"` (default), `"internal"`, or `"provider"` for HTTP. |
 | `ssh_config`       | object | SSH only | SSH target configuration with `host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, and `allowed_principals` |
@@ -1555,6 +1556,7 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `name`         | string  | No       | New display name (1-200 chars)                                          |
 | `description`  | string  | No       | New description (max 500 chars)                                         |
 | `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
+| `auth_scheme` | string or null | No | Replace the bearer scheme; `null` restores `Bearer`, omission preserves it. Catalog Managers follow own/shared row field rules; Tools Managers cannot set it. Admin Tool changes demote operations. |
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
 | `openapi_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars). The legacy alias `api_spec_url` is also accepted. |
 | `asyncapi_spec_url` | string  | No       | URL to an AsyncAPI spec for WebSocket or SSE documentation (max 2048 chars) |

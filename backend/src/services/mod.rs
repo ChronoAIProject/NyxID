@@ -31,6 +31,7 @@ pub mod auth_device_service;
 pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
+pub mod catalog_auth_scheme;
 pub mod catalog_delegation_service;
 pub mod catalog_discovery_service;
 pub mod catalog_identity_service;

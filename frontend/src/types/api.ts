@@ -322,6 +322,7 @@ export interface DownstreamService {
   readonly service_type: string;
   readonly visibility: string;
   readonly auth_method: string;
+  readonly auth_scheme?: string | null;
   readonly auth_type: string | null;
   readonly auth_key_name: string;
   readonly is_active: boolean;
@@ -511,6 +512,7 @@ export type CreateServicePayload =
       /// Required when auth_type is "body" (e.g. "app_secret" for Lark).
       /// Also accepted as an override for other auth types.
       readonly auth_key_name?: string;
+      readonly auth_scheme?: string;
       /** Write-only master credential for an internal service row. */
       readonly credential?: string;
       readonly service_category?: string;
@@ -535,6 +537,7 @@ export type UpdateServicePayload =
       readonly description?: string;
       readonly visibility?: string;
       readonly base_url?: string;
+      readonly auth_scheme?: string | null;
       readonly is_active?: boolean;
       readonly openapi_spec_url?: string;
       readonly asyncapi_spec_url?: string;
