@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub const COLLECTION_NAME: &str = "assistant_checkpoints";
 
@@ -7,7 +8,7 @@ pub const COLLECTION_NAME: &str = "assistant_checkpoints";
 /// written in the same transaction that settles each turn. `_id` is the
 /// conversation id. Metadata and bounded excerpts only: no credentials, tool
 /// arguments or tool results.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantCheckpoint {
     #[serde(rename = "_id")]
     pub conversation_id: String,
@@ -39,9 +40,60 @@ pub struct AssistantCheckpoint {
     pub updated_at: DateTime<Utc>,
 }
 
+impl fmt::Debug for AssistantCheckpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssistantCheckpoint")
+            .field("conversation_id", &self.conversation_id)
+            .field("user_id", &self.user_id)
+            .field("turn_id", &self.turn_id)
+            .field("status", &self.status)
+            .field("error_code", &self.error_code)
+            .field("goal_len", &self.goal.as_ref().map(String::len))
+            .field("completed_actions", &self.completed_actions.len())
+            .field("failed_actions", &self.failed_actions.len())
+            .field("output_len", &self.output.as_ref().map(String::len))
+            .field("last_successful_turn_id", &self.last_successful_turn_id)
+            .field("last_successful_at", &self.last_successful_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointAction {
     /// The tool identifier shown on the activity; never arguments.
     pub label: String,
     pub turn_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_goal_output_and_action_labels() {
+        let debug = format!(
+            "{:?}",
+            AssistantCheckpoint {
+                conversation_id: "conversation".into(),
+                user_id: "user".into(),
+                turn_id: "turn".into(),
+                status: "failed".into(),
+                error_code: None,
+                goal: Some("sample goal text".into()),
+                completed_actions: vec![CheckpointAction {
+                    label: "sample action text".into(),
+                    turn_id: "turn".into(),
+                }],
+                failed_actions: Vec::new(),
+                output: Some("sample assistant output".into()),
+                last_successful_turn_id: None,
+                last_successful_at: None,
+                updated_at: Utc::now(),
+            }
+        );
+        assert!(!debug.contains("sample goal text"));
+        assert!(!debug.contains("sample assistant output"));
+        assert!(!debug.contains("sample action text"));
+    }
 }
