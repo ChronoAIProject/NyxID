@@ -25,16 +25,26 @@ fn input(agent: &str) -> Value {
     json!({"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
 
-/// The owner's signed identity, which publication and the pre-review Ornn
-/// format check use.
-fn validator(f: &Fixture) -> crate::handlers::agent_skills::Reader<'_> {
-    crate::handlers::agent_skills::Reader {
-        state: &f.state,
-        person: &f.owner,
-        thread_key: None,
-        scopes: None,
-        chat: None,
-    }
+/// The pre-review format check NyxID sends while drafting (its package's
+/// operation ID is the fixed `preflight`), as opposed to publication traffic.
+pub(super) fn preflight_request(request: &wiremock::Request) -> bool {
+    const MARKER: &[u8] = br#"operation-id: "preflight""#;
+    request.url.path() == "/api/v1/skill-format/validate"
+        && request
+            .body
+            .windows(MARKER.len())
+            .any(|window| window == MARKER)
+}
+
+/// Ornn requests other than drafting's pre-review format check.
+async fn ornn_requests(server: &MockServer) -> Vec<wiremock::Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| !preflight_request(request))
+        .collect()
 }
 
 async fn fixture(name: &str) -> Fixture {
@@ -81,7 +91,7 @@ async fn make_with_access(
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
-        &validator(f),
+        &reader,
     )
     .await
     .unwrap();
@@ -172,7 +182,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
-        &validator(&f),
+        &reader,
     )
     .await;
     assert!(
@@ -205,7 +215,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
             .unwrap(),
         1
     );
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
 
@@ -3152,7 +3162,7 @@ async fn authored_denial_and_expiry_never_publish() {
         .await
         .unwrap();
     assert!(finish(&f, card, true).await.is_err());
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
 
@@ -3168,7 +3178,7 @@ async fn authored_changed_content_refuses_old_card_before_ornn() {
         .await
         .unwrap();
     assert!(finish(&f, card, true).await.is_err());
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
 
@@ -4326,7 +4336,7 @@ async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
         &f.chat,
         serde_json::from_value(input(&f.chat.agent_id)).unwrap(),
         &reader,
-        &validator(&f),
+        &reader,
     )
     .await
     .unwrap();
@@ -4381,7 +4391,7 @@ async fn draft_in_chat(f: &Fixture, chat: &ChatAuthority) -> AppResult<Value> {
         chat,
         parse_input(&input(&f.chat.agent_id)).unwrap(),
         &reader,
-        &validator(f),
+        &reader,
     )
     .await
 }
@@ -4960,7 +4970,7 @@ async fn ornn_format_verdict_refuses_the_draft_before_review() {
         &f.chat,
         serde_json::from_value(input(&f.chat.agent_id)).unwrap(),
         &reader,
-        &validator(&f),
+        &reader,
     )
     .await
     .unwrap_err();
@@ -5056,5 +5066,68 @@ async fn ornn_field_rules_are_checked_when_authoring() {
             "{error:?}"
         );
     }
+    f.state.db.drop().await.unwrap();
+}
+
+/// A specialist drafts its own skill in the default (denied) access mode; the
+/// owner's approval publishes and pins it to that specialist.
+#[tokio::test]
+async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
+    let f =
+        crate::services::assistant_authority_tests::fixture("authoring_specialist_publish").await;
+    assert!(!f.chat.is_orchestrator());
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"specialist_access_requests":"denied"}},
+        )
+        .await
+        .unwrap();
+    review::migrate_publication_targets(&f.state, false)
+        .await
+        .unwrap();
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        learning::FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+        )
+        .mount(&server)
+        .await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    assert_eq!(row.agent_id, f.chat.agent_id);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(preflight_request),
+        "the specialist's draft gets Ornn's pre-review check"
+    );
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &id, "POST").await;
+    assert_eq!(finish(&f, card, true).await.unwrap().status, "used");
+    let agent = f
+        .state
+        .db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(agent.skills.iter().any(|pin| pin.skill_id == id));
     f.state.db.drop().await.unwrap();
 }

@@ -770,9 +770,13 @@ membership resolution when no relevant rollout is enabled. Owner NyxBot and
 specialist chats read the authoring flag during tool discovery; a failed lookup
 hides only the drafting tool. Guests cannot draft.
 
-Before the owner card is raised, NyxID builds the package exactly as publication
-will (the improvement's interface metadata comes from its already-accepted base)
-and asks Ornn's `/skill-format/validate` as the owner. An explicit refusal
+Before the owner card is raised, NyxID builds the package as publication will,
+except that an improvement's interface metadata (already accepted by Ornn) is not
+re-read, and asks Ornn's `/skill-format/validate`. Agent drafts send this check
+with the drafting chat key, so approval policy, the live-turn fence and
+attribution apply; where policy would require an approval, or a webhook turn's
+policy refuses the request, the check is skipped without raising a prompt. Owner
+edits started in the app send it as the person. An explicit refusal
 returns `ornn_format_rejected` with Ornn's rule identifiers in `ornn_rules`
 (sanitized, at most 10; Ornn's messages are never relayed because they can quote
 filenames), so the author fixes the draft first; nothing is stored. An
@@ -781,8 +785,14 @@ after approval. Supporting files outside `references/`, `scripts/` or `assets/`
 are placed under `references/` both in the reviewed draft and in the package
 (existing packages keep their bytes). Authoring also refuses `<`/`>` in the
 description and `claude`/`anthropic` in the name. Assistant chat keys cannot call
-Ornn's raw create, pull or update routes; they are told to use
-`draft_agent_skill`, so no agent ever needs or asks for a ZIP.
+Ornn's raw create, pull, update, refresh or source routes; they are told to use
+`draft_agent_skill`, so no agent ever needs or asks for a ZIP. Specialist cards
+approve only their own agent's drafts.
+
+Rollout: stored proposals whose files sit outside the allowed folders were
+unpublishable before (Ornn refused them); after upgrade their rebuilt package
+differs from the reviewed hash, so they fail with a conflict instead and should
+be discarded and drafted again.
 
 Build agents from description (role/scope), persona (tone/style), and Ornn skills
 (repeatable procedures, checklists, references, templates and workflows). Search,

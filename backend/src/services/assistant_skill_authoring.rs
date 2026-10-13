@@ -172,8 +172,8 @@ pub(crate) fn parse_input(value: &Value) -> AppResult<DraftInput> {
     serde_json::from_value(value.clone()).map_err(|_| invalid("invalid_shape", "draft"))
 }
 
-/// `reader` reads as the drafting chat; `validator` is the owner's signed
-/// identity that publication itself uses, for Ornn's format check.
+/// `reader` reads as the drafting chat; `validator` sends the pre-review
+/// format check (the drafting chat for agents, the person for owner drafts).
 pub async fn create(
     state: &AppState,
     chat: &ChatAuthority,
@@ -415,6 +415,8 @@ pub async fn create_improve_draft(
                 "skill_files_unsupported: only .md and .txt text files can be edited here; improve this skill through NyxBot".into(),
             ));
         };
+        // The owner reviews the paths Ornn will receive.
+        let path = super::assistant_learning_publication::package_path(&path).into_owned();
         extra.push(GeneratedFile { path, content });
     }
     let description = agent
