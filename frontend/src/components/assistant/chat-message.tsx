@@ -13,7 +13,6 @@ import {
   CircleAlert,
   MessageSquare,
   Sparkles,
-  Wrench,
   X,
   ThumbsDown,
   ThumbsUp,
@@ -27,6 +26,7 @@ import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
+import { describeToolActivity } from "@/lib/assistant/tool-activity-labels";
 import { MachineToolCard } from "./machine-tool-card";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
@@ -78,77 +78,128 @@ function ThinkingBlock({
   );
 }
 
-function ActivityBlock({ message }: { readonly message: ChatMessage }) {
+function StatusIcon({
+  status,
+  className,
+}: {
+  readonly status: "running" | "done" | "error";
+  readonly className?: string;
+}) {
+  if (status === "running") return <PulseDot className={cn("mx-[3px]", className)} />;
+  if (status === "error") {
+    return <X aria-label="Failed" className={cn("h-3 w-3 shrink-0 text-destructive", className)} />;
+  }
+  return <Check aria-label="Succeeded" className={cn("h-3 w-3 shrink-0 text-success", className)} />;
+}
+
+function ActivityBlock({
+  message,
+  streaming,
+}: {
+  readonly message: ChatMessage;
+  readonly streaming: boolean;
+}) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const count = steps.length + tools.length;
   const [open, setOpen] = useState(false);
   if (!count) return null;
-  const running =
-    steps.some((step) => step.status === "running") ||
-    tools.some((tool) => tool.status === "running");
+  const statuses = [...steps, ...tools].map((item) => item.status);
+  const runningCount = statuses.filter((status) => status === "running").length;
+  const failedCount = statuses.filter((status) => status === "error").length;
+  const runningTools = streaming
+    ? tools.filter((tool) => tool.status === "running")
+    : [];
+  const current = runningTools.at(-1);
   return (
-    <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-muted-foreground hover:bg-overlay"
-      >
-        <ChevronRight
-          className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
-        />
-        {running ? (
-          <PulseDot />
-        ) : tools.some((tool) => tool.status === "error") ||
-          steps.some((step) => step.status === "error") ? (
-          <X className="h-3 w-3 text-destructive" />
-        ) : (
-          <Check className="h-3 w-3 text-success" />
-        )}
-        <span>
-          {count} {count === 1 ? "action" : "actions"}
-        </span>
-      </button>
-      {open ? (
-        <div className="space-y-1 border-t border-hairline px-2.5 py-2">
-          {steps.map((step) => (
-            <div key={step.id} className="flex items-start gap-2 text-11">
-              {step.status === "running" ? (
-                <PulseDot className="mt-1" />
-              ) : step.status === "error" ? (
-                <X className="mt-0.5 h-3 w-3 text-destructive" />
-              ) : (
-                <Check className="mt-0.5 h-3 w-3 text-success" />
-              )}
-              <span className="min-w-0 flex-1 break-words text-muted-foreground">
-                {step.name || "Processing"}
-              </span>
-              {step.stepType ? (
-                <span className="shrink-0 font-mono text-9 text-text-tertiary">
-                  {step.stepType}
+    <div className="mb-2">
+      <div className="overflow-hidden rounded-lg border border-hairline bg-overlay/35">
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+          className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-muted-foreground hover:bg-overlay"
+        >
+          <ChevronRight
+            className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
+          />
+          <StatusIcon
+            status={runningCount ? "running" : failedCount ? "error" : "done"}
+          />
+          <span>
+            {count} {count === 1 ? "action" : "actions"}
+            {failedCount ? (
+              <span className="text-destructive"> · {failedCount} failed</span>
+            ) : null}
+            {runningCount ? <span> · {runningCount} running</span> : null}
+          </span>
+        </button>
+        {open ? (
+          <div className="space-y-1 border-t border-hairline px-2.5 py-2">
+            {steps.map((step) => (
+              <div key={step.id} className="flex items-start gap-2 text-11">
+                <StatusIcon status={step.status} className="mt-0.5" />
+                <span className="min-w-0 flex-1 break-words text-muted-foreground">
+                  {step.name || "Processing"}
                 </span>
-              ) : null}
-            </div>
-          ))}
-          {tools.map((tool) => (
-            <details key={tool.id} className="text-11 text-muted-foreground">
-              <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5">
-                {tool.status === "running" ? (
-                  <PulseDot />
-                ) : (
-                  <Wrench className="h-3 w-3 text-text-tertiary" />
-                )}
-                <span className="font-mono">{tool.name || tool.id}</span>
-              </summary>
-              {tool.result ? (
-                <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
-                  {tool.result.slice(0, 500)}
-                </pre>
-              ) : null}
-            </details>
-          ))}
-        </div>
+                {step.stepType ? (
+                  <span className="shrink-0 font-mono text-9 text-text-tertiary">
+                    {step.stepType}
+                  </span>
+                ) : null}
+              </div>
+            ))}
+            {tools.map((tool) => {
+              const name = tool.name || tool.id;
+              return (
+                <details
+                  key={tool.id}
+                  data-tool-status={tool.status}
+                  className="text-11 text-muted-foreground"
+                >
+                  <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5">
+                    <StatusIcon status={tool.status} />
+                    <span
+                      className={cn(
+                        "min-w-0 flex-1 truncate",
+                        tool.status === "error" && "text-destructive",
+                      )}
+                    >
+                      {describeToolActivity(name).action}
+                    </span>
+                    <span className="max-w-[45%] shrink-0 truncate font-mono text-10 text-text-tertiary">
+                      {name}
+                    </span>
+                  </summary>
+                  {tool.result ? (
+                    <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
+                      {tool.result.slice(0, 500)}
+                    </pre>
+                  ) : null}
+                </details>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+      {current ? (
+        <p
+          data-running-tool
+          role="status"
+          aria-live="polite"
+          className="mt-1.5 flex items-center gap-2 px-1 text-11 text-muted-foreground"
+        >
+          <PulseDot />
+          <span className="min-w-0 truncate">
+            {describeToolActivity(current.name || current.id).progress}…
+            {runningTools.length > 1 ? (
+              <span className="text-text-tertiary">
+                {" "}
+                and {runningTools.length - 1} more
+              </span>
+            ) : null}
+          </span>
+        </p>
       ) : null}
     </div>
   );
@@ -309,9 +360,11 @@ export function ChatMessageBubble({
     message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
-  const runningTool = streaming
-    ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
-    : undefined;
+  const toolInProgress =
+    streaming &&
+    Boolean(
+      message.toolCalls?.some((tool) => !tool.machine && tool.status === "running"),
+    );
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -327,7 +380,7 @@ export function ChatMessageBubble({
       </span>
       <div className="min-w-0 max-w-[min(84%,758px)] flex-1 pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
-        <ActivityBlock message={message} />
+        <ActivityBlock message={message} streaming={streaming} />
         {message.toolCalls
           ?.filter((tool) => tool.machine)
           .map((tool) => (
@@ -387,7 +440,7 @@ export function ChatMessageBubble({
             <ArtifactBlock block={artifact} />
           </div>
         ))}
-        {streaming && !content ? (
+        {streaming && !content && !toolInProgress ? (
           <div
             data-streaming-dots
             role="status"
@@ -397,14 +450,6 @@ export function ChatMessageBubble({
             <PulseDot />
             <PulseDot className="[animation-delay:120ms]" />
             <PulseDot className="[animation-delay:240ms]" />
-            {runningTool ? (
-              <span
-                data-running-tool
-                className="ml-1.5 truncate font-mono text-11 text-muted-foreground"
-              >
-                {runningTool.name}
-              </span>
-            ) : null}
           </div>
         ) : null}
         {message.status === "error" && message.error ? (

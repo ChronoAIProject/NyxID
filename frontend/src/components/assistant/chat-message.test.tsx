@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as telemetry from "@/lib/telemetry";
 import { api } from "@/lib/api-client";
@@ -215,6 +215,7 @@ describe("canonical chat presentation", () => {
     fireEvent.click(screen.getByRole("button", { name: /2 actions/i }));
     expect(screen.getByText("Inspect")).toBeVisible();
     expect(screen.getByText("catalog.read")).toBeVisible();
+    expect(screen.getByText("Run catalog.read")).toBeVisible();
     expect(screen.queryByText(/secret/)).not.toBeInTheDocument();
     expect(screen.getByText("after").tagName).toBe("STRONG");
     expect(screen.getByText("Run failed")).toBeVisible();
@@ -326,7 +327,7 @@ describe("canonical chat presentation", () => {
     expect(container.querySelector("[data-streaming-caret]")).not.toBeNull();
   });
 
-  it("names the running tool beside the streaming dots until text arrives", () => {
+  it("narrates the running tool below the actions until the turn settles", () => {
     const running = {
       ...BASE,
       content: "",
@@ -341,7 +342,7 @@ describe("canonical chat presentation", () => {
         },
         {
           id: "t2",
-          name: "github__list_issues",
+          name: "api-github-4__list_repo_issues",
           status: "running" as const,
           startedAt: 2,
         },
@@ -351,17 +352,44 @@ describe("canonical chat presentation", () => {
       <ChatMessageBubble message={running} />,
     );
     expect(container.querySelector("[data-running-tool]")).toHaveTextContent(
-      "github__list_issues",
+      "Listing repo issues on GitHub…",
     );
-    expect(screen.getByRole("button", { name: /2 actions/i })).toBeVisible();
+    expect(container.querySelector("[data-streaming-dots]")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /2 actions · 1 running/i }),
+    ).toBeVisible();
     rerender(
       <ChatMessageBubble message={{ ...running, content: "Found 3 issues" }} />,
     );
-    expect(container.querySelector("[data-running-tool]")).toBeNull();
+    expect(container.querySelector("[data-running-tool]")).toHaveTextContent(
+      "Listing repo issues on GitHub…",
+    );
     rerender(
       <ChatMessageBubble message={{ ...running, status: "complete" }} />,
     );
     expect(container.querySelector("[data-running-tool]")).toBeNull();
+  });
+
+  it("marks each action as succeeded or failed", () => {
+    const { container } = render(
+      <ChatMessageBubble
+        message={{
+          ...BASE,
+          toolCalls: [
+            { id: "t1", name: "nyx__search_tools", status: "done", startedAt: 1, finishedAt: 2 },
+            { id: "t2", name: "api-github-4__get_issue", status: "error", startedAt: 2, finishedAt: 3 },
+          ],
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2 actions · 1 failed/i }));
+    const rows = container.querySelectorAll("[data-tool-status]");
+    expect([...rows].map((row) => row.getAttribute("data-tool-status"))).toEqual(["done", "error"]);
+    expect(rows[0]).toHaveTextContent("Search available tools");
+    expect(within(rows[0] as HTMLElement).getByLabelText("Succeeded")).toBeInTheDocument();
+    expect(rows[1]).toHaveTextContent("Read issue on GitHub");
+    expect(rows[1]).toHaveTextContent("api-github-4__get_issue");
+    expect(within(rows[1] as HTMLElement).getByLabelText("Failed")).toBeInTheDocument();
   });
 
   it("renders tool images from the authenticated client and reports failures", async () => {

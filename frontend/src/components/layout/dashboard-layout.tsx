@@ -105,7 +105,7 @@ export function DashboardLayout() {
     <RightPanelContext.Provider value={{ setRightPanel }}>
     <BreadcrumbLabelContext.Provider value={{ pathname, labels: breadcrumbLabels, setLabel: setBreadcrumbLabel, sections: breadcrumbSections, setSection: setBreadcrumbSection }}>
       <div
-        className="flex flex-col h-dvh overflow-hidden bg-background"
+        className="relative flex flex-col h-dvh overflow-hidden bg-background"
         style={{
           paddingTop: "var(--sat)",
           paddingLeft: "var(--sal)",
@@ -125,7 +125,7 @@ export function DashboardLayout() {
           </div>
 
           <main
-            className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
+            className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
             style={{ paddingBottom: "max(2rem, var(--sab))" }}
           >
             <div className="w-full">
