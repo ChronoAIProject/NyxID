@@ -125,7 +125,7 @@ export function DashboardLayout() {
           </div>
 
           <main
-            className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
+            className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
             style={{ paddingBottom: "max(2rem, var(--sab))" }}
           >
             <div className="w-full">

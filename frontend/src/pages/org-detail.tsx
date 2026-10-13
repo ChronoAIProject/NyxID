@@ -948,7 +948,7 @@ function RolePermissionCard({
               This org has no services yet.
             </div>
           ) : (
-            <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+            <div className="relative max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
               {services.map((service) => {
                 const id = `role-scope-${role}-${service.id}`;
                 const checked =

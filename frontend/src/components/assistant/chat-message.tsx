@@ -13,7 +13,6 @@ import {
   CircleAlert,
   MessageSquare,
   Sparkles,
-  Wrench,
   X,
   ThumbsDown,
   ThumbsUp,
@@ -27,6 +26,8 @@ import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
+import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
+import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { MachineToolCard } from "./machine-tool-card";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
@@ -78,6 +79,22 @@ function ThinkingBlock({
   );
 }
 
+function ToolStatusIcon({
+  status,
+}: {
+  readonly status: RuntimeToolCallInfo["status"];
+}) {
+  if (status === "running") return <PulseDot className="mx-[3px]" />;
+  if (status === "error") {
+    return (
+      <X aria-label="Failed" className="h-3 w-3 shrink-0 text-destructive" />
+    );
+  }
+  return (
+    <Check aria-label="Succeeded" className="h-3 w-3 shrink-0 text-success" />
+  );
+}
+
 function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
@@ -87,6 +104,9 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const running =
     steps.some((step) => step.status === "running") ||
     tools.some((tool) => tool.status === "running");
+  const failed =
+    steps.filter((step) => step.status === "error").length +
+    tools.filter((tool) => tool.status === "error").length;
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
       <button
@@ -100,8 +120,7 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         />
         {running ? (
           <PulseDot />
-        ) : tools.some((tool) => tool.status === "error") ||
-          steps.some((step) => step.status === "error") ? (
+        ) : failed ? (
           <X className="h-3 w-3 text-destructive" />
         ) : (
           <Check className="h-3 w-3 text-success" />
@@ -109,6 +128,9 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         <span>
           {count} {count === 1 ? "action" : "actions"}
         </span>
+        {failed ? (
+          <span className="text-destructive">· {failed} failed</span>
+        ) : null}
       </button>
       {open ? (
         <div className="space-y-1 border-t border-hairline px-2.5 py-2">
@@ -133,13 +155,22 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
           ))}
           {tools.map((tool) => (
             <details key={tool.id} className="text-11 text-muted-foreground">
-              <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5">
-                {tool.status === "running" ? (
-                  <PulseDot />
-                ) : (
-                  <Wrench className="h-3 w-3 text-text-tertiary" />
-                )}
-                <span className="font-mono">{tool.name || tool.id}</span>
+              <summary
+                data-tool-status={tool.status}
+                className="flex cursor-pointer list-none items-center gap-2 py-0.5"
+              >
+                <ToolStatusIcon status={tool.status} />
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate",
+                    tool.status === "error" && "text-destructive",
+                  )}
+                >
+                  {describeToolActivity(tool.name || tool.id, tool.status)}
+                </span>
+                <span className="max-w-[45%] shrink-0 truncate font-mono text-10 text-text-tertiary">
+                  {tool.name || tool.id}
+                </span>
               </summary>
               {tool.result ? (
                 <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
@@ -312,6 +343,7 @@ export function ChatMessageBubble({
   const runningTool = streaming
     ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
     : undefined;
+  const lastTool = streaming ? message.toolCalls?.at(-1) : undefined;
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -400,9 +432,16 @@ export function ChatMessageBubble({
             {runningTool ? (
               <span
                 data-running-tool
-                className="ml-1.5 truncate font-mono text-11 text-muted-foreground"
+                className="ml-1.5 truncate text-11 text-muted-foreground"
               >
-                {runningTool.name}
+                {describeToolActivity(runningTool.name, "running")}…
+              </span>
+            ) : lastTool ? (
+              <span
+                data-last-tool
+                className="ml-1.5 truncate text-11 text-text-tertiary"
+              >
+                {describeToolActivity(lastTool.name, lastTool.status)}
               </span>
             ) : null}
           </div>
