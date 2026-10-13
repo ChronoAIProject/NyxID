@@ -30,7 +30,8 @@ A Catalog Manager may:
 - on any other provider, including seeded connectors:
   - edit the name, description, default scopes, whether the vendor uses OAuth
     scopes (`supports_oauth_scopes`), documentation URL, API key instructions
-    and link, and icon (links must be absolute http(s) URLs);
+    and link, and icon (links must be absolute http(s) URLs without embedded
+    credentials or cloud-metadata hosts);
   - set the first OAuth client on a provider that has none;
   - edit its authorization, token, revocation and device URLs, credential
     mode, PKCE and token request settings only **before anyone has connected
