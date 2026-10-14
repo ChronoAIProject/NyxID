@@ -3,7 +3,11 @@ import type {
   ServiceViewsPreferences,
 } from "@/schemas/service-view";
 import type { ProxyOperationPolicy } from "@/schemas/services";
-import type { InferenceMetadata, PlatformKeyConfig, LanePricingView } from "@/schemas/platform-keys";
+import type {
+  InferenceMetadata,
+  PlatformKeyConfig,
+  LanePricingView,
+} from "@/schemas/platform-keys";
 import type { BillingMetric } from "@/schemas/billing";
 
 /// Resolved platform role for a user. `admin` is full read+write,
@@ -52,6 +56,8 @@ export interface ProfileConfig {
 }
 
 export interface UserCapabilities {
+  /** Admin, or Operator holding Tools Manager. Older backends omit it. */
+  readonly manage_tools?: boolean;
   /** Admin, or Operator holding Catalog Manager. Older backends omit it. */
   readonly manage_catalog?: boolean;
   readonly billing_available?: boolean;
@@ -121,7 +127,9 @@ export function canManageCreditGrants(
     | null
     | undefined,
 ): boolean {
-  return canAdminWrite(user) || user?.capabilities?.manage_credit_grants === true;
+  return (
+    canAdminWrite(user) || user?.capabilities?.manage_credit_grants === true
+  );
 }
 
 export function canManageCatalog(
@@ -131,6 +139,29 @@ export function canManageCatalog(
     | undefined,
 ): boolean {
   return canAdminWrite(user) || user?.capabilities?.manage_catalog === true;
+}
+
+/** Backend capability is required; role labels alone never grant Tool writes. */
+export function canManageTools(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return canAdminWrite(user) || user?.capabilities?.manage_tools === true;
+}
+export function canWriteTool(
+  user: User | null | undefined,
+  service: DownstreamService,
+): boolean {
+  return (
+    canAdminWrite(user) ||
+    (canManageTools(user) &&
+      service.tools_manager_eligible === true &&
+      service.tools_manager_created === true &&
+      service.created_by === user?.id &&
+      (!service.owner_user_id || service.owner_user_id === user?.id))
+  );
 }
 
 /// True if the user may open the admin Usage page: everyone with admin read
@@ -261,6 +292,11 @@ export interface OAuthClient {
 }
 
 export interface DownstreamService {
+  readonly icon_url?: string | null;
+  readonly catalog_manager_created?: boolean;
+  readonly tools_manager_created?: boolean;
+  readonly tools_manager_eligible?: boolean;
+  readonly tools_credential_frozen?: boolean;
   readonly offering_kind?: "ai_service" | "tool";
   readonly topics?: readonly string[];
   readonly supplier?: string | null;
@@ -268,6 +304,7 @@ export interface DownstreamService {
     | import("zod").infer<typeof import("@/schemas/tools").importSourceSchema>
     | null;
   readonly provider_config_id?: string | null;
+  readonly destination_targets?: Readonly<Record<string, string>>;
   readonly credential_configured?: boolean | null;
   readonly proxy_operation_policy?: ProxyOperationPolicy | null;
   readonly inference?: InferenceMetadata | null;
@@ -286,6 +323,7 @@ export interface DownstreamService {
   readonly service_type: string;
   readonly visibility: string;
   readonly auth_method: string;
+  readonly auth_scheme?: string | null;
   readonly auth_type: string | null;
   readonly auth_key_name: string;
   readonly is_active: boolean;
@@ -475,6 +513,7 @@ export type CreateServicePayload =
       /// Required when auth_type is "body" (e.g. "app_secret" for Lark).
       /// Also accepted as an override for other auth types.
       readonly auth_key_name?: string;
+      readonly auth_scheme?: string;
       /** Write-only master credential for an internal service row. */
       readonly credential?: string;
       readonly service_category?: string;
@@ -499,6 +538,7 @@ export type UpdateServicePayload =
       readonly description?: string;
       readonly visibility?: string;
       readonly base_url?: string;
+      readonly auth_scheme?: string | null;
       readonly is_active?: boolean;
       readonly openapi_spec_url?: string;
       readonly asyncapi_spec_url?: string;

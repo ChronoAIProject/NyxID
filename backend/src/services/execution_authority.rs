@@ -65,6 +65,8 @@ pub struct ExecutionAuthorityProjection {
     pub user_service_id: String,
     pub destination_base_url: String,
     pub auth_method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
     pub auth_key_name: String,
     pub service_category: String,
     pub requires_user_credential: bool,
@@ -105,6 +107,7 @@ pub fn build_projection(
         user_service_id: resolution.user_service_id.clone(),
         destination_base_url: target.base_url.clone(),
         auth_method: target.auth_method.clone(),
+        auth_scheme: service.auth_scheme.clone(),
         auth_key_name: target.auth_key_name.clone(),
         service_category: service.service_category.clone(),
         requires_user_credential: service.requires_user_credential,
@@ -215,6 +218,7 @@ mod tests {
             user_service_id: "us-alpha".to_string(),
             destination_base_url: "https://api.example.test".to_string(),
             auth_method: "bearer".to_string(),
+            auth_scheme: None,
             auth_key_name: "Authorization".to_string(),
             service_category: "connection".to_string(),
             requires_user_credential: true,
@@ -252,6 +256,21 @@ mod tests {
                 configured_fallback_node_ids: vec!["node-b".to_string(), "node-a".to_string()],
             },
         }
+    }
+
+    #[test]
+    fn catalog_auth_scheme_binds_only_present_configuration() {
+        let mut projection = sample_projection();
+        let original = digest(&projection);
+        let value = serde_json::to_value(&projection).unwrap();
+        assert!(value.get("auth_scheme").is_none());
+        assert_eq!(original, mcp_service::canonical_sha256(value));
+        let v1 = legacy_digest(&projection);
+        projection.auth_scheme = Some("Zoho-oauthtoken".into());
+        assert_ne!(digest(&projection), original);
+        assert_eq!(legacy_digest(&projection), v1);
+        projection.auth_scheme = None;
+        assert_eq!(digest(&projection), original);
     }
 
     #[test]

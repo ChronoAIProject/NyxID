@@ -707,10 +707,14 @@ async fn public_reply_uses_the_persisted_incoming_post_as_its_target() {
         .expect(1)
         .mount(&server)
         .await;
-    let db = mongodb::Client::with_uri_str("mongodb://127.0.0.1:27017")
-        .await
-        .unwrap()
-        .database("unused_x_adapter_test");
+    // This adapter path does not use MongoDB; keep the driver inert rather than
+    // monitoring a developer's default database.
+    let db = mongodb::Client::with_uri_str(
+        "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=100",
+    )
+    .await
+    .unwrap()
+    .database("unused_x_adapter_test");
     let mut bot = bot();
     bot.x_events = Some(vec![XChannelEvent::Mentions]);
     let incoming =

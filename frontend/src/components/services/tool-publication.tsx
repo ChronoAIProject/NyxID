@@ -1,3 +1,5 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { canWriteTool } from "@/types/api";
 import { useEndpoints } from "@/hooks/use-endpoints";
 import { usePublication } from "@/hooks/use-catalog-admin";
 import type { DownstreamService } from "@/types/api";
@@ -11,10 +13,18 @@ export function PublicationOperations({
   tool: DownstreamService;
   disabled?: boolean;
 }) {
+  const user = useAuthStore((state) => state.user);
+  const admin = user?.is_admin === true;
+  const writable = canWriteTool(user, tool);
   const { data: operations = [] } = useEndpoints(tool.id);
   const mutation = usePublication();
   return (
     <div className="space-y-2">
+      {!admin && (
+        <p className="text-11 text-text-tertiary">
+          Admin publication and audience approval required before use.
+        </p>
+      )}
       {operations.map((op) => (
         <div
           key={op.id}
@@ -35,20 +45,33 @@ export function PublicationOperations({
               )}
             </Badge>
             <Button
-              disabled={disabled || mutation.isPending}
+              disabled={
+                disabled ||
+                !writable ||
+                mutation.isPending ||
+                (!admin && op.publication === "validated")
+              }
               onClick={() =>
                 mutation.mutate(
                   {
                     serviceId: tool.id,
                     endpointId: op.id,
                     state:
-                      op.publication === "published" ? "paused" : "published",
+                      op.publication === "published"
+                        ? "paused"
+                        : admin
+                          ? "published"
+                          : "validated",
                   },
                   { onError: () => toast.error("Publication failed") },
                 )
               }
             >
-              {op.publication === "published" ? "Pause" : "Publish"}
+              {op.publication === "published"
+                ? "Pause"
+                : admin
+                  ? "Publish"
+                  : "Validate"}
             </Button>
           </div>
         </div>

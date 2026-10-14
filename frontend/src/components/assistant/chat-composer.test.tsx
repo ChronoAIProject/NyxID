@@ -28,6 +28,14 @@ describe("ChatComposer drafts", () => {
     });
     expect(onFiles).toHaveBeenCalledWith([expect.objectContaining({ name: "pasted-image-1.png" })]);
   });
+  it("says a message sent during a reply steers it, with Stop beside a labelled Steer button", () => {
+    const { container } = render(
+      <ChatComposer {...baseProps} draftKey="steer" active allowActiveInput activePlaceholder="Guide this running reply…" />,
+    );
+    expect(container.querySelector("[data-steering-hint]")).toHaveTextContent("steers this reply");
+    expect(screen.getByRole("button", { name: "Send steering instruction" })).toHaveTextContent("Steer");
+    expect(screen.getByRole("button", { name: "Stop assistant turn" })).toBeInTheDocument();
+  });
   it("names each pasted image uniquely across pastes and keeps its format", () => {
     const onFiles = vi.fn();
     render(<ChatComposer {...baseProps} onFiles={onFiles} />);

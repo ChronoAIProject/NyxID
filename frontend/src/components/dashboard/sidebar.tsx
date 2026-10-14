@@ -44,7 +44,13 @@ import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
 import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
-import { canAdminWrite, canReadAdminUsage, hasAdminRead, isBillingAvailable } from "@/types/api";
+import {
+  canAdminWrite,
+  canManageTools,
+  canReadAdminUsage,
+  hasAdminRead,
+  isBillingAvailable,
+} from "@/types/api";
 
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
@@ -121,9 +127,11 @@ export function getVisibleAdminNav(
   user: Parameters<typeof canReadAdminUsage>[0],
 ): readonly NavItemDef[] {
   if (!hasAdminRead(user)) {
-    return canReadAdminUsage(user)
-      ? ADMIN_NAV.filter((item) => item.to === ADMIN_USAGE_PATH)
-      : [];
+    return ADMIN_NAV.filter(
+      (item) =>
+        (item.to === ADMIN_USAGE_PATH && canReadAdminUsage(user)) ||
+        (item.to === "/admin/tools" && canManageTools(user)),
+    );
   }
   return ADMIN_NAV.filter(
     (item) =>
@@ -132,7 +140,9 @@ export function getVisibleAdminNav(
         "/admin/ownership",
         "/admin/tools",
         "/admin/upload-retention",
-      ].includes(item.to) || canAdminWrite(user),
+      ].includes(item.to) ||
+      canAdminWrite(user) ||
+      (item.to === "/admin/tools" && canManageTools(user)),
   );
 }
 
@@ -255,7 +265,7 @@ export function Sidebar({
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
   const mainNav = getVisibleMainNav(user);
-  const adminNav = hasAdminRead(user) ? getVisibleAdminNav(user) : [];
+  const adminNav = getVisibleAdminNav(user);
 
   const mode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);

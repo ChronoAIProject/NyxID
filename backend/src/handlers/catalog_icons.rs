@@ -52,3 +52,40 @@ pub async fn serve(State(state): State<AppState>, Path(id): Path<String>) -> App
     )
         .into_response())
 }
+
+/// Store and attach a provider-less Tool asset with live authority rechecked.
+pub async fn upload_tool(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(service_id): Path<String>,
+    Json(body): Json<Upload>,
+) -> AppResult<Json<Uploaded>> {
+    let service = super::services_helpers::fetch_service(&state, &service_id).await?;
+    if service.offering_kind != crate::models::downstream_service::OfferingKind::Tool {
+        return Err(crate::errors::AppError::ValidationError(
+            "Tool icon route requires a Tool".into(),
+        ));
+    }
+    catalog_authority::require_tool_writer(&state, &auth, Some(&service)).await?;
+    let id = catalog_icon_service::store(&state.db, &body.svg).await?;
+    let icon_url = format!(
+        "{}/catalog-icons/{id}",
+        state.config.base_url.trim_end_matches('/')
+    );
+    let actor = crate::services::audit_service::AuditActor::from_auth_user(&auth);
+    crate::services::catalog_mutation_service::commit_update(
+        &state.db,
+        &service,
+        &crate::services::catalog_mutation_service::Authority {
+            actor,
+            first_party_human: true,
+            admin_required: super::services_helpers::is_admin(&state, &auth).await?,
+            catalog_base_url: state.config.base_url.clone(),
+        },
+        &mongodb::bson::doc! {"icon_url":&icon_url,"updated_at":mongodb::bson::DateTime::now()},
+        &mongodb::bson::doc! {"_id":&service.id},
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+    )
+    .await?;
+    Ok(Json(Uploaded { icon_url }))
+}

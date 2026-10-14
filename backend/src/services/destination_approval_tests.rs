@@ -180,6 +180,7 @@ async fn workspace_pending_approval_preserves_catalog_and_execution_drift_fences
         observed.failure_code.as_deref(),
         Some("execution_authority_drift")
     );
+    crate::test_utils::init_test_audit_chain_hmac_key();
     crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
         .await
         .unwrap();
@@ -282,6 +283,7 @@ async fn google_corrected_contracts_drift_pending_exact_approvals_then_reapprove
             approve(&state, &request).await;
             pending.push((caller, request));
         }
+        crate::test_utils::init_test_audit_chain_hmac_key();
         crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();

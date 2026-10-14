@@ -186,3 +186,6 @@ pub mod service_concurrency;
 mod service_preference_tests;
 
 pub mod catalog_icons;
+
+#[cfg(test)]
+mod tools_manager_tests;

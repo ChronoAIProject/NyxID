@@ -3,7 +3,9 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type {
+  AssistantAgent,
   NyxAgentAcknowledgement,
+  NyxAgentConversation,
   NyxAgentConversationAgent,
   NyxAgentHistory,
 } from "@/schemas/assistant-nyxagent";
@@ -84,6 +86,73 @@ export function continuationForAll(acknowledgements: readonly NyxAgentAcknowledg
   return acknowledgements.map(continuationText).join("\n");
 }
 
+/**
+ * Every mounted view sees the same agents change; only the first to see it
+ * refreshes the thread lists, so two views never fetch them twice.
+ */
+const claimedAgentsChanges = new Map<string, string>();
+function claimAgentsChange(userId: string, signature: string): boolean {
+  const previous = claimedAgentsChanges.get(userId);
+  if (previous === signature) return false;
+  claimedAgentsChanges.set(userId, signature);
+  return previous !== undefined;
+}
+
+/** What changes when an agent starts, settles or raises a request. */
+function agentsSignatureOf(agents: readonly AssistantAgent[] | undefined): string | undefined {
+  return agents
+    ?.map(
+      (agent) =>
+        `${agent.id}:${agent.status}:${String(agent.pending_requests.length)}:${String(
+          agent.last_reply?.seq ?? 0,
+        )}`,
+    )
+    .join(",");
+}
+
+const NO_THREADS: readonly NyxAgentConversation[] = [];
+
+/**
+ * `agentId`'s threads, newest first. Re-renders only when those rows change,
+ * not on every streamed token.
+ */
+export function useNyxAgentThreads({
+  agentId,
+  enabled = true,
+}: {
+  readonly agentId?: string;
+  readonly enabled?: boolean;
+}) {
+  const userId = useAuthStore((state) => state.user?.id);
+  const queryClient = useQueryClient();
+  useNyxAgentLive(enabled);
+  const threads = useQuery({
+    queryKey: nyxBotQueryKeys.threads(userId, agentId),
+    queryFn: () => nyxAgentTransport.list(agentId),
+    enabled: enabled && Boolean(userId && agentId),
+  });
+  const agents = useNyxBotAgents(enabled);
+  const signature = agentsSignatureOf(agents.data?.agents);
+  useEffect(() => {
+    if (!userId || signature === undefined || !claimAgentsChange(userId, signature)) return;
+    void queryClient.invalidateQueries(
+      { queryKey: nyxBotQueryKeys.threads(userId) },
+      { cancelRefetch: false },
+    );
+  }, [queryClient, signature, userId]);
+  const snapshot = useRef(NO_THREADS);
+  const conversations = useSyncExternalStore(nyxAgentTransport.subscribe, () => {
+    const next = enabled && agentId ? nyxAgentTransport.getConversations(agentId) : NO_THREADS;
+    const previous = snapshot.current;
+    if (next.length === previous.length && next.every((row, index) => row === previous[index])) {
+      return previous;
+    }
+    snapshot.current = next;
+    return next;
+  });
+  return { conversations, threadsLoaded: threads.isSuccess, threadsError: threads.error, agents };
+}
+
 export function useNyxAgentAssistantChat({
   selectedConversationId,
   onConversationAdopted,
@@ -117,50 +186,26 @@ export function useNyxAgentAssistantChat({
     selectedConversationId ??
     (sendingDraft && nyxAgentTransport.isRunning(sendingDraft) ? sendingDraft : undefined);
   const viewSession = nyxAgentTransport.session(viewId);
-  useNyxAgentLive(enabled);
   const live = useNyxAgentLiveConnected();
   const threadsKey = nyxBotQueryKeys.threads(userId);
   const agentsKey = nyxBotQueryKeys.agents(userId);
   const historyKey = [...nyxBotQueryKeys.history(userId, selectedConversationId), reviewCardId ?? null];
-  const threads = useQuery({
-    queryKey: nyxBotQueryKeys.threads(userId, threadsAgentId),
-    queryFn: () => nyxAgentTransport.list(threadsAgentId),
-    enabled: enabled && Boolean(userId && threadsAgentId),
-  });
-  const agents = useNyxBotAgents(enabled);
+  const threads = useNyxAgentThreads({ agentId: threadsAgentId, enabled });
+  const agents = threads.agents;
   const selected = nyxAgentTransport.getConversation(selectedConversationId);
-  // A thread whose agent NyxID (not this page) set to work: poll its transcript.
-  const selectedAgentRunning = agents.data?.agents.some(
-    (agent) => agent.id === selected?.agent?.id && agent.status === "running",
-  );
   const history = useQuery({
     queryKey: historyKey,
-    queryFn: async () => {
-      const previous = queryClient.getQueryData<NyxAgentHistory>(historyKey);
-      const page = await nyxAgentTransport.history(selectedConversationId!, undefined, reviewCardId ?? null);
-      if (
-        (previous?.conversation.active_turn && !page.conversation.active_turn) ||
-        previous?.conversation.pending_acknowledgements !==
-          page.conversation.pending_acknowledgements ||
-        // Something the thread waited for happened: NyxID resumes it.
-        (previous?.waiting.length ?? 0) > page.waiting.length
-      ) {
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: threadsKey }),
-          queryClient.invalidateQueries({ queryKey: agentsKey }),
-        ]);
-      }
-      return page;
-    },
+    queryFn: () =>
+      nyxAgentTransport.history(selectedConversationId!, undefined, reviewCardId ?? null),
     enabled: enabled && Boolean(userId && selectedConversationId),
     retry: false,
     // Polling during a live turn also carries the turn's tool activity.
     // NyxID pushes changes over the live stream; these polls are the
-    // fallback without it and a slow backstop with it.
+    // fallback without it and a slow backstop with it. A turn NyxID (not
+    // this page) starts here reaches the thread row first: `streaming`.
     refetchInterval: (query) =>
       livePollInterval(
         streaming ||
-          selectedAgentRunning ||
           query.state.data?.conversation.active_turn ||
           query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
           (query.state.data?.approvals.length ?? 0) > 0
@@ -172,6 +217,25 @@ export function useNyxAgentAssistantChat({
         live,
       ),
   });
+  // A settled turn, a decided card or a resolved wait changes the agent's
+  // summary and its thread row.
+  const seenHistory = useRef<NyxAgentHistory | undefined>(undefined);
+  useEffect(() => {
+    const previous = seenHistory.current;
+    const page = history.data;
+    seenHistory.current = page;
+    if (!previous || !page || previous.conversation.id !== page.conversation.id) return;
+    if (
+      (previous.conversation.active_turn && !page.conversation.active_turn) ||
+      previous.conversation.pending_acknowledgements !== page.conversation.pending_acknowledgements ||
+      // Something the thread waited for happened: NyxID resumes it.
+      previous.waiting.length > page.waiting.length
+    ) {
+      void queryClient.invalidateQueries({ queryKey: threadsKey }, { cancelRefetch: false });
+      void queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history.data]);
   const send = useCallback(
     async (text: string, uploads?: UploadedMessage) => {
       let draft: string | undefined;
@@ -189,7 +253,7 @@ export function useNyxAgentAssistantChat({
         if (draft) setSendingDraft((current) => (current === draft ? undefined : current));
         // A new thread changes its agent's summary. (Model routing is
         // server-side, so there is no profile list to refresh.)
-        await queryClient.invalidateQueries({ queryKey: agentsKey });
+        await queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false });
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -200,24 +264,18 @@ export function useNyxAgentAssistantChat({
   }, [selectedConversationId]);
 
   // When any agent starts, settles or raises a request, NyxID may have woken
-  // the open thread (NyxBot hears back from its specialists), so re-read it
-  // and the agent's thread list.
-  const agentsSignature = agents.data?.agents
-    .map(
-      (agent) =>
-        `${agent.id}:${agent.status}:${String(agent.pending_requests.length)}:${String(
-          agent.last_reply?.seq ?? 0,
-        )}`,
-    )
-    .join(",");
+  // the open thread (NyxBot hears back from its specialists), so re-read it.
+  // `useNyxAgentThreads` refreshes the thread lists.
+  const agentsSignature = agentsSignatureOf(agents.data?.agents);
   const seenAgentsSignature = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (agentsSignature === undefined) return;
     const previous = seenAgentsSignature.current;
     seenAgentsSignature.current = agentsSignature;
     if (previous === undefined || previous === agentsSignature) return;
-    void queryClient.invalidateQueries({ queryKey: threadsKey });
-    if (selectedConversationId) void queryClient.invalidateQueries({ queryKey: historyKey });
+    if (selectedConversationId) {
+      void queryClient.invalidateQueries({ queryKey: historyKey }, { cancelRefetch: false });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentsSignature]);
 
@@ -261,9 +319,9 @@ export function useNyxAgentAssistantChat({
     },
     onSettled: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: historyKey }),
-        queryClient.invalidateQueries({ queryKey: threadsKey }),
-        queryClient.invalidateQueries({ queryKey: agentsKey }),
+        queryClient.invalidateQueries({ queryKey: historyKey }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: threadsKey }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false }),
       ]);
     },
   });
@@ -329,9 +387,8 @@ export function useNyxAgentAssistantChat({
     waiting: nyxAgentTransport.getHistory(selectedConversationId)?.waiting ?? [],
     decideApproval,
     /** `threadsAgentId`'s threads, newest first. */
-    conversations:
-      enabled && threadsAgentId ? nyxAgentTransport.getConversations(threadsAgentId) : [],
-    threadsLoaded: threads.isSuccess,
+    conversations: threads.conversations,
+    threadsLoaded: threads.threadsLoaded,
     /** The selected thread's row, once loaded. */
     conversation: selected,
     // Until adoption the page treats the draft as a new thread (no conversation id).
@@ -341,7 +398,7 @@ export function useNyxAgentAssistantChat({
     continuations: nyxAgentTransport.continuations(viewId),
     isStreaming: nyxAgentTransport.isRunning(viewId),
     isLoading: history.isLoading,
-    error: history.error?.message ?? threads.error?.message ?? agents.error?.message,
+    error: history.error?.message ?? threads.threadsError?.message ?? agents.error?.message,
     send,
     retry: (id: string, messageId: string) =>
       nyxAgentTransport.retry(id, messageId, onConversationAdopted),

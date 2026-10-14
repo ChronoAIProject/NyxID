@@ -13,6 +13,7 @@ import {
   NyxAgentAssistantEntry,
 } from "@/components/assistant/assistant-chat-page";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
+import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 
 const BASE: ChatMessage = {
   id: "assistant-1",
@@ -401,6 +402,144 @@ describe("canonical chat presentation", () => {
       <ChatMessageBubble message={{ ...running, status: "complete" }} />,
     );
     expect(container.querySelector("[data-running-tool]")).toBeNull();
+  });
+
+  it("counts the seconds a reply has waited, as thinking and then beside a running tool", () => {
+    vi.useFakeTimers();
+    try {
+      const waiting = { ...BASE, content: "", status: "streaming" as const };
+      const { container, rerender } = render(<ChatMessageBubble message={waiting} />);
+      expect(container.querySelector("[data-waiting-status]")).toBeNull();
+      act(() => void vi.advanceTimersByTime(3000));
+      expect(container.querySelector("[data-waiting-status]")).toHaveTextContent("Thinking · 3s");
+      rerender(
+        <ChatMessageBubble
+          message={{
+            ...waiting,
+            toolCalls: [{ id: "t", name: "github__list_issues", status: "running", startedAt: 1 }],
+          }}
+        />,
+      );
+      act(() => void vi.advanceTimersByTime(4000));
+      expect(container.querySelector("[data-running-tool]")).toHaveTextContent(
+        `${describeToolActivity("github__list_issues", "running")}… · 7s`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-renders only the rows whose message changed while a reply streams", () => {
+    const session: ChatSessionState = {
+      clientId: "client", conversationId: "nyxagent-page", status: "streaming", title: "Test",
+      messages: [], expectedTurnCount: 1,
+    };
+    const settled: ChatMessage = { ...BASE, id: "settled" };
+    const live: ChatMessage = { ...BASE, id: "live", content: "A", status: "streaming" };
+    const rendered: string[] = [];
+    const renderMessage = (message: ChatMessage) => {
+      rendered.push(message.id);
+      return <p>{message.content}</p>;
+    };
+    const { rerender } = render(
+      <ChatMessageList session={{ ...session, messages: [settled, live] }} bottomInset={0} renderMessage={renderMessage} />,
+    );
+    rendered.length = 0;
+    rerender(
+      <ChatMessageList
+        session={{ ...session, messages: [settled, { ...live, content: "AB" }] }}
+        bottomInset={0}
+        renderMessage={(message) => renderMessage(message)}
+      />,
+    );
+    expect(rendered).toEqual(["live"]);
+    expect(screen.getByText("AB")).toBeVisible();
+    rendered.length = 0;
+    rerender(
+      <ChatMessageList
+        session={{ ...session, messages: [settled, { ...live, content: "AB" }] }}
+        bottomInset={0}
+        renderMessage={renderMessage}
+        projectionVersion="card:1"
+      />,
+    );
+    expect(rendered).toEqual(["settled", "live"]);
+  });
+
+  it("mounts a bounded window of a long transcript, ending at the newest message", () => {
+    // happy-dom has no layout: give every element a 600px box.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 600, bottom: 600, width: 600, height: 600, toJSON: () => ({}),
+    } as DOMRect);
+    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    try {
+      const messages = Array.from({ length: 200 }, (_, index): ChatMessage => ({
+        ...BASE, id: `m-${String(index)}`, content: `Message ${String(index)}`,
+        role: index % 2 ? "assistant" : "user",
+      }));
+      const { container } = render(
+        <ChatMessageList
+          session={{ clientId: "c", conversationId: "nyxagent-long", status: "completed_text", title: "Long", messages, expectedTurnCount: 100 }}
+          bottomInset={0}
+        />,
+      );
+      const rows = container.querySelectorAll("[id^=message-]");
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.length).toBeLessThan(20);
+      expect(container.querySelector("#message-m-199")).not.toBeNull();
+      expect(container.querySelector("#message-m-0")).toBeNull();
+    } finally {
+      rect.mockRestore();
+      width.mockRestore();
+      height.mockRestore();
+    }
+  });
+
+  it("starts windowing only while the reader follows the newest message", () => {
+    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    try {
+      const session = (count: number): ChatSessionState => ({
+        clientId: "c", conversationId: "nyxagent-growing", status: "completed_text", title: "T",
+        expectedTurnCount: 0,
+        messages: Array.from({ length: count }, (_, index): ChatMessage => ({ ...BASE, id: `m-${String(index)}` })),
+      });
+      const { container, rerender } = render(<ChatMessageList session={session(30)} bottomInset={0} />);
+      const scroller = container.querySelector<HTMLDivElement>("[id^=message-]")!.closest<HTMLDivElement>(".overflow-y-auto")!;
+      let top = 0;
+      Object.defineProperty(scroller, "scrollHeight", { configurable: true, get: () => 5000 });
+      Object.defineProperty(scroller, "clientHeight", { configurable: true, get: () => 600 });
+      Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => top, set: (value: number) => { top = value; } });
+      const scrollTo = (value: number) => { top = value; fireEvent.scroll(scroller); };
+      scrollTo(4400);
+      scrollTo(1000); // the reader scrolls up
+      rerender(<ChatMessageList session={session(31)} bottomInset={0} />);
+      expect(container.querySelectorAll("[id^=message-]")).toHaveLength(31);
+      expect(top).toBe(1000);
+      scrollTo(4400); // back at the newest message
+      rerender(<ChatMessageList session={session(32)} bottomInset={0} />);
+      expect(container.querySelectorAll("[id^=message-]").length).toBeLessThan(32);
+    } finally {
+      width.mockRestore();
+      height.mockRestore();
+    }
+  });
+
+  it("shows a reply's images, and a message's attachments, above its text", () => {
+    // The image stays loading: only its position matters here.
+    globalThis.__nyxidAssistantHttpMock = () => new Promise<Response>(() => undefined);
+    const image = { id: "img", endpoint: "/assistant/nyxagent/conversations/c/attachments/img", contentType: "image/png", label: "chart.png" };
+    for (const role of ["assistant", "user"] as const) {
+      const { container, unmount } = render(
+        <ChatMessageBubble message={{ ...BASE, role, content: "Here is the chart.", images: [image] }} />,
+      );
+      const html = container.innerHTML;
+      expect(html.indexOf("Loading image from chart.png")).toBeGreaterThan(-1);
+      expect(html.indexOf("Loading image from chart.png")).toBeLessThan(html.indexOf("Here is the chart."));
+      unmount();
+    }
+    globalThis.__nyxidAssistantHttpMock = undefined;
   });
 
   it("renders tool images from the authenticated client and reports failures", async () => {

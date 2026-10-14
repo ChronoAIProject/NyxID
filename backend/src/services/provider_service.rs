@@ -3444,6 +3444,10 @@ fn validate_revocation_url_shape(url: &str) -> AppResult<()> {
 }
 
 pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
+    #[cfg(test)]
+    if crate::test_utils::is_registered_loopback_revocation_url(url) {
+        return Ok(());
+    }
     validate_revocation_url_shape(url)?;
     crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
 }
@@ -6356,6 +6360,7 @@ pub async fn seed_default_services(
             credential_encrypted: empty_credential,
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url,
             asyncapi_spec_url: None,
             streaming_supported,
@@ -6366,6 +6371,9 @@ pub async fn seed_default_services(
             is_active: true,
             created_by: "system".to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -7303,9 +7311,16 @@ pub async fn create_provider_with_revocation(
 
 /// List all active providers (visible to all authenticated users).
 pub async fn list_providers(db: &mongodb::Database) -> AppResult<Vec<ProviderConfig>> {
+    list_providers_filtered(db, doc! {"is_active": true}).await
+}
+
+pub async fn list_providers_filtered(
+    db: &mongodb::Database,
+    filter: bson::Document,
+) -> AppResult<Vec<ProviderConfig>> {
     let providers: Vec<ProviderConfig> = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find(doc! { "is_active": true })
+        .find(filter)
         .sort(doc! { "name": 1 })
         .await?
         .try_collect()

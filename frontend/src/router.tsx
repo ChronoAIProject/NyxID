@@ -35,7 +35,13 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { CreditsDeniedHost } from "@/components/billing/credits-denied-host";
 import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite, canManageCatalog, canReadAdminUsage, hasAdminRead } from "@/types/api";
+import {
+  canAdminWrite,
+  canManageCatalog,
+  canManageTools,
+  canReadAdminUsage,
+  hasAdminRead,
+} from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
@@ -503,11 +509,11 @@ const toolsRoute = createRoute({
   getParentRoute: () => dashboardLayout,
   component: ToolsPage,
 });
-const adminToolsRoute = createRoute({
+export const adminToolsRoute = createRoute({
   path: "/admin/tools",
   getParentRoute: () => dashboardLayout,
   beforeLoad: () => {
-    if (!useAuthStore.getState().user?.is_admin)
+    if (!canManageTools(useAuthStore.getState().user))
       throw redirect({ to: "/tools" });
   },
   component: AdminToolsPage,
@@ -518,7 +524,11 @@ export const servicesRedirectRoute = createRoute({
   getParentRoute: () => dashboardLayout,
   beforeLoad: async () => {
     const { user } = useAuthStore.getState();
-    if (canManageCatalog(user)) {
+    if (
+      canManageCatalog(user) ||
+      canManageTools(user) ||
+      hasAdminRead(user)
+    ) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });

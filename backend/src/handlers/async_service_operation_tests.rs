@@ -80,6 +80,7 @@ impl AsyncFixture {
             .insert_one(&catalog)
             .await
             .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&f.state.db)
             .await
             .unwrap();

@@ -47,11 +47,39 @@ describe("getVisibleAdminNav", () => {
   });
 
   it("keeps the full read-only set for operators", () => {
-    const routes = getVisibleAdminNav({ is_admin: false, role: "operator" }).map(
-      (item) => item.to,
-    );
+    const routes = getVisibleAdminNav({
+      is_admin: false,
+      role: "operator",
+    }).map((item) => item.to);
     expect(routes).toContain("/admin/users");
     expect(routes).toContain("/admin/usage");
     expect(routes).not.toContain("/admin/platform-credentials");
   });
+});
+
+it("uses the same Tools capability rule for desktop and mobile navigation", () => {
+  expect(
+    getVisibleAdminNav({ is_admin: false, role: "operator" }).map((i) => i.to),
+  ).not.toContain("/admin/tools");
+  expect(
+    getVisibleAdminNav({
+      is_admin: false,
+      role: "operator",
+      capabilities: { manage_tools: true },
+    }).map((i) => i.to),
+  ).toContain("/admin/tools");
+  expect(
+    getVisibleAdminNav({
+      is_admin: false,
+      role: "operator",
+      capabilities: { manage_catalog: true },
+    }).map((i) => i.to),
+  ).not.toContain("/admin/tools");
+  expect(
+    getVisibleAdminNav({
+      is_admin: false,
+      role: "operator",
+      capabilities: { manage_catalog: true, manage_tools: true },
+    }).map((i) => i.to),
+  ).toContain("/admin/tools");
 });

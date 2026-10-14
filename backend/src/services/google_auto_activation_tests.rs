@@ -109,6 +109,7 @@ async fn google_concurrent_sync_inserts_editors_and_updates_old_contracts_once()
                 let db = db.clone();
                 tasks.spawn(async move {
                     provider_service::seed_default_services(&db, &test_encryption_keys()).await?;
+                    crate::test_utils::init_test_audit_chain_hmac_key();
                     catalog_spec_sync::sync_seeded_service_endpoints(&db).await
                 });
             }
@@ -248,6 +249,7 @@ async fn google_partial_custom_maps_sync_only_available_origins_and_keep_custom_
             provider_service::seed_default_services(&db, &test_encryption_keys())
                 .await
                 .unwrap();
+            crate::test_utils::init_test_audit_chain_hmac_key();
             catalog_spec_sync::sync_seeded_service_endpoints(&db)
                 .await
                 .unwrap();
@@ -873,6 +875,7 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
         )
         .await
         .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();

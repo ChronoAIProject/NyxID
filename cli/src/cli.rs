@@ -340,6 +340,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: AdminProviderCommands,
     },
+    /// Prepare Tools with a manifest or wizard (publication is Admin-only)
+    Tools {
+        #[command(subcommand)]
+        command: AdminToolsCommands,
+    },
     /// Add, apply and validate catalog services from a manifest (Admin or Catalog Manager)
     Catalog {
         #[command(subcommand)]
@@ -495,6 +500,57 @@ pub enum AdminCatalogCommands {
     Validate {
         #[command(flatten)]
         manifest: ManifestArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminToolsCommands {
+    /// Upload and attach an immutable static SVG to a provider-less Tool
+    Icon {
+        tool: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Onboard a twin or new HTTP API; save only secret-free metadata
+    Add {
+        #[arg(long, conflicts_with = "template")]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        skip_credentials: bool,
+        #[arg(long)]
+        credential_env: Option<String>,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Reconcile by slug, without rotating credentials; reruns are no-ops
+    Apply {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read-only readiness report (exit 0 ready, 2 pending, 1 failed)
+    Validate {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

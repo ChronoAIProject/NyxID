@@ -1,14 +1,17 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DownstreamService } from "@/types/api";
+import type { DownstreamService, User } from "@/types/api";
 import { ApiError } from "@/lib/api-client";
 import { ServiceEditPage } from "./service-edit";
 import { serviceFormPatch, serviceFormValues } from "./service-edit.helpers";
 
-const { source, mutate } = vi.hoisted(() => ({
+type EditorUser = Pick<User, "id" | "is_admin" | "capabilities">;
+
+const { source, mutate, actor } = vi.hoisted(() => ({
   source: { data: undefined as DownstreamService | undefined },
   mutate: vi.fn(),
+  actor: { user: { id: "admin-1", is_admin: true } as EditorUser },
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
@@ -63,8 +66,8 @@ vi.mock("@/components/dashboard/identity-propagation-config", () => ({
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (
-    selector: (state: { user: { is_admin: boolean } }) => unknown,
-  ) => selector({ user: { is_admin: true } }),
+    selector: (state: { user: EditorUser }) => unknown,
+  ) => selector(actor),
 }));
 vi.mock("@/hooks/use-admin", () => ({
   useAdminUsers: () => ({ data: { users: [] }, isFetching: false }),
@@ -108,8 +111,87 @@ function makeService(
   };
 }
 
+it("loads, edits and clears only the catalog bearer scheme while preserving unrelated patches", () => {
+  const service = makeService({
+    auth_method: "bearer",
+    auth_scheme: "Zoho-oauthtoken",
+  });
+  const values = serviceFormValues(service);
+  expect(values.auth_scheme).toBe("Zoho-oauthtoken");
+  expect(serviceFormPatch(values, service)).toEqual({});
+  expect(serviceFormPatch({ ...values, name: "Renamed" }, service)).toEqual({
+    name: "Renamed",
+  });
+  expect(
+    serviceFormPatch({ ...values, auth_scheme: "Bearer" }, service),
+  ).toEqual({ auth_scheme: "Bearer" });
+  expect(serviceFormPatch({ ...values, auth_scheme: "" }, service)).toEqual({
+    auth_scheme: null,
+  });
+  const nonBearer = makeService({ auth_method: "header" });
+  expect(
+    serviceFormPatch(
+      { ...serviceFormValues(nonBearer), auth_scheme: "Zoho-oauthtoken" },
+      nonBearer,
+    ),
+  ).toEqual({});
+});
+
+it("renders the optional bearer authorization scheme in the Admin editor", () => {
+  source.data = makeService({
+    auth_method: "bearer",
+    auth_scheme: "Zoho-oauthtoken",
+  });
+  render(<ServiceEditPage />);
+  expect(screen.getByLabelText("Authorization scheme")).toHaveValue(
+    "Zoho-oauthtoken",
+  );
+});
+
+it.each([
+  ["Admin", { id: "admin-1", is_admin: true }, true],
+  [
+    "owning Catalog Manager",
+    { id: "user-1", is_admin: false, capabilities: { manage_catalog: true } },
+    true,
+  ],
+  [
+    "foreign Catalog Manager",
+    { id: "user-2", is_admin: false, capabilities: { manage_catalog: true } },
+    false,
+  ],
+  ["plain user", { id: "user-1", is_admin: false }, false],
+] as const)("shows the authorization scheme only to an authorized %s", (_, user, visible) => {
+  actor.user = user;
+  source.data = makeService({
+    auth_method: "bearer",
+    auth_scheme: "Zoho-oauthtoken",
+    catalog_manager_created: true,
+  });
+  render(<ServiceEditPage />);
+  if (visible) {
+    expect(screen.getByLabelText("Authorization scheme")).toHaveValue(
+      "Zoho-oauthtoken",
+    );
+  } else {
+    expect(screen.queryByLabelText("Authorization scheme")).not.toBeInTheDocument();
+  }
+});
+
+it("hides the authorization scheme from a manager who owns an unmarked row", () => {
+  actor.user = {
+    id: "user-1",
+    is_admin: false,
+    capabilities: { manage_catalog: true },
+  };
+  source.data = makeService({ auth_method: "bearer" });
+  render(<ServiceEditPage />);
+  expect(screen.queryByLabelText("Authorization scheme")).not.toBeInTheDocument();
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
+  actor.user = { id: "admin-1", is_admin: true };
   source.data = makeService({
     recommended_skills: ["old"],
     skills_revision: 7,

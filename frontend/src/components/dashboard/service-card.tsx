@@ -18,7 +18,7 @@ import { ServiceIcon } from "@/components/service-icon";
 
 interface ServiceCardProps {
   readonly service: DownstreamService;
-  readonly onDelete: (id: string) => void;
+  readonly onDelete?: (id: string) => void;
   readonly isDeleting: boolean;
 }
 
@@ -57,24 +57,30 @@ export function ServiceCard({
       }
     >
       {/* Delete button (show on hover) */}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="absolute right-2 top-2 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(service.id);
-        }}
-        disabled={isDeleting}
-      >
-        <Trash2 className="h-3.5 w-3.5 text-destructive" />
-        <span className="sr-only">Delete service</span>
-      </Button>
+      {onDelete && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="absolute right-2 top-2 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(service.id);
+          }}
+          disabled={isDeleting}
+        >
+          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+          <span className="sr-only">Delete service</span>
+        </Button>
+      )}
 
       {/* Title + Badges row */}
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
-          <ServiceIcon slug={service.slug} size="md" />
+          {service.icon_url ? (
+            <img src={service.icon_url} alt="" className="size-8" />
+          ) : (
+            <ServiceIcon slug={service.slug} size="md" />
+          )}
           <h3 className="truncate text-lg font-normal text-foreground">
             {service.name}
           </h3>

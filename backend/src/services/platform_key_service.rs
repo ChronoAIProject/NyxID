@@ -59,6 +59,12 @@ pub fn has_platform_key(service: &DownstreamService) -> bool {
     PlatformKeyView::from(service).has_platform_key()
 }
 
+/// Linked catalog rows can declare `none` while their provider requirement
+/// supplies credential injection. Only provider-less rows are truly no-auth.
+pub fn no_auth_platform_service(service: &DownstreamService) -> bool {
+    service.auth_method == "none" && service.provider_config_id.is_none()
+}
+
 /// The exact fields needed for metadata-only platform ACL checks. Listings can
 /// project these fields without loading unrelated catalog configuration.
 #[derive(serde::Deserialize)]
@@ -402,7 +408,12 @@ pub async fn require(
     service: &DownstreamService,
     owner_id: &str,
 ) -> AppResult<()> {
-    if available(db, service, owner_id).await? {
+    let allowed = if no_auth_platform_service(service) && service.platform_key.is_some() {
+        no_auth_available_with_grants(service, owner_id, &OwnerGrants::load(db, owner_id).await?)
+    } else {
+        available(db, service, owner_id).await?
+    };
+    if allowed {
         Ok(())
     } else {
         Err(AppError::NotFound(
@@ -475,7 +486,7 @@ pub fn no_auth_available_with_grants(
     grants: &OwnerGrants,
 ) -> bool {
     service.is_active
-        && service.auth_method == "none"
+        && no_auth_platform_service(service)
         && service.service_type == "http"
         && service.service_category == "internal"
         && service

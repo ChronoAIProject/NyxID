@@ -625,7 +625,9 @@ unrecognized response or the bounded 15-second request deadline records
 enter metadata audit/logs. Local validation, unsupported scope and `starting`
 refusals do not reserve a receipt or dispatch.
 
-The composer keeps Stop available alongside Send guidance. It shows acceptance,
+The composer keeps Stop available alongside Send guidance: while a reply runs, a
+hint above the field says that sending steers this reply, and the send control is
+labelled **Steer** beside Stop. It shows acceptance,
 retains definitely refused drafts, refreshes state on a response mismatch, and
 offers an explicit **Send as new message** action for `no_active_turn` once idle.
 Uncertain guidance is shown as such and never automatically resent under a new
@@ -962,7 +964,10 @@ surface.
 On reload, the client fetches persisted history and follows active history
 through the live stream (or, without it, polls every two seconds) until its own
 metadata reports settlement. The index has no periodic
-poll: selected-history settlement refreshes it once, as does send completion.
+poll: selected-history settlement refreshes it once, and send completion updates
+the sent thread's row from its settled history. An idle thread is not polled
+because its agent is busy in another thread, and its machine desktops are polled
+only during a turn or while one is open.
 Unselected active conversations do not trigger expensive index-page polling. Browser subscriptions have a 45-second opening deadline
 and 135-second idle deadline; losing that subscription triggers history refresh without
 cancelling the server turn. Identity changes clear client presentation caches and

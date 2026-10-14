@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 use crate::AppState;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{DownstreamService, OfferingKind};
+use crate::models::downstream_service::DownstreamService;
 use crate::models::provider_config::ProviderConfig;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
@@ -29,6 +29,7 @@ use super::services::{CreateServiceRequest, UpdateServiceRequest};
 pub enum CatalogAuthority {
     Admin,
     CatalogManager,
+    ToolsManager,
 }
 
 impl CatalogAuthority {
@@ -36,6 +37,7 @@ impl CatalogAuthority {
         match self {
             Self::Admin => "admin",
             Self::CatalogManager => "catalog_manager",
+            Self::ToolsManager => "tools_manager",
         }
     }
 }
@@ -66,6 +68,7 @@ pub async fn require_catalog_writer(
     state: &AppState,
     auth_user: &AuthUser,
 ) -> AppResult<CatalogAuthority> {
+    super::login_client_context::require_first_party_human(auth_user)?;
     catalog_authority(state, auth_user)
         .await?
         .ok_or_else(|| AppError::Forbidden("Admin or Catalog Manager access required".to_string()))
@@ -86,17 +89,6 @@ pub async fn require_public_row_writer(
     require_catalog_writer(state, auth_user).await.map(Some)
 }
 
-/// A public, unowned HTTP catalog row outside the internal category. Catalog
-/// Managers may edit these and their operations whoever created them, so
-/// seeded connectors can be completed without an Admin.
-fn is_shared_catalog_row(service: &DownstreamService) -> bool {
-    service.owner_user_id.is_none()
-        && service.visibility == "public"
-        && service.service_type == "http"
-        && service.service_category != "internal"
-        && service.offering_kind != OfferingKind::Tool
-}
-
 /// Write gate for a catalog row and its operations. Admins pass. A Catalog
 /// Manager passes on every shared catalog row and on rows they created;
 /// callers then apply the Catalog Manager field rules. Anyone else keeps the
@@ -107,6 +99,9 @@ pub async fn require_catalog_row_writer(
     auth_user: &AuthUser,
     service: &DownstreamService,
 ) -> AppResult<Option<CatalogAuthority>> {
+    if service.catalog_manager_created && service.visibility != "private" {
+        super::login_client_context::require_first_party_human(auth_user)?;
+    }
     if service.owner_user_id.is_some() {
         super::services_helpers::require_admin(state, auth_user).await?;
         return Ok(Some(CatalogAuthority::Admin));
@@ -114,7 +109,10 @@ pub async fn require_catalog_row_writer(
     let authority = catalog_authority(state, auth_user).await?;
     match authority {
         Some(CatalogAuthority::Admin) => return Ok(authority),
-        Some(CatalogAuthority::CatalogManager) if is_shared_catalog_row(service) => {
+        Some(CatalogAuthority::CatalogManager)
+            if crate::services::catalog_mutation_service::is_shared_catalog_row(service) =>
+        {
+            super::login_client_context::require_first_party_human(auth_user)?;
             return Ok(authority);
         }
         _ => {}
@@ -437,6 +435,10 @@ const MANAGER_AUTH_METHODS: &[&str] = &[
 /// only. Credential injection, identity forwarding, billing, inference and
 /// access-policy fields stay with Admins.
 pub fn check_service_create(body: &CreateServiceRequest) -> AppResult<()> {
+    forbid_fields("set", service_create_denied_fields(body))
+}
+
+fn service_create_denied_fields(body: &CreateServiceRequest) -> Vec<&'static str> {
     let CreateServiceRequest {
         twin_of_service_id,
         asyncapi_spec_url: _,
@@ -453,12 +455,14 @@ pub fn check_service_create(body: &CreateServiceRequest) -> AppResult<()> {
         service_type,
         base_url: _,
         auth_method,
+        auth_scheme: _,
         auth_key_name: _,
         credential,
         service_category,
         openapi_spec_url: _,
         visibility,
         ssh_config,
+        icon_url: _,
         homepage_url: _,
         repository_url: _,
         issues_url: _,
@@ -481,7 +485,7 @@ pub fn check_service_create(body: &CreateServiceRequest) -> AppResult<()> {
         anonymous_endpoints,
         proxy_operation_policy,
     } = body;
-    let denied: Vec<&'static str> = [
+    [
         twin_of_service_id.as_ref().map(|_| "twin_of_service_id"),
         offering_kind
             .as_ref()
@@ -527,14 +531,18 @@ pub fn check_service_create(body: &CreateServiceRequest) -> AppResult<()> {
     ]
     .into_iter()
     .flatten()
-    .collect();
-    forbid_fields("set", denied)
+    .collect()
 }
 
 /// On rows they created, Catalog Managers edit descriptive metadata, the
 /// destination URL and the active flag.
 pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
+    forbid_fields("change", service_update_denied_fields(body))
+}
+
+fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
     let UpdateServiceRequest {
+        auth_scheme: _,
         service_category,
         offering_kind,
         topics: _,
@@ -557,6 +565,7 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
         inject_delegation_token,
         delegation_token_scope,
         ssh_config,
+        icon_url: _,
         homepage_url: _,
         repository_url: _,
         issues_url: _,
@@ -565,6 +574,7 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
         inference,
         platform_key,
         credential,
+        clear_credential,
         auth_notes: _,
         known_limitations: _,
         required_permissions: _,
@@ -582,7 +592,7 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
         anonymous_endpoints,
         proxy_operation_policy,
     } = body;
-    let denied: Vec<&'static str> = [
+    [
         service_category.as_ref().map(|_| "service_category"),
         offering_kind
             .as_ref()
@@ -610,6 +620,7 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
         inference.as_ref().map(|_| "inference"),
         platform_key.as_ref().map(|_| "platform_key"),
         credential.as_ref().map(|_| "credential"),
+        clear_credential.then_some("clear_credential"),
         recommended_skills.as_ref().map(|_| "recommended_skills"),
         skills_revision.map(|_| "skills_revision"),
         skills_request_id.as_ref().map(|_| "skills_request_id"),
@@ -632,6 +643,134 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
     ]
     .into_iter()
     .flatten()
-    .collect();
-    forbid_fields("change", denied)
+    .collect()
+}
+
+/// Select authority by offering, so callers holding both roles cannot cross lanes.
+pub async fn require_service_creator(
+    state: &AppState,
+    auth: &AuthUser,
+    tool: bool,
+) -> AppResult<CatalogAuthority> {
+    if !tool {
+        return require_catalog_writer(state, auth).await;
+    }
+    require_tool_writer(state, auth, None).await
+}
+
+pub async fn require_tool_writer(
+    state: &AppState,
+    auth: &AuthUser,
+    service: Option<&DownstreamService>,
+) -> AppResult<CatalogAuthority> {
+    super::login_client_context::require_first_party_human(auth)?;
+    let id = auth.user_id.to_string();
+    let user = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": &id})
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Tool management requires a human account".into()))?;
+    let role = role_service::resolve_platform_role(&state.db, &user).await?;
+    if role.is_admin() {
+        return Ok(CatalogAuthority::Admin);
+    }
+    let eligible_owner = if let Some(s) = service {
+        s.tools_manager_created
+            && s.created_by == id
+            && s.owner_user_id.as_ref().is_none_or(|owner| owner == &id)
+            && crate::services::tools_manager_service::eligible_manager_tool_in_db(
+                &state.db, s, None,
+            )
+            .await?
+    } else {
+        true
+    };
+    if !role_service::can_manage_tools(&state.db, &user, role).await? || !eligible_owner {
+        return Err(AppError::Forbidden(
+            "Admin or owning Tools Manager access required".into(),
+        ));
+    }
+    Ok(CatalogAuthority::ToolsManager)
+}
+
+// Compose the exhaustive catalog classifier with a tighter Tool allowlist. New
+// request fields must still be classified in check_service_create/update.
+pub fn check_tool_create(body: &CreateServiceRequest) -> AppResult<()> {
+    let mut denied = service_create_denied_fields(body);
+    denied.retain(|field| {
+        ![
+            "twin_of_service_id",
+            "offering_kind",
+            "service_category",
+            "auth_method",
+        ]
+        .contains(field)
+    });
+    if body.provider_config_id.is_some() {
+        denied.push("provider_config_id");
+    }
+    if body.auth_scheme.is_some() {
+        denied.push("auth_scheme");
+    }
+    forbid_tool_fields(denied)?;
+    if body
+        .service_category
+        .as_deref()
+        .is_some_and(|v| v != "internal")
+        || body.offering_kind != Some(crate::models::downstream_service::OfferingKind::Tool)
+        || body.asyncapi_spec_url.is_some()
+        || body.custom_user_agent.is_some()
+        || body
+            .auth_method
+            .as_deref()
+            .is_some_and(|m| !["none", "bearer", "header", "query", "basic"].contains(&m))
+    {
+        return Err(AppError::Forbidden(
+            "Tools Manager may create only provider-less internal HTTP Tools with supported auth"
+                .into(),
+        ));
+    }
+    if body.auth_key_name.as_ref().is_some_and(|name| {
+        name.len() > 256
+            || (body.auth_method.as_deref() != Some("none")
+                && (name.is_empty()
+                    || !name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))))
+    }) {
+        return Err(AppError::ValidationError(
+            "Invalid Tool auth key name".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn check_tool_update(body: &UpdateServiceRequest) -> AppResult<()> {
+    let mut denied = service_update_denied_fields(body);
+    if body.auth_scheme.is_some() {
+        denied.push("auth_scheme");
+    }
+    denied.retain(|field| *field != "credential");
+    forbid_tool_fields(denied)?;
+    if body.offering_kind.is_some()
+        || body.is_active.is_some()
+        || body.asyncapi_spec_url.is_some()
+        || body.custom_user_agent.is_some()
+    {
+        return Err(AppError::Forbidden(
+            "Tool shape, activation and injection configuration require an Admin".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn forbid_tool_fields(fields: Vec<&'static str>) -> AppResult<()> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(format!(
+        "A Tools Manager cannot set these fields; ask an Admin: {}",
+        fields.join(", ")
+    )))
 }

@@ -29,6 +29,9 @@ const ROOT = "/assistant/nyxagent";
 export const CONTEXT_RESET_NOTICE =
   "The last turn failed, so the assistant continues in a fresh context with a recap of its completed actions, failures and attachments. Rerun only what did not complete.";
 
+type NyxAgentMessage = NyxAgentHistory["messages"][number];
+type LiveMessage = DirectTurnState["messages"][number];
+
 interface LiveTurn {
   state: DirectTurnState;
   conversation: NyxAgentConversation;
@@ -156,6 +159,11 @@ export class NyxAgentTransport {
   private live = new Map<string, LiveTurn>();
   private requests = new Set<AbortController>();
   private draftModel = "nyxagent/chat";
+  // Views reused while their source is unchanged, so a streamed token or a
+  // history refresh re-renders only the rows that actually changed.
+  private settledViews = new WeakMap<NyxAgentMessage, ChatMessage>();
+  private liveViews = new WeakMap<LiveMessage, { id?: string; settled?: NyxAgentMessage; view: ChatMessage }>();
+  private views = new Map<string, Map<string, ChatMessage>>();
 
   constructor() {
     subscribeAssistantIdentity(() => this.clear());
@@ -185,6 +193,7 @@ export class NyxAgentTransport {
     this.index.clear();
     this.histories.clear();
     this.reviewCards.clear();
+    this.views.clear();
     this.draftModel = "nyxagent/chat";
     this.changed();
   }
@@ -222,6 +231,7 @@ export class NyxAgentTransport {
       this.index.delete(row.id);
       this.histories.delete(row.id);
       this.reviewCards.delete(row.id);
+      this.views.delete(row.id);
     }
     this.changed();
   }
@@ -327,8 +337,15 @@ export class NyxAgentTransport {
     };
     const existing = this.histories.get(id);
     // Preserve older pages during the running-turn poll and deduplicate by seq.
+    // An unchanged message keeps its object so its rendered row is reused.
     const merged = new Map((existing?.messages ?? []).map((message) => [message.seq, message]));
-    for (const message of page.messages) merged.set(message.seq, message);
+    for (const message of page.messages) {
+      const previous = merged.get(message.seq);
+      merged.set(
+        message.seq,
+        previous && JSON.stringify(previous) === JSON.stringify(message) ? previous : message,
+      );
+    }
     const before_seq = beforeSeq || !existing ? page.before_seq : existing.before_seq;
     const history = {
       ...page,
@@ -409,6 +426,7 @@ export class NyxAgentTransport {
     this.index.delete(id);
     this.histories.delete(id);
     this.reviewCards.delete(id);
+    this.views.delete(id);
     this.changed();
   }
 
@@ -473,8 +491,10 @@ export class NyxAgentTransport {
     const live = this.live.get(id ?? "draft");
     const conversation = live?.conversation ?? history?.conversation ?? this.index.get(id ?? "");
     let messages: ChatMessage[] = (history?.messages ?? []).map((message) => {
+      const cached = this.settledViews.get(message);
+      if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
-      return {
+      const view: ChatMessage = {
         id: message.id,
         feedback: message.feedback ?? undefined,
         role: message.role,
@@ -490,6 +510,8 @@ export class NyxAgentTransport {
         via: message.via,
         steering: message.steering,
       };
+      this.settledViews.set(message, view);
+      return view;
     });
     // The live turn's tool activity arrives through the polled history metadata,
     // which the server records at the MCP boundary; the upstream stream is text only.
@@ -509,14 +531,17 @@ export class NyxAgentTransport {
       messages = live.state.messages.map((message) => {
         const streaming =
           message.role === "assistant" && message === live.state.messages.at(-1);
-        return {
+        const settled = settledMessages.get(message.id);
+        const cached = streaming ? undefined : this.liveViews.get(message);
+        if (cached && cached.id === id && cached.settled === settled) return cached.view;
+        const view: ChatMessage = {
           id: message.id,
-          role: settledMessages.get(message.id)?.role ?? message.role,
-          feedback: settledMessages.get(message.id)?.feedback ?? undefined,
-          errorCode: settledMessages.get(message.id)?.error_code,
-          steering: settledMessages.get(message.id)?.steering,
-          via: settledMessages.get(message.id)?.via,
-          turnId: settledMessages.get(message.id)?.turn_id,
+          role: settled?.role ?? message.role,
+          feedback: settled?.feedback ?? undefined,
+          errorCode: settled?.error_code,
+          steering: settled?.steering,
+          via: settled?.via,
+          turnId: settled?.turn_id,
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? "streaming" : "complete",
@@ -526,6 +551,8 @@ export class NyxAgentTransport {
               ? liveActivity
               : settledImages.get(message.id)),
         };
+        if (!streaming) this.liveViews.set(message, { id, settled, view });
+        return view;
       });
     }
     if (live) {
@@ -589,6 +616,16 @@ export class NyxAgentTransport {
         status: "complete",
       });
     }
+    // Rows rebuilt above with identical fields keep their previous object.
+    const previousViews = this.views.get(id ?? "draft");
+    const views = new Map<string, ChatMessage>();
+    messages = messages.map((message) => {
+      const previous = previousViews?.get(message.id);
+      const view = previous && sameFields(previous, message) ? previous : message;
+      views.set(message.id, view);
+      return view;
+    });
+    this.views.set(id ?? "draft", views);
     const tail = history?.messages.at(-1);
     return {
       clientId: id ?? "nyxagent-draft",
@@ -810,8 +847,6 @@ export class NyxAgentTransport {
         this.current(generation);
         this.live.delete(key);
         this.changed();
-        const agentId = this.getConversation(key)?.agent?.id;
-        if (agentId) await this.list(agentId).catch(() => undefined);
       }
     }
   }
@@ -837,6 +872,11 @@ export class NyxAgentTransport {
 }
 
 export const nyxAgentTransport = new NyxAgentTransport();
+
+function sameFields(a: ChatMessage, b: ChatMessage): boolean {
+  const keys = Object.keys(a) as (keyof ChatMessage)[];
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
+}
 
 function provisionalTitle(text: string): string {
   const line = text.split(/\r?\n/).find((part) => part.trim()) ?? "";

@@ -10,6 +10,9 @@ pub struct OwnershipTransfer {
     pub actor_user_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_api_key_id: Option<String>,
+    /// Persist Tool authority requirements for replay after deletion or conversion.
+    #[serde(default)]
+    pub tool_transfer: bool,
     pub resource_kind: String,
     pub resource_id: String,
     pub previous_owner_user_id: String,

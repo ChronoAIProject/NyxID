@@ -736,3 +736,17 @@ NyxAgent model selection is owner-authenticated, validated against live models,
 and changing an existing thread resets its upstream context.
 Assistant reply feedback is a human-only NyxAgent conversation and group feature: `PUT`/`DELETE` feedback routes require the engine flag and participant ownership, while `/admin/assistant/feedback` is admin/operator-only (filters `model`, `agent_kind`, `has_error`; pre-snapshot rows show no context). Controls are hidden for replay, legacy Aevatar, stopped, and failed replies; comments are optional and bounded. Writes are scoped to the parent conversation or group, purged with it, and atomic per person and reply. Each change stores a metadata-only reply context snapshot and emits one `nyxid::assistant_feedback` log line (`submitted`/`changed`/`comment_updated`/`withdrawn`); comment, prompt and reply text are never logged. See `docs/chat/08-nyxagent-engine.md#reply-feedback`.
 
+
+
+### Tools Manager boundary
+
+Tools Manager is Operator-only (`nyxid:catalog:tools:write`) and binds every
+mutation to own server-marked Tool rows and live first-party human authority.
+Admin alone publishes and configures audience/prices. Manager creation uses a
+restricted empty audience; twin inheritance is sanitized. First credential and
+destination version commit atomically, with a durable freeze after first set.
+Contract edits demote live operations and advance generation transactionally;
+no-op discovery/planning must not mutate state. Tool icons reuse static-SVG
+validation and recheck authority on attachment. Keep manifest/wizard credentials
+in zeroizing memory, env names only in saved manifests, no credential reads in
+dry-run/validate, no redirects on shared-credential transport. See docs/TOOLS.md.

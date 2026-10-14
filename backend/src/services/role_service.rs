@@ -70,21 +70,38 @@ async fn ensure_unclaimed_system_role(
     db: &mongodb::Database,
     spec: &SystemRoleSpec,
 ) -> AppResult<Option<Role>> {
-    let existing = db
-        .collection::<Role>(ROLES)
-        .find_one(doc! { "slug": spec.slug })
-        .await?;
-    if let Some(existing) = existing
-        && (!existing.is_system || existing.client_id.is_some())
-    {
-        tracing::warn!(
-            slug = spec.slug,
-            role_id = %existing.id,
-            "skipping system role seed: slug belongs to a custom role"
-        );
+    let roles = db.collection::<Role>(ROLES);
+    let now = Utc::now();
+    // The conditional update never converts a concurrently created custom role.
+    if let Some(role) = roles.find_one_and_update(doc! {"slug":spec.slug,"is_system":true,"client_id":null}, doc! {"$set":{
+        "name":spec.name,"description":spec.description,"permissions":permissions_vec(spec.permissions),"is_default":spec.is_default,"updated_at":bson::DateTime::from_chrono(now)
+    }}).return_document(mongodb::options::ReturnDocument::After).await? { return Ok(Some(role)); }
+    if roles.find_one(doc! {"slug":spec.slug}).await?.is_some() {
         return Ok(None);
     }
-    ensure_system_role(db, spec).await.map(Some)
+    let role = Role {
+        id: Uuid::new_v4().to_string(),
+        name: spec.name.into(),
+        slug: spec.slug.into(),
+        description: Some(spec.description.into()),
+        permissions: permissions_vec(spec.permissions),
+        is_default: spec.is_default,
+        is_system: true,
+        client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    match roles.insert_one(&role).await {
+        Ok(_) => Ok(Some(role)),
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) if e.code == 11000) =>
+        {
+            // A winner's assignments retain their original meaning.
+            Ok(roles
+                .find_one(doc! {"slug":spec.slug,"is_system":true,"client_id":null})
+                .await?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn ensure_system_role(db: &mongodb::Database, spec: &SystemRoleSpec) -> AppResult<Role> {
@@ -200,6 +217,20 @@ pub async fn can_manage_catalog(
     platform_role: PlatformRole,
 ) -> AppResult<bool> {
     operator_holds(db, user, platform_role, CATALOG_SERVICES_WRITE_PERMISSION).await
+}
+
+pub async fn can_manage_tools(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<bool> {
+    operator_holds(
+        db,
+        user,
+        platform_role,
+        crate::models::role::TOOLS_WRITE_PERMISSION,
+    )
+    .await
 }
 
 async fn operator_holds(
@@ -646,6 +677,18 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
         is_default: false,
     };
     ensure_system_role(db, &credits_manager).await?;
+
+    ensure_unclaimed_system_role(
+        db,
+        &SystemRoleSpec {
+            name: "Tools Manager",
+            slug: crate::models::role::TOOLS_MANAGER_ROLE_SLUG,
+            description: "Lets an Operator prepare their own Tools; publication remains Admin-only",
+            permissions: &[crate::models::role::TOOLS_WRITE_PERMISSION],
+            is_default: false,
+        },
+    )
+    .await?;
 
     let catalog_manager = SystemRoleSpec {
         name: CATALOG_MANAGER_ROLE_NAME,
