@@ -612,6 +612,7 @@ pub struct ProposalItem {
     pub draft: Option<GeneratedProposal>,
     pub published_skill_id: Option<String>,
     pub published_version: Option<String>,
+    pub auto_allowed: bool,
     /// False when learned evidence or consent was withdrawn after a request
     /// may have reached the registry: NyxID only checks it and never attaches.
     pub evidence_available: bool,
@@ -976,7 +977,12 @@ pub async fn list(
         } else {
             None
         };
-        let body = if include_drafts && row.status != "pinned" {
+        let automatic = row.source == ProposalSource::Authored
+            && row
+                .publication
+                .as_ref()
+                .is_some_and(|p| p.approved_by.is_some() && p.acknowledgement_id.is_none());
+        let body = if include_drafts && (row.status != "pinned" || automatic) {
             Some(draft(state, &row).await?)
         } else {
             None
@@ -1025,6 +1031,7 @@ pub async fn list(
             draft: body,
             published_skill_id: row.publication.as_ref().and_then(|p| p.skill_id.clone()),
             published_version: row.publication.as_ref().map(|p| p.version.clone()),
+            auto_allowed: automatic,
             evidence_available,
             card_conversation_id: card.as_ref().map(|c| c.conversation_id.clone()),
             acknowledgement_id: card.as_ref().map(|c| c.id.clone()),
@@ -1315,7 +1322,15 @@ pub async fn reject(
             "Choose a valid rejection reason".into(),
         ));
     }
-    let (_, row) = load(&state.db, actor, agent_id, id).await?;
+    let (agent, row) = load(&state.db, actor, agent_id, id).await?;
+    if row.source == ProposalSource::Authored
+        && row.status == "pinned"
+        && row.publication.as_ref().is_some_and(|p| {
+            p.approved_by.as_deref() == Some(actor) && p.acknowledgement_id.is_none()
+        })
+    {
+        return discard_automatic(state, actor, &agent, &row, revision).await;
+    }
     let db = state.db.clone();
     let proposal_id = id.to_owned();
     let agent_id = agent_id.to_owned();
@@ -1377,6 +1392,61 @@ pub async fn reject(
         })
         .await
         .map_err(transactions::map_transaction_error)?;
+    audit(
+        &state.db,
+        actor,
+        &row,
+        "assistant_learning_proposal_rejected",
+    )
+    .await;
+    Ok(())
+}
+
+/// Discarding a completed automatic proposal removes only its exact attached
+/// version. The private registry publication remains available to its owner.
+async fn discard_automatic(
+    state: &AppState,
+    actor: &str,
+    agent: &AssistantAgent,
+    row: &AssistantAgentLearningProposal,
+    revision: i64,
+) -> AppResult<()> {
+    let p = row.publication.as_ref().ok_or_else(conflict)?;
+    let skill_id = p.skill_id.as_ref().ok_or_else(conflict)?;
+    let selection = Selection {
+        expected_revision: agent.skills_revision,
+        skills: agent
+            .skills
+            .iter()
+            .filter(|pin| {
+                !(pin.skill_id == *skill_id && pin.version == p.version && pin.sha256 == p.sha256)
+            })
+            .cloned()
+            .collect(),
+    };
+    let mut metadata = agent.skill_metadata.clone();
+    if !selection.skills.iter().any(|pin| pin.skill_id == *skill_id) {
+        metadata.remove(skill_id);
+    }
+    let db = state.db.clone();
+    let agent = agent.clone();
+    let row_for_discard = row.clone();
+    let actor_owned = actor.to_owned();
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let row = &row_for_discard;
+        let result: AppResult<()> = async {
+            let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+                doc! {"_id":&row.id,"owner_id":&actor_owned,"revision":revision_filter(revision),"source":"authored","status":"pinned","publication.acknowledgement_id":bson::Bson::Null,"publication.approved_by":&actor_owned},
+                doc! {"$set":{"status":"rejected","body_bytes":0,"failure_code":"rejected","updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
+            ).session(&mut *session).await?;
+            if changed.modified_count != 1 { return Err(conflict()); }
+            skills::apply_verified_in_session(&db, &agent, &selection, &metadata, &mut *session).await?;
+            db.collection::<bson::Document>(ROOTS_COLLECTION_NAME).delete_many(doc! {"proposal_id":&row.id,"agent_id":&agent.id}).session(&mut *session).await?;
+            Ok(())
+        }.await;
+        transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)?;
     audit(
         &state.db,
         actor,
@@ -1799,6 +1869,39 @@ pub async fn approve(
     binding: &Value,
     reader: &impl OrnnReader,
 ) -> AppResult<Value> {
+    approve_core(state, chat, agent_id, id, Some(card), binding, reader).await
+}
+
+/// Server-initiated publication uses the chat owner's identity and the same
+/// package, target, lease and pin fences as a reviewed publication.
+pub async fn approve_automatically(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent_id: &str,
+    id: &str,
+    binding: &Value,
+    reader: &impl OrnnReader,
+) -> AppResult<Value> {
+    if chat.guest
+        || acks::effective_access_mode(&state.db, chat).await?
+            != crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        return Err(AppError::Forbidden(
+            "Automatic publication requires Full access".into(),
+        ));
+    }
+    approve_core(state, chat, agent_id, id, None, binding, reader).await
+}
+
+async fn approve_core(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent_id: &str,
+    id: &str,
+    card: Option<&str>,
+    binding: &Value,
+    reader: &impl OrnnReader,
+) -> AppResult<Value> {
     publication_ready(&state.db).await?;
     let actor = &chat.user_id;
     let (agent, row) = load(&state.db, actor, agent_id, id).await?;
@@ -1814,7 +1917,7 @@ pub async fn approve(
     let lease = Uuid::new_v4().to_string();
     let db = state.db.clone();
     let chat = chat.clone();
-    let card = card.to_owned();
+    let card = card.map(str::to_owned);
     let binding = binding.clone();
     let actor = actor.clone();
     let actor_for_claim = actor.clone();
@@ -1846,13 +1949,18 @@ pub async fn approve(
                 if !classified || next.lease_expires_at.is_some_and(|t| t > Utc::now()) {
                     return Err(conflict());
                 }
-                if !resumes_publication(&next, &actor_for_claim, &card, &digest)
-                    && !acks::consume_action_in_session(&db, &chat, &card, TOOL, &binding, &mut *session).await? {
+                if let Some(card) = &card {
+                    if !resumes_publication(&next, &actor_for_claim, card, &digest)
+                    && !acks::consume_action_in_session(&db, &chat, card, TOOL, &binding, &mut *session).await? {
                     return Err(AppError::Conflict(if fresh.source == ProposalSource::Learned {
                         "Learning approval card is missing, expired, used or stale"
                     } else {
                         "This confirmation cannot publish right now; see the card for the reason"
                     }.into()));
+                }
+                } else {
+                    if chat.guest { return Err(conflict()); }
+                    acks::fence(&db, &chat, &mut *session).await?;
                 }
                 if let Some(target) = target_id(&next) {
                     let targets = db.collection::<LearningPublicationTarget>(PUBLICATION_TARGETS_COLLECTION_NAME);
@@ -1870,7 +1978,7 @@ pub async fn approve(
                     }
                 }
                 next.approved_by = Some(actor_for_claim.clone());
-                next.acknowledgement_id = Some(card.clone());
+                next.acknowledgement_id = card.clone();
                 next.approval_digest = Some(digest.clone());
                 next.skills_revision = agent_for_claim.skills_revision;
                 next.lease_id = Some(lease.clone());
@@ -2337,12 +2445,25 @@ async fn execute(
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         lease_filter(&row_for_pin, &publication_for_pin),
-                        doc! {"$set":{"status":"pinned","failure_code":bson::Bson::Null,"publication.lease_expires_at":bson::Bson::Null,"body_bytes":0,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
+                        if row_for_pin.source == ProposalSource::Authored && publication_for_pin.acknowledgement_id.is_none() {
+                            doc! {"$set":{"status":"pinned","failure_code":bson::Bson::Null,"publication.lease_expires_at":bson::Bson::Null,"updated_at":bson::DateTime::now()}}
+                        } else {
+                            doc! {"$set":{"status":"pinned","failure_code":bson::Bson::Null,"publication.lease_expires_at":bson::Bson::Null,"body_bytes":0,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}}
+                        },
                     )
                     .session(&mut *session)
                     .await?;
                 if completed.matched_count != 1 {
                     return Err(conflict());
+                }
+                if row_for_pin.source == ProposalSource::Authored && publication_for_pin.acknowledgement_id.is_none() {
+                    db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+                        .update_many(doc! {"user_id": &row_for_pin.owner_id,
+                            "authored_skill.proposal_id": &row_for_pin.id,
+                            "status": {"$in": ["pending", "allowed"]},
+                            "decided_by": {"$ne": "access_mode"}},
+                            doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}})
+                        .session(&mut *session).await?;
                 }
                 let revision = skills::apply_verified_in_session(
                     &db,
@@ -2370,6 +2491,25 @@ async fn execute(
                     .insert_one(root)
                     .session(&mut *session)
                     .await?;
+                if row_for_pin.source == ProposalSource::Authored
+                    && let Some(card_id) = &publication_for_pin.acknowledgement_id
+                    && let Some(card) = db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME)
+                        .find_one(doc! {"_id": card_id}).session(&mut *session).await? {
+                    let mut event = team::event("skill_attached", format!(
+                        "The owner's reviewed skill {} {} was published and attached to {} (agent_id {}). Do not publish or attach it again. {}",
+                        super::assistant_nyxagent::identifier(&publication_for_pin.name),
+                        super::assistant_nyxagent::identifier(&publication_for_pin.version),
+                        super::assistant_nyxagent::identifier(&agent_for_pin.name), agent_for_pin.id,
+                        acks::DECISION_NARRATION), Some(&agent_for_pin.id));
+                    event.id = publication_for_pin.operation_id.clone();
+                    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                        .update_one(doc! {"_id": &card.conversation_id, "user_id": &card.user_id},
+                            doc! {"$push": {"pending_events": {"$each": [bson::to_bson(&event)
+                                .map_err(|_| AppError::Internal("Failed to encode skill attachment event".into()))?],
+                                "$slice": -(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)}}})
+                        .session(&mut *session).await?;
+                }
                 Ok(revision)
             }
             .await;

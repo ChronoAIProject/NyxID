@@ -308,6 +308,31 @@ pub async fn approve(
     if args["agent_id"].as_str() != Some(&agent_id) {
         return Err(AppError::NotFound("Learning proposal not found".into()));
     }
+    if !chat.guest
+        && acks::effective_access_mode(&state.db, &chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        let agent =
+            crate::services::assistant_team_service::agent(&state.db, &owner, &agent_id).await?;
+        let owner_reader = super::agent_skills::Reader {
+            state: &state,
+            person: &owner,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        };
+        return Ok(Json(
+            crate::services::assistant_skill_authoring::publish_automatically(
+                &state,
+                &chat,
+                &agent,
+                &proposal_id,
+                &args,
+                &owner_reader,
+            )
+            .await?,
+        ));
+    }
     if let Some(id) = body.acknowledgement_id.as_deref() {
         review::confirm_learned_card(
             &state,
@@ -472,6 +497,10 @@ pub(crate) async fn decide_authored(
                 Err(error) => return Err(error),
             }
         }
+        Box::pin(super::assistant_team::owner_denial_decided(
+            state, &actor, &card,
+        ))
+        .await;
         return Ok(card);
     }
     if !matches!(card.status.as_str(), "allowed" | "used") {
@@ -536,6 +565,12 @@ pub(crate) async fn decide_authored(
         return Err(error);
     }
     card.status = "used".into();
+    Box::pin(super::assistant_team::wake(
+        state,
+        &actor,
+        &card.conversation_id,
+    ))
+    .await;
     Ok(card)
 }
 
