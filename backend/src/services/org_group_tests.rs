@@ -881,6 +881,19 @@ async fn org_group_http_tools_and_demoted_or_inactive_members_are_refused() {
     .await;
     assert!(!error);
     assert_eq!(listing["groups"][0]["id"], group.id);
+    // The fixture's member runs in Full access, which bypasses the webhook
+    // floor (covered by `full_access_webhook_change_executes_with_receipt_while_auto_asks`).
+    // Auto keeps the floor: the destructive leave must raise a card.
+    super::assistant_settings_service::update(
+        &f.state.db,
+        &f.member,
+        super::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let mut automation = chat.clone();
     automation.confirmation_policy =
         Some(crate::models::trigger_schedule::ConfirmationPolicy::Destructive);
@@ -891,7 +904,7 @@ async fn org_group_http_tools_and_demoted_or_inactive_members_are_refused() {
         &serde_json::json!({"group":group.id,"leave":true}),
     )
     .await;
-    assert!(error);
+    assert!(error, "{card}");
     assert_eq!(card["error"], "acknowledgement_required");
     groups::get(&f.state.db, &f.member, &group.id, None)
         .await
