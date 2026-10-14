@@ -113,6 +113,9 @@ shapes retain their meaning.
 - **Rule:** Submit/Save buttons must be disabled when no changes exist or required fields are empty
 - **`AddCtaButton`** (shared) — the standard "create" trigger on every list page header. `h-8`, `rounded-lg`, `border-hairline` idle / `border-hairline-strong` hover, `text-12 text-text-tertiary`, with a 22×22 inset icon container (`rounded-[6px]`, `border-hairline`, `bg-overlay`, 12px Plus icon). Distinct from `variant="primary"` — used when the button is the page-level "add" affordance.
 
+### Composer toolbar
+NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside the composer border below its full-width textarea, with send/stop/mic on the right; composers without a toolbar keep the existing inline layout.
+
 ### Inputs
 - **Height:** `h-8`
 - **Text:** `text-12`

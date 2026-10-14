@@ -122,7 +122,7 @@ And a new **delivery**:
   contracts share the guest classifier; there are no tool-name word lists.
   The owner may explicitly choose `destructive` after a warning, permitting
   ordinary changes without a card. The run waits for the owner and notifies them;
-  this policy cannot be bypassed by the global skip-destructive setting.
+  Auto and Ask every time enforce this policy; Full access bypasses it with an automatic receipt whose reason is `webhook`.
 - **Delivery of results.** Optional `deliver_to`:
   - a chat of one of the owner's channel bots (by chat ID from
     `nyxid__list_channel_chats`, only chats the owner may post to);
@@ -387,8 +387,8 @@ classification shares guest access's HTTP method and catalog contract rules,
 including NyxID markers; names and payload instructions never authorize changes.
 Native tools use their closed effect inventory. Policy is snapshotted at run
 admission and persists across confirmation continuations. Scheduled turns retain
-normal owner authority. The global skip-destructive preference cannot bypass a
-webhook policy. NyxBot tools expose and explain this choice.
+normal owner authority. Full access bypasses webhook confirmation with an auto-allowed receipt. Auto
+and Ask every time retain the snapshotted policy. NyxBot tools expose and explain this choice.
 
 Automation REST operations (including previews, setup prefills, runs and list
 filtering) and timezone/budget settings use the shared first-party human check.
