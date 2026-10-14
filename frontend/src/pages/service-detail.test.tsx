@@ -87,6 +87,7 @@ vi.mock("@/hooks/use-nodes", () => ({
 
 vi.mock("@/hooks/use-providers", () => ({
   useMyProviderTokens: () => ({ data: [] }),
+  useProvider: () => ({ data: undefined }),
 }));
 
 vi.mock("@/hooks/use-developer-apps", () => ({
