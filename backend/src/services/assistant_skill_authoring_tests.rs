@@ -1056,13 +1056,13 @@ fn authoring_guidance_uses_three_parts_and_existing_skills_first() {
     assert!(prompt.ends_with(" Description=role/scope; persona=tone; skills=procedures."));
     for preserved in [
         "For uncovered settings (agent-key creation, security, profile, billing, organizations), give the exact page with nyxid__settings_link.",
-        "Its keys use nothing else.",
+        "the owner's account and connected services.",
         "When the owner must finish a connect link, channel bot setup or verification outside chat, explain what to do and end your turn.",
         "NyxID resumes you when they finish; never ask them to reply that they are done or connected.",
-        "Service approvals wait for the owner in the app, phone or Telegram and continue automatically; report timeouts.",
+        "If a service returns approval_required, wait for the owner in the app, phone or Telegram; report timeouts.",
         "After posting work, end your turn; NyxID wakes you with replies when the group is quiet so you can report back.",
-        "Link existing personal or organization bots from nyxid__list_channel_bots to yourself or a specialist with nyxid__connect_channel_bot by id or label.",
-        "Create Telegram, Discord, Slack, Lark or other bots with nyxid__channel_bot_setup_link; share its link, never request bot secrets in chat or send the user to Studio.",
+        "Link bots from nyxid__list_channel_bots with nyxid__connect_channel_bot by id or label.",
+        "Create bots with nyxid__channel_bot_setup_link; share its link, never request bot secrets in chat or send the user to Studio.",
     ] {
         assert!(prompt.contains(preserved), "{preserved}");
     }
@@ -2174,7 +2174,7 @@ async fn post_write_zip_hash_mismatch_keeps_check_only_barrier() {
 
 #[tokio::test]
 async fn authored_approval_uses_signed_person_and_pins_exact_post_then_put_version() {
-    let f = fixture("authoring_publish").await;
+    let mut f = fixture("authoring_publish").await;
     let server = setup_ornn(&f).await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
     let id = Uuid::new_v4().to_string();
@@ -2234,16 +2234,43 @@ async fn authored_approval_uses_signed_person_and_pins_exact_post_then_put_versi
         assert_eq!(claims["sub"], f.owner);
     }
     server.verify().await;
-    // Remove L1 provenance: authored revisions may improve other owned B2 pins too.
-    f.state
-        .db
-        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{"active_turn":bson::to_bson(&f.row.active_turn).unwrap()}},
-        )
+    // Reviewed publication wakes a narration turn. Wait for that turn to
+    // settle, then draft the revision from a fresh owner turn and its authority.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+            if row.active_turn.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.row = crate::services::assistant_nyxagent::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &crate::services::assistant_nyxagent::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(f.row.id.clone()),
+            text: "Improve the weekly review skill".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    f.chat = acks::for_key(&f.state.db, &f.owner, Some(&f.row.credential_api_key_id))
         .await
+        .unwrap()
         .unwrap();
+    // Remove L1 provenance: authored revisions may improve other owned B2 pins too.
     f.state
         .db
         .collection::<bson::Document>(
