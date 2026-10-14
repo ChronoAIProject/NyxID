@@ -71,6 +71,12 @@ enum ToolOutcome {
     Error,
 }
 
+#[derive(Clone)]
+struct AutomaticServiceApprovalReceipt {
+    auto: crate::services::assistant_acknowledgement_service::AutoAllowed,
+    summary: String,
+}
+
 fn tool_succeeded(response: &Response) -> bool {
     response.status().is_success()
         && matches!(
@@ -2140,6 +2146,10 @@ async fn dispatch_tools_call(
         billing_egress_permit,
     ) {
         let response = future.await;
+        let service_receipt = response
+            .extensions()
+            .get::<AutomaticServiceApprovalReceipt>();
+        let auto_allowed = service_receipt.map(|receipt| receipt.auto).or(auto_allowed);
         if tool_succeeded(&response)
             && let (Some(auto), Some(chat)) = (auto_allowed, auth.chat.as_ref())
         {
@@ -2149,7 +2159,9 @@ async fn dispatch_tools_call(
                 tool_name,
                 &arguments,
                 &auto,
-                &meta_action_summary(tool_name, &arguments),
+                &service_receipt
+                    .map(|receipt| receipt.summary.clone())
+                    .unwrap_or_else(|| meta_action_summary(tool_name, &arguments)),
             )
             .await;
         }
@@ -4756,17 +4768,6 @@ async fn handle_mcp_ssh_exec(
 
     let response = match result {
         Ok(response) => {
-            if response.exit_code == 0 {
-                approval_service::record_chat_approval(
-                    &state.db,
-                    auth.chat.as_ref(),
-                    approval_auto,
-                    &service_id,
-                    &service.name,
-                    &operation,
-                )
-                .await;
-            }
             let response_json = serde_json::json!({
                 "exit_code": response.exit_code,
                 "stdout": response.stdout,
@@ -4778,7 +4779,16 @@ async fn handle_mcp_ssh_exec(
             });
             let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
             let is_error = response.exit_code != 0;
-            tool_result(request_id, &text, is_error)
+            let mut result = tool_result(request_id, &text, is_error);
+            if !is_error && let Some(auto) = approval_auto {
+                result
+                    .extensions_mut()
+                    .insert(AutomaticServiceApprovalReceipt {
+                        auto,
+                        summary: format!("{} on {}", operation.operation_summary(), service.name),
+                    });
+            }
+            result
         }
         Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
             return concurrency_limited_response(request_id);
