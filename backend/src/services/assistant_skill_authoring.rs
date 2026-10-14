@@ -310,7 +310,11 @@ pub async fn create(
                     )
                 )
             {
-                return Err(AppError::Conflict("source_skill_unavailable: NyxID could not read the source skill from Ornn. Approve any pending Ornn request, then draft again.".into()));
+                return Err(AppError::Conflict(if automatic {
+                    "source_skill_unavailable: NyxID could not read the source skill from Ornn under the current grants and policy."
+                } else {
+                    "source_skill_unavailable: NyxID could not read the source skill from Ornn. Approve any pending Ornn request, then draft again."
+                }.into()));
             }
             return Err(failure.error);
         }
