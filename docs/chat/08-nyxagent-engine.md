@@ -244,7 +244,8 @@ cleared to inherit the workspace mode.
 ## Acknowledgements
 
 `assistant_acknowledgements` is a transcript collection with UUID `_id`, owner,
-conversation, credential key, kind (`service`, `account`, `action`), applicable
+conversation, credential key, kind (`service`, `account`, `action`, `operations`,
+`skills`, `machine`, `saved_login`), applicable
 service id/slug/name or tool/argument digest/summary, status, creation/decision/
 expiry dates, and the last persisted user turn that requested it. Debug is
 redacted. Index `(conversation_id,status,created_at)` has no TTL. Pending requests
@@ -273,8 +274,9 @@ threads, respecting agent overrides. History, group and voice reads also retire
 pre-upgrade floor cards for owners already using Full access. Retirement records
 expiry, not success; the retried action writes its automatic receipt after it runs.
 
-Permission-mode receipt rollout: deploy the frontend accepting `decided_by: access_mode`
-and optional `continuation_of` before backend writers, or ship both in one release.
+Permission-mode receipt rollout: deploy the frontend accepting `decided_by: access_mode`,
+optional `continuation_of` and routed `machine`/`saved_login` requests before backend
+writers, or ship both in one release.
 Unknown future deciders are tolerated. After allowance the agent reports what it
 did and the result in plain words; after denial it reports what it skipped. Skill
 attachment reports name, version and target agent. Asking channel modes retain

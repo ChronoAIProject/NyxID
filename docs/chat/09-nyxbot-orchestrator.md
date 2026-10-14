@@ -1155,8 +1155,9 @@ validated against an allowed/used user decision in that conversation, persisted
 as optional `AssistantMessage.continuation_of`, and shown as “Continuing after
 your decision”. Agents explain the resulting action or skipped work in plain
 words, including skill/version/agent after attachment. Channel modes that ask
-retain “yes NNNN”. Deploy the frontend accepting `decided_by: access_mode` and
-`continuation_of` first, or together with the backend.
+retain “yes NNNN”. Deploy the frontend accepting `decided_by: access_mode`,
+`continuation_of` and routed `machine`/`saved_login` requests first, or together
+with the backend.
 ### Editable skills and attached pins
 
 Attached Ornn skill pins are exact, bounded guidance. Each pin can be disabled
