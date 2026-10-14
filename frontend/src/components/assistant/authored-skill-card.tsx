@@ -28,8 +28,9 @@ function interruptedCopy(actions: readonly string[]): string {
 export const SAVED_EDIT_NOTICE =
   "Draft saved. A new review card for this version was posted in this conversation; confirm it there.";
 
-export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision }: {
+export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed = false, deciding, onDecision }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
+  readonly confirmationsBypassed?: boolean;
   readonly deciding: boolean;
   readonly onDecision: (choice: "allow" | "deny") => Promise<unknown>;
 }) {
@@ -105,6 +106,10 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {actions.includes("reprepare") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Review updated package</Button> : null}
     {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
   </div> : null;
+  if (confirmationsBypassed) {
+    return <DecisionReceipt acknowledgement={card.status === "pending" ? { ...card, status: "expired" } : card}
+      summary={data?.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}` : undefined} />;
+  }
   if (data?.state && data.state !== "active") {
     const stateSummary = data.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}`
       : data.state === "discarded" ? "Skill draft discarded"

@@ -20,6 +20,17 @@ const acknowledgement: NyxAgentAcknowledgement = {
 };
 afterEach(cleanup);
 
+it("hides a stale owner ask in Full access while keeping specialist requests routed to NyxBot", () => {
+  const decide = vi.fn();
+  const view = render(<NyxAgentAcknowledgementCard acknowledgement={acknowledgement} accessMode="autopilot" deciding={false} onDecision={decide} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Expired · Delete agent key ci-bot");
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  expect(decide).not.toHaveBeenCalled();
+  view.rerender(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, decider: "orchestrator" }} accessMode="autopilot" deciding={false} onDecision={decide} />);
+  expect(screen.getByText("Requested from NyxBot")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Allow" })).toBeVisible();
+});
+
 it.each([
   ["service", "Allow this chat to use GitHub?"],
   ["account", "Allow this chat to manage your NyxID account"],

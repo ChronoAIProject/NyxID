@@ -26,6 +26,7 @@ import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
 import {
   agentHandle,
   agentTitle,
+  effectiveAccessMode,
   groupWithDisplayNames,
   withDisplayName,
 } from "@/lib/assistant/nyxbot-labels";
@@ -513,7 +514,7 @@ export function NyxAgentAssistantChatPage() {
 
 function NyxAgentThreadPage() {
   const voiceEnabled = useFeature("assistant:voice");
-  const voiceSettings = useNyxBotSettings(voiceEnabled);
+  const nyxBotSettings = useNyxBotSettings();
   const [voiceThread, setVoiceThread] = useState<string>();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
@@ -644,9 +645,11 @@ function NyxAgentThreadPage() {
   const channelPlatform = selectedId ? (conversation?.channel?.platform ?? null) : null;
   // The home stays until the first message of its new NyxBot thread shows.
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
+  const agentOverride = agents.data?.agents.find((row) => row.id === headerAgent?.id)?.access_mode_override;
+  const accessMode = effectiveAccessMode(nyxBotSettings.data?.access_mode, agentOverride);
   const composerToolbar = <>
     <AccessModeSwitcher disabled={destroyed || chat.isStreaming}
-      agentOverride={agents.data?.agents.find((row) => row.id === headerAgent?.id)?.access_mode_override} />
+      agentOverride={agentOverride} />
     {selectedId && conversation ? <ThreadModelSelect conversationId={selectedId}
       model={conversation.model} disabled={destroyed || chat.isStreaming} /> : null}
   </>;
@@ -823,6 +826,7 @@ function NyxAgentThreadPage() {
                   <ReviewCardTarget selected={search.card === acknowledgement.id}>
                   <NyxAgentAcknowledgementCard
                     acknowledgement={acknowledgement}
+                    accessMode={accessMode}
                     deciding={Boolean(chat.decidingAcknowledgement)}
                     onDecision={async (choice) => {
                       await chat.decideAcknowledgement({ id: acknowledgement.id, choice });
@@ -837,6 +841,7 @@ function NyxAgentThreadPage() {
                 `card:${search.card ?? ""}`,
                 `deciding:${chat.decidingAcknowledgement ?? ""}`,
                 `channel:${channelPlatform ?? ""}`,
+                `mode:${accessMode}`,
                 ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
@@ -855,7 +860,7 @@ function NyxAgentThreadPage() {
         )}
         {voiceEnabled && voiceThread && voiceThread === selectedId && !destroyed && !channelPlatform && (
           <div className="absolute inset-x-0 top-3 z-20 mx-auto w-full max-w-[758px] px-4">
-            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={voiceSettings.data?.voice}
+            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={nyxBotSettings.data?.voice}
               onClose={() => { setVoiceThread(undefined); setFocusRequest((n) => n + 1); }} />
           </div>
         )}

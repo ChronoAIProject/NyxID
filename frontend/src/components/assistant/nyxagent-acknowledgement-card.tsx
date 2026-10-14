@@ -3,7 +3,7 @@ import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ACTION_RISK_LABEL, confirmationReason } from "@/lib/assistant/nyxbot-labels";
-import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
+import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 
 function title(row: NyxAgentAcknowledgement): string {
   // A specialist's request that NyxBot decides.
@@ -27,19 +27,23 @@ function title(row: NyxAgentAcknowledgement): string {
 
 export function NyxAgentAcknowledgementCard({
   acknowledgement,
+  accessMode,
   deciding,
   onDecision,
 }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
+  readonly accessMode?: NyxAgentAccessMode;
   readonly deciding: boolean;
   readonly onDecision: (choice: "allow" | "deny") => Promise<unknown>;
 }) {
   const [error, setError] = useState<string>();
-  if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} deciding={deciding} onDecision={onDecision} />;
+  const confirmationsBypassed = accessMode === "autopilot" && acknowledgement.decider === "user";
+  if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} confirmationsBypassed={confirmationsBypassed} deciding={deciding} onDecision={onDecision} />;
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
-  if (acknowledgement.status !== "pending") {
-    return <DecisionReceipt acknowledgement={acknowledgement} />;
+  if (acknowledgement.status !== "pending" || confirmationsBypassed) {
+    return <DecisionReceipt acknowledgement={confirmationsBypassed && acknowledgement.status === "pending"
+      ? { ...acknowledgement, status: "expired" } : acknowledgement} />;
   }
 
   async function decide(choice: "allow" | "deny") {
