@@ -1189,8 +1189,8 @@ async fn native_inventory(full: bool) {
             assert_eq!(count, 1, "{name}");
         }
     }
-    // Orchestrators never see consent cards; only destructive confirmations,
-    // and none at all once the owner turns confirmations off.
+    // Orchestrators never see scope-consent cards. Full access records
+    // automatic allowances instead of creating pending action confirmations.
     assert_eq!(
         db.collection::<bson::Document>(ACKS)
             .count_documents(doc! {"kind": {"$ne": "action"}})
@@ -1199,13 +1199,32 @@ async fn native_inventory(full: bool) {
         0
     );
     if full {
+        let rows = db.collection::<bson::Document>(ACKS);
         assert_eq!(
-            db.collection::<bson::Document>(ACKS)
-                .count_documents(doc! {})
+            rows.count_documents(doc! {"status": "pending"})
                 .await
                 .unwrap(),
             0
         );
+        assert_eq!(
+            rows.count_documents(doc! {"decided_by": {"$ne": "access_mode"}})
+                .await
+                .unwrap(),
+            0
+        );
+        for tool in ["nyxid__delete_node", "nyxid__delete_agent_key"] {
+            assert_eq!(
+                rows.count_documents(doc! {
+                    "tool_name": tool, "status": "allowed",
+                    "confirmation.risk": "destructive",
+                    "confirmation.reason": "access_mode",
+                })
+                .await
+                .unwrap(),
+                1,
+                "{tool} leaves one successful automatic allowance",
+            );
+        }
     }
     assert_eq!(
         db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
