@@ -513,6 +513,18 @@ pub async fn record_auto_allowed(
     auto: &AutoAllowed,
     summary: &str,
 ) {
+    record_auto_allowed_with_link(db, chat, tool, args, auto, summary, None).await;
+}
+
+pub async fn record_auto_allowed_with_link(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+    link: Option<&str>,
+) {
     if chat.guest {
         return;
     }
@@ -535,6 +547,7 @@ pub async fn record_auto_allowed(
             },
         ),
         summary: summary.into(),
+        link: link.map(str::to_owned),
         tool_name: Some(tool.into()),
         arguments_digest: Some(arguments_digest(args)),
         created_at: now,
@@ -1637,6 +1650,7 @@ async fn prepare_request_candidate(
         tool_name: request.tool.map(str::to_owned),
         arguments_digest: request.arguments.map(arguments_digest),
         summary: request.summary.into(),
+        link: None,
         status: "pending".into(),
         requested_turn_id: None,
         voice_request_id: None,

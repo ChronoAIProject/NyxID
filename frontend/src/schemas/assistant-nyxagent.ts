@@ -179,6 +179,7 @@ export const nyxAgentAcknowledgementSchema = z.object({
   kind: z.enum(["service", "account", "action", "operations", "skills", "machine", "saved_login"]),
   status: z.enum(["pending", "allowed", "denied", "expired", "used"]),
   summary: z.string(),
+  link: z.string().nullish(),
   /** `orchestrator`: a specialist's request that NyxBot decides (the user may too). */
   decider: z.enum(["user", "orchestrator"]).default("user"),
   decided_by: z.enum(["user", "orchestrator", "access_mode"]).catch("user").nullable().default(null),

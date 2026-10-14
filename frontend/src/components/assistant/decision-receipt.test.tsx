@@ -32,9 +32,14 @@ describe("DecisionReceipt", () => {
   });
   it("uses the decided time and links an automatically published proposal", () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-14T00:03:00Z"));
-    render(<DecisionReceipt acknowledgement={{ ...row, decided_by: "access_mode", summary: "Skill weekly-review 1.0 published and attached to NyxBot. Inspect or discard: https://nyxid.test/assistant?agent=a&proposal=p" }} />);
+    render(<DecisionReceipt acknowledgement={{ ...row, decided_by: "access_mode", summary: "Skill weekly-review 1.0 published and attached to NyxBot", link: "https://nyxid.test/assistant?agent=a&proposal=p" }} />);
     expect(screen.getByRole("status")).toHaveTextContent("2m ago");
     expect(screen.getByText("· 2m ago")).toHaveAttribute("dateTime", row.decided_at);
     expect(screen.getByRole("link", { name: "Inspect or discard proposal" })).toHaveAttribute("href", "https://nyxid.test/assistant?agent=a&proposal=p");
+  });
+  it("leaves legacy receipt prose unchanged when no structured link exists", () => {
+    render(<DecisionReceipt acknowledgement={{ ...row, summary: "Inspect or discard: https://nyxid.test/legacy" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Inspect or discard: https://nyxid.test/legacy");
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 });

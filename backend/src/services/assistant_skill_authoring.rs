@@ -642,13 +642,12 @@ pub async fn publish_automatically(
         id
     );
     let summary = format!(
-        "Skill {} {} published and attached to {}. Inspect or discard: {}",
+        "Skill {} {} published and attached to {}",
         name,
         result["version"].as_str().unwrap_or_default(),
-        agent.name,
-        url
+        agent.name
     );
-    acks::record_auto_allowed(
+    acks::record_auto_allowed_with_link(
         &state.db,
         chat,
         review::TOOL,
@@ -659,6 +658,7 @@ pub async fn publish_automatically(
             reason: "access_mode",
         },
         &summary,
+        Some(&url),
     )
     .await;
     result["proposal_id"] = id.into();

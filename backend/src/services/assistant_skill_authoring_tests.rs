@@ -5278,7 +5278,8 @@ async fn full_access_authored_skill_publishes_and_pins_with_receipt_while_auto_r
             assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
             assert!(rows[0].summary.contains("weekly-review 1.0"));
             assert!(rows[0].summary.contains(&agent.name));
-            assert!(rows[0].summary.contains("proposal="));
+            assert!(!rows[0].summary.contains("http"));
+            assert_eq!(rows[0].link.as_deref(), result["proposal_url"].as_str());
             assert_eq!(agent.skills.len(), 1);
             assert_eq!(agent.skills[0].skill_id, skill_id);
             assert_eq!(

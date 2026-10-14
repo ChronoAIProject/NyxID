@@ -45,8 +45,6 @@ export function DecisionReceipt({
   const Glyph =
     row.status === "denied" ? X : row.status === "expired" ? Clock : Check;
   const text = summary ?? row.summary;
-  const proposal = /\. Inspect or discard: (https?:\/\/\S+)$/.exec(text);
-  const shownSummary = proposal ? text.slice(0, proposal.index) : text;
   const time = row.decided_at ?? row.created_at;
   return (
     <p
@@ -56,10 +54,10 @@ export function DecisionReceipt({
       <Glyph aria-hidden="true" className="h-3 w-3 shrink-0 self-center" />
       <span>
         {label}
-        {bypass ? ` · bypassed ${bypass}` : ""} · {shownSummary}
+        {bypass ? ` · bypassed ${bypass}` : ""} · {text}
       </span>
-      {proposal ? (
-        <a className="underline" href={proposal[1]}>
+      {row.link ? (
+        <a className="underline" href={row.link}>
           Inspect or discard proposal
         </a>
       ) : null}

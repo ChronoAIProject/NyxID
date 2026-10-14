@@ -806,6 +806,8 @@ pub struct AcknowledgementResponse {
     kind: String,
     status: String,
     summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link: Option<String>,
     /// `user` or `orchestrator` (a subagent's request its orchestrator decides).
     decider: String,
     decided_by: Option<String>,
@@ -832,6 +834,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             kind: row.kind,
             status: row.status,
             summary: row.summary,
+            link: row.link,
             trigger_run_id: row.trigger_run_id,
             decider: row.decider,
             decided_by: row.decided_by,
