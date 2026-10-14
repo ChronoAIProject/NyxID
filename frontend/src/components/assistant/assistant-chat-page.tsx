@@ -116,6 +116,24 @@ export function NyxAgentAssistantEntry({
   );
 }
 
+/** A user message the owner wrote in a chat app, not here. */
+export function ChannelUserEntry({
+  message,
+  platform,
+  retry,
+}: {
+  readonly message: import("@/lib/assistant/chat-types").ChatMessage;
+  readonly platform: string;
+  readonly retry: (messageId: string) => Promise<void>;
+}) {
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <ChannelBadge platform={platform} />
+      <ChatMessageBubble message={message} onRetry={message.status === "error" ? () => retry(message.id) : undefined} />
+    </div>
+  );
+}
+
 export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) { return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
 
 export function AssistantChatPage() {
@@ -779,13 +797,7 @@ function NyxAgentThreadPage() {
                 }
                 const via = message.role === "user" ? (message.via ?? channelPlatform) : null;
                 if (via) {
-                  // The user wrote this in a chat app, not here.
-                  return (
-                    <div className="flex flex-col items-end gap-1">
-                      <ChannelBadge platform={via} />
-                      <ChatMessageBubble message={message} onRetry={message.status === "error" ? () => retryFailedMessage(message.id) : undefined} />
-                    </div>
-                  );
+                  return <ChannelUserEntry message={message} platform={via} retry={retryFailedMessage} />;
                 }
                 if (message.role === "assistant") {
                   return (

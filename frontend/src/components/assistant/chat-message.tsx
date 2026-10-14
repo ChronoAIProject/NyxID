@@ -32,6 +32,7 @@ import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { MachineToolCard } from "./machine-tool-card";
+import { MessageTime } from "./message-time";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
 
@@ -355,26 +356,29 @@ export function ChatMessageBubble({
   };
   if (message.role === "user") {
     return (
-      <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
-        {message.steering && (
-          <p className="mb-1 text-11 text-muted-foreground" role="note">
-            Steering ·{" "}
-            {steeringNotice(message.steering.code, message.steering.outcome)}
-          </p>
-        )}
-        {message.images?.length ? (
-          <div className={cn("flex flex-wrap gap-2", content && "mb-2")}>
-            {message.images.map((image) => (
-              <ToolImage key={image.id} image={image} />
-            ))}
-          </div>
-        ) : null}
-        {content}
-        {feedbackError ? (
-          <p role="alert" className="mt-1 text-11 text-destructive">
-            Unable to save feedback. Try again.
-          </p>
-        ) : null}
+      <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
+        <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+          {message.steering && (
+            <p className="mb-1 text-11 text-muted-foreground" role="note">
+              Steering ·{" "}
+              {steeringNotice(message.steering.code, message.steering.outcome)}
+            </p>
+          )}
+          {message.images?.length ? (
+            <div className={cn("flex flex-wrap gap-2", content && "mb-2")}>
+              {message.images.map((image) => (
+                <ToolImage key={image.id} image={image} />
+              ))}
+            </div>
+          ) : null}
+          {content}
+          {feedbackError ? (
+            <p role="alert" className="mt-1 text-11 text-destructive">
+              Unable to save feedback. Try again.
+            </p>
+          ) : null}
+        </div>
+        <MessageTime value={message.timestamp} reveal />
       </div>
     );
   }
@@ -395,11 +399,18 @@ export function ChatMessageBubble({
     ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
     : undefined;
   const lastTool = streaming ? message.toolCalls?.at(-1) : undefined;
+  const showFeedback = Boolean(
+    feedbackEnabled &&
+    conversationId &&
+    message.status === "complete" &&
+    !message.errorCode &&
+    message.id,
+  );
   return (
     <article
       role={thinking ? "status" : undefined}
       aria-label={thinking ? "Assistant is thinking" : undefined}
-      className="flex items-start gap-2.5"
+      className="group/message flex items-start gap-2.5"
     >
       <span
         {...(thinking ? { "data-assistant-halo": "" } : {})}
@@ -485,53 +496,59 @@ export function ChatMessageBubble({
             <span>{message.error}</span>
           </div>
         ) : null}
-        {feedbackEnabled &&
-        conversationId &&
-        !streaming &&
-        message.status === "complete" &&
-        !message.errorCode &&
-        message.id ? (
-          <div
-            role="group"
-            className="mt-2 flex items-center gap-1"
-            aria-label="Reply feedback"
-          >
-            <button
-              type="button"
-              aria-label="Helpful"
-              aria-pressed={vote === "up"}
-              disabled={feedback.isPending}
-              onClick={() => void setFeedback("up")}
-              className={cn(
-                "rounded p-1 text-text-tertiary hover:bg-overlay",
-                vote === "up" && "text-success",
-              )}
-            >
-              <ThumbsUp className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              aria-label="Not helpful"
-              aria-pressed={vote === "down"}
-              disabled={feedback.isPending}
-              onClick={() => void setFeedback("down")}
-              className={cn(
-                "rounded p-1 text-text-tertiary hover:bg-overlay",
-                vote === "down" && "text-destructive",
-              )}
-            >
-              <ThumbsDown className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              aria-label="Add feedback comment"
-              onClick={() => setCommentOpen((open) => !open)}
-              className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
-            >
-              Comment
-            </button>
+        {/* The time joins the feedback line once the reply settles; a
+            streaming reply has no settled instant yet. */}
+        {streaming ? null : (
+          <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
+            {showFeedback ? (
+              <div
+                role="group"
+                className="flex items-center gap-1"
+                aria-label="Reply feedback"
+              >
+                <button
+                  type="button"
+                  aria-label="Helpful"
+                  aria-pressed={vote === "up"}
+                  disabled={feedback.isPending}
+                  onClick={() => void setFeedback("up")}
+                  className={cn(
+                    "rounded p-1 text-text-tertiary hover:bg-overlay",
+                    vote === "up" && "text-success",
+                  )}
+                >
+                  <ThumbsUp className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Not helpful"
+                  aria-pressed={vote === "down"}
+                  disabled={feedback.isPending}
+                  onClick={() => void setFeedback("down")}
+                  className={cn(
+                    "rounded p-1 text-text-tertiary hover:bg-overlay",
+                    vote === "down" && "text-destructive",
+                  )}
+                >
+                  <ThumbsDown className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Add feedback comment"
+                  onClick={() => setCommentOpen((open) => !open)}
+                  className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
+                >
+                  Comment
+                </button>
+              </div>
+            ) : null}
+            <MessageTime
+              value={message.timestamp}
+              reveal
+              className={showFeedback ? "ml-1" : undefined}
+            />
           </div>
-        ) : null}
+        )}
         {feedbackEnabled && conversationId && commentOpen && !streaming ? (
           <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
             <textarea

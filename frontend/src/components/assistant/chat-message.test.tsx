@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as telemetry from "@/lib/telemetry";
 import { api } from "@/lib/api-client";
@@ -9,10 +9,12 @@ import {
 } from "@/components/assistant/chat-message";
 import {
   AevatarAssistantMessageList,
+  ChannelUserEntry,
   NyxAgentThreadMessageList,
   NyxAgentAssistantEntry,
 } from "@/components/assistant/assistant-chat-page";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
+import { messageTime } from "@/lib/assistant/message-time";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 
 const BASE: ChatMessage = {
@@ -298,7 +300,9 @@ describe("canonical chat presentation", () => {
     for (const value of ["no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
       expect(screen.getByText(value)).toBeInTheDocument();
     }
-    expect(screen.getByRole("time")).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
+    expect(
+      within(screen.getByText("Details").closest("details")!).getByRole("time"),
+    ).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
     fireEvent.click(screen.getByRole("button", { name: "Copy diagnostic ID" }));
     expect(writeText).toHaveBeenCalledWith("turn turn-1 / response resp_1 / request req-1");
   });
@@ -790,4 +794,104 @@ it("focuses the comment field and closes it with Escape, showing save failures",
   fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
   fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+describe("message timestamps", () => {
+  const SENT = "2026-10-12T07:40:43.000Z";
+  const at = Date.parse(SENT);
+
+  function sentTime(container: HTMLElement) {
+    return container.querySelector(`time[datetime="${SENT}"]`);
+  }
+
+  it("stamps user messages and settled replies with their local send time", () => {
+    const expected = messageTime(at)!;
+    for (const message of [
+      { ...BASE, id: "user-1", role: "user", timestamp: at },
+      { ...BASE, timestamp: at },
+    ] satisfies ChatMessage[]) {
+      const { container, unmount } = render(
+        <ChatMessageEntry message={message} conversationId="conversation-1" />,
+      );
+      const time = sentTime(container);
+      expect(time).toHaveTextContent(expected.label);
+      expect(time).not.toHaveAttribute("title");
+      unmount();
+    }
+  });
+
+  it("stamps a user message written in a chat app", () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const { container } = render(
+      <ChannelUserEntry
+        message={{ ...BASE, id: "user-1", role: "user", content: "From Telegram", timestamp: at, via: "telegram" }}
+        platform="telegram"
+        retry={retry}
+      />,
+    );
+    expect(screen.getByText("From Telegram")).toBeInTheDocument();
+    expect(sentTime(container)).toHaveTextContent(messageTime(at)!.label);
+  });
+
+  it("puts a reply's time on its feedback line, and keeps it without feedback", () => {
+    const { container, rerender } = render(
+      <ChatMessageBubble message={{ ...BASE, timestamp: at }} conversationId="conversation-1" />,
+    );
+    const feedback = screen.getByRole("group", { name: "Reply feedback" });
+    expect(feedback.parentElement).toContainElement(sentTime(container) as HTMLElement);
+    rerender(
+      <ChatMessageBubble
+        message={{ ...BASE, timestamp: at, status: "error", error: "Turn lost" }}
+        conversationId="conversation-1"
+      />,
+    );
+    expect(screen.queryByRole("group", { name: "Reply feedback" })).not.toBeInTheDocument();
+    expect(sentTime(container)).toBeInTheDocument();
+  });
+
+  it("waits for a streaming reply to settle instead of stamping each update", () => {
+    const { container } = render(
+      <ChatMessageBubble message={{ ...BASE, timestamp: Date.now(), status: "streaming" }} />,
+    );
+    expect(container.querySelector("time")).toBeNull();
+  });
+
+  it("omits a missing or invalid time rather than inventing one", () => {
+    for (const timestamp of [Number.NaN, Date.parse("not a date")]) {
+      const { container, unmount } = render(
+        <>
+          <ChatMessageBubble message={{ ...BASE, id: "user-1", role: "user", timestamp }} />
+          <ChatMessageBubble message={{ ...BASE, timestamp }} />
+        </>,
+      );
+      expect(container.querySelector("time")).toBeNull();
+      expect(container).not.toHaveTextContent("Invalid Date");
+      unmount();
+    }
+  });
+
+  it("stamps every restored history row in a transcript", () => {
+    const earlier = "2026-10-11T22:05:00.000Z";
+    const session: ChatSessionState = {
+      clientId: "history",
+      conversationId: "conversation-1",
+      status: "completed_text",
+      title: "History",
+      expectedTurnCount: 2,
+      messages: [
+        { ...BASE, id: "user-1", role: "user", content: "Yesterday", timestamp: Date.parse(earlier) },
+        { ...BASE, id: "assistant-1", timestamp: Date.parse(earlier) + 1000 },
+        { ...BASE, id: "user-2", role: "user", content: "Today", timestamp: at },
+        { ...BASE, id: "assistant-2", timestamp: at + 1000 },
+      ],
+    };
+    const { container } = render(<ChatMessageList session={session} bottomInset={0} />);
+    const times = [...container.querySelectorAll("time")].map((time) => time.getAttribute("datetime"));
+    expect(times).toEqual([
+      earlier,
+      new Date(Date.parse(earlier) + 1000).toISOString(),
+      SENT,
+      new Date(at + 1000).toISOString(),
+    ]);
+  });
 });

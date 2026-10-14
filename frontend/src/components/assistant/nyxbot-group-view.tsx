@@ -19,6 +19,7 @@ import { UploadComposer } from "@/components/assistant/upload-composer";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { MessageTime } from "@/components/assistant/message-time";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
@@ -51,7 +52,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { cn, formatClockTime } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type {
   AssistantGroup,
   AssistantGroupMember,
@@ -152,7 +153,7 @@ export function GroupMessageRow({
   }
   if (message.role === "user") {
     return (
-      <div className="ml-[30px] flex justify-end">
+      <div className="group/message ml-[30px] flex flex-col items-end gap-1">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
           {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
@@ -176,6 +177,7 @@ export function GroupMessageRow({
             />
           ))}
         </div>
+        <MessageTime value={message.created_at} reveal />
       </div>
     );
   }
@@ -186,7 +188,6 @@ export function GroupMessageRow({
   };
   const title = agentTitle(agent);
   const handle = agentHandle(agent);
-  const time = formatClockTime(message.created_at);
   return (
     <article
       aria-label={`Message from ${title}`}
@@ -202,7 +203,7 @@ export function GroupMessageRow({
         <AgentAvatar agent={agent} size="md" />
       </button>
       <div className="min-w-0">
-        <div className="mb-0.5 flex items-baseline gap-2">
+        <div className="mb-0.5 flex flex-wrap items-baseline gap-x-2">
           <span className="text-12 font-medium text-foreground">{title}</span>
           {handle ? (
             <span className="text-11 text-text-tertiary">{handle}</span>
@@ -210,14 +211,7 @@ export function GroupMessageRow({
           {agent.kind === "nyxbot" ? (
             <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
-          {time ? (
-            <time
-              dateTime={message.created_at}
-              className="font-mono text-11 text-text-tertiary"
-            >
-              {time}
-            </time>
-          ) : null}
+          <MessageTime value={message.created_at} />
         </div>
         <div className="px-px text-foreground">
           {message.activities
