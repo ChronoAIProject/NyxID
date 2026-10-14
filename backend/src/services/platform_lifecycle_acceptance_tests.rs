@@ -33,7 +33,7 @@ async fn legacy_rows(
         &f.state.db,
         owner,
         "Legacy callback",
-        "account:read",
+        "read",
         None,
         None,
         None,

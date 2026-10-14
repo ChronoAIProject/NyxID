@@ -1669,10 +1669,15 @@ mod signup_journey_tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let created: serde_json::Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap())
-                .unwrap();
+        let response_status = response.status();
+        let response_body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        assert_eq!(
+            response_status,
+            StatusCode::OK,
+            "authenticated setup creation failed: {}",
+            String::from_utf8_lossy(&response_body)
+        );
+        let created: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
         let id = created["id"].as_str().unwrap();
         assert_eq!(
             get_owned(&f.state.db, &registered.user_id, id)

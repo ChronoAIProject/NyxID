@@ -2205,7 +2205,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn platform_onboarding_distinct_customer_test_activation_and_personal_payer() {
         use super::super::{
             platform_provisioning_service as p, platform_runtime_service as r,
