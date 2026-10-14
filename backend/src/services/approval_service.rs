@@ -1233,19 +1233,7 @@ pub async fn expire_pending_requests(
     // the find() above and this update_many(). Without the status guard,
     // the sweep could overwrite an "approved" status back to "expired".
     let ids: Vec<&str> = expired.iter().map(|r| r.id.as_str()).collect();
-    let expire_result = db
-        .collection::<ApprovalRequest>(REQUESTS)
-        .update_many(
-            doc! { "_id": { "$in": &ids }, "status": "pending" },
-            doc! { "$set": {
-                "status": "expired",
-                "decided_at": sweep_time,
-                "decision_idempotency_key": &sweep_marker,
-            } },
-        )
-        .await?;
-
-    let count = expire_result.modified_count;
+    let count = expire_pending_ids(db, &ids, sweep_time, &sweep_marker).await?;
     if count == 0 {
         return Ok(0);
     }
@@ -1333,6 +1321,114 @@ pub async fn expire_pending_requests(
     }
 
     Ok(count)
+}
+
+/// Shared pending-only transition for time expiry and obsolete chat asks.
+async fn expire_pending_ids(
+    db: &Database,
+    ids: &[&str],
+    decided_at: bson::DateTime,
+    marker: &str,
+) -> AppResult<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(db
+        .collection::<ApprovalRequest>(REQUESTS)
+        .update_many(
+            doc! {"_id": {"$in": ids}, "status": "pending"},
+            doc! {"$set": {"status": "expired", "decided_at": decided_at,
+            "decision_idempotency_key": marker}},
+        )
+        .await?
+        .modified_count)
+}
+
+/// Retire only approvals bound to actual assistant credentials. General agent
+/// keys and explicit denials retain their lifecycle. Called on policy writes
+/// and startup, never while reading history or pending cards.
+pub(super) async fn retire_full_access_chat_requests(
+    db: &Database,
+    user: Option<&str>,
+    agent: Option<&str>,
+    modes: &mut super::assistant_acknowledgement_service::AccessModeCache,
+    sweep_time: bson::DateTime,
+) -> AppResult<()> {
+    use crate::models::{
+        api_key::{ApiKey, COLLECTION_NAME as KEYS},
+        assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
+        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+    };
+    let mut filter = doc! {"status": "pending", "requester_type": "user",
+    "requester_label": {"$ne": bson::Bson::Null}, "created_at": {"$lte": sweep_time}};
+    if let Some(user) = user {
+        filter.insert("requester_id", user);
+    }
+    let marker = format!("expiry:full-access:{}", uuid::Uuid::new_v4());
+    let mut identities = std::collections::HashMap::new();
+    loop {
+        let pending: Vec<_> = db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .find(filter.clone())
+            .sort(doc! {"_id": 1})
+            .limit(100)
+            .await?
+            .try_collect()
+            .await?;
+        let Some(last) = pending.last() else { break };
+        filter.insert("_id", doc! {"$gt": &last.id});
+        let mut ids = Vec::new();
+        for request in pending {
+            let Some(label) = request.requester_label.as_deref() else {
+                continue;
+            };
+            let identity = (request.requester_id.clone(), label.to_owned());
+            if !identities.contains_key(&identity) {
+                let key = db
+                    .collection::<ApiKey>(KEYS)
+                    .find_one(doc! {"user_id": &request.requester_id, "name": label})
+                    .await?;
+                let thread = if let Some(key) = key {
+                    let credential = db
+                        .collection::<AssistantAgentCredential>(CREDENTIALS)
+                        .find_one(doc! {"user_id": &request.requester_id, "api_key_id": &key.id})
+                        .await?;
+                    if let Some(credential) = credential {
+                        db.collection::<AssistantConversation>(CONVERSATIONS)
+                            .find_one(doc! {"_id": &credential.conversation_id, "user_id": &request.requester_id})
+                            .await?
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                identities.insert(
+                    identity.clone(),
+                    thread.map(|t| (t.agent_id.unwrap_or_default(), t.guest_turn)),
+                );
+            }
+            let Some(Some((requester, guest))) = identities.get(&identity) else {
+                continue;
+            };
+            if *guest || agent.is_some_and(|target| target != requester) {
+                continue;
+            }
+            if super::assistant_acknowledgement_service::cached_full_access(
+                db,
+                modes,
+                &request.requester_id,
+                requester,
+            )
+            .await?
+            {
+                ids.push(request.id);
+            }
+        }
+        let ids: Vec<_> = ids.iter().map(String::as_str).collect();
+        expire_pending_ids(db, &ids, sweep_time, &marker).await?;
+    }
+    Ok(())
 }
 
 async fn requests_updated_by_expiry_sweep(
@@ -2755,6 +2851,172 @@ mod tests {
 
     use crate::models::user::UserType;
     use crate::test_utils::{connect_test_database, test_user};
+
+    #[tokio::test]
+    async fn full_access_startup_retires_chat_only_approvals_with_guarded_expiry_lifecycle() {
+        use crate::models::{
+            assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+            assistant_settings::AccessMode,
+        };
+        use crate::services::{
+            assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+        };
+        let f = crate::services::assistant_authority_tests::fixture("approval_startup_retirement")
+            .await;
+        let actor = crate::services::audit_service::AuditActor {
+            user_id: f.owner.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        };
+        crate::services::assistant_team_service::set_agent_policy(
+            &f.state.db,
+            &actor,
+            &f.chat.agent_id,
+            crate::services::assistant_team_service::AgentPolicy {
+                model: None,
+                access_mode_override: Some(Some(AccessMode::Nyxmode)),
+            },
+        )
+        .await
+        .unwrap();
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let nyxbot = f
+            .state
+            .db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": &f.nyxbot_thread})
+            .await
+            .unwrap()
+            .unwrap();
+        let full_key = crate::services::key_service::get_api_key(
+            &f.state.db,
+            &f.owner,
+            &nyxbot.credential_api_key_id,
+        )
+        .await
+        .unwrap();
+        let auto_key =
+            crate::services::key_service::get_api_key(&f.state.db, &f.owner, &f.chat.api_key_id)
+                .await
+                .unwrap();
+        let general_id = crate::services::assistant_authority_tests::ordinary_key(&f).await;
+        let general = crate::services::key_service::get_api_key(&f.state.db, &f.owner, &general_id)
+            .await
+            .unwrap();
+        let mut requests = Vec::new();
+        for (id, label, status) in [
+            ("full", full_key.name.as_str(), "pending"),
+            ("auto", auto_key.name.as_str(), "pending"),
+            ("general", general.name.as_str(), "pending"),
+            ("decided", full_key.name.as_str(), "approved"),
+        ] {
+            let mut request = make_request(id, status);
+            request.user_id = f.owner.clone();
+            request.requester_id = f.owner.clone();
+            request.requester_type = "user".into();
+            request.requester_label = Some(label.into());
+            request.expires_at = Utc::now() + Duration::minutes(10);
+            request.notification_channel = None;
+            requests.push(request);
+        }
+        f.state
+            .db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .insert_many(requests)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::services::assistant_nyxagent::pending_approvals(
+                &f.state.db,
+                &f.owner,
+                &full_key.id
+            )
+            .await
+            .unwrap()
+            .len(),
+            1,
+            "reads do not retire pre-upgrade asks"
+        );
+        acks::retire_full_access_confirmations(&f.state.db, None, None)
+            .await
+            .unwrap();
+        let full = get_request(&f.state.db, "full").await.unwrap();
+        assert_eq!(full.status, "expired");
+        assert!(full.decided_at.is_some());
+        assert!(
+            full.decision_idempotency_key
+                .as_deref()
+                .unwrap()
+                .starts_with("expiry:full-access:")
+        );
+        acks::retire_full_access_confirmations(&f.state.db, None, None)
+            .await
+            .unwrap();
+        let again = get_request(&f.state.db, "full").await.unwrap();
+        assert_eq!(full.decided_at, again.decided_at);
+        assert_eq!(
+            full.decision_idempotency_key,
+            again.decision_idempotency_key
+        );
+        for id in ["auto", "general"] {
+            let kept = get_request(&f.state.db, id).await.unwrap();
+            assert_eq!(kept.status, "pending");
+            assert!(kept.decided_at.is_none());
+        }
+        // A decision won between the candidate read and the expiry write.
+        assert_eq!(
+            expire_pending_ids(
+                &f.state.db,
+                &["decided"],
+                bson::DateTime::now(),
+                "expiry:race"
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            get_request(&f.state.db, "decided").await.unwrap().status,
+            "approved"
+        );
+        crate::services::assistant_team_service::set_agent_policy(
+            &f.state.db,
+            &actor,
+            &f.chat.agent_id,
+            crate::services::assistant_team_service::AgentPolicy {
+                model: None,
+                access_mode_override: Some(None),
+            },
+        )
+        .await
+        .unwrap();
+        let auto = get_request(&f.state.db, "auto").await.unwrap();
+        assert_eq!(
+            auto.status, "expired",
+            "agent write retires approval-only asks"
+        );
+        assert!(auto.decided_at.is_some());
+        assert_ne!(
+            full.decision_idempotency_key, auto.decision_idempotency_key,
+            "each sweep has a unique marker"
+        );
+        assert_eq!(
+            get_request(&f.state.db, "general").await.unwrap().status,
+            "pending"
+        );
+        f.state.db.drop().await.unwrap();
+    }
 
     /// Helper to insert an ApprovalRequest directly into the DB.
     async fn insert_request(db: &mongodb::Database, req: &ApprovalRequest) {

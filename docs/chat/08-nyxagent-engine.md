@@ -269,10 +269,13 @@ Their metadata-only audit is `assistant_action_auto_allowed`. History renders
 bypassed automation, machine/saved-login or service-approval policy. Full-access
 authored publication uses the same leased publication-and-pin core, under the
 chat owner's signed identity, and links the persisted proposal for inspection or discard.
-Switching to Full access retires pending owner confirmations for the affected
-threads, respecting agent overrides. History, group and voice reads also retire
-pre-upgrade floor cards for owners already using Full access. Retirement records
-expiry, not success; the retried action writes its automatic receipt after it runs.
+Switching to Full access retires pending owner confirmations, respecting agent
+overrides. Policy writes and an idempotent startup sweep visit only pending owner
+action rows and chat-key approvals in bounded batches, resolving each user/agent's
+mode once. History, group and voice reads do not retire asks or re-read mode policy
+for retirement. Approval expiry uses the approval service's pending status guard,
+decision time and unique expiry marker. Retirement records expiry, not success;
+the retried action writes its automatic receipt after it runs.
 
 Permission-mode receipt rollout: deploy the frontend accepting `decided_by: access_mode`,
 optional `continuation_of` and routed `machine`/`saved_login` requests before backend

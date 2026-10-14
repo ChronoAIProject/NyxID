@@ -821,6 +821,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"kind": 1, "decider": 1, "status": 1, "user_id": 1, "requester_agent_id": 1, "_id": 1},
+            false,
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
             doc! {"skill_notification_pending": 1, "skill_notification_retry_after": 1, "skill_notification_retry_at": 1, "_id": 1},
             false,
         ),
@@ -2775,16 +2780,6 @@ pub async fn pending_approvals(
         .await?
         .try_collect()
         .await?;
-    if !rows.is_empty()
-        && let Some(thread) = db
-            .collection::<AssistantConversation>(CONVERSATIONS)
-            .find_one(doc! {"user_id": user_id, "credential_api_key_id": credential_api_key_id})
-            .await?
-        && super::assistant_acknowledgement_service::retire_thread_if_full_access(db, &thread)
-            .await?
-    {
-        return Ok(Vec::new());
-    }
     Ok(rows
         .into_iter()
         .map(|row| ChatApproval {

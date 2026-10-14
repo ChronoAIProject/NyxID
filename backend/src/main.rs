@@ -634,6 +634,12 @@ async fn server_main() {
         tracing::warn!("Unified collection migration encountered errors: {e}");
     }
 
+    // Retire pre-upgrade owner asks before any history/voice/group read can expose
+    // them. The sweep is idempotent and visits only bounded pending-row batches.
+    services::assistant_acknowledgement_service::retire_full_access_confirmations(&db, None, None)
+        .await
+        .expect("Failed to retire obsolete Full-access confirmations");
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");

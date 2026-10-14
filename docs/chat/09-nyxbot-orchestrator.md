@@ -1148,6 +1148,14 @@ Per-service `approval_mode`, per-machine `machine_confirm`, saved-login
 skill-publication review still ask in Auto and Ask every time. Guests never
 confirm or widen authority.
 
+Policy writes retire obsolete owner asks when the effective mode becomes Full
+access. A one-time, idempotent startup sweep also retires pre-upgrade asks. Both
+walk only pending owner-action rows and chat-key approvals in bounded batches,
+resolve each user/agent mode once, and retain Auto/Ask overrides and routed
+specialist requests. Approval retirement uses the approval service's guarded
+expiry lifecycle (`decided_at`, unique `decision_idempotency_key`); it records no
+successful action. History, group and voice reads never perform mode retirement.
+
 Permission and model selectors live in the composer toolbar (model appears only
 with an existing thread). Owner decisions remain as compact receipts with who,
 summary, risk and time. Browser continuations submit `acknowledgement_id`,

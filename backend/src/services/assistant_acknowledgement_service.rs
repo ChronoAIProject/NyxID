@@ -186,91 +186,97 @@ async fn effective_mode_for_agent(
     }
 }
 
-/// Retire outstanding owner asks when the governing policy changes to Full
-/// access. No action has run yet, so retries produce the success receipt.
-/// Specialist requests addressed to NyxBot keep their existing lifecycle.
+pub(super) type AccessModeCache =
+    std::collections::HashMap<(String, String), crate::models::assistant_settings::AccessMode>;
+
+pub(super) async fn cached_full_access(
+    db: &Database,
+    modes: &mut AccessModeCache,
+    user: &str,
+    agent: &str,
+) -> AppResult<bool> {
+    let identity = (user.to_owned(), agent.to_owned());
+    let mode = match modes.get(&identity) {
+        Some(mode) => *mode,
+        None => {
+            let mode = effective_mode_for_agent(db, user, agent).await?;
+            modes.insert(identity, mode);
+            mode
+        }
+    };
+    Ok(mode == crate::models::assistant_settings::AccessMode::Autopilot)
+}
+
+/// Retire owner asks on policy writes and once at startup. Walk only pending
+/// owner-action rows, in bounded batches, and resolve each governing mode once.
+/// Retirement is expiry; the action has not run and has no success receipt yet.
 pub async fn retire_full_access_confirmations(
     db: &Database,
     user: Option<&str>,
     agent: Option<&str>,
 ) -> AppResult<()> {
-    let mut filter = doc! {};
+    let sweep_time = bson::DateTime::now();
+    let mut filter = doc! {
+        "kind": "action", "decider": "user", "status": "pending",
+        "created_at": {"$lte": sweep_time},
+    };
     if let Some(user) = user {
         filter.insert("user_id", user);
     }
     if let Some(agent) = agent {
-        filter.insert("agent_id", agent);
-    }
-    let mut threads = db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(filter)
-        .await?;
-    let mut modes = std::collections::HashMap::new();
-    while let Some(thread) = threads.try_next().await? {
-        let identity = (
-            thread.user_id.clone(),
-            thread.agent_id.clone().unwrap_or_default(),
+        // Legacy asks without a requester ID are resolved from their one thread.
+        filter.insert(
+            "requester_agent_id",
+            doc! {"$in": [agent, bson::Bson::Null]},
         );
-        let mode = match modes.get(&identity) {
-            Some(mode) => *mode,
-            None => {
-                let mode = effective_mode_for_agent(db, &identity.0, &identity.1).await?;
-                modes.insert(identity, mode);
-                mode
-            }
-        };
-        if mode != crate::models::assistant_settings::AccessMode::Autopilot {
-            continue;
-        }
-        retire_thread_confirmations(db, &thread).await?;
     }
-    Ok(())
-}
-
-/// Used only when an existing ask is read; ordinary history and execution
-/// paths incur no additional settings lookup.
-pub async fn retire_thread_if_full_access(
-    db: &Database,
-    thread: &AssistantConversation,
-) -> AppResult<bool> {
-    if effective_mode_for_agent(
-        db,
-        &thread.user_id,
-        thread.agent_id.as_deref().unwrap_or_default(),
-    )
-    .await?
-        != crate::models::assistant_settings::AccessMode::Autopilot
-    {
-        return Ok(false);
-    }
-    retire_thread_confirmations(db, thread).await?;
-    Ok(true)
-}
-
-async fn retire_thread_confirmations(
-    db: &Database,
-    thread: &AssistantConversation,
-) -> AppResult<()> {
-    db.collection::<bson::Document>(ACKS)
-        .update_many(
-            doc! {"user_id": &thread.user_id, "conversation_id": &thread.id,
-            "kind": "action", "decider": "user", "status": "pending"},
-            doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}},
-        )
-        .await?;
-    if let Some(key) = db
-        .collection::<ApiKey>(KEYS)
-        .find_one(doc! {"_id": &thread.credential_api_key_id})
-        .await?
-    {
-        db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
-            .update_many(
-                doc! {"requester_type": "user", "requester_id": &thread.user_id,
-                "requester_label": &key.name, "status": "pending"},
-                doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}},
-            )
+    let collection = db.collection::<AssistantAcknowledgement>(ACKS);
+    let mut modes = AccessModeCache::new();
+    loop {
+        let pending: Vec<_> = collection
+            .find(filter.clone())
+            .sort(doc! {"_id": 1})
+            .limit(100)
+            .await?
+            .try_collect()
             .await?;
+        let Some(last) = pending.last() else { break };
+        filter.insert("_id", doc! {"$gt": &last.id});
+        let mut ids = Vec::new();
+        for ask in pending {
+            let requester = match ask.requester_agent_id {
+                Some(id) => id,
+                None => {
+                    let thread = db
+                        .collection::<AssistantConversation>(CONVERSATIONS)
+                        .find_one(doc! {"_id": &ask.conversation_id, "user_id": &ask.user_id})
+                        .await?;
+                    let Some(thread) = thread else { continue };
+                    thread.agent_id.unwrap_or_default()
+                }
+            };
+            if agent.is_some_and(|target| target != requester) {
+                continue;
+            }
+            if cached_full_access(db, &mut modes, &ask.user_id, &requester).await? {
+                ids.push(ask.id);
+            }
+        }
+        if !ids.is_empty() {
+            collection
+                .update_many(
+                    doc! {"_id": {"$in": ids}, "status": "pending"},
+                    doc! {"$set": {"status": "expired", "expires_at": sweep_time}},
+                )
+                .await?;
+        }
     }
+    // Proxy approvals can exist without an acknowledgement; their owning service
+    // resolves the actual chat credential and applies its normal expiry lifecycle.
+    super::approval_service::retire_full_access_chat_requests(
+        db, user, agent, &mut modes, sweep_time,
+    )
+    .await?;
     Ok(())
 }
 
@@ -516,6 +522,7 @@ pub async fn record_auto_allowed(
     record_auto_allowed_with_link(db, chat, tool, args, auto, summary, None).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn record_auto_allowed_with_link(
     db: &Database,
     chat: &ChatAuthority,
@@ -1266,7 +1273,7 @@ pub async fn history_for_messages(
     conversation: &str,
     oldest_message: Option<DateTime<Utc>>,
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
-    let thread = super::assistant_nyxagent::get(db, user, conversation).await?;
+    super::assistant_nyxagent::get(db, user, conversation).await?;
     expire(db, user, conversation).await?;
     let collection = db.collection::<AssistantAcknowledgement>(ACKS);
     let mut rows: Vec<_> = collection
@@ -1276,13 +1283,6 @@ pub async fn history_for_messages(
         .await?
         .try_collect()
         .await?;
-    if rows
-        .iter()
-        .any(|r| r.kind == "action" && r.decider == "user")
-        && retire_thread_if_full_access(db, &thread).await?
-    {
-        rows.retain(|r| r.kind != "action" || r.decider != "user");
-    }
     let decided: Vec<_> = collection
         .find(doc! {
             "user_id": user, "conversation_id": conversation, "status": {"$ne": "pending"},

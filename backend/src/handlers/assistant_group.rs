@@ -735,7 +735,6 @@ pub(crate) async fn org_pending_actions(
     access: &crate::services::org_group_service::Access,
 ) -> AppResult<Vec<Value>> {
     use crate::models::assistant_acknowledgement::AssistantAcknowledgement;
-    use crate::services::assistant_acknowledgement_service as acks;
     let mut out = Vec::new();
     let people = crate::services::org_group_service::participants(&state.db, &access.group).await?;
     let threads: std::collections::HashMap<_, _> =
@@ -757,9 +756,6 @@ pub(crate) async fn org_pending_actions(
         else {
             continue;
         };
-        if acks::retire_thread_if_full_access(&state.db, thread).await? {
-            continue;
-        }
         let name = people
             .iter()
             .find(|p| p.id == thread.user_id)
@@ -785,11 +781,6 @@ pub(crate) async fn org_pending_actions(
         let Some(binding) = &approval.assistant_group else {
             continue;
         };
-        if let Some(thread) = threads.get(&binding.conversation_id)
-            && acks::retire_thread_if_full_access(&state.db, thread).await?
-        {
-            continue;
-        }
         let name = people
             .iter()
             .find(|p| p.id == binding.actor_user_id)

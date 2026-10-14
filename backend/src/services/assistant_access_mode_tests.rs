@@ -992,7 +992,153 @@ async fn full_access_transition_retires_old_owner_cards_but_preserves_auto_overr
 }
 
 #[tokio::test]
-async fn full_access_history_retires_pre_upgrade_floor_cards_without_claiming_success() {
+async fn full_access_retirement_batches_pending_asks_and_resolves_each_mode_once() {
+    use futures::TryStreamExt;
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+    let f = orchestrator_fixture("mode_pending_batch_retirement").await;
+    set_mode(&f, AccessMode::Autopilot).await;
+    let card = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: None,
+            summary: "Old owner ask",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let mut pending = Vec::new();
+    for _ in 1..205 {
+        let mut row = card.clone();
+        row.id = uuid::Uuid::new_v4().to_string();
+        pending.push(row);
+    }
+    let agents = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let mut auto_agent = agents
+        .find_one(doc! {"_id": &f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let auto_id = uuid::Uuid::new_v4().to_string();
+    auto_agent.insert("_id", &auto_id);
+    auto_agent.insert("kind", "specialist");
+    auto_agent.insert("name", "auto-worker");
+    auto_agent.insert("access_mode_override", "nyxmode");
+    agents.insert_one(auto_agent).await.unwrap();
+    let mut auto_ask = card.clone();
+    auto_ask.id = uuid::Uuid::new_v4().to_string();
+    auto_ask.requester_agent_id = Some(auto_id);
+    let mut routed = card.clone();
+    routed.id = uuid::Uuid::new_v4().to_string();
+    routed.decider = "orchestrator".into();
+    let mut foreign = card.clone();
+    foreign.id = uuid::Uuid::new_v4().to_string();
+    foreign.user_id = uuid::Uuid::new_v4().to_string();
+    pending.extend([auto_ask.clone(), routed.clone(), foreign.clone()]);
+    f.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_many(pending)
+        .await
+        .unwrap();
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let recorded = commands.clone();
+    let handler = EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event {
+            recorded.lock().unwrap().push(event.command);
+        }
+    });
+    let mut options =
+        mongodb::options::ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+    options.command_event_handler = Some(handler);
+    let db = mongodb::Client::with_options(options)
+        .unwrap()
+        .database(f.state.db.name());
+    acks::retire_full_access_confirmations(&db, Some(&f.owner), None)
+        .await
+        .unwrap();
+    let queries = commands.lock().unwrap().clone();
+    let agent_reads = queries
+        .iter()
+        .filter(|c| c.get_str("find").ok() == Some(crate::models::assistant_agent::COLLECTION_NAME))
+        .count();
+    let settings_reads = queries
+        .iter()
+        .filter(|c| {
+            c.get_str("find").ok() == Some(crate::models::assistant_settings::COLLECTION_NAME)
+        })
+        .count();
+    assert_eq!(
+        agent_reads, 2,
+        "one resolution per user/agent, across batches"
+    );
+    assert_eq!(
+        settings_reads, 1,
+        "Auto override needs no owner-mode lookup"
+    );
+    assert!(
+        !queries.iter().any(|c| c.get_str("find").ok()
+            == Some(crate::models::assistant_conversation::COLLECTION_NAME)),
+        "no conversation enumeration"
+    );
+    let ack_queries: Vec<_> = queries
+        .iter()
+        .filter(|c| c.get_str("find").ok() == Some(ACKS))
+        .collect();
+    assert!(
+        ack_queries.len() >= 3,
+        "the pending set exceeds two batches"
+    );
+    for query in ack_queries {
+        assert_eq!(query.get_i64("limit").unwrap(), 100);
+        let filter = query.get_document("filter").unwrap();
+        assert_eq!(filter.get_str("status").unwrap(), "pending");
+        assert_eq!(filter.get_str("kind").unwrap(), "action");
+        assert_eq!(filter.get_str("decider").unwrap(), "user");
+        assert_eq!(filter.get_str("user_id").unwrap(), f.owner);
+    }
+    let remaining: Vec<_> = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find(doc! {"status":"pending"})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 3);
+    for kept in [auto_ask.id, routed.id, foreign.id] {
+        assert!(remaining.iter().any(|r| r.id == kept));
+    }
+    // Agent writes target just that agent's pending asks and retain its Auto policy.
+    acks::retire_full_access_confirmations(&db, None, Some(&f.chat.agent_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKS)
+            .count_documents(doc! {"status":"pending"})
+            .await
+            .unwrap(),
+        3
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_access_startup_retires_pre_upgrade_floor_cards_without_claiming_success() {
     let f = orchestrator_fixture("mode_retires_upgrade_floor_cards").await;
     set_mode(&f, AccessMode::Autopilot).await;
     // A card persisted by the old Full-access webhook floor before this release.
@@ -1010,6 +1156,25 @@ async fn full_access_history_retires_pre_upgrade_floor_cards_without_claiming_su
     )
     .await
     .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(ACKS)
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$unset": {"requester_agent_id": ""}},
+        )
+        .await
+        .unwrap();
+    let before = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(before[0].status, "pending", "reads do not retire asks");
+    acks::retire_full_access_confirmations(&f.state.db, None, None)
+        .await
+        .unwrap();
+    acks::retire_full_access_confirmations(&f.state.db, None, None)
+        .await
+        .unwrap();
     let history = acks::history(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
