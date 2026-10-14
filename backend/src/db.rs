@@ -226,6 +226,12 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     crate::services::coordination_service::ensure_indexes(db).await?;
     crate::services::service_concurrency_service::ensure_indexes(db).await?;
+    crate::services::platform_bot_config_service::ensure_indexes(db).await?;
+    crate::services::platform_setup_service::ensure_indexes(db).await?;
+    crate::services::platform_binding_service::ensure_indexes(db).await?;
+    crate::services::platform_provisioning_service::ensure_indexes(db).await?;
+    crate::services::platform_inference_service::ensure_indexes(db).await?;
+    crate::services::platform_native_receipt_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)

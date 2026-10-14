@@ -102,6 +102,7 @@ pub async fn access(db: &Database, owner: &str, channel_id: &str) -> AppResult<N
         .find_one(doc! {"_id": channel_id, "user_id": owner, "status": "active"})
         .await?
         .ok_or_else(not_found)?;
+    super::platform_bot_authority::require_personal_routes(db, &row.channel_bot_id).await?;
     if let Some(org) = &row.bot_owner_id
         && !super::org_service::is_admin(db, owner, org).await?
     {

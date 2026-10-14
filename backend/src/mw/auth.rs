@@ -648,6 +648,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "catalog-curation"
                 | "saved-logins"
                 | "machines"
+                | "onboarding"
         )
     ) {
         return true;

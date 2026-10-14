@@ -414,6 +414,8 @@ impl TelegramNewService<'_> {
             .await?
             .ok_or_else(unavailable)?;
         let request = TelegramBotRequest {
+            setup_authority: None,
+            connection_generation: 0,
             id: uuid::Uuid::new_v4().to_string(),
             actor_user_id: actor.into(),
             owner_user_id: owner.into(),

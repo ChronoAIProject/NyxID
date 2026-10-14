@@ -55,6 +55,7 @@ export const MAIN_NAV = [
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/devices/onboard", icon: QrCode, label: "Device Onboard" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
+  { to: "/onboarding/setups", icon: Bot, label: "Bot Setups" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/docs", icon: BookOpen, label: "Docs" },
@@ -76,6 +77,7 @@ export const DEVELOPER_NAV = [
 const ADMIN_USAGE_PATH = "/admin/usage";
 
 export const ADMIN_NAV = [
+  { to: "/admin/platform-bots", icon: Bot, label: "Platform BotFather" },
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
@@ -129,6 +131,7 @@ export function getVisibleAdminNav(
     (item) =>
       ![
         "/admin/platform-credentials",
+        "/admin/platform-bots",
         "/admin/ownership",
         "/admin/tools",
         "/admin/upload-retention",

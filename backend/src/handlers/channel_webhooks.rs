@@ -37,12 +37,74 @@ pub async fn channel_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    channel_webhook_with_api(
+        State(state),
+        Path((platform, bot_id)),
+        uri,
+        headers,
+        body,
+        "https://api.telegram.org",
+    )
+    .await
+}
+
+pub(crate) async fn channel_webhook_with_api(
+    State(state): State<AppState>,
+    Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    telegram_api_base: &str,
+) -> axum::response::Response {
     use crate::services::channel_platform::WebhookPolicy;
     let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if !adapter.registration().enabled || !adapter.registration().webhook_ingestion {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    if matches!(platform.as_str(), "telegram" | "telegram-new") {
+        match crate::services::platform_runtime_service::managed(&state.db, &bot_id).await {
+            Ok(true) => {
+                let bot = match channel_bot_service::get_bot(&state.db, &bot_id).await {
+                    Ok(bot) => bot,
+                    Err(error) => {
+                        return super::telegram_new::native_dispatch_status(&error).into_response();
+                    }
+                };
+                if bot.platform != platform || !bot.is_active {
+                    return StatusCode::OK.into_response();
+                }
+                if adapter
+                    .verify_webhook(&bot, None, &headers, &body)
+                    .await
+                    .is_err()
+                {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+                let Ok(update) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                    return StatusCode::BAD_REQUEST.into_response();
+                };
+                let api = crate::services::telegram_new_api::TelegramApi {
+                    http: &state.http_client,
+                    base_url: telegram_api_base,
+                };
+                if let Err(error) = crate::services::platform_customer_service::dispatch_verified(
+                    &state, &bot_id, &update, &api,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Native public child effect refused"
+                    );
+                    return super::telegram_new::native_dispatch_status(&error).into_response();
+                }
+                return StatusCode::OK.into_response();
+            }
+            Ok(false) => {}
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
     }
     let empty_ack_is_text = adapter.registration().empty_ack_is_text;
     match adapter.webhook_policy(&body) {

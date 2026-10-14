@@ -543,6 +543,8 @@ async fn create_thread_with_kind(
     let now = Utc::now();
     let mut row = AssistantConversation {
         machine_previews: false,
+        platform_cleanup_pending: false,
+        platform_cleanup_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
         user_id: actor.to_owned(),
         title: super::assistant_title_service::provisional(title),
@@ -900,9 +902,67 @@ pub async fn create_specialist_for(
     owner: &str,
     request: CreateRequest,
 ) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
+    create_specialist_inner(db, keys, actor, owner, request, None, None).await
+}
+
+pub(crate) async fn create_approved_specialist(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    job: &crate::models::platform_installation::SetupStepJob,
+    request: CreateRequest,
+) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
+    let authority = &job.authority;
+    if authority.step != crate::models::platform_installation::SetupStep::ConnectTelegram {
+        return Err(AppError::Forbidden(
+            "Review the exact child before specialist creation".into(),
+        ));
+    }
+    if request.account_read
+        || !request.targets.service_ids.is_empty()
+        || !request.targets.platform_service_ids.is_empty()
+        || !request.targets.slugs.is_empty()
+        || !request.targets.ids_by_request.is_empty()
+        || request.machines.as_ref().is_some_and(|v| !v.is_empty())
+        || request.logins.as_ref().is_some_and(|v| !v.is_empty())
+    {
+        return Err(AppError::Forbidden(
+            "Public setup specialists cannot inherit private capabilities".into(),
+        ));
+    }
+    create_specialist_inner(
+        db,
+        keys,
+        &authority.owner_user_id,
+        &authority.owner_user_id,
+        request,
+        Some(authority),
+        Some(job),
+    )
+    .await
+}
+
+async fn create_specialist_inner(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    actor: &str,
+    owner: &str,
+    request: CreateRequest,
+    authority: Option<&crate::models::platform_installation::SetupStepAuthority>,
+    claimed_step: Option<&crate::models::platform_installation::SetupStepJob>,
+) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
     if actor != owner {
         super::org_agent_service::require_creation_enabled(db, actor).await?;
     }
+    let planned = if let Some(a) = authority {
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().await?;
+        let row =
+            super::platform_provisioning_service::fence_authority(db, a, &mut session).await?;
+        session.abort_transaction().await?;
+        Some(row)
+    } else {
+        None
+    };
     let description = request.description.trim().to_owned();
     validate_profile(&request.name, &description)?;
     if request
@@ -930,18 +990,34 @@ pub async fn create_specialist_for(
         } => (machines.unwrap_or_default(), logins.unwrap_or_default()),
         _ => (Vec::new(), Vec::new()),
     };
-    let nyxbot = ensure_nyxbot(db, actor).await?;
+    let nyxbot = if authority.is_some() {
+        db.collection::<AssistantAgent>(AGENTS)
+            .find_one(doc! {"user_id": actor, "kind": "nyxbot", "destroyed_at": bson::Bson::Null})
+            .await?
+    } else {
+        Some(ensure_nyxbot(db, actor).await?)
+    };
     let limit = assistant_settings_service::get(db, owner)
         .await?
         .max_live_subagents;
-    let model = routing::model_for(
-        db,
-        RouteRole::Subagent {
-            specialty: request.specialty.as_deref(),
-        },
-        &nyxbot.model,
-    )
-    .await;
+    let model = if let Some(row) = &planned {
+        row.resources
+            .runtime_model_id
+            .clone()
+            .ok_or_else(|| AppError::Conflict("Approved model is missing".into()))?
+    } else {
+        routing::model_for(
+            db,
+            RouteRole::Subagent {
+                specialty: request.specialty.as_deref(),
+            },
+            &nyxbot
+                .as_ref()
+                .ok_or_else(|| AppError::Conflict("Owner agent is unavailable".into()))?
+                .model,
+        )
+        .await
+    };
     let now = Utc::now();
     let agent = AssistantAgent {
         skills: Vec::new(),
@@ -959,7 +1035,10 @@ pub async fn create_specialist_for(
         })),
         machine_node_ids,
         saved_login_ids,
-        id: Uuid::new_v4().to_string(),
+        id: planned
+            .as_ref()
+            .and_then(|row| row.resources.agent_id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         user_id: owner.into(),
         kind: AgentKind::Specialist,
         name: request.name.clone(),
@@ -995,11 +1074,13 @@ pub async fn create_specialist_for(
         updated_at: now,
     };
     Box::pin(super::org_agent_service::validate_grants(db, actor, &agent)).await?;
+    let authority = authority.cloned();
+    let claimed_step = claimed_step.cloned();
     let actor_owned = actor.to_owned();
     let mut session = db.client().start_session().await?;
     let db_owned = db.clone();
     let keys_owned = keys.clone();
-    let nyxbot_id = nyxbot.id.clone();
+    let nyxbot_id = nyxbot.map(|agent| agent.id);
     let outcome = session
         .start_transaction()
         .and_run2(async move |session| {
@@ -1007,24 +1088,28 @@ pub async fn create_specialist_for(
             let agent = agent.clone();
             let operation: AppResult<_> = async {
                 let collection = db.collection::<AssistantAgent>(AGENTS);
-                super::org_agent_service::require_maintain(db, &actor_owned, &agent).await?;
-                if actor_owned != agent.user_id {
-                    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-                        .update_one(
-                            doc! {"_id": &agent.user_id, "is_active": true},
-                            doc! {"$inc": {"agent_team_fence": 1}},
-                        )
-                        .session(&mut *session)
-                        .await?;
+                if let Some(a) = &authority {
+                    super::platform_provisioning_service::fence_step(db, claimed_step.as_ref().ok_or_else(|| AppError::Conflict("Missing provisioning claim".into()))?, session).await?;
+                    let row = super::platform_provisioning_service::fence_authority(db, a, session).await?;
+                    if row.resources.agent_id.as_deref() != Some(agent.id.as_str()) { return Err(AppError::Conflict("Approved specialist identity changed".into())); }
+                    if let Some(existing) = collection.find_one(doc! {"_id": &agent.id}).session(&mut *session).await? {
+                        let marked = db.collection::<bson::Document>(AGENTS).find_one(doc! {"_id": &agent.id, "platform_setup_id": &a.setup_id, "user_id": &a.owner_user_id, "destroyed_at": null}).session(&mut *session).await?;
+                        if marked.is_none() { return Err(AppError::Conflict("Specialist identity is already in use".into())); }
+                        let home = db.collection::<AssistantConversation>(CONVERSATIONS).find_one(doc! {"_id": existing.home_conversation_id.as_deref().ok_or_else(|| AppError::Conflict("Specialist home is missing".into()))?, "user_id": &a.owner_user_id}).session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Specialist home is missing".into()))?;
+                        return Ok(Ok((existing, home)));
+                    }
                 }
-                // Serialize personal team changes on the person's NyxBot.
-                collection
-                    .update_one(
-                        doc! {"_id": &nyxbot_id, "user_id": &agent.user_id},
-                        doc! {"$inc": {"team_fence": 1}},
-                    )
-                    .session(&mut *session)
-                    .await?;
+                super::org_agent_service::require_maintain(db, &actor_owned, &agent).await?;
+                // Both ordinary and reviewed setup creation serialize capacity
+                // on the owner row; public setup creation never provisions a
+                // separate privileged NyxBot merely to obtain this lock.
+                if db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME).update_one(
+                    doc! {"_id": &agent.user_id, "is_active": true}, doc! {"$inc": {"agent_team_fence": 1_i64}})
+                    .session(&mut *session).await?.matched_count != 1 { return Err(AppError::Forbidden("Owner is unavailable".into())); }
+                if let Some(nyxbot_id) = &nyxbot_id {
+                    collection.update_one(doc! {"_id": nyxbot_id, "user_id": &agent.user_id}, doc! {"$inc": {"team_fence": 1_i64}})
+                        .session(&mut *session).await?;
+                }
                 let live = collection
                     .count_documents(doc! {"user_id": &agent.user_id, "kind": "specialist",
                     "destroyed_at": bson::Bson::Null})
@@ -1043,6 +1128,9 @@ pub async fn create_specialist_for(
                     return Ok(Err(TeamRefusal::NameTaken));
                 }
                 collection.insert_one(&agent).session(&mut *session).await?;
+                if let Some(a) = &authority {
+                    db.collection::<bson::Document>(AGENTS).update_one(doc! {"_id": &agent.id}, doc! {"$set": {"platform_setup_id": &a.setup_id}}).session(&mut *session).await?;
+                }
                 let home = create_thread_with_kind(
                     db,
                     &keys_owned,
@@ -1059,6 +1147,7 @@ pub async fn create_specialist_for(
                 if actor_owned == agent.user_id {
                     agent.home_conversation_id = Some(home.id.clone());
                 }
+                if let Some(job) = &claimed_step {super::platform_provisioning_service::fence_step(db, job, session).await?;}
                 Ok(Ok((agent, home)))
             }
             .await;

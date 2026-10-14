@@ -146,6 +146,7 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<(HeaderMap, Json<Vec<PlatformCredentialsResponse>>)> {
+    super::login_client_context::require_first_party_human(&auth)?;
     require_admin(&state, &auth).await?;
     let mut responses = Vec::new();
     for (platform, descriptor) in service::descriptors(&state.token_exchange_cache) {
@@ -160,6 +161,7 @@ pub async fn update(
     Path(provider): Path<String>,
     Json(body): Json<UpdatePlatformCredentialsRequest>,
 ) -> AppResult<(HeaderMap, Json<PlatformCredentialsResponse>)> {
+    super::login_client_context::require_first_party_human(&auth)?;
     require_admin(&state, &auth).await?;
     let (platform, descriptor) = service::descriptor(&state.token_exchange_cache, &provider)?;
     if provider == "telegram-new" {
@@ -200,6 +202,7 @@ pub async fn delete(
     auth: AuthUser,
     Path(provider): Path<String>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
     require_admin(&state, &auth).await?;
     let (_, descriptor) = service::descriptor(&state.token_exchange_cache, &provider)?;
     if provider == "telegram-new" {

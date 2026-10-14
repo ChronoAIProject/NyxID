@@ -556,6 +556,9 @@ pub async fn preview_with_agent(
     destination: &str,
     capacity: u32,
 ) -> AppResult<TransferPreview> {
+    if kind == ResourceKind::ChannelBot {
+        super::platform_bot_authority::require_personal_routes(db, resource_id).await?;
+    }
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
     let owner = access::resource_owner(db, &mut session, kind, resource_id).await?;
@@ -596,6 +599,9 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
         expected_version,
         capacity,
     } = command;
+    if kind == ResourceKind::ChannelBot {
+        super::platform_bot_authority::require_personal_routes(db, resource_id).await?;
+    }
     valid_id(request_id)?;
     if Uuid::parse_str(request_id).is_ok_and(|id| id.get_version_num() != 4) {
         return Err(AppError::ValidationError(
@@ -703,6 +709,9 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
             }
             let owner = access::resource_owner(&db, transaction, kind, &resource_id).await?;
             access::authorize(&db, transaction, &actor, api_key_id.as_deref(), &owner, true).await?;
+            if kind == ResourceKind::ChannelBot {
+                super::platform_bot_authority::fence_personal_routes(&db, &resource_id, &owner, transaction).await?;
+            }
             let reviewed = inspect(
                 &db,
                 transaction,

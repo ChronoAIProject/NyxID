@@ -1,3 +1,4 @@
+import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
 import { parseAutomationSearch } from "@/lib/automation-search";
@@ -52,6 +53,11 @@ import {
 } from "@/lib/url-tabs";
 
 import {
+  PlatformOnboardingPage,
+  PlatformBindingReviewPage,
+  PlatformSetupsPage,
+  PlatformSetupDetailPage,
+  AdminPlatformBotsPage,
   LandingPage,
   NyxbotOnboardingPage,
   AiSetupPage,
@@ -880,6 +886,11 @@ const apiKeyDetailRoute = createRoute({
   component: ApiKeyDetailPage,
 });
 
+export const platformOnboardingRoute = createRoute({path: "/onboarding", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformOnboardingPage});
+export const platformBindingReviewRoute = createRoute({path: "/onboarding/link", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformBindingReviewPage});
+export const platformSetupsRoute = createRoute({path: "/onboarding/setups", getParentRoute: () => dashboardLayout, validateSearch: onboardingSearch, component: PlatformSetupsPage});
+export const platformSetupDetailRoute = createRoute({path: "/onboarding/setups/$setupId", getParentRoute: () => dashboardLayout, component: PlatformSetupDetailPage});
+
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
   validateSearch: (
@@ -986,6 +997,11 @@ const adminLayout = createRoute({
   },
   component: () => <Outlet />,
 });
+
+export const adminPlatformBotsRoute = createRoute({path: "platform-bots", getParentRoute: () => adminLayout, beforeLoad: () => {
+  const {user, isLoading} = useAuthStore.getState();
+  if (!isLoading && !canAdminWrite(user)) throw redirect({to: "/dashboard"});
+}, component: AdminPlatformBotsPage});
 
 const adminUsersRoute = createRoute({
   path: "users",
@@ -1182,6 +1198,8 @@ const adminFeatureFlagsRoute = createRoute({
 });
 
 const routeTree = rootRoute.addChildren([
+  platformOnboardingRoute,
+  platformBindingReviewRoute,
   landingRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
@@ -1257,6 +1275,8 @@ const routeTree = rootRoute.addChildren([
     apiKeyDetailRoute,
     nodesRoute,
     nodeDetailRoute,
+    platformSetupsRoute,
+    platformSetupDetailRoute,
     channelBotsRoute,
     channelBotSetupLinksRoute,
     channelBotDetailRoute,
@@ -1287,6 +1307,7 @@ const routeTree = rootRoute.addChildren([
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminUploadRetentionRoute,
+      adminPlatformBotsRoute,
       adminPlatformCredentialsRoute,
     ]),
   ]),

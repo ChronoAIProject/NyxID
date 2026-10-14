@@ -1956,3 +1956,20 @@ The first transition to `failed` sends one best-effort notice through the owner'
 5. Run Resubscribe and expect `none`.
 
 Production credentials are never used in local tests.
+
+
+## Platform-managed onboarding installations
+
+Platform BotFather uses a dedicated native receiver rather than the gateway's
+personal provider handshake. A durable platform manager or installation marker
+closes ordinary conversation routes, NyxBot relinking, private/group defaults,
+thread following and alternate agent setters. Missing setup/profile authority,
+stale revisions and inactive installations fail closed; deleting or expiring setup
+records never enables personal fallback. Legacy channels without an explicit marker
+retain their existing behavior.
+
+Public child effects require current reviewed publication, owned specialist,
+manager/child identity, funding, quotas and activation. In-flight replies and
+creation workers carry exact revision/digest/generation fences. Previous gateway
+cleanup retains the captured remote version; admin recovery can preserve a changed
+binding without deleting it. See [Platform BotFather](PLATFORM_BOTFATHER.md).

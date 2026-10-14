@@ -49,6 +49,8 @@ export interface CommandItem {
 }
 
 export const ALL_ITEMS: readonly CommandItem[] = [
+  {icon: Bot, label: "Bot Setups", to: "/onboarding/setups", group: "navigation"},
+  {icon: Bot, label: "Platform BotFather", to: "/admin/platform-bots", group: "admin", requiresAdminWrite: true},
   { icon: Bot, label: "Assistant", to: "/assistant", group: "navigation" },
   { icon: CalendarClock, label: "Automations", to: "/assistant/automations", group: "navigation" },
   { icon: Server, label: "Machines", to: "/assistant/machines", group: "navigation" },

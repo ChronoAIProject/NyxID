@@ -22,7 +22,26 @@ impl TelegramNewService<'_> {
         super::telegram_new_service::with_operation(
             self.db,
             &format!("telegram-child:{expected_bot}"),
-            self.connect_inner(actor, id, expected_bot, revision),
+            self.connect_inner(actor, id, expected_bot, revision, None),
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_claimed(
+        &self,
+        request: &TelegramBotRequest,
+        bot: i64,
+    ) -> AppResult<ChannelBot> {
+        super::telegram_new_service::with_operation(
+            self.db,
+            &format!("telegram-child:{bot}"),
+            self.connect_inner(
+                &request.actor_user_id,
+                &request.id,
+                bot,
+                request.revision,
+                Some(request.connection_generation),
+            ),
         )
         .await
     }
@@ -33,8 +52,13 @@ impl TelegramNewService<'_> {
         id: &str,
         expected_bot: i64,
         revision: i64,
+        claimed_generation: Option<i64>,
     ) -> AppResult<ChannelBot> {
         let request = self.get(actor, id).await?;
+        if claimed_generation.is_some_and(|generation| generation != request.connection_generation)
+        {
+            return Err(AppError::Conflict("The connection claim changed".into()));
+        }
         if request.telegram_bot_id != Some(expected_bot)
             || !matches!(
                 request.status,
@@ -50,6 +74,7 @@ impl TelegramNewService<'_> {
                 "The request changed. Refresh before confirming.".into(),
             ));
         }
+        super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         let bot = if let Some(saved) = self
             .db
             .collection::<ChannelBot>(BOTS)
@@ -71,6 +96,7 @@ impl TelegramNewService<'_> {
                 .ok_or_else(|| AppError::Conflict("Manager token is unavailable".into()))?;
             self.verify_creation_delivery(&request, manager_token)
                 .await?;
+            super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
             let token = self
                 .api
                 .token(
@@ -80,6 +106,7 @@ impl TelegramNewService<'_> {
                     expected_bot,
                 )
                 .await?;
+            super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
             let identity = self.api.call(&token, "getMe", json!({})).await?;
             let (verified_id, username) = bot_identity(&identity).ok_or_else(|| {
                 AppError::ChannelPlatformError("Telegram returned an invalid bot identity".into())
@@ -127,11 +154,11 @@ impl TelegramNewService<'_> {
                 updated_at: Utc::now(),
             };
             self.check_owner(actor, &request.owner_user_id).await?;
-            super::channel_bot_service::insert_registered_bot(
+            super::channel_bot_service::insert_approved_telegram_bot(
                 self.db,
                 &bot,
                 self.config.channel_relay_max_bots_per_user,
-                Some(revision),
+                &request,
             )
             .await?;
             super::channel_bot_service::get_bot(self.db, id).await?
@@ -143,7 +170,7 @@ impl TelegramNewService<'_> {
             ));
         }
         if bot.status == "active" {
-            self.finish_request(id).await?;
+            self.finish_request(&request).await?;
             return Ok(bot);
         }
         let event = self.db.collection::<bson::Document>(MANAGED_BOTS).find_one(doc! {"manager_bot_id": request.manager_bot_id, "telegram_bot_id": expected_bot, "telegram_user_id": request.telegram_user_id, "revision": request.manager_revision}).await?;
@@ -167,6 +194,7 @@ impl TelegramNewService<'_> {
             self.config.base_url.trim_end_matches('/'),
             bot.id
         );
+        super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         let webhook = self.api.call(&token, "getWebhookInfo", json!({})).await?;
         if webhook["url"]
             .as_str()
@@ -174,14 +202,25 @@ impl TelegramNewService<'_> {
         {
             return Err(AppError::Conflict("This bot has a webhook for another application. Clear that webhook before retrying.".into()));
         }
+        super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         self.api.call(&token, "setWebhook", json!({"url": callback, "secret_token": secret, "allowed_updates": ["message", "edited_message", "channel_post"]})).await?;
+        super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         let webhook = self.api.call(&token, "getWebhookInfo", json!({})).await?;
         if webhook["url"] != callback {
             return Err(AppError::ChannelPlatformError(
                 "Telegram webhook was not confirmed. Retry connecting the saved bot.".into(),
             ));
         }
-        let result = self.db.collection::<ChannelBot>(BOTS).update_one(doc! {"_id": id, "is_active": true, "status": "pending"}, doc! {"$set": {"status": "active", "webhook_registered": true, "updated_at": bson::DateTime::now()}}).await?;
+        let db = self.db.clone();
+        let captured = request.clone();
+        let mut session = db.client().start_session().await?;
+        let result = session.start_transaction().and_run2(async move |session| {
+            let outcome: AppResult<_> = async {
+                super::platform_provisioning_service::fence_request(&db, &captured, true, session).await?;
+                Ok(db.collection::<ChannelBot>(BOTS).update_one(doc! {"_id": &captured.id, "is_active": true, "status": "pending"}, doc! {"$set": {"status": "active", "webhook_registered": true, "updated_at": bson::DateTime::now()}}).session(&mut *session).await?)
+            }.await;
+            super::api_key_mutation_service::transaction_result(outcome)
+        }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
         if result.matched_count != 1 {
             let saved = super::channel_bot_service::get_bot(self.db, id).await?;
             if !saved.is_active || saved.status != "active" {
@@ -191,7 +230,7 @@ impl TelegramNewService<'_> {
                 ));
             }
         }
-        self.finish_request(id).await?;
+        self.finish_request(&request).await?;
         // Tracked requests reserve their completion notification even when the
         // browser has gone away. The bot-link sweep recovers any transient error.
         if let Err(error) = super::channel_connect_link_service::complete(self.db, id).await {
@@ -200,7 +239,41 @@ impl TelegramNewService<'_> {
         super::channel_bot_service::get_bot(self.db, id).await
     }
 
-    async fn finish_request(&self, id: &str) -> AppResult<()> {
+    async fn finish_request(&self, captured: &TelegramBotRequest) -> AppResult<()> {
+        let id = captured.id.as_str();
+        if captured.setup_authority.is_some() {
+            let db = self.db.clone();
+            let request = captured.clone();
+            let mut session = db.client().start_session().await?;
+            session.start_transaction().and_run2(async move |session| {
+                let result: AppResult<()> = async {
+                    super::platform_provisioning_service::fence_request(&db, &request, true, session).await?;
+                    db.collection::<TelegramBotRequest>(REQUESTS).update_one(
+                        doc! {"_id": &request.id, "status": "provisioning", "connection_generation": request.connection_generation},
+                        doc! {"$set": {"status": "connected", "active": false}, "$unset": {"connection_error": "", "next_connection_attempt_at": ""}, "$inc": {"revision": 1_i64}}
+                    ).session(&mut *session).await?;
+                    if let Some(a) = &request.setup_authority {
+                        let transition = db.collection::<bson::Document>(crate::models::platform_setup::COLLECTION_NAME).update_one(
+                            doc! {"_id": &a.setup_id, "revision": a.setup_revision, "approved_digest": &a.digest, "state": "provisioning"},
+                            doc! {"$set": {"state": "ready_for_test", "updated_at": bson::DateTime::now()}}
+                        ).session(&mut *session).await?;
+                        if transition.modified_count == 1 {
+                        let installation = db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME).update_one(
+                            doc! {"setup_id": &a.setup_id, "channel_bot_id": &request.id, "state": "provisioning"},
+                            doc! {"$set": {"state": "ready_for_test", "updated_at": bson::DateTime::now()}}
+                        ).session(&mut *session).await?;
+                        if installation.modified_count != 1 {
+                            return Err(crate::errors::AppError::Conflict("Installation transition changed".into()));
+                        }
+                        super::platform_setup_notice_service::queue(&db, a, "ready_for_test", session).await?;
+                        }
+                    }
+                    Ok(())
+                }.await;
+                super::api_key_mutation_service::transaction_result(result)
+            }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+            return Ok(());
+        }
         let result = self.db
             .collection::<TelegramBotRequest>(REQUESTS)
             .update_one(

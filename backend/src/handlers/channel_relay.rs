@@ -507,6 +507,7 @@ async fn load_active_bot(state: &AppState, original: &ChannelMessage) -> AppResu
         )
     })?;
     let bot = channel_bot_service::get_bot(&state.db, channel_bot_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
@@ -927,6 +928,7 @@ async fn resolve_initiated_context(
         .as_deref()
         .ok_or_else(|| AppError::ChannelBotNotFound("Conversation has no bot".to_string()))?;
     let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),

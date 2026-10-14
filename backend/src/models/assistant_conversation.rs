@@ -205,6 +205,11 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Internal conversion fence; typed settlement must preserve it until exact cleanup completes.
+    #[serde(default)]
+    pub platform_cleanup_pending: bool,
+    #[serde(default)]
+    pub platform_cleanup_id: Option<String>,
     /// Human opt-in only; command previews are encrypted and expire within 30 days.
     #[serde(default)]
     pub machine_previews: bool,

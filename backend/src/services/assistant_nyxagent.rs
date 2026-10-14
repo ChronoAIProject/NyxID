@@ -1579,6 +1579,13 @@ pub async fn begin_turn_with_voice(
             let operation: AppResult<_> = Box::pin(async {
                 let now = Utc::now();
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
+                if start.conversation_id.is_some()
+                    && db.collection::<bson::Document>(CONVERSATIONS)
+                        .find_one(doc! {"_id": &id, "user_id": user_id, "platform_cleanup_pending": true})
+                        .session(&mut *session).await?.is_some()
+                {
+                    return Err(AppError::Conflict("Platform conversion cleanup is pending".into()));
+                }
                 let mut row = if start.conversation_id.is_some() {
                     collection
                         .find_one(owner_filter(user_id, &id)?)
@@ -1588,6 +1595,8 @@ pub async fn begin_turn_with_voice(
                 } else {
                     AssistantConversation {
                         machine_previews: false,
+        platform_cleanup_pending: false,
+        platform_cleanup_id: None,
                         automation_thread: false,
                         voice_parent_conversation_id: None,
                         agent_owner_id: (new_agent.user_id != user_id)

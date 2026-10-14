@@ -848,6 +848,7 @@ impl Runtime {
             computer: self.config.computer,
             browser: self.config.browser,
             authority_versions: vec![2],
+            exact_cancel: true,
             separated: Some(self.context_support().await),
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
@@ -948,6 +949,16 @@ impl Runtime {
             nyxid_machine::desktop::Display::Dev => &self.dev_owner_control,
         }
     }
+    async fn cancel_exact_local(&self, scope: &cancellation::Scope, ids: &[String]) {
+        if !scope.turn_id.is_empty() {
+            self.turns.stop(Some(scope));
+        }
+        self.jobs.preempt_ids(ids).await;
+        if let Some(gateway) = self.gateway.get() {
+            gateway.cancel_jobs(ids).await;
+        }
+    }
+
     fn control_channels(
         &self,
         operation: Operation,
@@ -1032,6 +1043,7 @@ impl Runtime {
             Operation::AuthorityRenew
                 | Operation::AuthorityRevoke
                 | Operation::Cancel
+                | Operation::CancelExact
                 | Operation::Upgrade
                 | Operation::UpgradeStatus
                 | Operation::DesktopControl
@@ -1287,6 +1299,7 @@ impl Runtime {
             && !matches!(
                 request.operation,
                 Operation::Cancel
+                    | Operation::CancelExact
                     | Operation::Upgrade
                     | Operation::UpgradeStatus
                     | Operation::ContainerInspect
@@ -1352,6 +1365,7 @@ impl Runtime {
         let agent_operation = !matches!(
             request.operation,
             Operation::Cancel
+                | Operation::CancelExact
                 | Operation::Upgrade
                 | Operation::UpgradeStatus
                 | Operation::DesktopControl
@@ -1436,6 +1450,7 @@ impl Runtime {
         let human = matches!(
             operation,
             Operation::Cancel
+                | Operation::CancelExact
                 | Operation::Upgrade
                 | Operation::UpgradeStatus
                 | Operation::DesktopControl
@@ -1492,6 +1507,7 @@ impl Runtime {
             computer: self.config.computer,
             browser: self.config.browser,
             authority_versions: vec![2],
+            exact_cancel: true,
             ..Default::default()
         };
         if !operation.allowed(&profile) {
@@ -1768,6 +1784,31 @@ impl Runtime {
                 )
                 .await;
                 Ok(result)
+            }
+            Operation::CancelExact => {
+                let scope: cancellation::Scope = serde_json::from_value(parameters.clone())?;
+                anyhow::ensure!(
+                    !scope.conversation_id.is_empty(),
+                    "exact_cancel_conversation_required"
+                );
+                let ids: Vec<String> = serde_json::from_value(parameters["job_ids"].clone())?;
+                anyhow::ensure!(ids.len() <= 1024, "exact_cancel_job_limit");
+                self.cancel_exact_local(&scope, &ids).await;
+                #[cfg(target_os = "linux")]
+                {
+                    let runtimes: Vec<_> = self
+                        .contexts
+                        .lock()
+                        .await
+                        .runtimes
+                        .values()
+                        .cloned()
+                        .collect();
+                    for runtime in runtimes {
+                        runtime.cancel_exact_local(&scope, &ids).await;
+                    }
+                }
+                Ok(json!({"stopped": true}))
             }
             Operation::Cancel => {
                 let scope = if parameters["all"] == true {

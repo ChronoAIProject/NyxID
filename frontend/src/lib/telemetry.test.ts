@@ -295,6 +295,26 @@ describe("before_send privacy hook", () => {
     expect(mockPosthog.opt_out_capturing).not.toHaveBeenCalled();
   });
 
+  it("suppresses onboarding codes after SPA navigation and in URL/referrer metadata", () => {
+    window.history.replaceState(null, '', '/onboarding');
+    const beforeSend = getBeforeSend();
+    expect(beforeSend({ properties: {$current_url: window.location.href} })).not.toBeNull();
+    window.history.pushState(null, '', '/onboarding/link?code=ABCD1234');
+    expect(isTelemetryActive()).toBe(false);
+    capture({name: 'test_event', props: {}} as never);
+    captureException(new Error('private code fixture'));
+    expect(mockPosthog.capture).not.toHaveBeenCalled();
+    expect(mockPosthog.captureException).not.toHaveBeenCalled();
+    expect(beforeSend({properties: {}})).toBeNull();
+    window.history.pushState(null, '', '/onboarding');
+    for (const field of ['$current_url', '$referrer']) {
+      expect(beforeSend({properties: {[field]: `${window.location.origin}/onboarding/link?code=ABCD1234`}})).toBeNull();
+    }
+    expect(isTelemetryActive()).toBe(true);
+    capture({name: 'test_event', props: {}} as never);
+    expect(mockPosthog.capture).toHaveBeenCalledTimes(1);
+  });
+
   it("returns null for a null event", () => {
     expect(getBeforeSend()(null)).toBeNull();
   });

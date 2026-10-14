@@ -1122,6 +1122,73 @@ async fn server_main() {
         });
     }
 
+    // Budget holds must recover independently of external Telegram notice latency.
+    let platform_budget_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::platform_inference_service::sweep_abandoned(&platform_budget_db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform budget recovery sweep failed"
+                );
+            }
+        }
+    });
+
+    let platform_cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                handlers::platform_bots::sweep_cleanup(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform conversion cleanup sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_provisioning_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup provisioning sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_notice_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup status notice sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_native_receipt_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Native platform recovery sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_service::expire(&platform_cleanup_state.db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup expiry sweep failed"
+                );
+            }
+        }
+    });
+
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
     // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.
