@@ -1059,10 +1059,13 @@ fn authoring_guidance_uses_three_parts_and_existing_skills_first() {
         "the owner's account and connected services.",
         "When the owner must finish a connect link, channel bot setup or verification outside chat, explain what to do and end your turn.",
         "NyxID resumes you when they finish; never ask them to reply that they are done or connected.",
-        "If a service returns approval_required, wait for the owner in the app, phone or Telegram; report timeouts.",
+        "Service approvals wait for the owner in the app, phone or Telegram and continue automatically; report timeouts.",
         "After posting work, end your turn; NyxID wakes you with replies when the group is quiet so you can report back.",
-        "Link bots from nyxid__list_channel_bots with nyxid__connect_channel_bot by id or label.",
-        "Create bots with nyxid__channel_bot_setup_link; share its link, never request bot secrets in chat or send the user to Studio.",
+        "Link existing personal or organization bots from nyxid__list_channel_bots to yourself or a specialist with nyxid__connect_channel_bot by id or label.",
+        "Create Telegram, Discord, Slack, Lark or other bots with nyxid__channel_bot_setup_link; share its link, never request bot secrets in chat or send the user to Studio.",
+        "and ask the owner when unsure.",
+        "When work is specialized or parallel, or the user asks for an agent",
+        "Never tell the user to create an agent themselves. An agent key is different: a raw API key the user creates on its settings page.",
     ] {
         assert!(prompt.contains(preserved), "{preserved}");
     }
@@ -5280,6 +5283,22 @@ async fn full_access_authored_skill_publishes_and_pins_with_receipt_while_auto_r
             assert!(rows[0].summary.contains(&agent.name));
             assert!(!rows[0].summary.contains("http"));
             assert_eq!(rows[0].link.as_deref(), result["proposal_url"].as_str());
+            let dto = serde_json::to_value(
+                crate::handlers::assistant_nyxagent::AcknowledgementResponse::from(rows[0].clone()),
+            )
+            .unwrap();
+            assert_eq!(dto["link"], result["proposal_url"]);
+            let mut legacy = bson::to_document(&rows[0]).unwrap();
+            legacy.remove("link");
+            let legacy: crate::models::assistant_acknowledgement::AssistantAcknowledgement =
+                bson::from_document(legacy).unwrap();
+            assert!(legacy.link.is_none());
+            assert!(!bson::to_document(&legacy).unwrap().contains_key("link"));
+            let legacy_dto = serde_json::to_value(
+                crate::handlers::assistant_nyxagent::AcknowledgementResponse::from(legacy),
+            )
+            .unwrap();
+            assert!(legacy_dto.get("link").is_none());
             assert_eq!(agent.skills.len(), 1);
             assert_eq!(agent.skills[0].skill_id, skill_id);
             assert_eq!(
