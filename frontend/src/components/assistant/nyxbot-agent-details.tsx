@@ -144,12 +144,14 @@ export function accessAuthorityCopy(
 export function AgentDetailsSheet({
   agentId,
   agents,
+  proposalId,
   open,
   onOpenChange,
   onDeleted,
 }: {
   readonly agentId: string | undefined;
   readonly agents: readonly AssistantAgent[];
+  readonly proposalId?: string;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onDeleted: () => void;
@@ -226,7 +228,7 @@ export function AgentDetailsSheet({
               )}
               <AgentSkills agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
                 } />
-              <AgentLearningReview agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />
+              <AgentLearningReview key={`${agent.id}:${proposalId ?? ""}`} agentId={agent.id} proposalId={proposalId} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />
               {agent.can_use !== false ? (
                 <AgentAutomations agentId={agent.id} />
               ) : null}

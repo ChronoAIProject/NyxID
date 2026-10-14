@@ -84,6 +84,7 @@ export const learningProposalSchema = z.object({
   published_version: z.string().nullish(),
   // Older servers omit it; their listed proposals always had current evidence.
   evidence_available: z.boolean().default(true),
+  auto_allowed: z.boolean().default(false),
   card_conversation_id: z.string().nullish(),
   acknowledgement_id: z.string().nullish(),
   card_status: z.string().nullish(),

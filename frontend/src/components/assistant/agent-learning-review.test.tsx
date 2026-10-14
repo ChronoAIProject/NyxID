@@ -293,3 +293,15 @@ describe("AgentLearningReview", () => {
     expect(screen.getAllByRole("button", { name: "Reject" })).toHaveLength(1);
   });
 });
+
+it("opens the linked automatically published proposal for inspection and discards its exact attachment", async () => {
+  mocks.feature.mockReturnValue(true);
+  const previous = mocks.review();
+  mocks.review.mockReturnValue({ ...previous, data: { proposals: [{ ...proposal, source: "authored", status: "pinned", auto_allowed: true }] } });
+  render(<AgentLearningReview agentId="agent" proposalId="proposal" />);
+  expect(screen.getByRole("textbox", { name: "Skill draft" })).toHaveValue(proposal.draft.skill_md);
+  expect(screen.getByRole("textbox", { name: "Skill draft" })).toHaveAttribute("readonly");
+  expect(screen.queryByText("Confirm this authored skill from its conversation card.")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Discard and detach" }));
+  await waitFor(() => expect(mocks.reject).toHaveBeenCalledWith({ proposalId: "proposal", revision: 2 }));
+});

@@ -22,6 +22,7 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
 export interface AssistantSearch extends AccountPanelSearch {
   readonly c?: string;
   readonly card?: string;
+  readonly proposal?: string;
   readonly draft?: boolean;
   readonly agent?: string;
   readonly g?: string;
@@ -36,6 +37,8 @@ function parseChatSearch(
     ...(typeof search.card === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.card)
       ? { card: search.card }
       : {}),
+    ...(typeof search.proposal === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.proposal)
+      ? { proposal: search.proposal } : {}),
     ...(search.draft === true || search.draft === "true"
       ? { draft: true }
       : {}),

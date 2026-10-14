@@ -19,14 +19,19 @@ function requestFailure(cause: unknown): string {
 
 export function AgentLearningReview({
   agentId,
+  proposalId,
   readOnly = false,
 }: {
   readonly agentId: string;
+  readonly proposalId?: string;
   readonly readOnly?: boolean;
 }) {
   const enabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
   const review = useAgentLearningReview(agentId, enabled);
-  const [open, setOpen] = useState<string>();
+  const [open, setOpen] = useState<string | undefined>(proposalId);
+  useEffect(() => {
+    if (proposalId && review.data) document.getElementById(`learning-proposal-${proposalId}`)?.scrollIntoView?.({ block: "nearest" });
+  }, [proposalId, review.data]);
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
@@ -51,7 +56,7 @@ export function AgentLearningReview({
         </h3>
         <p className="text-12 text-muted-foreground">
           Completed work can produce private, untrusted Ornn skill drafts.
-          Publishing and attaching always requires your confirmation.
+          Full access publishes and attaches automatically; other modes require your confirmation.
         </p>
       </div>
       {review.error ? (
@@ -164,6 +169,7 @@ export function AgentLearningReview({
         return (
           <article
             key={proposal.id}
+            id={`learning-proposal-${proposal.id}`}
             className="space-y-3 rounded-lg border border-border/50 p-3"
           >
             <div className="flex items-center justify-between gap-2">
@@ -220,7 +226,7 @@ export function AgentLearningReview({
               >
                 {isOpen ? "Hide draft" : "Review draft"}
               </Button>
-              {proposal.source === "authored" ? (
+              {proposal.source === "authored" && proposal.status !== "pinned" ? (
                 proposal.card_conversation_id ? (
                   <Link
                     to="/assistant"
@@ -303,7 +309,7 @@ export function AgentLearningReview({
                   publication that may have reached Ornn is refused, and the
                   reason appears in the error line above. */}
               {proposal.status === "pending" ||
-              proposal.status === "publication_failed" ? (
+              proposal.status === "publication_failed" || (proposal.auto_allowed && proposal.status === "pinned") ? (
                 <Button
                   size="sm"
                   disabled={readOnly || review.reject.isPending}
@@ -322,7 +328,7 @@ export function AgentLearningReview({
                     }
                   }}
                 >
-                  Reject
+                  {proposal.auto_allowed && proposal.status === "pinned" ? "Discard and detach" : "Reject"}
                 </Button>
               ) : null}
             </div>
