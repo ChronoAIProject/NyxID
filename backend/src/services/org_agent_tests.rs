@@ -155,6 +155,23 @@ impl Fixture {
                 .await
                 .unwrap();
         }
+        // These tests exercise the legacy permission-card contract explicitly:
+        // Autopilot keeps card assertions independent of access-mode prompts, and
+        // routed mode keeps the specialist request cards (production defaults to denied).
+        for (i, id) in ids.iter().enumerate() {
+            db.collection(crate::models::assistant_settings::COLLECTION_NAME)
+                .insert_one(crate::models::assistant_settings::AssistantSettings {
+                    access_mode: crate::models::assistant_settings::AccessMode::Autopilot,
+                    specialist_access_requests: if i < 4 {
+                        crate::models::assistant_settings::SpecialistAccessRequests::RoutedToNyxbot
+                    } else {
+                        crate::models::assistant_settings::SpecialistAccessRequests::Denied
+                    },
+                    ..crate::models::assistant_settings::AssistantSettings::defaults(id)
+                })
+                .await
+                .unwrap();
+        }
         for (i, role) in [OrgRole::Admin, OrgRole::Member, OrgRole::Viewer]
             .into_iter()
             .enumerate()
@@ -184,7 +201,7 @@ impl Fixture {
         .await
         .unwrap();
     }
-    fn request(&self, name: &str) -> team::CreateRequest {
+    pub(crate) fn request(&self, name: &str) -> team::CreateRequest {
         team::CreateRequest {
             name: name.into(),
             description: "Organization specialist".into(),
@@ -276,6 +293,7 @@ async fn org_agent_auth_resolves_access_once_and_reuses_only_within_request() {
         &f.state.db,
         &f.admin,
         &engine::TurnRequest {
+            retry_of: None,
             attachment_ids: vec![upload.id.clone()],
             conversation_id: Some(row.id.clone()),
             agent_id: None,
@@ -593,6 +611,7 @@ async fn org_agent_revocation_refuses_key_tool_turn_and_queued_work() {
             &f.state.db,
             &f.member,
             &engine::TurnRequest {
+                retry_of: None,
                 attachment_ids: Vec::new(),
                 conversation_id: Some(row.id.clone()),
                 agent_id: None,
@@ -610,6 +629,7 @@ async fn org_agent_revocation_refuses_key_tool_turn_and_queued_work() {
             &f.state.db,
             &f.member,
             &engine::TurnRequest {
+                retry_of: None,
                 attachment_ids: Vec::new(),
                 conversation_id: None,
                 agent_id: Some(agent.id),
@@ -1637,6 +1657,7 @@ async fn org_agent_skills_removal_acl_and_mandatory_add_card() {
         version: "1.0".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     let selection = super::agent_skill_service::Selection {
         expected_revision: 0,
@@ -2030,6 +2051,7 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         version: "1.0".into(),
         sha256: hex::encode(Sha256::digest(&bytes)),
         dependencies: vec![],
+        disabled: false,
     };
     Mock::given(method("GET")).and(path(format!("/api/v1/skills/{id}"))).and(query_param("version","1.0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":id,"name":pin.name,"version":"1.0","description":"Team guidance","skillHash":pin.sha256}}))).mount(&upstream).await;
@@ -2242,6 +2264,7 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
             db,
             &f.member,
             &engine::TurnRequest {
+                retry_of: None,
                 conversation_id: Some(thread.id.clone()),
                 text: "Delete the selected object".into(),
                 attachment_ids: Vec::new(),
@@ -2308,4 +2331,78 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
         db.drop().await.unwrap();
     })
     .await;
+}
+
+/// An organization's specialist is sandboxed like a personal one: under the
+/// default (denied) policy its request is refused and audited without a card,
+/// whoever's thread it runs in; routed mode then raises NyxBot's card.
+#[tokio::test]
+async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allowed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    let f = Fixture::new("org_specialist_strict_denial").await;
+    let (agent, _) = f.create().await;
+    let set = |mode: SpecialistAccessRequests| {
+        super::assistant_settings_service::update(
+            &f.state.db,
+            &f.member,
+            super::assistant_settings_service::Update {
+                specialist_access_requests: Some(mode),
+                ..Default::default()
+            },
+        )
+    };
+    set(SpecialistAccessRequests::Denied).await.unwrap();
+    let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+        .await
+        .unwrap();
+    let access = org_agents::resolve_key_access(&f.state.db, &f.member, Some(&f.org))
+        .await
+        .unwrap();
+    let chat = acks::for_key_with_access(
+        &f.state.db,
+        &f.member,
+        Some(&thread.credential_api_key_id),
+        access.as_ref(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let service = f.service(&f.org, "org-wiki").await;
+    let (value, card) = acks::service_gate(&f.state.db, &chat, &service, "org-wiki", "Wiki", false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value, acks::access_request_denied());
+    assert!(card.is_none());
+    let cards = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    assert_eq!(
+        cards
+            .count_documents(doc! {"conversation_id": &thread.id})
+            .await
+            .unwrap(),
+        0
+    );
+    let audit = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(
+            doc! {"event_type": "assistant_access_request_denied", "event_data.target": &service},
+        )
+        .await
+        .unwrap()
+        .expect("org denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("requester_agent").unwrap(), agent.id);
+    assert_eq!(audit.get_str("user_id").unwrap(), f.member);
+    set(SpecialistAccessRequests::RoutedToNyxbot).await.unwrap();
+    let (value, card) = acks::service_gate(&f.state.db, &chat, &service, "org-wiki", "Wiki", false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value["error"], "acknowledgement_required");
+    assert_eq!(card.unwrap().decider, "orchestrator");
 }

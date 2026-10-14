@@ -173,6 +173,17 @@ fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Respons
     response
 }
 
+/// The session named by `Mcp-Session-Id` is unknown, expired, or not the
+/// caller's. Streamable HTTP requires HTTP 404 here: MCP clients (Claude Code,
+/// Codex) answer it by starting a new session with the credential they already
+/// hold, while any other status surfaces as a failed call and leaves the
+/// client stuck on the dead session.
+fn session_not_found(id: Option<serde_json::Value>) -> Response {
+    let mut response = rpc_error(id, -32002, "Invalid or expired session");
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
+}
+
 /// MCP tool result (success or error are conveyed via `isError`, not JSON-RPC error).
 fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Response {
     rpc_success(
@@ -253,8 +264,9 @@ const MAX_INLINE_TOOL_IMAGE_BYTES: usize = 1024 * 1024;
 /// MCP content for a service tool response. The text note always comes first,
 /// because some clients (NyxAgent) hand the whole result to the model as one
 /// truncated string. Assistant chat keys get the image attached to the live
-/// turn and the note only: NyxAgent cannot pass pixels to its model, so base64
-/// would only crowd out the note. Other MCP callers also get an image block.
+/// turn and the note only: NyxID supplies pixels through a capability-gated
+/// continuation, so base64 would only crowd out the note. Other MCP callers
+/// also get an image block.
 async fn service_tool_content(
     state: &AppState,
     auth: &McpAuthContext,
@@ -318,8 +330,9 @@ async fn service_tool_content(
             Ok(Some(_)) => note.push_str(
                 " Delivered: NyxID already displays this image to the user in the chat \
                 under your reply. Tell the user it is shown below. Do not say it could not \
-                be displayed, was sent as base64, or was truncated. You cannot view its \
-                pixels, so do not describe its contents.",
+                be displayed, was sent as base64, or was truncated. NyxID shows the image to you \
+                after this response when this agent can view images. Do not describe its contents \
+                before you have seen it.",
             ),
             Ok(None) => note.push_str(
                 " It could not be attached to the chat: no turn is running or this turn \
@@ -1022,7 +1035,7 @@ async fn validate_session(
             rpc_error(request_id.clone(), -32603, "Internal error")
         })?;
     if !valid {
-        return Err(rpc_error(request_id, -32002, "Invalid or expired session"));
+        return Err(session_not_found(request_id));
     }
     let touched = state
         .mcp_sessions
@@ -1033,7 +1046,7 @@ async fn validate_session(
             rpc_error(request_id.clone(), -32603, "Internal error")
         })?;
     if !touched {
-        return Err(rpc_error(request_id, -32002, "Invalid or expired session"));
+        return Err(session_not_found(request_id));
     }
     Ok(())
 }
@@ -1247,7 +1260,7 @@ pub async fn mcp_post(
                 match state.mcp_sessions.touch(&sid).await {
                     Ok(true) => {}
                     Ok(false) => {
-                        return rpc_error(request.id, -32002, "Invalid or expired session");
+                        return session_not_found(request.id);
                     }
                     Err(error) => {
                         tracing::error!(%error, "Failed to persist MCP session activity");
@@ -1791,6 +1804,84 @@ fn chat_activity_label(params: &serde_json::Value) -> String {
     }
 }
 
+/// Key-order independent identity of a call: the tool name and its canonical
+/// arguments. `nyx__call_tool` carries its inner arguments as a JSON string,
+/// which is parsed so reordered inner keys digest identically too.
+fn chat_activity_digest(params: &serde_json::Value) -> String {
+    let name = params
+        .get("name")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(inner) = arguments
+        .get("arguments_json")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    {
+        arguments["arguments_json"] = inner;
+    }
+    crate::services::assistant_continuation::canonical_digest(
+        &serde_json::json!({"name": name, "arguments": arguments}),
+    )
+}
+
+/// Refuse a retried turn's repeat of a completed call: an MCP `isError`
+/// result the model can act on, recorded on the live turn (so a retry of this
+/// retry stays fenced) and audited with metadata only.
+async fn refuse_retry_duplicate(
+    state: &AppState,
+    auth: &McpAuthContext,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+    request: &JsonRpcRequest,
+    params: &serde_json::Value,
+    digest: &str,
+) -> Response {
+    let label = chat_activity_label(params);
+    if crate::services::assistant_nyxagent::record_retry_duplicate(
+        &state.db,
+        &chat.user_id,
+        &chat.conversation_id,
+        &label,
+        digest,
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(conversation_id = %chat.conversation_id, "Could not record a refused duplicate");
+    }
+    let _ = audit_service::log_actor_event(
+        state.db.clone(),
+        &audit_service::AuditActor {
+            user_id: auth.user_id.clone(),
+            ip_address: auth.ip_address.clone(),
+            user_agent: auth.user_agent.clone(),
+            api_key_id: auth.api_key_id.clone(),
+            api_key_name: auth.api_key_name.clone(),
+        },
+        "assistant_mcp_tool_call",
+        Some(serde_json::json!({
+            "conversation_id": chat.conversation_id,
+            "tool": label,
+            "error_code": crate::services::assistant_nyxagent::RETRY_DUPLICATE_ACTION,
+            "metadata_only": true,
+        })),
+    )
+    .await;
+    rpc_success(
+        request.id.clone(),
+        serde_json::json!({
+            "content": [{"type": "text", "text": serde_json::json!({
+                "error": crate::services::assistant_nyxagent::RETRY_DUPLICATE_ACTION,
+                "message": "This exact call already completed in the failed turn this turn retries. Use that result instead of repeating it; change the arguments only if a different action is intended.",
+            }).to_string()}],
+            "isError": true,
+        }),
+    )
+}
+
 /// Chat-key tool calls are recorded on the live turn as metadata-only activity
 /// so the browser can show what the assistant is doing before its reply streams.
 async fn handle_tools_call(
@@ -1823,6 +1914,33 @@ async fn handle_tools_call(
     {
         return app_error_to_rpc(request.id.clone(), &error);
     }
+    // A retried turn may not repeat a call its failed turn completed. Checked
+    // before the call counts as continuation progress or is dispatched.
+    if let Some(chat) = &auth.chat
+        && let Some(params) = request.params.as_ref()
+    {
+        let digest = chat_activity_digest(params);
+        match crate::services::assistant_nyxagent::retry_duplicate(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            &digest,
+        )
+        .await
+        {
+            Ok(false) => {}
+            Ok(true) => {
+                return refuse_retry_duplicate(state, auth, chat, request, params, &digest).await;
+            }
+            Err(_) => {
+                return rpc_error(
+                    request.id.clone(),
+                    -32603,
+                    "Tool execution could not be recorded; retry shortly",
+                );
+            }
+        }
+    }
     let window = if let Some(chat) = &auth.chat {
         match crate::services::assistant_continuation::started(
             &state.db,
@@ -1845,12 +1963,13 @@ async fn handle_tools_call(
     };
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
-            match crate::services::assistant_nyxagent::activity_started_for_turn(
+            match crate::services::assistant_nyxagent::activity_started_with_digest(
                 &state.db,
                 &chat.user_id,
                 &chat.conversation_id,
                 chat.turn_id.as_deref().unwrap_or_default(),
                 &chat_activity_label(params),
+                Some(&chat_activity_digest(params)),
             )
             .await
             {
@@ -2052,18 +2171,35 @@ async fn dispatch_tools_call(
         && let Some(chat) = auth
             .chat
             .as_ref()
-            .filter(|chat| chat.confirmation_policy.is_some())
+            .filter(|chat| !chat.guest)
     {
-        match crate::services::assistant_acknowledgement_service::webhook_action_gate(
-            &state.db,
-            chat,
-            tool_name,
-            &arguments,
-            false,
-            matches!(tool_name, "nyx__ssh_exec" | "nyx__oracle_ask"),
-        )
-        .await
-        {
+        use crate::services::assistant_acknowledgement_service as acks;
+        let class = acks::classify_owner_action(tool_name, &arguments);
+        // Webhook automations keep treating oracle prompts (data leaving for
+        // an external model) as destructive, as before access modes.
+        let facts = acks::ActionFacts {
+            class,
+            read_only: false,
+            destructive: class == acks::OwnerActionClass::Destructive
+                || tool_name == "nyx__oracle_ask",
+        };
+        let gate = async {
+            match acks::confirmation_needed(&state.db, chat, facts, false).await? {
+                Some(need) => {
+                    acks::confirm_action(
+                        &state.db,
+                        chat,
+                        tool_name,
+                        &arguments,
+                        &need,
+                        &meta_action_summary(tool_name, &arguments),
+                    )
+                    .await
+                }
+                None => Ok(None),
+            }
+        };
+        match Box::pin(gate).await {
             Ok(Some(refusal)) => {
                 return tool_result(request.id.clone(), &refusal.to_string(), true);
             }
@@ -2910,10 +3046,7 @@ fn webhook_execution_arguments(
     args: &serde_json::Value,
 ) -> serde_json::Value {
     let mut result = args.clone();
-    if auth
-        .chat
-        .as_ref()
-        .is_some_and(|chat| chat.confirmation_policy.is_some())
+    if auth.chat.is_some()
         && let Some(object) = result.as_object_mut()
     {
         object.remove("acknowledgement_id");
@@ -2923,11 +3056,11 @@ fn webhook_execution_arguments(
 
 fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> serde_json::Value {
     let mut schema = schema.clone();
-    if auth
-        .chat
-        .as_ref()
-        .is_some_and(|chat| chat.confirmation_policy.is_some())
+    // Any owner chat may be asked for an action card (access mode or webhook
+    // policy); guests never confirm cards.
+    if auth.chat.as_ref().is_some_and(|chat| !chat.guest)
         && let Some(properties) = schema["properties"].as_object_mut()
+        && !properties.contains_key("acknowledgement_id")
     {
         properties.insert("acknowledgement_id".into(), serde_json::json!({
             "type": "string",
@@ -2937,6 +3070,30 @@ fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> ser
     schema
 }
 
+/// The owner-facing description of a meta tool call for its action card.
+/// Identifiers only; prompts, commands and credentials never enter a card.
+fn meta_action_summary(tool: &str, args: &serde_json::Value) -> String {
+    let what = match tool {
+        "nyx__ssh_exec" => "Run a command over SSH",
+        "nyx__oracle_ask" => "Send a prompt to an oracle pool",
+        "nyx__oracle_attach" => "Import a ChatGPT conversation into an oracle pool",
+        "nyx__oracle_extract" => "Extract a web page with an oracle pool",
+        "nyx__connect_service" => "Connect a service",
+        _ => "Run a NyxID tool",
+    };
+    let target = ["service_id", "service", "pool"]
+        .iter()
+        .find_map(|field| args[*field].as_str())
+        .map(crate::services::assistant_nyxagent::identifier);
+    match target {
+        Some(target) => format!("{what} ({target})"),
+        None => what.to_owned(),
+    }
+}
+
+/// Apply the owner's access mode and any webhook automation policy to one
+/// service operation, classified by its catalog/HTTP effects. (Named for the
+/// webhook policy it first enforced; it now carries both.)
 #[allow(clippy::too_many_arguments)]
 async fn webhook_service_gate(
     state: &AppState,
@@ -2948,10 +3105,9 @@ async fn webhook_service_gate(
     args: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
-    let chat = auth
-        .chat
-        .as_ref()
-        .filter(|chat| chat.confirmation_policy.is_some())?;
+    use crate::services::assistant_acknowledgement_service as acks;
+    // Guest calls are limited by the owner's per-service guest access instead.
+    let chat = auth.chat.as_ref().filter(|chat| !chat.guest)?;
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
@@ -2959,15 +3115,26 @@ async fn webhook_service_gate(
         .unwrap_or_default();
     let effects = mcp_service::operation_effects(prepared.method(), metadata);
     // Method overrides have unknown effects; they must never bypass a card.
-    let result = crate::services::assistant_acknowledgement_service::webhook_action_gate(
-        &state.db,
-        chat,
-        tool,
-        args,
-        effects.reads && !prepared.carries_method_override(),
-        effects.destructive || prepared.carries_method_override(),
-    )
-    .await;
+    let read_only = effects.reads && !prepared.carries_method_override();
+    let destructive = effects.destructive || prepared.carries_method_override();
+    let facts = acks::ActionFacts {
+        class: acks::service_action_class(read_only, destructive),
+        read_only,
+        destructive,
+    };
+    let summary = format!(
+        "{} {} on {}",
+        prepared.method(),
+        crate::services::assistant_nyxagent::identifier(&endpoint.name),
+        crate::services::assistant_nyxagent::identifier(&service.service_slug),
+    );
+    let result = async {
+        match acks::confirmation_needed(&state.db, chat, facts, false).await? {
+            Some(need) => acks::confirm_action(&state.db, chat, tool, args, &need, &summary).await,
+            None => Ok(None),
+        }
+    };
+    let result = Box::pin(result).await;
     match result {
         Ok(None) => None,
         Ok(Some(refusal)) => Some(tool_result(request_id, &refusal.to_string(), true)),
@@ -3855,6 +4022,27 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
+    if let Some(chat) = auth.chat.as_ref()
+        && !chat.access_request_allowed()
+    {
+        crate::services::assistant_acknowledgement_service::audit_access_request_denied(
+            &state.db,
+            chat,
+            // Model-supplied text never enters the audit row: only a UUID.
+            arguments
+                .get("service_id")
+                .and_then(|v| v.as_str())
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok()),
+            "connect_service",
+        )
+        .await;
+        return tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::access_request_denied()
+                .to_string(),
+            true,
+        );
+    }
     if auth.chat.is_some() && arguments.get("credential").is_some() {
         return tool_result(
             request_id,
@@ -6250,6 +6438,40 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn session_not_found_is_http_404_with_the_existing_rpc_body() {
+        let response = session_not_found(Some(serde_json::json!(7)));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["id"], 7);
+        assert_eq!(body["error"]["code"], -32002);
+        assert_eq!(body["error"]["message"], "Invalid or expired session");
+    }
+
+    #[tokio::test]
+    async fn unknown_or_foreign_session_is_reported_as_http_404() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let missing = validate_session(&state, "no-such-session", "user-1", None)
+            .await
+            .expect_err("unknown session");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let sid = state
+            .mcp_sessions
+            .create_with_proxy_access("user-2", true, false)
+            .await
+            .unwrap()
+            .expect("session created");
+        let foreign = validate_session(&state, &sid, "user-1", None)
+            .await
+            .expect_err("another user's session");
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert!(validate_session(&state, &sid, "user-2", None).await.is_ok());
+    }
+
     #[test]
     fn mcp_auth_context_user_has_unrestricted_access() {
         let ctx = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
@@ -7471,7 +7693,7 @@ mod skill_authoring_discovery_tests {
     }
 
     #[tokio::test]
-    async fn only_owner_nyxbot_tools_list_reads_authoring_flag() {
+    async fn only_owner_agent_tools_list_reads_authoring_flag() {
         let (state, reads) = observed_state("authoring_discovery_reads").await;
         feature_flag_service::set_platform_override(
             &state.db,
@@ -7482,8 +7704,8 @@ mod skill_authoring_discovery_tests {
         )
         .await
         .unwrap();
+        // Guests and non-chat callers never read the flag or see the tool.
         for auth in [
-            chat_auth(AgentRole::Subagent, false),
             chat_auth(AgentRole::Orchestrator, true),
             chat_auth(AgentRole::Subagent, true),
             McpAuthContext::user("owner".into(), AuthMethod::ApiKey),
@@ -7493,11 +7715,14 @@ mod skill_authoring_discovery_tests {
             assert_eq!(reads.load(Ordering::SeqCst), 0);
             assert!(!names.iter().any(|name| name == "nyxid__draft_agent_skill"));
         }
-        reads.store(0, Ordering::SeqCst);
-        let auth = chat_auth(AgentRole::Orchestrator, false);
-        let names = Box::pin(tool_names(&state, &auth)).await;
-        assert_eq!(reads.load(Ordering::SeqCst), 1);
-        assert!(names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        // Owner NyxBot and specialist chats (specialists draft for themselves).
+        for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+            reads.store(0, Ordering::SeqCst);
+            let auth = chat_auth(role, false);
+            let names = Box::pin(tool_names(&state, &auth)).await;
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+            assert!(names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        }
         state.db.drop().await.unwrap();
     }
 

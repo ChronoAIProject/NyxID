@@ -12,6 +12,23 @@ pub const CREDITS_MANAGER_ROLE_SLUG: &str = "credits_manager";
 /// anyone who is not an Operator; Admins already hold every permission.
 pub const CREDIT_GRANTS_WRITE_PERMISSION: &str = "nyxid:billing:credit_grants:write";
 
+pub const TOOLS_MANAGER_ROLE_SLUG: &str = "tools_manager";
+pub const TOOLS_WRITE_PERMISSION: &str = "nyxid:catalog:tools:write";
+
+pub const CATALOG_MANAGER_ROLE_SLUG: &str = "catalog_manager";
+
+/// Lets an Operator create providers and catalog services, edit the rows they
+/// created, and set initial OAuth client credentials. Ignored for anyone who
+/// is not an Operator; Admins already hold every permission.
+pub const CATALOG_SERVICES_WRITE_PERMISSION: &str = "nyxid:catalog:services:write";
+/// Slug of the seeded system role that carries [`ADMIN_USAGE_READ_PERMISSION`].
+pub const USAGE_VIEWER_ROLE_SLUG: &str = "usage_viewer";
+
+/// Grants read-only access to platform-wide admin usage (`/admin/usage*` GETs)
+/// to any user holding it through a direct or group role. Admins and Operators
+/// already have this access.
+pub const ADMIN_USAGE_READ_PERMISSION: &str = "nyxid:admin:usage:read";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     #[serde(rename = "_id")]

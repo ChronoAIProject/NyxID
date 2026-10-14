@@ -451,6 +451,7 @@ async fn first_turn_deletion_is_atomic_with_real_settlement_and_leaves_documents
         &state.db,
         &owner,
         &engine::TurnRequest {
+            retry_of: None,
             conversation_id: Some(thread.clone()),
             attachment_ids: vec![image.clone(), document.clone()],
             text: "Read files".into(),
@@ -623,6 +624,7 @@ async fn upload_retention_tool_and_transcript_report_expiry_before_and_after_cle
         &state.db,
         &owner,
         &engine::TurnRequest {
+            retry_of: None,
             conversation_id: Some(thread.clone()),
             attachment_ids: vec![id.clone()],
             text: "Read".into(),

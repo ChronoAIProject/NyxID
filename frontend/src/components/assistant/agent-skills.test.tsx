@@ -2,12 +2,23 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AgentSkills } from "./agent-skills";
+import { useAuthStore } from "@/stores/auth-store";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import type { User } from "@/types/api";
+
+function signIn(features: string[] = []) {
+  useAuthStore.setState({
+    user: { id: "owner", capabilities: { enabled_features: features } } as unknown as User,
+  });
+}
 const mocks = vi.hoisted(() => ({
   current: vi.fn(),
   save: vi.fn(),
   search: vi.fn(),
   versions: vi.fn(),
   preview: vi.fn(),
+  attachedPreview: vi.fn(),
+  history: vi.fn(),
 }));
 vi.mock("@/hooks/use-agent-skills", () => ({
   useAgentSkills: mocks.current,
@@ -15,6 +26,9 @@ vi.mock("@/hooks/use-agent-skills", () => ({
   useSkillSearch: mocks.search,
   useSkillVersions: mocks.versions,
   useSkillPreview: mocks.preview,
+  useAttachedSkillPreview: mocks.attachedPreview,
+  useAgentSkillHistory: mocks.history,
+  useImproveAgentSkill: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
 const pin = {
   source: "ornn",
@@ -26,6 +40,7 @@ const pin = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  signIn();
   mocks.current.mockReturnValue({
     data: {
       revision: 4,
@@ -35,6 +50,8 @@ beforeEach(() => {
       },
     },
   });
+  mocks.attachedPreview.mockReturnValue({ data: undefined, isFetching: false, error: null });
+  mocks.history.mockReturnValue({ data: { items: [] } });
   mocks.search.mockReturnValue({ data: undefined });
   mocks.versions.mockReturnValue({
     data: {
@@ -63,6 +80,26 @@ it("removes immediately with the observed revision", () => {
     { expected_revision: 4, skills: [] },
     expect.anything(),
   );
+});
+it("hides the enable toggle while assistant:skill-pin-disable is off", () => {
+  render(<AgentSkills agentId="agent" />);
+  expect(screen.getByText("Research guide")).toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "Use Research" })).not.toBeInTheDocument();
+  expect(mocks.save).not.toHaveBeenCalled();
+});
+it("still marks a disabled pin when the toggle is hidden", () => {
+  mocks.current.mockReturnValue({
+    data: { revision: 4, skills: [{ ...pin, disabled: true }], metadata: {} },
+  });
+  render(<AgentSkills agentId="agent" />);
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  expect(screen.getByText("Disabled")).toBeInTheDocument();
+});
+it("toggles a pin and sends disabled true in the PUT body", () => {
+  signIn([FEATURE_FLAG.SKILL_PIN_DISABLE]);
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("switch", { name: "Use Research" }));
+  expect(mocks.save).toHaveBeenCalledWith({ expected_revision: 4, skills: [{ ...pin, disabled: true }] }, expect.anything());
 });
 it("searches visible Ornn skills on submit", () => {
   render(<AgentSkills agentId="agent" />);
@@ -163,4 +200,11 @@ it("refuses a seventeenth attachment while retaining removal", () => {
   fireEvent.click(screen.getByRole("button", { name: "Extra skill" }));
   expect(screen.getByRole("button", { name: "Attach skill" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Remove Skill 0" })).toBeEnabled();
+});
+
+it("never tests a pin until its Test button is clicked", () => {
+  render(<AgentSkills agentId="agent" />);
+  expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "");
+  fireEvent.click(screen.getByRole("button", { name: "Test Research" }));
+  expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "skill-id");
 });

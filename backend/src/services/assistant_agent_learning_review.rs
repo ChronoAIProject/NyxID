@@ -503,8 +503,10 @@ async fn migrate_targets(
     Ok(MigrationOutcome::Complete)
 }
 
+/// The card's chat may carry an approval: the owner's NyxBot for any agent it
+/// maintains, or a specialist for its own agent (it drafts only for itself).
 fn approval_actor_allowed(agent: &AssistantAgent, actor: &str, chat: &ChatAuthority) -> bool {
-    agent.user_id == actor && !chat.guest && chat.is_orchestrator()
+    agent.user_id == actor && !chat.guest && (chat.is_orchestrator() || chat.agent_id == agent.id)
 }
 
 fn resumes_publication(
@@ -519,7 +521,7 @@ fn resumes_publication(
 }
 
 pub(super) async fn gate(db: &Database, actor: &str) -> AppResult<()> {
-    if !feature_flag_service::personal_flag_enabled(db, actor, learning::FLAG_KEY).await? {
+    if !super::assistant_skill_authoring::enabled(db, actor).await? {
         return Err(AppError::ValidationError(
             "Automatic agent learning is not enabled yet".into(),
         ));
@@ -618,6 +620,10 @@ pub struct ProposalItem {
     /// Authored proposals are confirmed on their conversation card; this is the
     /// conversation of the newest one, so the panel can link to it.
     pub card_conversation_id: Option<String>,
+    pub acknowledgement_id: Option<String>,
+    pub card_status: Option<String>,
+    pub card_expires_at: Option<chrono::DateTime<Utc>>,
+    pub review_url: Option<String>,
 }
 
 fn safe_failure_rules(rules: &[String]) -> Vec<String> {
@@ -995,7 +1001,7 @@ pub async fn list(
             let _ = invalidate_stale(&state.db, &row).await;
             continue;
         }
-        let card_conversation_id = if row.source == ProposalSource::Authored {
+        let card = if row.source == ProposalSource::Authored {
             state
                 .db
                 .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
@@ -1006,7 +1012,6 @@ pub async fn list(
                 )
                 .sort(doc! {"created_at":-1})
                 .await?
-                .map(|card| card.conversation_id)
         } else {
             None
         };
@@ -1078,7 +1083,25 @@ pub async fn list(
             published_skill_id: row.publication.as_ref().and_then(|p| p.skill_id.clone()),
             published_version: row.publication.as_ref().map(|p| p.version.clone()),
             evidence_available,
-            card_conversation_id,
+            card_conversation_id: card.as_ref().map(|c| c.conversation_id.clone()),
+            acknowledgement_id: card.as_ref().map(|c| c.id.clone()),
+            card_status: card.as_ref().map(|c| {
+                if (c.status == "pending" || (c.status == "allowed" && c.kind == "action"))
+                    && c.expires_at <= Utc::now()
+                {
+                    "expired".into()
+                } else {
+                    c.status.clone()
+                }
+            }),
+            card_expires_at: card.as_ref().map(|c| c.expires_at),
+            review_url: card.as_ref().map(|c| {
+                super::assistant_links::AssistantPage::ReviewCard {
+                    conversation: &c.conversation_id,
+                    card: &c.id,
+                }
+                .url(&state.config.frontend_url)
+            }),
         });
     }
     Ok(result)
@@ -1304,6 +1327,58 @@ async fn defer_publication_error<T>(
     }
 }
 
+/// Check an edited draft with its source's validator. Failures name the
+/// field and rule (`SkillDraftValidation`), including the base skill choice.
+async fn encode_draft(
+    db: &Database,
+    agent: &AssistantAgent,
+    row: &AssistantAgentLearningProposal,
+    value: &Value,
+) -> AppResult<Vec<u8>> {
+    use crate::errors::skill_draft::SkillDraftValidation as Diagnostic;
+    let encoded = if row.source == ProposalSource::Authored {
+        let body = super::assistant_skill_authoring::decode_body(&value.to_string())?;
+        super::assistant_skill_authoring::validation::ornn_rules(&body)?;
+        super::assistant_skill_authoring::validate_body(&body)?
+    } else {
+        let encoded = learning::validate_generated(&value.to_string())?
+            .ok_or_else(|| Diagnostic::at("invalid_kind", "kind"))?;
+        learning::validate_generation_contract(&encoded)?;
+        encoded
+    };
+    let body: GeneratedProposal = serde_json::from_slice(&encoded).map_err(|_| conflict())?;
+    if let Some(base) = &body.base_skill {
+        let attached = agent.skills.iter().any(|pin| {
+            pin.source == base.source
+                && pin.skill_id == base.skill_id
+                && pin.version == base.version
+                && pin.sha256 == base.sha256
+                && pin.name == base.name
+                && pin.dependencies.is_empty()
+        });
+        if !attached {
+            return Err(Diagnostic::at("base_skill_not_attached", "base_skill").into());
+        }
+        if row.source == ProposalSource::Authored && body.name != base.name {
+            return Err(Diagnostic::at("base_skill_name_mismatch", "name").into());
+        }
+    }
+    validate_proposal_base(db, agent, &body, row.source).await?;
+    Ok(encoded)
+}
+
+/// Validate an edited draft without saving it; returns its encoded size.
+pub async fn validate_draft(
+    state: &AppState,
+    actor: &str,
+    agent_id: &str,
+    id: &str,
+    value: &Value,
+) -> AppResult<usize> {
+    let (agent, row) = load(&state.db, actor, agent_id, id).await?;
+    Ok(encode_draft(&state.db, &agent, &row, value).await?.len())
+}
+
 pub async fn edit(
     state: &AppState,
     actor: &str,
@@ -1326,24 +1401,24 @@ pub async fn edit(
     {
         return Err(must_reconcile());
     }
-    let encoded = if row.source == ProposalSource::Authored {
-        let body = super::assistant_skill_authoring::decode_body(&value.to_string())?;
-        super::assistant_skill_authoring::validate_body(&body)?
-    } else {
-        let encoded = learning::validate_generated(&value.to_string())?.ok_or_else(conflict)?;
-        learning::validate_generation_contract(&encoded)?;
-        encoded
-    };
-    let value: GeneratedProposal = serde_json::from_slice(&encoded).map_err(|_| conflict())?;
-    validate_proposal_base(&state.db, &agent, &value, row.source).await?;
+    let encoded = encode_draft(&state.db, &agent, &row, value).await?;
     let encrypted = state.encryption_keys.encrypt(&encoded).await?;
-    let fingerprint = super::assistant_action_receipts::fingerprint_sensitive_material(&format!(
-        "{}:{}:{}:{}",
-        agent.id,
-        row.model_contract,
-        row.scope_digest.as_deref().unwrap_or(""),
-        String::from_utf8_lossy(&encoded)
-    ));
+    let material = match row.scope_digest.as_deref() {
+        Some(scope_digest) => format!(
+            "{}:{}:{}:{}",
+            agent.id,
+            row.model_contract,
+            scope_digest,
+            String::from_utf8_lossy(&encoded)
+        ),
+        None => format!(
+            "{}:{}:{}",
+            agent.id,
+            row.model_contract,
+            String::from_utf8_lossy(&encoded)
+        ),
+    };
+    let fingerprint = super::assistant_action_receipts::fingerprint_sensitive_material(&material);
     let db = state.db.clone();
     let proposal_id = id.to_owned();
     let skills_revision = agent.skills_revision;
@@ -1481,25 +1556,9 @@ pub(crate) struct BindingFailure {
 
 impl From<AppError> for BindingFailure {
     fn from(error: AppError) -> Self {
-        let rules = match &error {
-            AppError::SkillDraftValidation(diagnostic)
-                if publication::is_format_rejection(diagnostic) =>
-            {
-                Some(
-                    diagnostic
-                        .rules
-                        .iter()
-                        .map(|rule| (*rule).to_owned())
-                        .collect(),
-                )
-            }
-            _ => None,
-        };
         Self {
-            code: rules
-                .as_ref()
-                .map(|_| publication::FailureCode::OrnnValidationFailed),
-            rules: rules.unwrap_or_default(),
+            code: None,
+            rules: Vec::new(),
             error,
         }
     }
@@ -1513,7 +1572,7 @@ impl From<mongodb::error::Error> for BindingFailure {
 
 impl BindingFailure {
     /// The binding snapshot reads and verifies the base before any card exists.
-    fn from_publication(error: publication::PublicationError) -> Self {
+    pub(super) fn from_publication(error: publication::PublicationError) -> Self {
         Self {
             code: Some(error.failure_code(PublicationStage::BaseVerify)),
             rules: error.rules(),
@@ -1573,10 +1632,6 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
     }
     evidence_allows_pin(&state.db, &agent, &row).await?;
     let body = draft(state, &row).await?;
-    if row.source == ProposalSource::Authored && !row.publication.as_ref().is_some_and(dispatched) {
-        super::assistant_skill_authoring::validate_ornn_contract(&body)
-            .map_err(BindingFailure::from)?;
-    }
     // A possibly dispatched operation may still be checked after its base
     // changed; the pin gate refuses to attach the result.
     if !row.publication.as_ref().is_some_and(dispatched)
@@ -1618,16 +1673,6 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
             &version,
             snapshot.as_ref(),
         )?;
-        // Authored packages are checked against the live Ornn wire validator
-        // before the acknowledgement is created. Availability failures remain
-        // deferred to publication; an explicit validation verdict is safe to
-        // return to the draft author and must never produce a card.
-        if row.source == ProposalSource::Authored
-            && let Err(error) = publication::validate(reader, &bytes).await
-            && matches!(error, publication::PublicationError::Validation { .. })
-        {
-            return Err(BindingFailure::from_publication(error));
-        }
         let encrypted = match snapshot {
             Some(value) => Some(
                 state
@@ -2491,12 +2536,19 @@ async fn execute(
         expected_revision: p.skills_revision,
         skills: agent.skills.clone(),
     };
+    // The improved version replaces its base and keeps the base's disabled
+    // state: re-enabling stays an explicit owner change.
+    let mut pinned = preview.reference.clone();
     if let Some(base) = &body.base_skill {
+        pinned.disabled = selection
+            .skills
+            .iter()
+            .any(|s| s.skill_id == base.skill_id && s.source == base.source && s.disabled);
         selection
             .skills
             .retain(|s| s.skill_id != base.skill_id || s.source != base.source);
     }
-    selection.skills.push(preview.reference.clone());
+    selection.skills.push(pinned);
     skills::validate(&selection)?;
     let mut metadata = agent.skill_metadata.clone();
     metadata.insert(
@@ -2677,10 +2729,15 @@ async fn preview_value(
         }
     }
     let failure_code = row.failure_code.as_deref();
-    let failure_rules = if failure_code.is_some() {
+    let failure_rules = if !draft_unavailable && failure_code.is_some() {
         safe_failure_rules(&row.failure_rules)
     } else {
         Vec::new()
+    };
+    let failure_stage = if !draft_unavailable && failure_code.is_some() {
+        safe_failure_stage(p.last_stage.as_deref())
+    } else {
+        None
     };
     let scope = if let Some(encrypted) = &row.scope_encrypted {
         state
@@ -2721,6 +2778,7 @@ async fn preview_value(
         "failure_code":if draft_unavailable { Some("draft_unavailable") } else { failure_code },
         "failure_details_unavailable": !draft_unavailable && failure_details_unavailable(failure_code, &failure_rules),
         "failure_rules": failure_rules,
+        "failure_stage": failure_stage,
         "scope": scope,
         "scope_unavailable": scope_unavailable,
         "coverage": coverage.observations,
@@ -3010,6 +3068,7 @@ pub async fn authored_preview_for_card(
         || preview["failure_code"].is_null()
     {
         preview["failure_rules"] = json!([]);
+        preview["failure_stage"] = Value::Null;
     }
     preview["actions"] = json!(computed.actions);
     preview["state"] = json!(computed.state);

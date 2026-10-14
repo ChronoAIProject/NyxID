@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::assistant_skill_authoring::validation::ornn_rules;
 
 const WORKFLOW: &str = include_str!("../../tests/fixtures/skills/community-workflow-zh.md");
 
@@ -14,26 +15,26 @@ fn authored_ornn_contract_accepts_nested_references_and_rejects_wire_rules() {
         path: "references/nested/guide.md".into(),
         content: "safe".into(),
     }];
-    validate_ornn_contract(&draft).unwrap();
-    for (field, value) in [
-        ("name", "<bad>"),
-        ("description", "<bad>"),
-        ("name", "anthropic-helper"),
-    ] {
+    ornn_rules(&draft).unwrap();
+    for (field, value) in [("description", "<bad>"), ("name", "anthropic-helper")] {
         let mut invalid = draft.clone();
         if field == "name" {
             invalid.name = value.into();
         } else {
             invalid.description = value.into();
         }
-        assert!(validate_ornn_contract(&invalid).is_err());
+        assert!(ornn_rules(&invalid).is_err());
     }
     let mut invalid = draft;
     invalid.files = vec![GeneratedFile {
         path: "notes/private.md".into(),
         content: "safe".into(),
     }];
-    assert!(validate_ornn_contract(&invalid).is_err());
+    ornn_rules(&invalid).unwrap();
+    assert_eq!(
+        crate::services::assistant_learning_publication::package_path(&invalid.files[0].path),
+        "references/notes/private.md"
+    );
 }
 
 fn details(error: AppError) -> Value {
@@ -257,6 +258,7 @@ async fn authored_refusal_creates_no_proposal_or_card() {
         &f.chat,
         parse_input(&value).unwrap(),
         &review::UnavailableReader,
+        &review::UnavailableReader,
     )
     .await
     .unwrap_err();
@@ -413,7 +415,24 @@ fn generation_contract_is_shared_while_legacy_l1_decoding_stays_tolerant() {
             content: "Public guide".into(),
         }];
         validate_body(&draft).unwrap();
-        assert!(validate_ornn_contract(&draft).is_err());
+        ornn_rules(&draft).unwrap();
+        let bytes = learning::validate_generated(&serde_json::to_string(&draft).unwrap())
+            .unwrap()
+            .unwrap();
+        learning::validate_generation_contract(&bytes).unwrap();
+        assert_eq!(
+            crate::services::assistant_learning_publication::package_path(path),
+            format!("references/{path}")
+        );
+    }
+    for (name, description) in [
+        ("weekly-review", "Guide <invalid>"),
+        ("claude-helper", "Public guide"),
+    ] {
+        let mut draft = body();
+        draft.name = name.into();
+        draft.description = description.into();
+        // Decoding old proposals stays tolerant; new generation applies the shared rules.
         let bytes = learning::validate_generated(&serde_json::to_string(&draft).unwrap())
             .unwrap()
             .unwrap();
@@ -428,7 +447,7 @@ fn generation_contract_is_shared_while_legacy_l1_decoding_stays_tolerant() {
         path: "references/nested/guide.md".into(),
         content: "Public guide".into(),
     }];
-    validate_ornn_contract(&draft).unwrap();
+    ornn_rules(&draft).unwrap();
     let bytes = learning::validate_generated(&serde_json::to_string(&draft).unwrap())
         .unwrap()
         .unwrap();

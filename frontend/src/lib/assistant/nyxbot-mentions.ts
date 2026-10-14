@@ -1,7 +1,7 @@
 /**
- * `@name` mentions in group chats. A mention is `@` at the start of the text
- * or after whitespace, followed by an agent name; matching is
- * case-insensitive, like the server's routing.
+ * `@name` mentions in group chats. Recognised mentions follow the server's
+ * routing rule (see `mentionTokens`); matching is case-insensitive. Typing
+ * completion (`activeMention`) starts only at the text start or after a space.
  */
 
 const NAME_CHAR = /[A-Za-z0-9-]/;
@@ -57,12 +57,30 @@ export function insertMention(
   };
 }
 
+/**
+ * Every `@name` token in `text`, by the server's routing rule
+ * (`assistant_group_service::mentions`): the `@` starts a word (the previous
+ * character is not a letter, digit, `-`, `_` or `.`), and the name is the run
+ * of ASCII letters, digits, `-` and `_` after it. "@ana," and "(@ana" count;
+ * "mail@ana" does not.
+ */
+export function mentionTokens(text: string): { start: number; name: string }[] {
+  const tokens: { start: number; name: string }[] = [];
+  for (let index = text.indexOf("@"); index >= 0; index = text.indexOf("@", index + 1)) {
+    const before = index > 0 ? (text[index - 1] ?? "") : "";
+    if (before && /[\p{L}\p{N}_.-]/u.test(before)) continue;
+    const name = /^[A-Za-z0-9_-]+/.exec(text.slice(index + 1))?.[0];
+    if (name) tokens.push({ start: index, name });
+  }
+  return tokens;
+}
+
 /** Names mentioned in `text` that belong to `members` (case-insensitive). */
 export function mentionedNames(text: string, names: readonly string[]): string[] {
   const byLower = new Map(names.map((name) => [name.toLowerCase(), name]));
   const found: string[] = [];
-  for (const match of text.matchAll(/(^|\s)@([A-Za-z0-9][A-Za-z0-9-]*)/g)) {
-    const name = byLower.get((match[2] ?? "").toLowerCase());
+  for (const token of mentionTokens(text)) {
+    const name = byLower.get(token.name.toLowerCase());
     if (name && !found.includes(name)) found.push(name);
   }
   return found;
@@ -76,12 +94,12 @@ export function mentionSegments(
   const known = new Set(names.map((name) => name.toLowerCase()));
   const segments: { text: string; mention: boolean }[] = [];
   let last = 0;
-  for (const match of text.matchAll(/(^|\s)(@([A-Za-z0-9][A-Za-z0-9-]*))/g)) {
-    if (!known.has((match[3] ?? "").toLowerCase())) continue;
-    const start = (match.index ?? 0) + (match[1] ?? "").length;
-    if (start > last) segments.push({ text: text.slice(last, start), mention: false });
-    segments.push({ text: match[2] ?? "", mention: true });
-    last = start + (match[2] ?? "").length;
+  for (const token of mentionTokens(text)) {
+    if (!known.has(token.name.toLowerCase())) continue;
+    if (token.start > last) segments.push({ text: text.slice(last, token.start), mention: false });
+    const end = token.start + 1 + token.name.length;
+    segments.push({ text: text.slice(token.start, end), mention: true });
+    last = end;
   }
   if (last < text.length) segments.push({ text: text.slice(last), mention: false });
   return segments;

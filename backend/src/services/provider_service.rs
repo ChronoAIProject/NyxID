@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
@@ -3444,6 +3444,10 @@ fn validate_revocation_url_shape(url: &str) -> AppResult<()> {
 }
 
 pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
+    #[cfg(test)]
+    if crate::test_utils::is_registered_loopback_revocation_url(url) {
+        return Ok(());
+    }
     validate_revocation_url_shape(url)?;
     crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
 }
@@ -6356,6 +6360,7 @@ pub async fn seed_default_services(
             credential_encrypted: empty_credential,
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url,
             asyncapi_spec_url: None,
             streaming_supported,
@@ -6365,6 +6370,10 @@ pub async fn seed_default_services(
             requires_user_credential: seed.requires_user_credential,
             is_active: true,
             created_by: "system".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -7302,9 +7311,16 @@ pub async fn create_provider_with_revocation(
 
 /// List all active providers (visible to all authenticated users).
 pub async fn list_providers(db: &mongodb::Database) -> AppResult<Vec<ProviderConfig>> {
+    list_providers_filtered(db, doc! {"is_active": true}).await
+}
+
+pub async fn list_providers_filtered(
+    db: &mongodb::Database,
+    filter: bson::Document,
+) -> AppResult<Vec<ProviderConfig>> {
     let providers: Vec<ProviderConfig> = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find(doc! { "is_active": true })
+        .find(filter)
         .sort(doc! { "name": 1 })
         .await?
         .try_collect()
@@ -7340,8 +7356,28 @@ pub async fn update_provider(
     provider_id: &str,
     updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
+    update_provider_if_unchanged(db, encryption_keys, provider_id, updates, None).await
+}
+
+/// `update_provider` that applies only while the provider's `updated_at`
+/// still equals `observed_updated_at`, so a write authorized against one
+/// version of the provider (for example its OAuth client being absent)
+/// cannot land on a version changed in between. A mismatch is a Conflict.
+pub async fn update_provider_if_unchanged(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    provider_id: &str,
+    updates: ProviderUpdateInput,
+    observed_updated_at: Option<DateTime<Utc>>,
+) -> AppResult<ProviderConfig> {
     // Verify exists
     let existing = get_provider(db, provider_id).await?;
+    if observed_updated_at.is_some_and(|observed| observed != existing.updated_at) {
+        return Err(AppError::Conflict(
+            "The provider changed while this update was being checked; reload and try again"
+                .to_string(),
+        ));
+    }
     if existing.provider_type == "telegram_widget"
         && let Some(ref mode) = updates.credential_mode
         && mode != "admin"
@@ -7641,17 +7677,27 @@ pub async fn update_provider(
     if !unset_doc.is_empty() {
         update_doc.insert("$unset", unset_doc);
     }
+    let mut filter = doc! { "_id": provider_id };
+    if let Some(observed) = observed_updated_at {
+        filter.insert("updated_at", bson::DateTime::from_chrono(observed));
+    }
 
     let updated = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(doc! { "_id": provider_id }, update_doc)
+        .find_one_and_update(filter, update_doc)
         .with_options(
             FindOneAndUpdateOptions::builder()
                 .return_document(ReturnDocument::After)
                 .build(),
         )
         .await?
-        .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
+        .ok_or_else(|| match observed_updated_at {
+            Some(_) => AppError::Conflict(
+                "The provider changed while this update was being checked; reload and try again"
+                    .to_string(),
+            ),
+            None => AppError::NotFound("Provider not found".to_string()),
+        })?;
 
     tracing::info!(provider_id = %provider_id, "Provider config updated");
 

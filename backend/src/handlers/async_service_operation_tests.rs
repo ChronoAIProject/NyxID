@@ -80,6 +80,7 @@ impl AsyncFixture {
             .insert_one(&catalog)
             .await
             .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&f.state.db)
             .await
             .unwrap();
@@ -209,6 +210,7 @@ async fn async_submit_mcp_polls_once_across_replicas_and_quotes_encrypted_result
     .await
     .unwrap();
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        retry_of: None,
         attachment_ids: vec![],
         conversation_id: Some(row.id.clone()),
         text: String::new(),
@@ -614,6 +616,7 @@ async fn admit_event(
     a: &AsyncFixture,
 ) -> crate::models::assistant_conversation::AssistantConversation {
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        retry_of: None,
         attachment_ids: vec![],
         conversation_id: Some(a.f.row.id.clone()),
         text: String::new(),

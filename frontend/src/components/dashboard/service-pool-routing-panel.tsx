@@ -31,6 +31,7 @@ import { defaultFailoverPolicy, type ServicePool } from "@/schemas/pools";
 import type { KeyInfo } from "@/types/keys";
 import { ServiceOwnerAvatar } from "./service-owner-avatar";
 import { PoolStrategyIcon, ServicePoolIcon } from "./service-pool-icons";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
 export function ServicePoolRoutingPanel({
   pool,
@@ -226,6 +227,7 @@ export function ServicePoolRoutingPanel({
                       {key && (
                         <ServiceIcon
                           slug={key.catalog_service_slug ?? key.slug}
+                          iconUrl={connectionIconUrl(key)}
                           size="sm"
                         />
                       )}

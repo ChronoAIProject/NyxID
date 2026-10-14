@@ -4759,6 +4759,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.service_slug == "my-notion")
         );
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
@@ -4813,6 +4814,7 @@ mod tests {
                 assert_eq!(ids, current);
             }
             ids = current;
+            crate::test_utils::init_test_audit_chain_hmac_key();
             catalog_spec_sync::sync_seeded_service_endpoints(&db)
                 .await
                 .unwrap();

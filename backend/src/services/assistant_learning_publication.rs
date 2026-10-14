@@ -16,75 +16,33 @@ use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
 
-#[derive(Clone, Copy)]
-enum ContractRule {
-    AngleBrackets,
-    ReservedName,
-    RootEntry,
+// One extractor handles verdict and problem shapes. The model projection
+// preserves the released sanitizer/cap; persisted diagnostics use only the
+// allowlisted enum (unknown identifiers become `other`, never echoed).
+fn rule_identifiers(value: &Value) -> Vec<(&str, Option<&str>)> {
+    value["data"]["violations"]
+        .as_array()
+        .or_else(|| value["errors"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let rule = item.get("rule").or_else(|| item.get("code"))?.as_str()?;
+            Some((rule, item.get("path").and_then(Value::as_str)))
+        })
+        .collect()
 }
 
-impl ContractRule {
-    fn diagnostic(self) -> &'static str {
-        match self {
-            Self::AngleBrackets => "angle_brackets_not_allowed",
-            Self::ReservedName => "reserved_name_term",
-            Self::RootEntry => "root_entry_not_allowed",
-        }
-    }
-
-    fn wire_rule(self, field: &str) -> skills::OrnnValidationRule {
-        use skills::OrnnValidationRule as Rule;
-        match self {
-            Self::AngleBrackets if field == "description" => Rule::DescriptionNoXml,
-            Self::AngleBrackets => Rule::NoXmlBrackets,
-            Self::ReservedName => Rule::NameNoForbiddenTerms,
-            Self::RootEntry => Rule::AllowedRootItems,
-        }
-    }
-}
-
-/// Local wire-contract diagnostics and explicit Ornn verdicts consume the repair budget.
-pub(crate) fn is_format_rejection(
-    diagnostic: &crate::errors::skill_draft::SkillDraftValidation,
-) -> bool {
-    // Every local contract diagnostic carries a mapped wire rule. Explicit
-    // preflight verdicts count even when Ornn supplies no individual rules.
-    !diagnostic.rules.is_empty() || diagnostic.rule == "ornn_validation_failed"
-}
-
-fn contract_invalid(rule: ContractRule, field: &str) -> AppError {
-    let mut diagnostic =
-        crate::errors::skill_draft::SkillDraftValidation::at(rule.diagnostic(), field);
-    diagnostic.rules = vec![rule.wire_rule(field).as_str()];
-    diagnostic.into()
-}
-
-/// The package contract enforced by Ornn's wire validator. This is
-/// deliberately narrow and runs after the source-specific content validator so L1's
-/// credential/provenance diagnostics remain unchanged.
-pub(crate) fn validate_ornn_contract(body: &GeneratedProposal) -> AppResult<()> {
-    if body.name.contains(['<', '>']) {
-        return Err(contract_invalid(ContractRule::AngleBrackets, "name"));
-    }
-    if body.description.contains(['<', '>']) {
-        return Err(contract_invalid(ContractRule::AngleBrackets, "description"));
-    }
-    if body.name.to_ascii_lowercase().contains("claude")
-        || body.name.to_ascii_lowercase().contains("anthropic")
-    {
-        return Err(contract_invalid(ContractRule::ReservedName, "name"));
-    }
-    for (index, file) in body.files.iter().enumerate() {
-        let path = &file.path;
-        let allowed = path.starts_with("references/") || path.starts_with("assets/");
-        if !allowed {
-            return Err(contract_invalid(
-                ContractRule::RootEntry,
-                &format!("files[{index}].path"),
-            ));
-        }
-    }
-    Ok(())
+pub(crate) fn validation_rules(value: &Value) -> Vec<skills::OrnnValidationRule> {
+    rule_identifiers(value)
+        .into_iter()
+        .take(10)
+        .map(|(rule, path)| {
+            skills::OrnnValidationRule::parse(
+                path.filter(|path| path.starts_with("frontmatter."))
+                    .unwrap_or(rule),
+            )
+        })
+        .collect()
 }
 
 fn invalid() -> AppError {
@@ -167,14 +125,7 @@ impl PublicationError {
             Self::BaseInterfaceIncompatible => {
                 AppError::Conflict("base_interface_incompatible".into())
             }
-            Self::Validation { rules, .. } => {
-                let mut diagnostic = crate::errors::skill_draft::SkillDraftValidation::at(
-                    "ornn_validation_failed",
-                    "draft",
-                );
-                diagnostic.rules = rules.into_iter().map(|rule| rule.as_str()).collect();
-                diagnostic.into()
-            }
+            Self::Validation { .. } => AppError::Conflict("ornn_validation_failed".into()),
             Self::AuthMissing(_) => AppError::Conflict("ornn_auth_missing".into()),
             Self::ReadForbidden(_) => AppError::Conflict("ornn_read_forbidden".into()),
             Self::SkillNotFound(_) => AppError::Conflict("ornn_skill_not_found".into()),
@@ -376,12 +327,23 @@ pub(super) fn package_with_snapshot(
     // Source-specific validation runs before this function. All file names are safe,
     // unique UTF-8 text paths; the archive is never extracted on the API host.
     for file in &draft.files {
-        zip.start_file(format!("{name}/{}", file.path), options)
+        zip.start_file(format!("{name}/{}", package_path(&file.path)), options)
             .map_err(|_| invalid())?;
         zip.write_all(file.content.as_bytes())
             .map_err(|_| invalid())?;
     }
     Ok(zip.finish().map_err(|_| invalid())?.into_inner())
+}
+
+/// Ornn accepts only `SKILL.md`, `scripts/`, `references/` and `assets/` at
+/// a package root. Supporting files elsewhere are references. Paths already
+/// under an allowed folder are unchanged, so existing packages keep their
+/// bytes (and reviewed hashes).
+pub(crate) fn package_path(path: &str) -> std::borrow::Cow<'_, str> {
+    match path.split_once('/') {
+        Some(("references" | "scripts" | "assets", _)) => path.into(),
+        _ => format!("references/{path}").into(),
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -663,6 +625,25 @@ pub(super) async fn verify_base(
 }
 
 pub(super) async fn validate(reader: &impl OrnnReader, bytes: &[u8]) -> PublicationResult<()> {
+    match validate_report(reader, bytes).await? {
+        None => Ok(()),
+        Some(rules) => Err(PublicationError::Validation {
+            status: None,
+            rules: rules
+                .iter()
+                .take(10)
+                .map(|rule| skills::OrnnValidationRule::parse(rule))
+                .collect(),
+        }),
+    }
+}
+
+/// Ornn's verdict on a package: `None` when valid, otherwise its violated
+/// rule identifiers (possibly empty). Messages are never retained.
+pub(super) async fn validate_report(
+    reader: &impl OrnnReader,
+    bytes: &[u8],
+) -> PublicationResult<Option<Vec<String>>> {
     let response = match reader
         .classified(
             Method::POST,
@@ -682,23 +663,44 @@ pub(super) async fn validate(reader: &impl OrnnReader, bytes: &[u8]) -> Publicat
                 rules,
             });
         }
-        other => return read_result(other).map(|_| ()),
+        other => return read_result(other).map(|_| None),
     };
     let response: Value = serde_json::from_slice(&response).map_err(|_| malformed())?;
     let valid = response["data"]["valid"].as_bool().ok_or_else(malformed)?;
-    let violations = match &response["data"]["violations"] {
-        Value::Null => false,
-        Value::Array(items) => !items.is_empty(),
-        _ => return Err(malformed()),
-    };
-    // Only an explicit verdict refuses the package.
-    if !valid || violations {
-        return Err(PublicationError::Validation {
-            status: None,
-            rules: skills::validation_rules(&response),
-        });
+    if !matches!(
+        &response["data"]["violations"],
+        Value::Null | Value::Array(_)
+    ) {
+        return Err(malformed());
     }
-    Ok(())
+    let violations: Vec<String> = rule_identifiers(&response)
+        .into_iter()
+        .map(|(rule, _)| rule.to_owned())
+        .collect();
+    // Only an explicit verdict refuses the package.
+    if !valid || !violations.is_empty() {
+        return Ok(Some(violations));
+    }
+    Ok(None)
+}
+
+/// Ask Ornn to validate the parts of a package the draft controls (layout,
+/// name, description, body) before the owner is asked to review it. An
+/// improvement's interface metadata comes from a version Ornn already
+/// accepted, so it is not read here: no extra reads or approval requests.
+pub(super) async fn preflight(
+    validator: &impl OrnnReader,
+    draft: &GeneratedProposal,
+) -> PublicationResult<Option<Vec<String>>> {
+    let name = draft
+        .base_skill
+        .as_ref()
+        .map_or(draft.name.as_str(), |base| base.name.as_str());
+    let version =
+        next_version(draft.base_skill.as_ref()).map_err(|_| PublicationError::Integrity)?;
+    let bytes = package_with_snapshot(draft, "preflight", name, &version, None)
+        .map_err(|_| PublicationError::Integrity)?;
+    validate_report(validator, &bytes).await
 }
 
 pub(super) enum PublishOutcome {
@@ -970,42 +972,82 @@ pub(super) fn binding(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn every_local_contract_rule_consumes_format_budget_and_maps_to_wire_rule() {
-        for rule in [
-            super::ContractRule::AngleBrackets,
-            super::ContractRule::ReservedName,
-            super::ContractRule::RootEntry,
-        ] {
-            for field in ["name", "description", "files[0].path"] {
-                let crate::errors::AppError::SkillDraftValidation(diagnostic) =
-                    super::contract_invalid(rule, field)
-                else {
-                    panic!("wrong diagnostic type")
-                };
-                assert!(super::is_format_rejection(&diagnostic));
-                assert_eq!(diagnostic.rules, vec![rule.wire_rule(field).as_str()]);
-            }
-        }
-        for (rule, expected) in [
-            ("ornn_validation_failed", true),
-            ("size", false),
-            ("credential_shape", false),
-            ("scope_required", false),
-            ("base_skill_mismatch", false),
-        ] {
-            assert_eq!(
-                super::is_format_rejection(&crate::errors::skill_draft::SkillDraftValidation::at(
-                    rule, "draft"
-                )),
-                expected
-            );
-        }
-    }
-
     use super::*;
     use std::io::Read;
     use uuid::Uuid;
+
+    #[test]
+    fn package_paths_follow_ornn_root_rules() {
+        assert_eq!(package_path("references/faq.md"), "references/faq.md");
+        assert_eq!(package_path("assets/a/b.txt"), "assets/a/b.txt");
+        assert_eq!(package_path("scripts/run.md"), "scripts/run.md");
+        assert_eq!(package_path("faq.md"), "references/faq.md");
+        assert_eq!(package_path("README.md"), "references/README.md");
+        assert_eq!(package_path("docs/guide.md"), "references/docs/guide.md");
+        assert_eq!(package_path("references"), "references/references");
+        // Already-valid paths are borrowed unchanged, keeping package bytes.
+        assert!(matches!(
+            package_path("references/faq.md"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_report_keeps_rule_ids_only() {
+        struct Verdict(&'static [u8]);
+        #[async_trait::async_trait]
+        impl OrnnReader for Verdict {
+            async fn get(&self, _path: &str) -> AppResult<Vec<u8>> {
+                unreachable!()
+            }
+            async fn classified(&self, _m: Method, _p: &str, _b: Vec<u8>) -> OrnnOutcome {
+                OrnnOutcome::Ok(self.0.to_vec())
+            }
+        }
+        let rules = validate_report(
+            &Verdict(br#"{"data":{"valid":false,"violations":[{"rule":"allowed-root-items","message":"Root item \"x.md\""},{"message":"no rule"}]}}"#),
+            b"zip",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rules, Some(vec!["allowed-root-items".to_owned()]));
+        assert_eq!(
+            validate_report(
+                &Verdict(br#"{"data":{"valid":true,"violations":[]}}"#),
+                b"zip"
+            )
+            .await
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn verdict_and_problem_share_safe_owner_rule_projection() {
+        let verdict = json!({"data":{"valid":false,"violations":[
+            {"rule":"allowed-root-items","message":"SENTINEL_PRIVATE_DETAIL"},
+            {"rule":"SENTINEL_SECRET_RULE"}, {"message":"no identifier"}
+        ]}});
+        let problem = json!({"code":"validation_failed","errors":[
+            {"code":"allowed-root-items","detail":"SENTINEL_PRIVATE_DETAIL"},
+            {"code":"SENTINEL_SECRET_RULE"}, {"path":"no identifier"}
+        ]});
+        let expected = vec![
+            skills::OrnnValidationRule::AllowedRootItems,
+            skills::OrnnValidationRule::Other,
+        ];
+        assert_eq!(validation_rules(&verdict), expected);
+        assert_eq!(validation_rules(&problem), expected);
+        let encoded = serde_json::to_string(&validation_rules(&problem)).unwrap();
+        assert!(!encoded.contains("SENTINEL"));
+        assert_eq!(
+            validation_rules(
+                &json!({"errors":[{"code":"invalid","path":"frontmatter.description"}]})
+            ),
+            vec![skills::OrnnValidationRule::FrontmatterDescription]
+        );
+        assert!(validation_rules(&json!({"errors":"malformed"})).is_empty());
+    }
 
     struct ClassifiedReader(OrnnCode, u16);
     #[async_trait::async_trait]
@@ -1107,16 +1149,10 @@ mod tests {
                 .await
                 .unwrap_err();
             let error = error.into_app_error();
-            if expected == "ornn_validation_failed" {
-                assert!(
-                    matches!(error, AppError::SkillDraftValidation(diagnostic) if diagnostic.rule == expected)
-                );
-            } else {
-                assert_eq!(
-                    error.to_string(),
-                    AppError::Conflict(expected.into()).to_string()
-                );
-            }
+            assert_eq!(
+                error.to_string(),
+                AppError::Conflict(expected.into()).to_string()
+            );
         }
         assert!(matches!(
             validate(&ClassifiedReader(OrnnCode::Unknown, 503), b"zip").await,

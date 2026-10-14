@@ -774,6 +774,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         saved_login_ids: Vec::new(),
         created_by: "user".into(),
         model: "default".into(),
+        access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
         display_name: None,
@@ -788,6 +789,10 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     assert!(!approval_actor_allowed(&agent, "owner", &chat));
     chat.guest = false;
     chat.role = crate::models::assistant_conversation::AgentRole::Subagent;
+    // A specialist's card approves only its own agent's draft.
+    chat.agent_id = agent.id.clone();
+    assert!(approval_actor_allowed(&agent, "owner", &chat));
+    chat.agent_id = "another-agent".into();
     assert!(!approval_actor_allowed(&agent, "owner", &chat));
 }
 
@@ -1062,6 +1067,7 @@ async fn exact_root_provenance_is_active_even_when_legacy_active_is_false() {
         version: "1.0".into(),
         sha256: "b".repeat(64),
         dependencies: Vec::new(),
+        disabled: false,
     };
     fixture
         .state
@@ -1457,6 +1463,8 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                retry_of: None,
+                specialist_id: None,
                 steering: None,
                 author: None,
                 voice: None,
@@ -1470,6 +1478,8 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
                 text: text.into(),
                 status: "completed".into(),
                 error_code: None,
+                upstream_error_code: None,
+                error_detail: None,
                 created_at: now + chrono::Duration::seconds(seq),
                 activities: Vec::new(),
                 activity_total: 0,
@@ -1695,6 +1705,8 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            requester_agent_id: None,
+            confirmation: None,
             authored_skill: None,
             machine_context: None,
             id: card.clone(),
@@ -2035,7 +2047,7 @@ async fn stale_learned_evidence_checks_a_dispatched_version_but_never_attaches_i
             &id,
             0,
             agent.skills_revision,
-            &UnavailableReader,
+            &UnavailableReader
         )
         .await
         .unwrap_err()
@@ -2070,6 +2082,8 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            requester_agent_id: None,
+            confirmation: None,
             authored_skill: None,
             machine_context: None,
             id: card.clone(),
@@ -2166,6 +2180,7 @@ async fn authored_org_skill_refuses_personal_fallback() {
         &f.state,
         &f.chat,
         input,
+        &UnavailableReader,
         &UnavailableReader,
     )
     .await
@@ -2466,6 +2481,7 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
         version: base.version.clone(),
         sha256: base.sha256.clone(),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db
@@ -2557,7 +2573,14 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
     assert_eq!(listed[0].failure_code.as_deref(), Some(LEGACY_PACKAGE));
     // The panel cannot raise a confirmation for the old package.
     assert!(matches!(
-        approval_binding(&f.state, &f.owner, &agent.id, &id, 0, agent.skills_revision, &UnavailableReader).await,
+        approval_binding(&f.state,
+&f.owner,
+&agent.id,
+&id,
+0,
+agent.skills_revision,
+&UnavailableReader)
+.await,
         Err(AppError::Conflict(message)) if message == LEGACY_PACKAGE));
     let acknowledgements = f
         .state
@@ -2672,7 +2695,8 @@ async fn publication_failure_event_commits_once_under_concurrent_retry() {
     )
     .await
     .unwrap();
-    let result = super::super::assistant_skill_authoring::create(&f.state,&f.chat,super::super::assistant_skill_authoring::parse_input(&json!({"agent":f.chat.agent_id,"name":"weekly-review","description":"Public guide","skill_md":"Public guide","scope":{"status":"complete","omissions":[]}})).unwrap(),&UnavailableReader).await.unwrap();
+    let result = super::super::assistant_skill_authoring::create(&f.state,&f.chat,super::super::assistant_skill_authoring::parse_input(&json!({"agent":f.chat.agent_id,"name":"weekly-review","description":"Public guide","skill_md":"Public guide","scope":{"status":"complete","omissions":[]}})).unwrap(),&UnavailableReader, &UnavailableReader)
+.await.unwrap();
     let id = result["proposal_id"].as_str().unwrap();
     let card = result["acknowledgement_id"].as_str().unwrap();
     let lease = Uuid::new_v4().to_string();
@@ -2727,7 +2751,7 @@ async fn publication_failure_event_commits_once_under_concurrent_retry() {
     assert!(thread.pending_events.iter().any(|event| {
         event
             .text
-            .contains("Use SKILL.md and files under references/ or assets/ only.")
+            .contains("Keep supporting files under references/.")
     }));
     // Simulate delivery after commit. Replaying settlement cannot enqueue another event.
     f.state
@@ -2779,7 +2803,7 @@ async fn stored_legacy_learned_root_file_still_previews() {
 }
 
 #[tokio::test]
-async fn learned_edit_refuses_new_root_file_before_review_card() {
+async fn learned_edit_refuses_new_invalid_description_before_review_card() {
     let SeededLearned {
         fixture: f,
         agent,
@@ -2791,10 +2815,7 @@ async fn learned_edit_refuses_new_root_file_before_review_card() {
         .db
         .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
     let before = cards.count_documents(doc! {}).await.unwrap();
-    generated.files.push(learning::GeneratedFile {
-        path: "new-root.md".into(),
-        content: "Safe guidance".into(),
-    });
+    generated.description = "Invalid <description>".into();
     assert!(
         matches!(edit(&f.state, &f.owner, &agent.id, &id, 0, &serde_json::to_value(&generated).unwrap()).await,
         Err(AppError::ValidationError(message)) if message == "Learning proposal failed validation")

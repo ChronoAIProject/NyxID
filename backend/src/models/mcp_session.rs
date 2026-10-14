@@ -184,8 +184,11 @@ impl McpSessionStore {
         let mut orphaned_ids = Vec::new();
         let mut loaded = 0;
         for record in records {
-            if active_users.contains(&record.user_id) && self.ensure_recovered_slot(&record).await?
-            {
+            // Only fallback sessions depend on a live login; the rest must
+            // present a live bearer anyway, so a restart keeps them.
+            let login_alive =
+                !record.session_fallback_allowed || active_users.contains(&record.user_id);
+            if login_alive && self.ensure_recovered_slot(&record).await? {
                 self.hydrate(record);
                 loaded += 1;
             } else {
@@ -408,13 +411,23 @@ impl McpSessionStore {
         Ok(())
     }
 
-    pub async fn remove_by_user_id(&self, user_id: &str) -> Result<(), mongodb::error::Error> {
+    /// Remove the user's sessions that can authenticate without a bearer
+    /// (`session_fallback_allowed`), so that ending a login also ends them.
+    ///
+    /// Every other session presents a live bearer on each request, so its row
+    /// grants nothing on its own. Deleting it would revoke nothing and would
+    /// only disconnect an MCP client (Claude, Codex, any OAuth app) whose
+    /// credential is unrelated to the login that ended.
+    pub async fn remove_fallback_sessions_by_user_id(
+        &self,
+        user_id: &str,
+    ) -> Result<(), mongodb::error::Error> {
         if let Some(db) = &self.db {
             let mut transaction = db.client().start_session().await?;
             transaction.start_transaction().await?;
             let mut cursor = db
                 .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                .find(doc! { "user_id": user_id })
+                .find(doc! { "user_id": user_id, "session_fallback_allowed": true })
                 .session(&mut transaction)
                 .await?;
             let ids: Vec<String> = cursor
@@ -422,23 +435,26 @@ impl McpSessionStore {
                 .map_ok(|record| record.id)
                 .try_collect()
                 .await?;
-            db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                .delete_many(doc! { "user_id": user_id })
-                .session(&mut transaction)
-                .await?;
-            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
-                .delete_many(doc! { "user_id": user_id })
-                .session(&mut transaction)
-                .await?;
             if !ids.is_empty() {
+                db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                    .delete_many(doc! { "_id": { "$in": &ids } })
+                    .session(&mut transaction)
+                    .await?;
+                db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                    .delete_many(doc! { "session_id": { "$in": &ids } })
+                    .session(&mut transaction)
+                    .await?;
                 db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
                     .delete_many(doc! { "session_id": { "$in": &ids } })
                     .session(&mut transaction)
                     .await?;
             }
             transaction.commit_transaction().await?;
+            for id in &ids {
+                self.evict(id);
+            }
         }
-        self.evict_user(user_id);
+        self.evict_fallback_sessions(user_id);
         Ok(())
     }
 
@@ -966,13 +982,13 @@ impl McpSessionStore {
             .remove(session_id);
     }
 
-    fn evict_user(&self, user_id: &str) {
+    fn evict_fallback_sessions(&self, user_id: &str) {
         let ids: Vec<String> = self
             .sessions
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .iter()
-            .filter(|(_, session)| session.user_id == user_id)
+            .filter(|(_, session)| session.user_id == user_id && session.session_fallback_allowed)
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
@@ -1116,14 +1132,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_by_user_only_removes_matching_local_sessions() {
+    async fn remove_fallback_sessions_keeps_bearer_sessions_and_other_users() {
         let store = McpSessionStore::new();
-        let first = store.create("user-1").await.unwrap().expect("create");
-        let second = store.create("user-2").await.unwrap().expect("create");
-        store.remove_by_user_id("user-1").await.unwrap();
+        let fallback = store
+            .create_with_proxy_access("user-1", true, true)
+            .await
+            .unwrap()
+            .expect("create");
+        let bearer_only = store
+            .create_with_proxy_access("user-1", true, false)
+            .await
+            .unwrap()
+            .expect("create");
+        let other_user = store
+            .create_with_proxy_access("user-2", true, true)
+            .await
+            .unwrap()
+            .expect("create");
+        store
+            .remove_fallback_sessions_by_user_id("user-1")
+            .await
+            .unwrap();
 
-        assert!(!store.validate(&first, "user-1").await.unwrap());
-        assert!(store.validate(&second, "user-2").await.unwrap());
+        assert!(!store.validate(&fallback, "user-1").await.unwrap());
+        assert!(store.validate(&bearer_only, "user-1").await.unwrap());
+        assert!(store.validate(&other_user, "user-2").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn remove_fallback_sessions_keeps_persisted_bearer_sessions() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("mcp_remove_fallback_sessions")
+                .await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let store = McpSessionStore::with_db(db.clone());
+        let fallback = store
+            .create_with_proxy_access(&user_id, true, true)
+            .await
+            .unwrap()
+            .expect("create");
+        let bearer_only = store
+            .create_with_proxy_access(&user_id, true, false)
+            .await
+            .unwrap()
+            .expect("create");
+
+        store
+            .remove_fallback_sessions_by_user_id(&user_id)
+            .await
+            .unwrap();
+
+        assert!(!store.validate(&fallback, &user_id).await.unwrap());
+        assert!(store.validate(&bearer_only, &user_id).await.unwrap());
+        let slots = db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION);
+        assert!(
+            slots
+                .find_one(doc! { "session_id": &fallback })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            slots
+                .find_one(doc! { "session_id": &bearer_only })
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1252,6 +1327,31 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_keeps_bearer_sessions_without_a_live_login() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_recovery_bearer").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let fallback = record(&user_id);
+        let mut bearer_only = record(&user_id);
+        bearer_only.session_fallback_allowed = false;
+        let sessions = db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION);
+        sessions
+            .insert_one(&fallback)
+            .await
+            .expect("insert fallback session");
+        sessions
+            .insert_one(&bearer_only)
+            .await
+            .expect("insert bearer-only session");
+
+        let store = McpSessionStore::with_db(db.clone());
+        assert_eq!(store.load_from_db().await.unwrap(), 1);
+        assert!(store.validate(&bearer_only.id, &user_id).await.unwrap());
+        assert!(!store.validate(&fallback.id, &user_id).await.unwrap());
     }
 
     #[tokio::test]

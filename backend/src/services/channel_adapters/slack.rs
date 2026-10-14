@@ -982,6 +982,7 @@ mod tests {
 
     fn make_test_bot(_signing_secret: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

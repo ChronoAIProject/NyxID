@@ -24,6 +24,28 @@ pub struct SkillReference {
     pub sha256: String,
     #[serde(default)]
     pub dependencies: Vec<SkillPin>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SkillReference;
+
+    #[test]
+    fn catalog_reference_omits_default_disabled_wire_field() {
+        let reference = SkillReference {
+            source: "ornn".into(),
+            skill_id: "s".into(),
+            name: "n".into(),
+            version: "1.0".into(),
+            sha256: "h".into(),
+            dependencies: vec![],
+            disabled: false,
+        };
+        let value = serde_json::to_value(reference).unwrap();
+        assert!(value.get("disabled").is_none());
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

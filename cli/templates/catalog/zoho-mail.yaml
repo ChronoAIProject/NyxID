@@ -1,0 +1,73 @@
+# Zoho Mail through a NyxID-managed OAuth client, pinned to one Zoho data
+# center. Mailboxes in other data centers cannot connect through this row.
+#
+# Zoho expects comma-separated scopes, while NyxID joins scope entries with
+# spaces, so the scopes are one comma-joined entry. They are the read-only
+# minimum from the Zoho Mail API documentation; Zoho publishes no Mail CLI to
+# compare against. `access_type=offline` and `prompt=consent` make Zoho
+# return a refresh token.
+variables:
+  zoho_domain:
+    prompt: Zoho data center domain of the test mailbox
+    default: zoho.com
+    allowed: [zoho.com, zoho.eu, zoho.in, zoho.com.au, zoho.jp, zohocloud.ca, zoho.sa, zoho.com.cn]
+providers:
+  - slug: zoho-mail
+    name: Zoho Mail
+    description: Zoho Mail OAuth (single data center)
+    provider_type: oauth2
+    credential_mode: admin
+    authorization_url: https://accounts.${zoho_domain}/oauth/v2/auth
+    token_url: https://accounts.${zoho_domain}/oauth/v2/token
+    default_scopes:
+      - ZohoMail.accounts.READ,ZohoMail.folders.READ,ZohoMail.messages.READ
+    supports_pkce: false
+    token_endpoint_auth_method: client_secret_post
+    extra_auth_params:
+      access_type: offline
+      prompt: consent
+    documentation_url: https://www.zoho.com/mail/help/api/
+    playbook:
+      scope_source:
+        kind: documented_minimum
+        url: https://www.zoho.com/mail/help/api/
+        note: Zoho publishes no Mail CLI. These READ scopes cover the three operations below.
+      revocation:
+        kind: nyxid_incompatible
+        source: https://www.zoho.com/mail/help/api/using-oauth-2.html#revoke
+        note: Zoho documents POST with the refresh token in the URL query. NyxID's revocation transport supports form and JSON, so remote revocation is not configured.
+services:
+  - slug: api-zoho-mail
+    name: Zoho Mail
+    provider: zoho-mail
+    description: Read Zoho Mail accounts, folders and messages.
+    base_url: https://mail.${zoho_domain}/api
+    auth_method: bearer
+    auth_scheme: Zoho-oauthtoken
+    homepage_url: https://www.zoho.com/mail/
+    auth_notes: NyxID injects Authorization with Zoho's documented Zoho-oauthtoken scheme.
+    known_limitations: One Zoho data center per row. Pricing https://www.zoho.com/mail/zohomail-pricing.html
+    operations:
+      - name: list_accounts
+        method: GET
+        path: /accounts
+        description: List the connected user's mail accounts.
+      - name: list_folders
+        method: GET
+        path: /accounts/{accountId}/folders
+        description: List folders in the selected mail account.
+        parameters: [{name: accountId, in: path, required: true, schema: {type: string}}]
+      - name: list_messages
+        method: GET
+        path: /accounts/{accountId}/messages/view
+        description: List messages in the selected mail folder.
+        parameters:
+          - {name: accountId, in: path, required: true, schema: {type: string}}
+          - {name: folderId, in: query, required: true, schema: {type: string}}
+          - {name: start, in: query, schema: {type: integer, minimum: 1}}
+          - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200}}
+    smoke_test: {operation: list_accounts}
+# Upload a static SVG whose brand-use terms you have checked:
+# nyxid admin catalog icon zoho-mail --file zoho-mail.svg
+# Configuration readiness leaves the real vendor smoke and outside-user
+# connection gates open. No vendor SVG or account credentials are bundled.

@@ -17,6 +17,7 @@ pub mod assistant_action_receipts;
 pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_direct;
+pub mod assistant_feedback_service;
 mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
@@ -30,10 +31,12 @@ pub mod auth_device_service;
 pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
+pub mod catalog_auth_scheme;
 pub mod catalog_delegation_service;
 pub mod catalog_discovery_service;
 pub mod catalog_identity_service;
 pub mod catalog_import_source;
+pub mod catalog_mutation_service;
 pub mod catalog_service;
 pub mod catalog_spec_registry;
 pub mod catalog_spec_sync;
@@ -41,6 +44,7 @@ pub mod chain_verify_service;
 pub mod channel_adapters;
 pub mod channel_admission_service;
 pub mod channel_billing_service;
+pub mod channel_bot_health;
 pub mod channel_bot_service;
 pub mod channel_connect_link_service;
 pub mod channel_connection_webhook_service;
@@ -225,6 +229,8 @@ pub mod service_insights_activity;
 pub mod service_insights_billing;
 
 #[cfg(test)]
+mod assistant_access_mode_tests;
+#[cfg(test)]
 pub(crate) mod assistant_authority_tests;
 pub mod usage_workspace_service;
 
@@ -302,3 +308,7 @@ pub mod tools_service;
 pub mod async_service_operation;
 pub mod service_preference_service;
 pub mod tool_twin_service;
+
+pub mod catalog_icon_service;
+
+pub mod tools_manager_service;

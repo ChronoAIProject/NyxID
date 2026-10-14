@@ -126,6 +126,7 @@ async fn machine_receipt_jobs_finish_cancel_and_do_not_resurrect_late_outcomes()
     );
     let mut activity = TurnActivity {
         id: Uuid::new_v4().to_string(),
+        digest: None,
         label: "nyx__machine_exec".into(),
         status: "completed".into(),
         failure: None,
@@ -670,6 +671,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
         crate::models::assistant_conversation::TurnActivity {
             machine: Some(Box::new(receipt)),
             id: Uuid::new_v4().to_string(),
+            digest: None,
             label: "nyx__machine_exec".into(),
             status: "completed".into(),
             failure: None,
@@ -692,6 +694,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
         agent_id: row.agent_id.clone(),
         agent_name: None,
         text: "done".into(),
+        recipient_agent_ids: Vec::new(),
         created_at: Utc::now(),
     };
     f.state

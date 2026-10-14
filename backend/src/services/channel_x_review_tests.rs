@@ -118,13 +118,51 @@ async fn reconnect_relays_dms_received_while_failed_once() {
     let (state, adapter, server, owner, key) = fixture().await;
     let bot = insert_bot(&state, &owner, &key).await;
     route_agent(&state, &server, &bot).await;
-    channel_credentials::fail_bot(&state.db, &bot, "Reconnect the account")
-        .await
-        .unwrap();
+    let (notices, mut received) = tokio::sync::mpsc::unbounded_channel();
+    crate::services::channel_bot_health::TEST_NOTICES
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), notices);
+    channel_credentials::fail_bot(
+        &state.db,
+        &bot,
+        crate::services::channel_bot_health::codes::RECONNECT_REQUIRED,
+        "Reconnect the account",
+    )
+    .await
+    .unwrap();
     let failed = channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
     assert_eq!(failed.status, "failed");
+    let (recipient, notice) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+            .await
+            .expect("one notice on the failure transition")
+            .unwrap();
+    assert_eq!(recipient, owner);
+    assert_eq!(notice.recommended_action, "reconnect");
+    assert_eq!(notice.bot_id, bot.id);
+    channel_credentials::fail_bot(
+        &state.db,
+        &failed,
+        crate::services::channel_bot_health::codes::RECONNECT_REQUIRED,
+        "Reconnect the account",
+    )
+    .await
+    .unwrap();
+    let failure_count = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .count_documents(doc! {"event_type": "channel_bot_failed", "event_data.bot_id": &bot.id})
+        .await
+        .unwrap();
+    assert_eq!(failure_count, 1);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        received.try_recv().is_err(),
+        "a repeated failure sends no notice"
+    );
     identity(&server, "10").await;
     Mock::given(method("GET"))
         .and(path("/2/dm_events"))
@@ -203,6 +241,35 @@ async fn reconnect_relays_dms_received_while_failed_once() {
             .as_deref(),
         Some("102")
     );
+    // A later billing suspension is a new failure transition: one notice again.
+    let active = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(active.status, "active");
+    crate::services::channel_billing_service::suspend(
+        &crate::services::channel_inbound_service::InboundDeps::from(&state),
+        &active,
+        &adapter,
+    )
+    .await
+    .unwrap();
+    let (recipient, notice) = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .expect("one notice on suspension")
+        .unwrap();
+    assert_eq!(recipient, owner);
+    assert_eq!(notice.recommended_action, "enable_billing");
+    let suspended = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        suspended.diagnostics.failure_reason.as_deref(),
+        Some(crate::services::channel_bot_health::codes::BILLING_SUSPENDED)
+    );
+    crate::services::channel_bot_health::TEST_NOTICES
+        .lock()
+        .unwrap()
+        .remove(&bot.id);
 }
 
 #[tokio::test]

@@ -95,7 +95,13 @@ pub(crate) async fn poll_bot(
     if super::channel_billing_service::require_webhooks(&state.config, &bot.platform).is_err()
         || (bot.platform == "x" && super::channel_adapters::x::webhook_events_enabled(&bot))
     {
-        super::channel_credentials::fail_bot(&state.db, &bot, "This X channel requires webhook delivery. Configure webhook credentials and select Verify.").await?;
+        super::channel_credentials::fail_bot(
+            &state.db,
+            &bot,
+            super::channel_bot_health::codes::WEBHOOK_REQUIRED,
+            "This X channel requires webhook delivery. Configure webhook credentials and select Verify.",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -170,9 +176,13 @@ pub(crate) async fn poll_bot(
             );
             set.insert("poll_error_count", 0);
             set.insert("error", bson::Bson::Null);
+            set.insert("diagnostics.last_inbound_source", "poll");
+            set.insert("diagnostics.consecutive_errors", 0);
+            set.insert("diagnostics.failure_reason", bson::Bson::Null);
             None
         }
         Err(error) => {
+            let code = super::channel_bot_health::failure_code(&error);
             let cause = match error {
                 AppError::ChannelPlatformError(cause) | AppError::ValidationError(cause) => cause,
                 _ => "Channel polling is unavailable; retry or reconnect the account".to_string(),
@@ -180,13 +190,15 @@ pub(crate) async fn poll_bot(
             let count = bot.poll_error_count.saturating_add(1);
             set.insert("poll_error_count", i64::from(count));
             set.insert("error", &cause);
+            set.insert("diagnostics.consecutive_errors", i64::from(count));
+            set.insert("diagnostics.failure_reason", code);
             set.insert(
                 "poll_backoff_until",
                 bson::DateTime::from_chrono(
                     Utc::now() + chrono::Duration::seconds(30 * 2_i64.pow(count.min(6))),
                 ),
             );
-            (count >= ERROR_THRESHOLD).then_some(cause)
+            (count >= ERROR_THRESHOLD).then_some((code, cause))
         }
     };
     // Check expiry at commit as well as renewal. An expired worker cannot advance the cursor.
@@ -210,9 +222,9 @@ pub(crate) async fn poll_bot(
     let committed = committed?;
     released?;
     if committed.modified_count > 0
-        && let Some(cause) = failure
+        && let Some((code, cause)) = failure
     {
-        super::channel_credentials::audit_failure(&state.db, &bot, &cause).await?;
+        super::channel_credentials::audit_failure(&state.db, &bot, code, &cause).await;
     }
     Ok(())
 }

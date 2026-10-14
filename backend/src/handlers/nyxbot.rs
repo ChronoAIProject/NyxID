@@ -2387,6 +2387,7 @@ pub async fn list_channels(
     State(state): State<AppState>,
     auth: crate::mw::auth::AuthUser,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     Ok(Json(list_tool(&state, &owner).await?))
@@ -2416,6 +2417,7 @@ pub async fn connect_channel(
     auth: crate::mw::auth::AuthUser,
     Json(body): Json<ConnectRequest>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = requested_agent(&state, &owner, body.agent_id.as_deref()).await?;
@@ -2441,6 +2443,7 @@ pub async fn link_channel(
     Path(id): Path<String>,
     Json(body): Json<LinkRequest>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     if body.agent_id.is_none() && body.private_chats.is_none() {
@@ -2464,6 +2467,7 @@ pub async fn disconnect_channel(
     auth: crate::mw::auth::AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     Ok(Json(disconnect(&state, &owner, &id).await?))
@@ -2937,6 +2941,7 @@ async fn start_chat_turn(
     };
     late_delivery::prepare(state, event_key, row, &origin, sender.id, guest, addressed).await?;
     let start = TurnStart {
+        retry_of: None,
         channel_event_id: Some(event_key.to_owned()),
         org_access: None,
         attachment_ids: Vec::new(),

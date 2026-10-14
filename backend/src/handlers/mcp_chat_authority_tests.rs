@@ -426,6 +426,16 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
 #[tokio::test]
 async fn chat_mcp_native_account_and_action_refusals_are_tool_results() {
     let f = fixture("chat_mcp_account").await;
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let auth = authenticate(&f).await;
     let search = result(
         handle_meta_search(
@@ -753,7 +763,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
             assert_eq!(rows.len(), 1);
             assert!(rows[0].platform);
             assert_eq!(rows[0].service_id.as_deref(), Some(service.id.as_str()));
-            // The chat may also mint a hosted connect link in Ask mode.
+            // Specialist chat keys cannot mint hosted connect links, even in routed mode.
             let connect = handle_meta_connect(
                 &f.state,
                 &auth,
@@ -766,11 +776,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
             let bytes = axum::body::to_bytes(connect.into_body(), 1024 * 1024)
                 .await
                 .unwrap();
-            assert!(
-                !String::from_utf8_lossy(&bytes).contains("does not have access"),
-                "{}",
-                String::from_utf8_lossy(&bytes)
-            );
+            assert!(String::from_utf8_lossy(&bytes).contains("access_request_denied"));
             acks::decide(&f.state.db, &f.owner, &f.row.id, &ids[0], true)
                 .await
                 .unwrap();
@@ -977,6 +983,142 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
         .unwrap();
     assert_eq!(row.active_turn.as_ref().unwrap().tool_progress.calls, 3);
     assert_eq!(row.active_turn.unwrap().activities.len(), 3);
+}
+
+#[tokio::test]
+async fn b4_duplicate_action_fence_through_tools_call() {
+    let f = fixture("mcp_retry_fence").await;
+    let auth = authenticate(&f).await;
+    let failed_turn = f.row.active_turn.as_ref().unwrap().turn_id.clone();
+    // Turn 1 completes a search, then fails.
+    let first = direct_call(
+        &f,
+        &auth,
+        "nyx__search_tools",
+        json!({"query": "issues", "limit": 3}),
+    )
+    .await;
+    let first = axum::body::to_bytes(first.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let first: Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(first["result"]["isError"], false, "{first}");
+    assert!(
+        crate::services::assistant_nyxagent::force_stop(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            &failed_turn
+        )
+        .await
+        .unwrap()
+    );
+    // Turn 2 is the owner's Retry of turn 1.
+    let retry = crate::services::assistant_nyxagent::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &crate::services::assistant_nyxagent::TurnRequest {
+            retry_of: Some(failed_turn.clone()),
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(f.row.id.clone()),
+            text: "find the issues".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let refused = |response: Response| async move {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        let text: Value =
+            serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text["error"], "retry_duplicate_action");
+    };
+    // The same call is refused, including with its arguments in another key order.
+    refused(
+        direct_call(
+            &f,
+            &auth,
+            "nyx__search_tools",
+            json!({"query": "issues", "limit": 3}),
+        )
+        .await,
+    )
+    .await;
+    refused(
+        direct_call(
+            &f,
+            &auth,
+            "nyx__search_tools",
+            json!({"limit": 3, "query": "issues"}),
+        )
+        .await,
+    )
+    .await;
+    let live = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let turn = live.active_turn.unwrap();
+    assert_eq!(turn.turn_id, retry.active_turn.as_ref().unwrap().turn_id);
+    assert_eq!(
+        turn.tool_progress.calls, 0,
+        "a refused duplicate is not progress"
+    );
+    assert_eq!(turn.activities.len(), 2, "each refusal is recorded");
+    assert!(
+        turn.activities
+            .iter()
+            .all(|a| a.label == "nyx__search_tools" && a.status == "completed")
+    );
+    let audits: Vec<mongodb::bson::Document> = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find(doc! {"event_type": "assistant_mcp_tool_call", "event_data.error_code": "retry_duplicate_action"})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 2);
+    let data = audits[0].get_document("event_data").unwrap();
+    assert_eq!(data.get_str("tool").unwrap(), "nyx__search_tools");
+    assert_eq!(data.get_str("conversation_id").unwrap(), f.row.id);
+    assert!(data.get_bool("metadata_only").unwrap());
+    assert!(
+        !audits[0].to_string().contains("issues"),
+        "no arguments in audit"
+    );
+    // A different call, and a call the failed turn never made, still run.
+    let different = direct_call(
+        &f,
+        &auth,
+        "nyx__search_tools",
+        json!({"query": "calendar", "limit": 3}),
+    )
+    .await;
+    let different = axum::body::to_bytes(different.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&different).unwrap()["result"]["isError"],
+        false
+    );
+    let other = direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await;
+    let other = axum::body::to_bytes(other.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&other).unwrap()["result"]["isError"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -3006,6 +3148,7 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         version: "1.0".into(),
         sha256: hex::encode(Sha256::digest(&bytes)),
         dependencies: vec![],
+        disabled: false,
     };
     Mock::given(method("GET")).and(path(format!("/api/v1/skills/{id}"))).and(query_param("version","1.0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":id,"name":pin.name,"version":"1.0","description":"Bounded guidance","skillHash":pin.sha256}}))).mount(&upstream).await;
@@ -3071,6 +3214,34 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
     )
     .await;
     assert_eq!(read["content"], "Pinned guidance only");
+    f.state
+        .db
+        .collection::<crate::models::assistant_agent::AssistantAgent>(
+            crate::models::assistant_agent::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &f.chat.agent_id },
+            doc! { "$set": { "skills.0.disabled": true } },
+        )
+        .await
+        .unwrap();
+    let disabled_read = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill":id})).await,
+        true,
+    )
+    .await;
+    assert_eq!(disabled_read["error"], "forbidden");
+    f.state
+        .db
+        .collection::<crate::models::assistant_agent::AssistantAgent>(
+            crate::models::assistant_agent::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"skills.0.disabled": false}},
+        )
+        .await
+        .unwrap();
     let other = result(
         direct_call(&f, &auth, "nyxid__skill_read", json!({"skill":id})).await,
         true,
@@ -3625,3 +3796,638 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
 }
 #[path = "async_service_operation_tests.rs"]
 mod async_service_operation_tests;
+
+#[tokio::test]
+async fn specialist_request_tool_is_denied_audited_and_routed_when_allowed() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::{assistant_settings_service as settings, assistant_team_service as team};
+    let f = fixture("strict_request_tool_audit").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let id = connected(
+        &f.state.db,
+        &f.owner,
+        "requested-operations",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let specialist = authenticate(&f).await;
+    let args = json!({"subagent":"worker","service_id":id,"selection":{"expected_revision":0,"all_operations":true}});
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let denied = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__request_agent_operations",
+            args.clone(),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(denied, acks::access_request_denied());
+    let audits = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let audit = audits
+        .find_one(doc! {"event_type":"assistant_access_request_denied"})
+        .await
+        .unwrap()
+        .expect("denial audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("requester_agent").unwrap(), f.chat.agent_id);
+    assert_eq!(data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(data.get_str("key").unwrap(), f.row.credential_api_key_id);
+    assert_eq!(data.get_str("target").unwrap(), id);
+    assert_eq!(data.get_str("scope").unwrap(), "operations");
+    assert_eq!(data.get_str("decision").unwrap(), "denied");
+    let cards = f.state.db.collection::<mongodb::bson::Document>(
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    );
+    assert_eq!(
+        cards
+            .count_documents(doc! {"conversation_id": &f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let routed = result(
+        call(&f, &specialist, "nyxid__request_agent_operations", args).await,
+        true,
+    )
+    .await;
+    assert_eq!(routed["error"], "acknowledgement_required");
+    assert_eq!(routed["decider"], "orchestrator");
+    let ack = routed["acknowledgement_id"].as_str().unwrap();
+    assert!(
+        cards
+            .find_one(doc! {"_id":ack,"conversation_id":&f.row.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let queued = f.state.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id": &f.nyxbot_thread, "pending_events": {"$elemMatch": {"text": {"$regex": ack}}}})
+        .await.unwrap();
+    assert!(queued.is_some(), "NyxBot pending event");
+}
+
+#[tokio::test]
+async fn specialist_service_card_request_denied_audited_and_routed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_service_gate_card").await;
+    let specialist = authenticate(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "strict-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (denied, card) = acks::service_gate(
+        &f.state.db,
+        &f.chat,
+        &service,
+        "strict-service",
+        "Strict service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(denied["error"], "access_request_denied");
+    assert!(card.is_none());
+    let audit = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(
+            doc! {"event_type":"assistant_access_request_denied","event_data.scope":"service"},
+        )
+        .await
+        .unwrap()
+        .expect("service denial audit");
+    let audit_data = audit.get_document("event_data").unwrap();
+    assert_eq!(
+        audit_data.get_str("requester_agent").unwrap(),
+        f.chat.agent_id
+    );
+    assert_eq!(audit_data.get_str("thread").unwrap(), f.row.id);
+    assert_eq!(
+        audit_data.get_str("key").unwrap(),
+        f.row.credential_api_key_id
+    );
+    assert_eq!(audit_data.get_str("target").unwrap(), service);
+    assert_eq!(audit_data.get_str("scope").unwrap(), "service");
+    assert_eq!(audit_data.get_str("decision").unwrap(), "denied");
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (_, card) = acks::service_gate(
+        &f.state.db,
+        &f.chat,
+        &service,
+        "strict-service",
+        "Strict service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(card.is_some());
+    let _ = specialist;
+}
+
+#[tokio::test]
+async fn specialist_connect_service_is_denied_audited_and_routed() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = fixture("strict_connect_link").await;
+    let auth = authenticate(&f).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "connect-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let response = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":service}),
+        None,
+        false,
+    )
+    .await;
+    let body = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("access_request_denied"));
+    assert!(f.state.db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"connect_service"}).await.unwrap().is_some());
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let routed = handle_meta_connect(
+        &f.state,
+        &auth,
+        None,
+        &json!({"service_id":service}),
+        None,
+        false,
+    )
+    .await;
+    let routed_body = String::from_utf8(
+        axum::body::to_bytes(routed.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(routed_body.contains("access_request_denied"));
+}
+
+#[tokio::test]
+async fn specialist_channel_bot_tools_remain_orchestrator_only() {
+    let f = fixture("strict_channel_bot_tools").await;
+    let specialist = authenticate(&f).await;
+    for tool in [
+        "nyxid__channel_bot_setup_link",
+        "nyxid__connect_channel_bot",
+        "nyxid__link_channel_bot",
+    ] {
+        let denied = result(call(&f, &specialist, tool, json!({})).await, true).await;
+        assert_eq!(denied["error"], "orchestrator_only", "{tool}");
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"assistant_access_request_denied"})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn s9_specialist_guest_disabled_pin_denial() {
+    let f = fixture("s9_mcp_disabled_pin").await;
+    // The specialist already has one attached pin.
+    let pin = json!({"source":"ornn","skill_id":uuid::Uuid::new_v4().to_string(),"name":"checklist","version":"1.0","sha256":"a".repeat(64),"dependencies":[]});
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"skills": [mongodb::bson::to_bson(&pin).unwrap()], "skills_revision": 0}},
+        )
+        .await
+        .unwrap();
+    let mut disabled = pin.clone();
+    disabled["disabled"] = json!(true);
+    let args =
+        json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[disabled]}});
+    let stored = || async {
+        f.state
+            .db
+            .collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &f.chat.agent_id})
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    // The specialist cannot change its own skills; a guest turn cannot either.
+    let specialist = authenticate(&f).await;
+    let refusal = result(
+        call(&f, &specialist, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(refusal["error"], "orchestrator_only");
+    let mut guest = authenticate(&f).await;
+    guest.chat.as_mut().unwrap().guest = true;
+    let guest_refusal = result(
+        direct_call(&f, &guest, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(guest_refusal["error"], "owner_only");
+    // NyxBot is refused while the rollout flag is off...
+    let owner = authenticate_id(&f, &f.nyxbot_thread).await;
+    let flag_off = result(
+        call(&f, &owner, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(flag_off["error"], "forbidden", "{flag_off}");
+    let agent = stored().await;
+    assert_eq!(agent.skills_revision, 0);
+    assert!(!agent.skills[0].disabled);
+    // ...and disables the pin without a card once it is on.
+    crate::services::feature_flag_service::set_platform_override(
+        &f.state.db,
+        crate::services::feature_flag_service::SKILL_PIN_DISABLE_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let owner_result = result(
+        call(&f, &owner, "nyxid__set_agent_skills", args.clone()).await,
+        false,
+    )
+    .await;
+    assert_eq!(owner_result["revision"], 1);
+    let agent = stored().await;
+    assert_eq!(agent.skills_revision, 1);
+    assert!(agent.skills[0].disabled);
+    // Turning it back on needs the owner's card.
+    let enable =
+        json!({"agent":f.chat.agent_id,"selection":{"expected_revision":1,"skills":[pin]}});
+    let card = result(
+        call(&f, &owner, "nyxid__set_agent_skills", enable).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["error"], "acknowledgement_required", "{card}");
+    assert!(stored().await.skills[0].disabled);
+    f.state.db.drop().await.unwrap();
+}
+
+async fn set_access_mode(f: &Fixture, mode: crate::models::assistant_settings::AccessMode) {
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(mode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Owner turns (no webhook policy) are gated by the access mode from the
+/// operation's HTTP/catalog effects, at the shared service gate both the
+/// typed and universal call paths use.
+#[tokio::test]
+async fn owner_access_mode_gates_service_operations_by_effect() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = orchestrator_fixture("owner_mode_service_gate").await;
+    let service_id = connected(&f.state.db, &f.owner, "mode-target", "http://127.0.0.1:9").await;
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().confirmation_policy.is_none());
+    let mut services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let service = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service_id)
+        .unwrap();
+    let endpoint = service.endpoints.remove(0);
+    let (service, endpoint) = (&*service, &endpoint);
+    let tool = "mode-target__proxy";
+    let gate = |method: &'static str| {
+        let args = json!({"method": method, "path": "/items/1"});
+        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
+        let (f, auth) = (&f, &auth);
+        async move {
+            webhook_service_gate(
+                &f.state, auth, service, endpoint, &prepared, tool, &args, None,
+            )
+            .await
+            .is_some()
+        }
+    };
+    let matrix = [
+        (AccessMode::Autopilot, [false, false, false, false]),
+        (AccessMode::Nyxmode, [false, false, false, true]),
+        (AccessMode::AskEveryTime, [false, true, true, true]),
+    ];
+    for (mode, expected) in matrix {
+        set_access_mode(&f, mode).await;
+        for (method, asks) in ["GET", "POST", "PATCH", "DELETE"].into_iter().zip(expected) {
+            assert_eq!(gate(method).await, asks, "{mode:?} {method}");
+        }
+    }
+    let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let delete = rows
+        .iter()
+        .find(|row| row.summary.starts_with("DELETE"))
+        .expect("delete card");
+    let confirmation = delete.confirmation.as_ref().unwrap();
+    assert_eq!(confirmation.risk, "destructive");
+    assert_eq!(confirmation.reason, "access_mode");
+    assert!(
+        delete.summary.ends_with("on mode-target"),
+        "{}",
+        delete.summary
+    );
+    // Owner chats are offered the card id on every tool; it never reaches the service.
+    let schema = webhook_tool_schema(&auth, &json!({"type": "object", "properties": {}}));
+    assert_eq!(schema["properties"]["acknowledgement_id"]["type"], "string");
+    let args = json!({"method": "POST", "acknowledgement_id": "x"});
+    assert!(
+        webhook_execution_arguments(&auth, &args)
+            .get("acknowledgement_id")
+            .is_none()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+/// Meta tools are classified by name at dispatch: SSH commands are
+/// destructive (NyxMode asks), while Autopilot proceeds to the tool itself.
+#[tokio::test]
+async fn owner_access_mode_gates_meta_tools_at_dispatch() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = orchestrator_fixture("owner_mode_meta_gate").await;
+    let auth = authenticate(&f).await;
+    let args = json!({"service": "no-such-host", "command": "uptime"});
+    let text = |response: Response| async move {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        body["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    set_access_mode(&f, AccessMode::Nyxmode).await;
+    let carded = text(direct_call(&f, &auth, "nyx__ssh_exec", args.clone()).await).await;
+    let card: Value = serde_json::from_str(&carded).unwrap();
+    assert_eq!(card["error"], "acknowledgement_required");
+    let row = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(row.tool_name.as_deref(), Some("nyx__ssh_exec"));
+    assert_eq!(row.confirmation.as_ref().unwrap().risk, "destructive");
+    assert!(
+        !row.summary.contains("uptime"),
+        "commands never enter a card"
+    );
+    // Discovery never asks, even in Ask Every Time.
+    set_access_mode(&f, AccessMode::AskEveryTime).await;
+    let listed =
+        text(direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await).await;
+    let card_error = |text: &str| {
+        serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| value["error"].as_str().map(str::to_owned))
+    };
+    assert_ne!(
+        card_error(&listed).as_deref(),
+        Some("acknowledgement_required"),
+        "{listed}"
+    );
+    set_access_mode(&f, AccessMode::Autopilot).await;
+    let ran = text(direct_call(&f, &auth, "nyx__ssh_exec", args).await).await;
+    assert_ne!(
+        card_error(&ran).as_deref(),
+        Some("acknowledgement_required"),
+        "{ran}"
+    );
+    assert_eq!(
+        acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+/// A specialist's own conversation key cannot reach assistant management
+/// routes, even with the live-turn rollout flag off: grants, skills,
+/// settings, channels, agent profile and destroy all refuse it.
+#[tokio::test]
+async fn specialist_conversation_key_cannot_call_assistant_management_routes() {
+    use tower::ServiceExt;
+    let f = fixture("specialist_management_routes").await;
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+    let router = private.with_state(f.state.clone());
+    let agent = f.chat.agent_id.clone();
+    let send = |method: &str, path: String, body: Value| {
+        let router = router.clone();
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("x-api-key", credential.raw_key.as_str())
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+    let base = "/api/v1/assistant/nyxagent";
+    for (method, path, body) in [
+        (
+            "PUT",
+            format!("{base}/agents/{agent}/grants"),
+            json!({"services": [], "account_read": true}),
+        ),
+        (
+            "PUT",
+            format!("{base}/agents/{agent}/skills"),
+            json!({"expected_revision": 0, "skills": []}),
+        ),
+        (
+            "PATCH",
+            format!("{base}/agents/{agent}"),
+            json!({"access_mode_override": "autopilot"}),
+        ),
+        ("POST", format!("{base}/agents/{agent}/destroy"), json!({})),
+        (
+            "PUT",
+            format!("{base}/settings"),
+            json!({"access_mode": "autopilot", "specialist_access_requests": "routed_to_nyxbot"}),
+        ),
+        (
+            "POST",
+            format!("{base}/channels"),
+            json!({"bot_id": uuid::Uuid::new_v4().to_string(), "agent_id": agent}),
+        ),
+        (
+            "PATCH",
+            format!("{base}/channels/{}", uuid::Uuid::new_v4()),
+            json!({"agent_id": agent}),
+        ),
+    ] {
+        let (status, body) = send(method, path.clone(), body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "{method} {path}: {body}"
+        );
+        // The human-only router refuses every API key, conversation keys
+        // included, before any handler; the extractor (independent of the
+        // live-turn flag) and the handlers' human guards refuse them again.
+        assert_eq!(
+            body["message"], "Forbidden: API keys cannot access this endpoint",
+            "{method} {path}"
+        );
+    }
+    // Nothing changed.
+    let settings = crate::services::assistant_settings_service::get(&f.state.db, &f.owner)
+        .await
+        .unwrap();
+    assert_ne!(
+        settings.access_mode,
+        crate::models::assistant_settings::AccessMode::Autopilot
+    );
+    let row = crate::services::assistant_team_service::agent(&f.state.db, &f.owner, &agent)
+        .await
+        .unwrap();
+    assert!(row.destroyed_at.is_none() && !row.grants.account_read);
+    assert!(row.access_mode_override.is_none());
+    // Positive control: the same key still reaches its execution route.
+    let (status, body) = send(
+        "POST",
+        "/mcp".into(),
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(
+        body["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    );
+    f.state.db.drop().await.unwrap();
+}

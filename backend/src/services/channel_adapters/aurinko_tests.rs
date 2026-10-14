@@ -1247,6 +1247,7 @@ async fn aurinko_catalog_account_token_connection_owner_scope_and_disable() {
     provider_service::seed_default_services(&db, &state.encryption_keys)
         .await
         .unwrap();
+    crate::test_utils::init_test_audit_chain_hmac_key();
     catalog_spec_sync::sync_seeded_service_endpoints(&db)
         .await
         .unwrap();

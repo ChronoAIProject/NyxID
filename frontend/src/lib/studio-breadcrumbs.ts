@@ -15,6 +15,8 @@ import {
   INVITE_CODES_TAB_DEFAULT,
   ADMIN_CREDITS_TABS,
   ADMIN_CREDITS_TAB_DEFAULT,
+  ADMIN_BILLING_TABS,
+  ADMIN_BILLING_TAB_DEFAULT,
   AI_SETUP_SKILL_TABS,
   parseTab,
 } from "./url-tabs";
@@ -102,6 +104,11 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
     allowances: "Free allowances",
     schedules: "Schedules",
   }),
+  "/admin/billing": tabSection(ADMIN_BILLING_TABS, ADMIN_BILLING_TAB_DEFAULT, {
+    overview: "Services",
+    rates: "Rate cache",
+    settings: "Settings",
+  }),
 };
 
 const PAGE_LABELS: Record<string, string> = {
@@ -134,6 +141,7 @@ const PAGE_LABELS: Record<string, string> = {
   "/admin/usage": "Usage",
   "/admin/integrity": "Integrity",
   "/admin/credits": "Credits",
+  "/admin/billing": "Billing",
   "/admin/service-accounts": "Service Accounts",
   "/admin/oauth-clients": "OAuth Clients",
   "/admin/roles": "Roles",

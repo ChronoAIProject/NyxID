@@ -100,10 +100,10 @@ export function ProviderCard({
             }`}
           >
             {provider.icon_url ? (
-              <img
-                src={provider.icon_url}
-                alt={provider.name}
-                className="h-4 w-4 rounded"
+              <ServiceIcon
+                slug={provider.slug}
+                iconUrl={provider.icon_url}
+                size="sm"
               />
             ) : SERVICE_ICONS[provider.slug] ? (
               <ServiceIcon slug={provider.slug} size="sm" />

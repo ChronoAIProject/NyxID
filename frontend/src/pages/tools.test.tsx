@@ -4,12 +4,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import type { ToolOffering } from "@/schemas/tools";
+import type { DownstreamService } from "@/types/api";
 import { ToolsPage } from "./tools";
 import { AdminToolsPage } from "./admin-tools";
 const mocks = vi.hoisted(() => ({
   post: vi.fn(),
   admin: true,
+  manager: false,
   tools: [] as ToolOffering[],
+  toolOverrides: {} as Partial<DownstreamService>,
+  published: false,
 }));
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { children: ReactNode; to: string }) => (
@@ -27,8 +31,21 @@ vi.mock("@/hooks/use-tools", () => ({
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (
-    selector: (state: { user: { is_admin: boolean } }) => unknown,
-  ) => selector({ user: { is_admin: mocks.admin } }),
+    selector: (state: {
+      user: {
+        is_admin: boolean;
+        id: string;
+        capabilities: { manage_tools: boolean };
+      };
+    }) => unknown,
+  ) =>
+    selector({
+      user: {
+        is_admin: mocks.admin,
+        id: "manager",
+        capabilities: { manage_tools: mocks.manager },
+      },
+    }),
 }));
 vi.mock("@/hooks/use-api-keys", () => ({ useApiKeys: () => ({ data: [] }) }));
 vi.mock("@/hooks/use-services", () => ({
@@ -44,6 +61,12 @@ vi.mock("@/hooks/use-services", () => ({
       },
       {
         id: "tool-1",
+        service_type: "http",
+        service_category: "internal",
+        requires_user_credential: false,
+        created_by: "manager",
+        tools_manager_created: true,
+      tools_manager_eligible: true,
         name: "Search",
         slug: "search",
         offering_kind: "tool",
@@ -52,6 +75,7 @@ vi.mock("@/hooks/use-services", () => ({
         credential_configured: true,
         openapi_spec_url: "https://example.com/spec",
         topics: [],
+        ...mocks.toolOverrides,
       },
     ],
     isLoading: false,
@@ -65,8 +89,8 @@ vi.mock("@/hooks/use-endpoints", () => ({
         name: "search",
         method: "GET",
         path: "/search",
-        publication: "draft",
-        is_active: false,
+        publication: mocks.published ? "published" : "draft",
+        is_active: mocks.published,
       },
     ],
   }),
@@ -122,6 +146,9 @@ function mount(element: ReactNode) {
 }
 beforeEach(() => {
   mocks.admin = true;
+  mocks.manager = false;
+  mocks.toolOverrides = {};
+  mocks.published = false;
   mocks.post.mockReset();
   mocks.post.mockResolvedValue({});
   mocks.tools = [
@@ -214,7 +241,7 @@ it("publishes through the publication route from the Tools tab", async () => {
     ),
   );
 });
-it("keeps Phase 1 management admin-only", () => {
+it("denies management without Admin or Tools Manager authority", () => {
   mocks.admin = false;
   mount(<AdminToolsPage />);
   expect(
@@ -223,6 +250,29 @@ it("keeps Phase 1 management admin-only", () => {
   expect(
     screen.queryByRole("tab", { name: "Imports" }),
   ).not.toBeInTheDocument();
+});
+
+it("reports pending Admin audience even with a credential and published operations", () => {
+  mocks.admin = false;
+  mocks.manager = true;
+  mocks.published = true;
+  mocks.toolOverrides = {
+    platform_key: {
+      enabled: true,
+      audience: "restricted",
+      allowed_owner_ids: [],
+    },
+  };
+  mount(<AdminToolsPage />);
+  expect(screen.getByText("Admin audience approval")).toBeInTheDocument();
+  expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+});
+
+it("allows manually authored published operations without requiring a spec", () => {
+  mocks.published = true;
+  mocks.toolOverrides = { openapi_spec_url: null };
+  mount(<AdminToolsPage />);
+  expect(screen.getByText("Ready")).toBeInTheDocument();
 });
 
 it("creates a twin with the selected source and no transport or credential fields", async () => {
@@ -269,6 +319,26 @@ it("offers a new-service path without an Imports tab", async () => {
   expect(screen.getByLabelText("OpenAPI spec URL")).toBeInTheDocument();
 });
 
+it("creates a manager's new API without authoring an audience", async () => {
+  mocks.admin = false;
+  mocks.manager = true;
+  mocks.post.mockResolvedValue({ id: "created-tool", name: "Local API" });
+  mount(<AdminToolsPage />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add tool" }));
+  await user.click(screen.getByRole("combobox", { name: "Creation method" }));
+  await user.click(screen.getByRole("option", { name: "New service" }));
+  await user.type(screen.getByLabelText("name"), "Local API");
+  await user.type(screen.getByLabelText("slug"), "tools-local");
+  await user.type(screen.getByLabelText("Base URL"), "https://vendor.example");
+  await user.click(screen.getByRole("button", { name: "Create tool" }));
+  await waitFor(() => expect(mocks.post).toHaveBeenCalled());
+  const body = mocks.post.mock.calls[0]![1];
+  expect(body).not.toHaveProperty("platform_key");
+  expect(body).not.toHaveProperty("credential");
+  expect(body.service_category).toBe("internal");
+});
+
 it("renders disabled limits and labels writes as changes to data", async () => {
   mocks.tools = [tool("Write tool", "free", false)];
   mocks.tools[0]!.limits = null;
@@ -278,4 +348,35 @@ it("renders disabled limits and labels writes as changes to data", async () => {
   await userEvent.click(screen.getByText("1 operations"));
   expect(screen.getByText("Changes data")).toBeInTheDocument();
   expect(screen.queryByText("Destructive")).not.toBeInTheDocument();
+});
+
+it("lets Tools Managers validate their own drafts without publication authority and fails closed on revocation", async () => {
+  mocks.admin = false;
+  mocks.manager = true;
+  const user = userEvent.setup();
+  const view = mount(<AdminToolsPage />);
+  expect(screen.getByRole("button", { name: "Add tool" })).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Tools" }));
+  expect(
+    screen.queryByRole("button", { name: "Publish" }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Validate" }));
+  await waitFor(() =>
+    expect(mocks.post).toHaveBeenCalledWith(
+      "/services/tool-1/endpoints/op-1/publication",
+      { state: "validated" },
+    ),
+  );
+  expect(
+    screen.queryByRole("combobox", { name: "Offering kind" }),
+  ).not.toBeInTheDocument();
+  mocks.manager = false;
+  view.rerender(
+    <QueryClientProvider client={new QueryClient()}>
+      <AdminToolsPage />
+    </QueryClientProvider>,
+  );
+  expect(
+    screen.getByText("Tools management authority required"),
+  ).toBeInTheDocument();
 });

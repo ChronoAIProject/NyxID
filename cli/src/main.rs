@@ -151,6 +151,10 @@ async fn run_main() {
             }
             std::process::exit(error.exit_code());
         }
+        if let Some(readiness) = e.downcast_ref::<commands::admin_tools::PendingReadiness>() {
+            // The command already emitted the complete structured readiness report.
+            std::process::exit(readiness.exit_code);
+        }
         eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
         // 3: a human must log in again; 4: renewal outcome unknown, retry later.
         let code = if e.downcast_ref::<auth::ReauthRequired>().is_some() {

@@ -770,7 +770,11 @@ export function ProviderListPage() {
               <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-3">
                 <div className="flex items-center gap-3">
                   <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                    <ServiceIcon slug={provider.slug} size="sm" />
+                    <ServiceIcon
+                      slug={provider.slug}
+                      iconUrl={provider.icon_url}
+                      size="sm"
+                    />
                   </div>
                   <div>
                     <CardTitle>{provider.name}</CardTitle>

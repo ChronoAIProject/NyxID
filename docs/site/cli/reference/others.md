@@ -232,6 +232,7 @@ nyxid channel-bot list [--org <id|slug|name>]
 nyxid channel-bot show <id>
 nyxid channel-bot delete <id> [--yes]
 nyxid channel-bot verify <id>                # re-check token + re-register webhook
+nyxid channel-bot health <id>                # delivery diagnostics + recommended action
 ```
 
 ### channel-bot connect-link

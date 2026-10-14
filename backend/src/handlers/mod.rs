@@ -1,5 +1,8 @@
 pub mod admin;
 pub mod admin_anonymous_endpoints;
+pub mod admin_billing;
+#[cfg(test)]
+mod admin_billing_tests;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
@@ -37,6 +40,7 @@ pub(crate) mod body_limit;
 pub mod brand_icons;
 pub mod broker_bindings;
 pub mod catalog;
+pub(crate) mod catalog_authority;
 pub mod channel_bots;
 pub mod channel_connect_links;
 pub mod channel_conversations;
@@ -127,6 +131,9 @@ mod catalog_editor_tests;
 #[cfg(test)]
 mod tools_tests;
 
+pub mod assistant_feedback;
+#[cfg(test)]
+mod assistant_feedback_tests;
 pub mod assistant_group;
 pub mod assistant_nyxagent;
 pub mod assistant_team;
@@ -177,3 +184,8 @@ pub mod tools;
 pub mod service_concurrency;
 #[cfg(test)]
 mod service_preference_tests;
+
+pub mod catalog_icons;
+
+#[cfg(test)]
+mod tools_manager_tests;

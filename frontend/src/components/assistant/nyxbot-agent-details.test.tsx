@@ -30,6 +30,7 @@ let agent: Record<string, unknown>;
 let memory: { id: string; text: string; created_at: string; updated_at: string }[];
 let writes: { method: string; endpoint: string; body: unknown }[];
 let client: QueryClient;
+let requestMode: "denied" | "routed_to_nyxbot";
 
 function agentRow(fields: Record<string, unknown>) {
   return {
@@ -81,6 +82,7 @@ beforeEach(() => {
     return new Response(JSON.stringify(fixtures[path]));
   }));
   writes = [];
+  requestMode = "denied";
   agent = agentRow({});
   memory = [
     { id: "n1", text: "Weekly digests on Mondays", created_at: at, updated_at: at },
@@ -123,6 +125,24 @@ beforeEach(() => {
     }
     if (endpoint === "/assistant/nyxagent/channels") {
       return new Response(JSON.stringify({ channel_agents: [] }));
+    }
+    if (endpoint === "/assistant/nyxagent/settings") {
+      return new Response(JSON.stringify({
+        access_mode: "nyxmode",
+        skip_destructive_confirmation: false,
+        max_live_subagents: 8,
+        max_concurrent_subagent_turns: 3,
+        max_live_subagents_limit: 32,
+        max_concurrent_subagent_turns_limit: 8,
+        specialist_access_requests: requestMode,
+      }));
+    }
+    if (endpoint === "/assistant/nyxagent/models") {
+      return new Response(JSON.stringify([
+        { id: "nyxagent/chat", label: "chat", available: true },
+        { id: "nyxagent/research", label: "research", available: true },
+        { id: "nyxagent/retired", label: "retired", available: false },
+      ]));
     }
     return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
   };
@@ -387,4 +407,84 @@ it("lets an organization Member edit shared memory with the privacy note and bac
   expect(
     screen.queryByRole("list", { name: "Guest access" }),
   ).not.toBeInTheDocument();
+});
+
+it("explains the specialist sandbox and who approves in each request policy", async () => {
+  agent = agentRow({ owner_kind: "person", can_maintain: true, can_use: true });
+  renderSheet();
+  const authority = await screen.findByRole("region", { name: "Access authority" });
+  await waitFor(() =>
+    expect(authority).toHaveTextContent(
+      "Its access requests are denied and it reports the need to NyxBot instead; you can still grant access below",
+    ),
+  );
+  expect(authority).toHaveTextContent("cannot grant access to itself or to other agents");
+  cleanup();
+  requestMode = "routed_to_nyxbot";
+  client.clear();
+  renderSheet();
+  const routed = await screen.findByRole("region", { name: "Access authority" });
+  await waitFor(() =>
+    expect(routed).toHaveTextContent("Its access requests go to NyxBot, which approves or denies them"),
+  );
+});
+
+it("names an organization maintainer as the approver for an organization viewer", async () => {
+  agent = agentRow({
+    owner_kind: "org",
+    owner_name: "Team",
+    owner_id: "org-team",
+    org_role: "viewer",
+    can_maintain: false,
+    can_use: false,
+  });
+  renderSheet();
+  const authority = await screen.findByRole("region", { name: "Access authority" });
+  expect(authority).toHaveTextContent(
+    "Only a maintainer of Team (an Admin or Member) can approve or grant its access",
+  );
+});
+
+it("selects the agent's model from the live list and its own access mode", async () => {
+  agent = agentRow({ model: "nyxagent/chat", access_mode_override: null });
+  const { user } = renderSheet();
+  const profile = await screen.findByRole("form", { name: "Profile" });
+  const model = within(profile).getByRole("combobox", { name: "Agent model" });
+  await waitFor(() => expect(model).toHaveTextContent("chat"));
+  await user.click(model);
+  expect(await screen.findByRole("option", { name: "retired (unavailable)" })).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await user.click(screen.getByRole("option", { name: "research" }));
+  const mode = within(profile).getByRole("combobox", { name: "Agent access mode" });
+  expect(mode).toHaveTextContent("Workspace setting (NyxMode)");
+  await user.click(mode);
+  await user.click(await screen.findByRole("option", { name: "Ask Every Time" }));
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher",
+      body: { model: "nyxagent/research", access_mode_override: "ask_every_time" },
+    }),
+  );
+});
+
+it("clears an agent's own access mode back to the workspace setting", async () => {
+  agent = agentRow({ model: "nyxagent/chat", access_mode_override: "autopilot" });
+  const { user } = renderSheet();
+  const profile = await screen.findByRole("form", { name: "Profile" });
+  const mode = within(profile).getByRole("combobox", { name: "Agent access mode" });
+  expect(mode).toHaveTextContent("Autopilot");
+  await user.click(mode);
+  await user.click(await screen.findByRole("option", { name: "Workspace setting (NyxMode)" }));
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher",
+      body: { access_mode_override: null },
+    }),
+  );
 });

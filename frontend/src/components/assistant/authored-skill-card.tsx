@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import type { z } from "zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -6,9 +7,10 @@ import { Button } from "@/components/ui/button";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
-import { authoredSkillPreviewSchema } from "@/schemas/agent-skills";
+import { authoredSkillPreviewSchema, learningDraftEditable } from "@/schemas/agent-skills";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { publicationFailureText, publicationRuleText } from "@/lib/assistant/skill-publication-copy";
+import { ProposalDraftEditor } from "./learning-draft-editor";
 
 // A `publishing` row whose lease expired was interrupted (for example the
 // request was cancelled). The server offers publish, retry, deny and discard
@@ -25,6 +27,111 @@ function interruptedCopy(actions: readonly string[]): string {
     : "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version.";
 }
 
+type AuthoredPreview = z.infer<typeof authoredSkillPreviewSchema>;
+
+function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
+  if (!data.failure_code) return null;
+  return (
+    <>
+      <p role="alert" className="text-[12px] text-destructive">
+        {publicationFailureText(data.failure_code, data.status, "authored")}
+      </p>
+      {data.failure_rules.length ? (
+        <ul className="list-disc pl-5 text-11 text-muted-foreground">
+          {data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}
+        </ul>
+      ) : data.failure_details_unavailable ? (
+        <p className="text-11 text-muted-foreground">Format details unavailable.</p>
+      ) : null}
+    </>
+  );
+}
+
+function ScopeSection({ data, id, accepted, onAccepted }: {
+  readonly data: AuthoredPreview;
+  readonly id: string;
+  readonly accepted: boolean;
+  readonly onAccepted: (accepted: boolean) => void;
+}) {
+  if (data.scope_unavailable) {
+    return (
+      <p role="alert" className="text-11 text-muted-foreground">
+        Scope unavailable. Reload the draft before allowing publication.
+      </p>
+    );
+  }
+  if (!data.scope) return null;
+  const { status, omissions } = data.scope;
+  return (
+    <>
+      {omissions.length ? (
+        <ul aria-label="Declared omissions" className="list-disc pl-5 text-11 text-muted-foreground">
+          {omissions.map((text, index) => <li key={index}>{text}</li>)}
+        </ul>
+      ) : null}
+      {status === "reduced" ? (
+        <div className="flex items-start gap-2">
+          <Checkbox
+            id={id}
+            checked={accepted}
+            onCheckedChange={(checked) => onAccepted(checked === true)}
+          />
+          <Label htmlFor={id} className="text-11 leading-4">
+            I accept this reduced scope ({omissions.length} declared omission
+            {omissions.length === 1 ? "" : "s"}).
+          </Label>
+        </div>
+      ) : (
+        <p className="text-11 text-muted-foreground">
+          The drafting agent declares this draft covers everything requested.
+          The read coverage shown here is what NyxID observed.
+        </p>
+      )}
+    </>
+  );
+}
+
+function coverageText(upload: AuthoredPreview["coverage"][number]): string {
+  if (upload.expired) return "expired";
+  if (upload.unknown) return "read coverage unavailable";
+  if (upload.reads === 0) return "not read";
+  if (upload.lower_bound) return `at least ${upload.percent}%`;
+  if (upload.percent === 100) return "read completely";
+  return `read ${upload.percent}%`;
+}
+
+function CoverageList({ data }: { readonly data: AuthoredPreview }) {
+  return (
+    <>
+      {data.coverage.length ? (
+        <div className="space-y-1 text-11 text-muted-foreground">
+          <p>Observed reads in the drafting conversation</p>
+          <ul>
+            {data.coverage.map((upload) => (
+              <li key={upload.id}>
+                {upload.name}: {coverageText(upload)}
+                {upload.since_reset_percent != null ? (
+                  <>; {upload.lower_bound ? "at least " : "read "}
+                    {upload.since_reset_percent}% since the last context reset
+                  </>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {data.coverage_omitted ? (
+        <p className="text-11 text-muted-foreground">
+          {data.coverage_omitted} earlier uploads are not shown.
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+export const SAVED_EDIT_NOTICE =
+  "Draft saved. A new review card for this version was posted in this conversation; confirm it there.";
+
 export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly deciding: boolean;
@@ -37,6 +144,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
   const [notice, setNotice] = useState<string>();
   const [acceptReducedScope, setAcceptReducedScope] = useState(false);
   const scopeId = useId();
+  const [editing, setEditing] = useState(false);
   const preview = useQuery({
     queryKey: ["authored-skill-review", owner, reference.proposal_id, card.id],
     queryFn: async () => authoredSkillPreviewSchema.parse(await assistantJson(
@@ -50,8 +158,11 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
   });
   const data = preview.data;
   const actions = data?.actions ?? [];
-  useEffect(() => { setAcceptReducedScope(false); }, [data?.revision]);
-  const scopePending = data?.scope_unavailable || (data?.scope?.status === "reduced" && !acceptReducedScope);
+  useEffect(() => {
+    setAcceptReducedScope(false);
+  }, [data?.revision]);
+  const scopePending = data?.scope_unavailable
+    || (data?.scope?.status === "reduced" && !acceptReducedScope);
   const path = `/assistant/nyxagent/agents/${encodeURIComponent(reference.agent_id)}/learning/proposals/${encodeURIComponent(reference.proposal_id)}`;
   async function refresh() {
     await Promise.all([
@@ -129,18 +240,34 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
       <p className="text-[12px] font-medium">{file.path}</p>
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-11">{file.content}</pre>
     </div>)}
+    {data && learningDraftEditable(data.status) ? <div className="space-y-2">
+      <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>
+        {editing ? "Close the editor" : "Edit before publishing"}
+      </Button>
+      {editing ? <>
+        <p className="text-[12px] text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
+        <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => {
+          setEditing(false);
+          setNotice(SAVED_EDIT_NOTICE);
+          void refresh();
+        }} />
+      </> : null}
+    </div> : null}
     {data?.status === "publishing" ? <p role="status" className="text-[12px] text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
     {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
     {preview.isError ? <p role="alert" className="text-[12px] text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
-    {data?.failure_code ? <p role="alert" className="text-[12px] text-destructive">{publicationFailureText(data.failure_code, data.status, "authored")}</p> : null}
-    {data?.failure_code && data.failure_rules?.length ? <ul className="list-disc pl-5 text-11 text-muted-foreground">{data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}</ul> : data?.failure_code && data.failure_details_unavailable ? <p className="text-11 text-muted-foreground">Format details unavailable.</p> : null}
-    {data?.scope?.omissions.length ? <ul aria-label="Declared omissions" className="list-disc pl-5 text-11 text-muted-foreground">{data.scope.omissions.map((text, index) => <li key={index}>{text}</li>)}</ul> : null}
-    {data?.coverage.length ? <div className="space-y-1 text-11 text-muted-foreground"><p>What NyxBot read</p><ul>{data.coverage.map((upload) => {
-      const coverage = upload.expired ? "expired" : upload.unknown ? "read coverage unavailable" : upload.reads === 0 ? "not read" : upload.lower_bound ? `at least ${upload.percent}%` : upload.percent === 100 ? "read completely" : `read ${upload.percent}%`;
-      return <li key={upload.id}>{upload.name}: {coverage}{upload.since_reset_percent != null ? `; ${upload.lower_bound ? "at least " : "read "}${upload.since_reset_percent}% since the last context reset` : ""}</li>;
-    })}</ul></div> : null}
-    {data?.coverage_omitted ? <p className="text-11 text-muted-foreground">{data.coverage_omitted} earlier uploads are not shown.</p> : null}
-    {data?.scope_unavailable ? <p role="alert" className="text-11 text-muted-foreground">Scope unavailable. Reload the draft before allowing publication.</p> : data?.scope?.status === "reduced" ? <div className="flex items-start gap-2"><Checkbox id={scopeId} checked={acceptReducedScope} onCheckedChange={(checked) => setAcceptReducedScope(checked === true)} /><Label htmlFor={scopeId} className="text-11 leading-4">I accept this reduced scope ({data.scope.omissions.length} declared omission{data.scope.omissions.length === 1 ? "" : "s"}).</Label></div> : data?.scope?.status === "complete" ? <p className="text-11 text-muted-foreground">NyxBot says this draft covers everything requested. The read coverage shown here is what NyxID observed.</p> : <p className="text-11 text-muted-foreground">Scope not declared (drafted before this release).</p>}
+    {data ? (
+      <>
+        <FailureDetails data={data} />
+        <ScopeSection
+          data={data}
+          id={scopeId}
+          accepted={acceptReducedScope}
+          onAccepted={setAcceptReducedScope}
+        />
+        <CoverageList data={data} />
+      </>
+    ) : null}
     {messages}
     {buttons}
   </section>;

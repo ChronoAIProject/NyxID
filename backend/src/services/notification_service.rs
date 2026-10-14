@@ -227,6 +227,68 @@ pub async fn send_connection_expired_notification(
     user_id: &str,
     context: &ConnectionExpiredNotificationContext,
 ) -> AppResult<NotificationResult> {
+    let rendered = render_connection_expired_notification(config, context);
+    deliver_best_effort(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &rendered,
+        "connection expiry",
+    )
+    .await
+}
+
+/// Metadata-only notice that a channel bot stopped working.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelBotFailedNotificationContext {
+    pub bot_id: String,
+    pub bot_label: String,
+    pub platform_name: String,
+    /// Stable recovery action (`reconnect`, `resubscribe`, ...).
+    pub recommended_action: String,
+    pub recommended_action_text: String,
+}
+
+/// Send a channel-bot failure notice through the recipient's enabled
+/// channels. Missing channels and delivery failures are a no-op.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_channel_bot_failed_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    context: &ChannelBotFailedNotificationContext,
+) -> AppResult<NotificationResult> {
+    let rendered = render_channel_bot_failed_notification(config, context);
+    deliver_best_effort(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &rendered,
+        "channel bot failure",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_best_effort(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    rendered: &RenderedConnectionExpiredNotification,
+    kind: &str,
+) -> AppResult<NotificationResult> {
     let Some(channel) = db
         .collection::<NotificationChannel>(COLLECTION_NAME)
         .find_one(doc! { "user_id": user_id })
@@ -238,7 +300,6 @@ pub async fn send_connection_expired_notification(
             telegram_message_id: None,
         });
     };
-    let rendered = render_connection_expired_notification(config, context);
     let mut channels_used = Vec::new();
     let mut telegram_chat_id = None;
     let mut tokens_to_remove = Vec::new();
@@ -261,8 +322,9 @@ pub async fn send_connection_expired_notification(
             }
             Err(error) => tracing::warn!(
                 user_id = %user_id,
+                kind,
                 error = %error,
-                "Telegram connection expiry notification failed"
+                "Telegram best-effort notification failed"
             ),
         }
     }
@@ -302,7 +364,7 @@ pub async fn send_connection_expired_notification(
                     user_id = %user_id,
                     device_id = %unique_devices[index].device_id,
                     error = %error,
-                    "Push connection expiry notification failed"
+                    "Push best-effort notification failed"
                 ),
             }
         }
@@ -914,6 +976,33 @@ fn render_connection_expired_notification(
     RenderedConnectionExpiredNotification {
         title: "Connection expired".to_string(),
         body,
+        data,
+    }
+}
+
+fn render_channel_bot_failed_notification(
+    config: &AppConfig,
+    context: &ChannelBotFailedNotificationContext,
+) -> RenderedConnectionExpiredNotification {
+    let bots_url = format!(
+        "{}/channel-bots/{}",
+        config.frontend_url.trim_end_matches('/'),
+        context.bot_id
+    );
+    let mut data = HashMap::new();
+    data.insert("type".to_string(), "channel_bot_failed".to_string());
+    data.insert("bot_id".to_string(), context.bot_id.clone());
+    data.insert(
+        "recommended_action".to_string(),
+        context.recommended_action.clone(),
+    );
+    data.insert("url".to_string(), bots_url.clone());
+    RenderedConnectionExpiredNotification {
+        title: format!("{} channel needs attention", context.platform_name),
+        body: format!(
+            "{} stopped working. {} Open {}.",
+            context.bot_label, context.recommended_action_text, bots_url
+        ),
         data,
     }
 }

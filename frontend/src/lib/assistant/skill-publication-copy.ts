@@ -28,14 +28,14 @@ const failureCopy: Record<string, string> = {
 };
 
 const authoredRepairCopy: Record<string, string> = {
-  base_changed: "The source skill changed. NyxBot was asked for a corrected draft.",
-  base_verify_failed: "The source skill is no longer the reviewed private version. NyxBot was asked for a corrected draft.",
-  base_interface_incompatible: "The source skill interface cannot be preserved. NyxBot was asked for a corrected draft.",
-  ornn_validation_failed: "Ornn rejected the package format. NyxBot was asked for a corrected draft.",
-  ornn_interface_change_requires_major: "Ornn requires a major version for this interface change. NyxBot was asked for a corrected draft.",
-  ornn_package_rejected: "Ornn rejected the skill package. NyxBot was asked for a corrected draft.",
-  ornn_dependency_rejected: "Ornn rejected a skill dependency. NyxBot was asked for a corrected draft.",
-  ornn_name_taken: "That skill name is already in use. NyxBot was asked for a corrected draft.",
+  base_changed: "The source skill changed. The agent that drafted it was asked for a corrected draft.",
+  base_verify_failed: "The source skill is no longer the reviewed private version. The agent that drafted it was asked for a corrected draft.",
+  base_interface_incompatible: "The source skill interface cannot be preserved. The agent that drafted it was asked for a corrected draft.",
+  ornn_validation_failed: "Ornn rejected the package format. The agent that drafted it was asked for a corrected draft.",
+  ornn_interface_change_requires_major: "Ornn requires a major version for this interface change. The agent that drafted it was asked for a corrected draft.",
+  ornn_package_rejected: "Ornn rejected the skill package. The agent that drafted it was asked for a corrected draft.",
+  ornn_dependency_rejected: "Ornn rejected a skill dependency. The agent that drafted it was asked for a corrected draft.",
+  ornn_name_taken: "That skill name is already in use. The agent that drafted it was asked for a corrected draft.",
 };
 
 const notAttached: Record<string, string> = {
@@ -43,14 +43,18 @@ const notAttached: Record<string, string> = {
   evidence_unavailable: "NyxID verified this private version in Ornn but did not attach it because learning evidence or consent was withdrawn. Attach it from the agent's skills if you still want it.",
 };
 
-export function publicationFailureText(code: string, status?: string, source: "authored" | "learned" = "learned"): string {
+export function publicationFailureText(
+  code: string,
+  status?: string,
+  source: "authored" | "learned" = "learned",
+): string {
   if (status === "published_unpinned" && notAttached[code]) return notAttached[code];
   if (source === "authored" && authoredRepairCopy[code]) return authoredRepairCopy[code];
   return failureCopy[code] ?? "Publication could not finish. Check the current state.";
 }
 
 const ruleCopy: Record<string, string> = {
-  allowed_root_items: "Supporting files must be under references or assets.",
+  allowed_root_items: "Keep supporting files under references/.",
   no_readme_md: "README files are not allowed in the package.",
   skill_md_exists: "The package must contain SKILL.md.",
   no_xml_brackets: "Angle brackets are not allowed in skill metadata.",

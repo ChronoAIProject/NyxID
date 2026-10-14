@@ -63,15 +63,33 @@ NyxBot must apply it through `set_agent_skills`, which still requires the owner
 card for external additions or re-pins. No permission decision alone attaches
 external content. Owner UI writes are explicit owner actions.
 
+After the owner allows a specialist's request, NyxID wakes the assigning NyxBot
+thread (or its home thread) with `skill_request_allowed`, including the immutable
+agent ID, request ID and a bounded summary of the requested roots. The saved
+owner decision retains a durable notification marker until a NyxBot turn
+consumes its event. The assistant sweep retries after restart, routing failure,
+or bounded event-queue eviction; concurrent retries reuse the same event. NyxBot previews
+each root with `preview_agent_skill` to obtain complete pins and calls
+`set_agent_skills` at the current revision; the owner then receives
+a separate attachment card. Trigger-run skill requests also wake NyxBot; their
+specialist resumes through the existing trigger flow. The specialist continues
+without the skill and may
+check `get_agent_skills` later; it must never re-request after an allow. An
+identical request in that conversation within 24 hours of allowance returns
+`allowed_pending_attachment` without another card or wake. A NyxBot decision
+already has the agent ID and summary and does not enqueue another NyxBot event.
+
 Audit contains agent/skill IDs, versions, revisions and counts only. No package
 content, credentials, request bodies or external descriptions enter audit or
 Debug output.
 
 ## Rollout
 
-No feature flag is needed: old replicas safely omit skill guidance and preserve
-the sibling fields on grant updates. Deploy new replicas normally. There is no
-new permission or execution boundary that an old replica can fail open.
+For the base B2 skill fields, no feature flag is needed: old replicas safely
+omit skill guidance and preserve sibling fields on grant updates. Those base
+fields support a normal rolling deploy and add no permission boundary that an
+old replica can fail open. The durable skill-approval outbox and authored-draft
+claims require the coordinated backend rollout described below.
 
 ## Interfaces
 
@@ -93,11 +111,34 @@ bypass. Human UI reads retain ordinary browser-session behavior.
 ## Owner-requested authoring
 
 Reuse comes first: `search_agent_skills` → `preview_agent_skill` →
-`set_agent_skills` with an owner card. Personal NyxBot gains `draft_agent_skill`
-only under the existing default-off `assistant:agent-learning` flag. Authored
+`set_agent_skills` with an owner card. Personal NyxBot (for any agent it
+maintains) and specialists (for their own agent) gain `draft_agent_skill` only
+under the existing default-off `assistant:agent-learning` flag. Ornn validates
+the exact package before the owner card is raised; refusals return
+`ornn_format_rejected` with Ornn's rule identifiers. Raw Ornn create, pull and
+update routes are refused for assistant chat keys, so agents never handle a ZIP. Authored
 drafts share L1's encrypted review store and publisher; they do not enroll the
 agent in automatic learning. Description is role/scope; persona is tone/style;
 skills contain repeatable procedures, references, checklists and templates.
+
+Draft results and authored-card refusals include an absolute `review_url` to
+`/assistant?c={conversation_id}&card={acknowledgement_id}`. Send that full URL in
+chat apps or groups, or whenever the owner cannot find the card. The app loads
+and highlights the exact card, including hidden group member threads. Group
+pending actions expose **Review draft**, never a chat confirmation or Allow/Deny.
+Only the owner can review all files and approve on the full card; a chat reply
+such as "allow" never approves publication.
+
+Identical pending, never-dispatched drafts reuse their original proposal/card
+across turns and concurrent threads while the original owner's conversation and
+its bound authoring key remain valid. An expired card
+returns the same link and **Request a new confirmation** instructions; no new
+card is created automatically. A durable fingerprint claim recovers interrupted
+preparation in its original conversation without creating another proposal.
+Changed content or an unusable original review surface creates a new draft. Learning
+status/list/run tools accept NyxBot's immutable UUID with the same maintain ACL;
+proposal listings include the latest card ID, status, expiry and exact review URL.
+Authoring pilot recipients can list their drafts without enabling automatic learning.
 
 The card displays every text file and the generated publication frontmatter.
 One approval packages server-side, privately publishes with the approving
@@ -176,6 +217,79 @@ for registry reads. No registry response detail reaches an admin.
 
 Authored drafts and L1 learned proposals are checked against Ornn's package wire
 contract after their respective NyxID content and credential validators.
-Supporting files live below `references/` or `assets/`; root README files,
-angle brackets in name or description, and reserved Claude/Anthropic name terms
-are rejected before an owner card exists.
+Supporting files already below `references/`, `scripts/` or `assets/` keep their
+paths. Other supporting paths, including root README files, move under
+`references/`; authored cards show those relocated paths. Only text files are
+accepted, so an allowed `scripts/` directory does not enable executable scripts.
+The shared field-rule function rejects angle brackets in descriptions and reserved
+Claude/Anthropic name terms for new authored drafts and learned generation/edits.
+Stored learned proposals remain readable without applying these new field rules.
+
+Authored creation performs exactly one read-only Ornn `preflight` before raising
+a card. Its `ornn_format_rejected` diagnostic preserves the released bounded
+`ornn_rules` sanitizer for the model; a format refusal consumes one of the three
+per-turn repair attempts. Ordinary size, credential, scope and base errors do not
+consume that budget. Review binding does not repeat the preflight. Publication
+validates the exact approved package again before mutation.
+
+One adapter-private extractor reads rule identifiers from both the 2xx
+`data.violations[].rule` verdict and 4xx `errors[].code/path` refusal. The model
+projection keeps the existing sanitizer/cap. Persisted `failure_rules` and owner
+copy use the fixed `OrnnValidationRule` allowlist (unknown identifiers become
+`other`, never echoed), alongside `failure_stage`; clearing a failure or editing
+a revision clears its diagnostics. Raw messages, filenames, values and response
+bodies never enter persisted diagnostics or audit. Missing format diagnostics
+are explicitly reported as unavailable.
+
+Agent-submitted scope declarations are encrypted and bind request identity and owner approval. Owner-started improve drafts and legacy rows have no declaration; their cards show no scope section, and scope-less fingerprints keep the original format.
+Reduced scope shows each omission as plain text and needs separate owner consent
+for that revision and digest. The card shows bounded observations of reads in
+the drafting conversation, including coverage since reset; coverage does not
+certify completeness. The target agent's name identifies where the skill will
+be attached, not who drafted it or read the sources.
+
+A publication failure requiring a corrected authored package queues one
+`skill_publication` repair event inside its fenced transaction and wakes the drafting conversation
+after commit. Successful pinning queues the corresponding completion event.
+These proposal transitions are distinct from the durable skill-request outbox:
+that outbox delivers owner-allowed `kind: skills` requests as
+`skill_request_allowed`, with admission consumed transactionally by a NyxBot
+turn. The publication event does not duplicate that request notification.
+
+## Editable pin controls and routes
+
+Agent pin references include `disabled` (default `false`, omitted while false); disabled pins are excluded from `skill_read` and prompt injection. Writing one requires the default-off `assistant:skill-pin-disable` flag; deploy every backend replica, then the frontend, then enable the flag. Re-enabling a pin through NyxBot needs the owner's card. Under `/assistant/nyxagent/agents/{id}`: `GET skills/{skill_id}/preview` tests an attached pin (exact version check plus a SKILL.md read through the agent's reader; `readable: false` while disabled); `POST skills/{skill_id}/improve` starts an authored improve draft from the exact package; `GET skills/history` lists the agent's newest 50 pin changes (with each pin's disabled state) and learning/authoring events to anyone who can read the agent; `POST learning/proposals/{proposal_id}/validate` with `{draft}` dry-runs the proposal's own validator. Proposal edits use `{revision, draft}` with the top-level revision canonical. Draft refusals carry field diagnostics `{rule, field, line?, limit?, actual?, unit?}`. All NyxAgent routes enforce the engine flag and first-party human sessions; writes require maintain access to the agent.
+
+The durable skill-approval outbox and authored-draft generation claims require
+all backend replicas and assistant workers to run this version before enabling
+or resuming the corresponding workflows. During rollout, pause authoring and
+skill approvals, drain active assistant turns, upgrade every writer and sweeper,
+then resume. Existing API shapes and stored drafts remain readable; older writers
+do not participate in claim serialization or transactional event consumption.
+Running these workflows across mixed backend versions can duplicate drafts or
+replay a notification. The image-input capability gate and card-query fallback
+continue to support older NyxAgent deployments and frontends independently.
+
+For this coordinated upgrade, first disable `assistant:agent-learning` for
+all affected users using the existing feature-flag administration. Quiesce
+assistant and approval ingress at the deployment's load balancer, including
+channel webhook ingress; the learning flag alone does not pause skill requests
+or owner decisions. Let admitted assistant turns and publication requests finish,
+then stop the old backend/assistant worker processes so no old sweeper can drain
+or enqueue events. Upgrade every backend writer and worker before restoring
+traffic and the flag. This requires a maintenance window; there is no automatic
+mixed-version activation fence for these two new internal workflows.
+
+Before rollback, quiesce the same ingress and drain/stop the new workers.
+An older binary leaves undelivered skill-notification markers untouched and
+cannot deliver them; retain those rows and upgrade again to recover delivery.
+Do not run old and new workers simultaneously. A marker records notification
+admission to a NyxBot turn, not successful attachment: upstream turn failure can
+still require the owner to resume NyxBot, and attachment always requires its
+separate owner review card.
+
+When source or persisted destination authority is temporarily unavailable,
+keep the owner decision and defer notification retries for 60 seconds, doubling
+to a one-hour cap. Restored access is rechecked at the next due sweep (at most
+one hour plus sweep backlog). Busy threads and event-budget limits retain normal
+queued-event handling; database failures do not become authority deferrals.

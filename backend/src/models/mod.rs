@@ -118,9 +118,11 @@ pub mod assistant_agent;
 pub mod assistant_agent_credential;
 pub mod assistant_agent_learning;
 pub mod assistant_attachment;
+pub mod assistant_checkpoint;
 pub mod assistant_conversation;
 pub mod assistant_group;
 pub mod assistant_message;
+pub mod assistant_message_feedback;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
 pub mod assistant_skill_draft_attempt;
@@ -163,3 +165,5 @@ pub mod service_concurrency;
 pub mod service_preference;
 
 pub mod async_service_operation;
+
+pub mod catalog_icon;

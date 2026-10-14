@@ -2,8 +2,10 @@
 
 Normative contract for human uploads to NyxAgent conversations and owner-posted
 group messages. This extends [08](08-nyxagent-engine.md) and
-[09](09-nyxbot-orchestrator.md). Tool images remain owner-only; their default
-retention is the conversation lifetime.
+[09](09-nyxbot-orchestrator.md). Tool images are owner-readable and may also be fetched by the bound thread key
+during their producing live turn, including that same guest turn; see
+[Tool images](08-nyxagent-engine.md#tool-images). Their default retention is the
+conversation lifetime. User-upload selection and access rules are unchanged.
 
 ## Admission and storage
 
@@ -145,7 +147,9 @@ Both list and document pages budget the final, doubly escaped MCP envelope below
 Existing group-member read authority still permits the group uploads included in
 that thread's per-turn context; the list and recap manifest do not enumerate groups.
 
-Review cards show upload coverage as observations. Atomic interval appends retain
+Review cards show upload coverage as observations in the drafting conversation,
+which may belong to a different agent from the skill's attachment destination.
+Atomic interval appends retain
 the latest 512 returned ranges; their union never fills unread gaps. After interval
 eviction, percentages are lower bounds. Since-reset coverage uses only ranges
 recorded after the conversation's latest context reset. Review observations show the newest 50
@@ -160,8 +164,10 @@ claim, not a server guarantee; reduced scope needs separate owner acceptance.
 NyxAgent advertises an additive `input_image` capability with explicit limits.
 NyxID sends images only when that capability is present, using an attachment URL
 fetched with the same thread Agent Key. A separate key-authenticated content route
-accepts only that thread's bound user images; it never widens the owner-only
-browser attachment route or permits tool-image retrieval by an agent.
+accepts that thread's bound user images and tool images produced in its current
+live, non-stopped turn. Owner, conversation, turn, credential and retention fences
+apply to tool images, including guest turns. The browser attachment route retains
+its existing human access policy.
 
 NyxAgent restricts remote images to its configured NyxID origin and the attachment
 content path, forbids redirects and credentials in URLs, uses the request's own
@@ -188,6 +194,18 @@ the file; browser MIME is ignored. Plain text accepts `.txt`, `.text` and no
 extension, and Markdown accepts `.md` and `.markdown`.
 Unsupported types return an actionable server error shown beside that file in
 the composer; sending stays blocked until the rejected file is removed.
+
+Each attachment gets a composer handle (`@image-1`, `@file-1`, `@pasted-text-1`)
+shown on its chip and offered when the writer types `@`. Before sending, each
+`@handle` becomes a plain description of its file (`image "chart.png"`), so
+servers that route `@name` to agents never see a handle; removing a chip removes
+its references. Pasting more than six lines, or more than 1,500 characters, of
+text attaches it as `pasted-text-N.md` (when it looks like Markdown) or `.txt` and
+places its handle at the caret. While a reply runs, uploads are closed, so a long
+paste stays ordinary text. Attachments do not survive leaving the composer, so a
+saved draft never keeps a handle: pasted text returns inline (bounded like the
+textbox) and other files become their description. File names never add an
+`@mention`. Images show above the text of the message they belong to.
 
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,

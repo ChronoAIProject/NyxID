@@ -1097,3 +1097,193 @@ async fn x_event_settings_require_consent_and_recover_partial_public_setup() {
     assert!(recovered.error.is_none());
     assert_eq!(recovered.x_events, Some(vec![Dm, Mentions, Replies]));
 }
+
+/// The production callback must be HTTPS for X; tests use a public-looking base.
+fn https_state(state: &AppState) -> AppState {
+    let mut config = state.config.clone();
+    config.base_url = "https://nyx.example".into();
+    crate::test_utils::test_app_state_with_config(state.db.clone(), config)
+}
+
+async fn mount_live(server: &MockServer, bot: &ChannelBot, subscribed: bool) {
+    server.reset().await;
+    identity(server, "10").await;
+    Mock::given(method("GET"))
+        .and(path("/2/webhooks"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "100", "valid": true,
+            "url": "https://nyx.example/api/v1/webhooks/channel/x/platform"}]})),
+        )
+        .mount(server)
+        .await;
+    let rows = if subscribed {
+        json!([{"subscription_id": "200", "event_type": "dm.received", "filter": {"user_id": "10"},
+            "webhook_id": "100", "tag": format!("nyxid:{}", bot.id)}])
+    } else {
+        json!([])
+    };
+    Mock::given(method("GET"))
+        .and(path("/2/activity/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": rows})))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/2/activity/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"subscription_id": "200",
+            "event_type": "dm.received", "filter": {"user_id": "10"}, "webhook_id": "100",
+            "tag": format!("nyxid:{}", bot.id)}}),
+        ))
+        .mount(server)
+        .await;
+}
+
+fn health(bot: &ChannelBot) -> crate::handlers::channel_bots::ChannelBotHealthResponse {
+    crate::handlers::channel_bots::health_for(bot, false, true)
+}
+
+#[tokio::test]
+async fn verify_live_check_persists_a_missing_subscription_and_resubscribe_restores_it() {
+    let (state, adapter, server, owner, connection) = fixture().await;
+    let state = https_state(&state);
+    credentials(&state, &adapter, &owner).await;
+    let bot = insert_bot(&state, &owner, &connection).await;
+    // X accepts the subscription create but does not list it: Verify must say so.
+    mount_live(&server, &bot, false).await;
+    let _verified = crate::handlers::channel_bots::verify_bot_with_adapter(
+        &state,
+        bot.clone(),
+        &adapter,
+        &crate::services::telegram_new_api::TelegramApi {
+            http: &state.http_client,
+            base_url: &server.uri(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(current.webhook_registered);
+    let subscription = current.diagnostics.subscription_state.as_ref().unwrap();
+    assert!(!subscription.registered);
+    assert_eq!(
+        subscription.last_error.as_deref(),
+        Some("subscription_missing")
+    );
+    assert_eq!(
+        current.diagnostics.failure_reason.as_deref(),
+        Some("subscription_missing")
+    );
+    assert_eq!(health(&current).recommended_action, "resubscribe");
+
+    // Resubscribe re-runs setup and the live check; this time X lists it.
+    mount_live(&server, &bot, true).await;
+    assert!(
+        crate::handlers::channel_bots::resubscribe_with_adapter(&state, &current, &adapter)
+            .await
+            .unwrap()
+    );
+    let restored = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(
+        restored
+            .diagnostics
+            .subscription_state
+            .as_ref()
+            .unwrap()
+            .registered
+    );
+    assert!(restored.diagnostics.failure_reason.is_none());
+    assert!(restored.poll_backoff_until.is_none());
+    let view = health(&restored);
+    assert_eq!(view.recommended_action, "none");
+    assert_eq!(view.mode, "webhook");
+}
+
+#[tokio::test]
+async fn resubscribe_without_platform_webhook_credentials_asks_an_admin() {
+    let (state, adapter, _server, owner, connection) = fixture().await;
+    let state = https_state(&state);
+    let bot = insert_bot(&state, &owner, &connection).await;
+    assert!(
+        !crate::handlers::channel_bots::resubscribe_with_adapter(&state, &bot, &adapter)
+            .await
+            .unwrap()
+    );
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        current.diagnostics.failure_reason.as_deref(),
+        Some("webhook_unconfigured")
+    );
+    assert!(
+        !current
+            .diagnostics
+            .subscription_state
+            .as_ref()
+            .unwrap()
+            .registered
+    );
+    let view = health(&current);
+    assert_eq!(view.recommended_action, "contact_admin");
+    assert!(
+        view.recommended_action_text
+            .contains("Platform Credentials")
+    );
+}
+
+#[tokio::test]
+async fn resubscribe_keeps_success_when_post_write_readback_is_unavailable() {
+    for status in [503, 429] {
+        let (state, adapter, server, owner, connection) = fixture().await;
+        let state = https_state(&state);
+        credentials(&state, &adapter, &owner).await;
+        let bot = insert_bot(&state, &owner, &connection).await;
+        Mock::given(method("GET"))
+            .and(path("/2/webhooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{
+                "id": "100", "valid": true, "url": "https://nyx.example/api/v1/webhooks/channel/x/platform"
+            }]})))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2/activity/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .expect(1)
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/2/activity/subscriptions"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/2/activity/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "subscription_id": "200", "event_type": "dm.received", "filter": {"user_id": "10"},
+                "webhook_id": "100", "tag": format!("nyxid:{}", bot.id)
+            }})))
+            .mount(&server)
+            .await;
+        assert!(
+            crate::handlers::channel_bots::resubscribe_with_adapter(&state, &bot, &adapter)
+                .await
+                .unwrap()
+        );
+        let current = channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        assert!(current.webhook_registered);
+        assert_eq!(
+            current.diagnostics.failure_reason.as_deref(),
+            Some("subscription_check_failed")
+        );
+    }
+}

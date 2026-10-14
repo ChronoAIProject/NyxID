@@ -94,6 +94,7 @@ import { OrgApprovalConfigs } from "@/components/orgs/org-approval-configs";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import { OrgDeveloperAppsTab } from "@/components/orgs/org-developer-apps-tab";
 import { OrgServiceAccountsTab } from "@/components/orgs/org-service-accounts-tab";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
 export function OrgDetailPage() {
   const { orgId } = useParams({ strict: false }) as { orgId: string };
@@ -948,7 +949,7 @@ function RolePermissionCard({
               This org has no services yet.
             </div>
           ) : (
-            <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+            <div className="relative max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
               {services.map((service) => {
                 const id = `role-scope-${role}-${service.id}`;
                 const checked =
@@ -966,6 +967,7 @@ function RolePermissionCard({
                     />
                     <ServiceIcon
                       slug={service.catalog_service_slug}
+                      iconUrl={connectionIconUrl(service)}
                       size="sm"
                     />
                     <Label

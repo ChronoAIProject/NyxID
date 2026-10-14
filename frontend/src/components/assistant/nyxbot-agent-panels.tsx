@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ChevronRight, PanelRightOpen, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -63,6 +63,7 @@ export function ThreadHeader({
   destroyed,
   channelPlatform,
   onOpenDetails,
+  controls,
 }: {
   /** The agent's display name (or handle). */
   readonly name: string;
@@ -75,6 +76,8 @@ export function ThreadHeader({
   /** Set when the thread answers one of the user's channel bots. */
   readonly channelPlatform?: string | null;
   readonly onOpenDetails?: () => void;
+  /** The thread's access mode and model controls. */
+  readonly controls?: ReactNode;
 }) {
   return (
     <div className="space-y-2">
@@ -84,6 +87,7 @@ export function ThreadHeader({
         {handle ? <span className="shrink-0 text-11 text-text-tertiary">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
         {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
+        {controls ? <div className="flex flex-wrap items-center gap-1.5">{controls}</div> : null}
         {onOpenDetails ? (
           <Button
             size="sm"

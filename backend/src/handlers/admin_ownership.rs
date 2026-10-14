@@ -154,6 +154,7 @@ pub async fn preview(
         &state.db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        super::login_client_context::require_first_party_human(&auth).is_ok(),
         kind,
         &id,
         &body.new_owner_user_id,
@@ -213,6 +214,8 @@ pub async fn transfer(
         TransferCommand {
             actor: &actor,
             api_key_id: auth.api_key_id.as_deref(),
+            first_party_human: super::login_client_context::require_first_party_human(&auth)
+                .is_ok(),
             kind,
             resource_id: &id,
             destination: &body.new_owner_user_id,
@@ -264,6 +267,7 @@ pub async fn authorization(
         &state.db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        super::login_client_context::require_first_party_human(&auth).is_ok(),
         kind,
         &id,
     )
@@ -283,7 +287,7 @@ pub async fn authorization(
             slug: row.get_str("slug").ok().map(str::to_owned),
         }),
         Ok(_) => None,
-        Err(error) if error.is_forbidden() || matches!(error, AppError::NotFound(_)) => None,
+        Err(error) if super::services_helpers::is_capability_denial(&error) => None,
         Err(error) => return Err(error),
     };
     Ok(Json(TransferAuthorization {
@@ -328,9 +332,15 @@ pub async fn destinations(
 ) -> AppResult<Json<DestinationList>> {
     auth.ensure_write_scope()?;
     let actor = auth.user_id.to_string();
-    let (owner, admin, _) =
-        access::require_resource_access(&state.db, &actor, auth.api_key_id.as_deref(), kind, &id)
-            .await?;
+    let (owner, admin, _) = access::require_resource_access(
+        &state.db,
+        &actor,
+        auth.api_key_id.as_deref(),
+        super::login_client_context::require_first_party_human(&auth).is_ok(),
+        kind,
+        &id,
+    )
+    .await?;
     let (rows, total) = access::destination_candidates(
         &state.db,
         &actor,

@@ -25,6 +25,56 @@ mod recovery;
 fn input(agent: &str) -> Value {
     json!({"scope":{"status":"complete","omissions":[]},"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
+
+/// The pre-review format check NyxID sends while drafting (its package's
+/// operation ID is the fixed `preflight`), as opposed to publication traffic.
+pub(super) fn preflight_request(request: &wiremock::Request) -> bool {
+    const MARKER: &[u8] = br#"operation-id: "preflight""#;
+    request.url.path() == "/api/v1/skill-format/validate"
+        && request
+            .body
+            .windows(MARKER.len())
+            .any(|window| window == MARKER)
+}
+
+/// Ornn requests other than drafting's pre-review format check.
+async fn ornn_requests(server: &MockServer) -> Vec<wiremock::Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| !preflight_request(request))
+        .collect()
+}
+
+async fn pending_skill_event_count(
+    db: &mongodb::Database,
+    conversation_id: &str,
+    proposal_id: &str,
+) -> usize {
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id": conversation_id})
+        .await
+        .unwrap()
+        .and_then(|row| row.get_array("pending_events").ok().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|event| {
+            event
+                .as_document()
+                .and_then(|event| {
+                    (event.get_str("kind").ok() == Some("skill_publication")
+                        && event
+                            .get_str("text")
+                            .is_ok_and(|text| text.contains(proposal_id)))
+                    .then_some(())
+                })
+                .is_some()
+        })
+        .count()
+}
+
 async fn fixture(name: &str) -> Fixture {
     let f = orchestrator_fixture(name).await;
     review::migrate_publication_targets(&f.state, false)
@@ -69,6 +119,7 @@ async fn make_with_access(
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
+        &reader,
     )
     .await
     .unwrap();
@@ -91,35 +142,47 @@ async fn make_with_access(
     (proposal, card)
 }
 
-async fn pending_skill_event_count(
-    db: &mongodb::Database,
-    conversation_id: &str,
-    proposal_id: &str,
-) -> usize {
-    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .find_one(doc! {"_id": conversation_id})
-        .await
-        .unwrap()
-        .and_then(|row| row.get_array("pending_events").ok().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|event| {
-            event
-                .as_document()
-                .and_then(|event| {
-                    (event.get_str("kind").ok() == Some("skill_publication")
-                        && event
-                            .get_str("text")
-                            .is_ok_and(|text| text.contains(proposal_id)))
-                    .then_some(())
-                })
-                .is_some()
-        })
-        .count()
+#[tokio::test]
+async fn creation_preflights_once_and_review_binding_does_not_repeat_it() {
+    let f = fixture("authoring_single_preflight").await;
+    let server = setup_ornn(&f).await;
+    let (row, _) = make(&f, input(&f.chat.agent_id)).await;
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| preflight_request(request))
+            .count(),
+        1
+    );
+    let before = server.received_requests().await.unwrap().len();
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: Some(&f.chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(f.chat.clone())),
+    };
+    review::approval_binding_typed(
+        &f.state,
+        &f.owner,
+        &row.agent_id,
+        &row.id,
+        row.revision,
+        0,
+        &reader,
+    )
+    .await
+    .map_err(|failure| failure.error)
+    .unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
-async fn pending_source_read_times_out_without_leaving_a_draft_or_card() {
+async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
     let f = fixture("authoring_snapshot_approval_timeout").await;
     let server = setup_ornn(&f).await;
     let skill_id = Uuid::new_v4().to_string();
@@ -130,6 +193,7 @@ async fn pending_source_read_times_out_without_leaving_a_draft_or_card() {
         version: "1.0".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db
@@ -185,6 +249,7 @@ async fn pending_source_read_times_out_without_leaving_a_draft_or_card() {
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
+        &reader,
     )
     .await;
     assert!(
@@ -197,7 +262,7 @@ async fn pending_source_read_times_out_without_leaving_a_draft_or_card() {
             .count_documents(doc! {"source":"authored"})
             .await
             .unwrap(),
-        0
+        1
     );
     assert_eq!(
         f.state
@@ -217,7 +282,7 @@ async fn pending_source_read_times_out_without_leaving_a_draft_or_card() {
             .unwrap(),
         1
     );
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
 
@@ -832,61 +897,133 @@ async fn pre_claim_failure_is_bound_to_its_card_and_draft() {
 
 #[tokio::test]
 async fn expired_confirmation_renews_the_same_operation_and_restores_write_retry() {
-    let f = fixture("authoring_expired_confirmation_renewal").await;
-    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
-    let original = row.publication.as_ref().unwrap();
-    f.state
-        .db
-        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&row.id},
-            doc! {"$set":{"status":"publication_failed","failure_code":"approval_expired"}},
+    for allow_first in [false, true] {
+        let f = fixture("authoring_expired_confirmation_renewal").await;
+        let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+        if allow_first {
+            let allowed =
+                acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
+                    .await
+                    .unwrap();
+            assert_eq!(allowed.status, "allowed");
+        }
+        let original = row.publication.as_ref().unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"status":"publication_failed","failure_code":"approval_expired"}},
+            )
+            .await
+            .unwrap();
+        f.state.db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .update_one(doc! {"_id":&card.id}, doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}})
+            .await.unwrap();
+        let unswept = f
+            .state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .find_one(doc! {"_id":&card.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unswept.status,
+            if allow_first { "allowed" } else { "pending" }
+        );
+        let listed = review::list(&f.state, &f.owner, &row.agent_id, false)
+            .await
+            .unwrap();
+        let item = listed.iter().find(|item| item.id == row.id).unwrap();
+        assert_eq!(item.card_status.as_deref(), Some("expired"));
+        let repeated = draft_in_chat(&f, &f.chat).await.unwrap();
+        assert_eq!(repeated["proposal_id"], row.id);
+        assert_eq!(repeated["acknowledgement_id"], card.id);
+        assert_eq!(repeated["status"], "expired");
+        assert_eq!(
+            f.state
+                .db
+                .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+                .count_documents(doc! {"authored_skill.proposal_id":&row.id})
+                .await
+                .unwrap(),
+            1
+        );
+        let before = review::authored_preview_for_card(
+            &f.state,
+            &f.owner,
+            &f.chat.agent_id,
+            &row.id,
+            &card.id,
         )
         .await
         .unwrap();
-    f.state.db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
-        .update_one(doc! {"_id":&card.id}, doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}})
-        .await.unwrap();
-    let before =
-        review::authored_preview_for_card(&f.state, &f.owner, &f.chat.agent_id, &row.id, &card.id)
-            .await
-            .unwrap();
-    assert_eq!(before["failure_code"], "approval_expired");
-    assert!(
-        before["actions"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("renew"))
-    );
+        assert_eq!(before["failure_code"], "approval_expired");
+        assert!(
+            before["actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("renew"))
+        );
 
-    let (renewed, fresh_card) = make(&f, input(&f.chat.agent_id)).await;
-    assert_eq!(renewed.id, row.id);
-    assert_ne!(fresh_card.id, card.id);
-    assert_eq!(
-        renewed.publication.as_ref().unwrap().operation_id,
-        original.operation_id
-    );
-    assert_eq!(
-        renewed.publication.as_ref().unwrap().sha256,
-        original.sha256
-    );
-    let after = review::authored_preview_for_card(
-        &f.state,
-        &f.owner,
-        &f.chat.agent_id,
-        &row.id,
-        &fresh_card.id,
-    )
-    .await
-    .unwrap();
-    assert!(after["failure_code"].is_null());
-    assert!(
-        after["actions"]
-            .as_array()
+        let repeated = draft_in_chat(&f, &f.chat).await.unwrap();
+        assert_eq!(repeated["proposal_id"], row.id);
+        assert_eq!(repeated["acknowledgement_id"], card.id);
+        assert_eq!(repeated["status"], "expired");
+        // Only the owner's explicit renewal raises another confirmation card.
+        let body = serde_json::from_value(json!({
+            "revision":row.revision, "agent_skills_revision":row.agent_skills_revision,
+            "renewal_of":card.id,
+        }))
+        .unwrap();
+        let axum::Json(result) = crate::handlers::assistant_agent_learning::approve(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((row.agent_id.clone(), row.id.clone())),
+            axum::Json(body),
+        )
+        .await
+        .unwrap();
+        let fresh_card = f
+            .state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .find_one(
+                doc! {"_id":result["acknowledgement"]["acknowledgement_id"].as_str().unwrap()},
+            )
+            .await
             .unwrap()
-            .contains(&json!("publish"))
-    );
-    f.state.db.drop().await.unwrap();
+            .unwrap();
+        let renewed = stored(&f, &row.id).await;
+        assert_eq!(renewed.id, row.id);
+        assert_ne!(fresh_card.id, card.id);
+        assert_eq!(
+            renewed.publication.as_ref().unwrap().operation_id,
+            original.operation_id
+        );
+        assert_eq!(
+            renewed.publication.as_ref().unwrap().sha256,
+            original.sha256
+        );
+        let after = review::authored_preview_for_card(
+            &f.state,
+            &f.owner,
+            &f.chat.agent_id,
+            &row.id,
+            &fresh_card.id,
+        )
+        .await
+        .unwrap();
+        assert!(after["failure_code"].is_null());
+        assert!(
+            after["actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("publish"))
+        );
+        f.state.db.drop().await.unwrap();
+    }
 }
 
 #[test]
@@ -1024,6 +1161,7 @@ async fn authoring_flag_guest_specialist_and_discovery_gates() {
             &f.chat,
             serde_json::from_value(value.clone()).unwrap(),
             &review::UnavailableReader,
+            &review::UnavailableReader
         )
         .await
         .is_err()
@@ -1046,26 +1184,42 @@ async fn authoring_flag_guest_specialist_and_discovery_gates() {
     assert!(visible(
         super::super::assistant_account_tools::virtual_service_for(&f.state.db, &f.chat).await
     ));
-    for guest in [true, false] {
-        let mut chat = f.chat.clone();
-        chat.guest = guest;
-        if !guest {
-            chat.role = crate::models::assistant_conversation::AgentRole::Subagent;
-        }
-        assert!(
-            create(
-                &f.state,
-                &chat,
-                serde_json::from_value(value.clone()).unwrap(),
-                &review::UnavailableReader,
-            )
-            .await
-            .is_err()
-        );
-        assert!(!visible(
-            super::super::assistant_account_tools::virtual_service_for(&f.state.db, &chat).await
-        ));
-    }
+    let mut guest = f.chat.clone();
+    guest.guest = true;
+    assert!(
+        create(
+            &f.state,
+            &guest,
+            serde_json::from_value(value.clone()).unwrap(),
+            &review::UnavailableReader,
+            &review::UnavailableReader
+        )
+        .await
+        .is_err()
+    );
+    assert!(!visible(
+        super::super::assistant_account_tools::virtual_service_for(&f.state.db, &guest).await
+    ));
+    // A specialist sees the tool but drafts only for its own agent.
+    let mut specialist = f.chat.clone();
+    specialist.role = crate::models::assistant_conversation::AgentRole::Subagent;
+    specialist.agent_id = Uuid::new_v4().to_string();
+    assert!(visible(
+        super::super::assistant_account_tools::virtual_service_for(&f.state.db, &specialist).await
+    ));
+    let error = create(
+        &f.state,
+        &specialist,
+        serde_json::from_value(value.clone()).unwrap(),
+        &review::UnavailableReader,
+        &review::UnavailableReader,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, AppError::Forbidden(message) if message.contains("only for their own agent")),
+        "{error:?}"
+    );
     assert_eq!(
         f.state
             .db
@@ -2090,7 +2244,7 @@ async fn post_write_zip_hash_mismatch_keeps_check_only_barrier() {
 
 #[tokio::test]
 async fn authored_approval_uses_signed_person_and_pins_exact_post_then_put_version() {
-    let f = fixture("authoring_publish").await;
+    let mut f = fixture("authoring_publish").await;
     let server = setup_ornn(&f).await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
     let id = Uuid::new_v4().to_string();
@@ -2151,15 +2305,21 @@ async fn authored_approval_uses_signed_person_and_pins_exact_post_then_put_versi
     }
     server.verify().await;
     // Remove L1 provenance: authored revisions may improve other owned B2 pins too.
-    f.state
-        .db
-        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{"active_turn":bson::to_bson(&f.row.active_turn).unwrap()}},
-        )
-        .await
-        .unwrap();
+    // A new owner turn can improve the pin while the completion event runs separately.
+    f.row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.owner,
+        "Improve the weekly review skill",
+    )
+    .await;
+    f.chat = crate::services::assistant_acknowledgement_service::for_key(
+        &f.state.db,
+        &f.owner,
+        Some(&f.row.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     f.state
         .db
         .collection::<bson::Document>(
@@ -2693,6 +2853,13 @@ async fn released_target_is_claimed_by_second_draft_and_old_retry_reports_target
     // The holder is the only blocker: the stored refusal stays, the card shows
     // the computed target_busy, and no retry is offered.
     assert_eq!(busy["failure_code"], "target_busy");
+    assert!(busy["failure_stage"].is_null());
+    assert_eq!(busy["failure_rules"], json!([]));
+    let original_preview = review::authored_preview(&f.state, &f.owner, &first.agent_id, &first.id)
+        .await
+        .unwrap();
+    assert_eq!(original_preview["failure_code"], "ornn_write_forbidden");
+    assert_eq!(original_preview["failure_stage"], "publish");
     assert_eq!(busy["actions"], json!(["discard"]));
     assert!(matches!(
         finish(&f, allowed_first, true).await,
@@ -3076,12 +3243,9 @@ async fn authored_denial_and_expiry_never_publish() {
     let f = fixture("authoring_no_publish").await;
     let server = setup_ornn(&f).await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
-    let requests_before_denial = server.received_requests().await.unwrap().len();
+    let before = server.received_requests().await.unwrap().len();
     finish(&f, card, false).await.unwrap();
-    assert_eq!(
-        server.received_requests().await.unwrap().len(),
-        requests_before_denial
-    );
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
     let stored = f
         .state
         .db
@@ -3105,12 +3269,9 @@ async fn authored_denial_and_expiry_never_publish() {
         )
         .await
         .unwrap();
-    let requests_before_decision = server.received_requests().await.unwrap().len();
+    let before = server.received_requests().await.unwrap().len();
     assert!(finish(&f, card, true).await.is_err());
-    assert_eq!(
-        server.received_requests().await.unwrap().len(),
-        requests_before_decision
-    );
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
     f.state.db.drop().await.unwrap();
 }
 
@@ -3125,12 +3286,9 @@ async fn authored_changed_content_refuses_old_card_before_ornn() {
         .update_one(doc! {"_id":&row.id}, doc! {"$inc":{"revision":1_i64}})
         .await
         .unwrap();
-    let requests_before_decision = server.received_requests().await.unwrap().len();
+    let before = server.received_requests().await.unwrap().len();
     assert!(finish(&f, card, true).await.is_err());
-    assert_eq!(
-        server.received_requests().await.unwrap().len(),
-        requests_before_decision
-    );
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
     f.state.db.drop().await.unwrap();
 }
 
@@ -3512,8 +3670,9 @@ async fn preview_without_a_card_keeps_the_original_response() {
         "version",
         "files",
         "failure_code",
-        "failure_rules",
         "failure_details_unavailable",
+        "failure_rules",
+        "failure_stage",
         "scope",
         "scope_unavailable",
         "coverage",
@@ -3525,48 +3684,13 @@ async fn preview_without_a_card_keeps_the_original_response() {
     assert_eq!(keys, expected);
     assert_eq!(preview["status"], "pending");
     assert_eq!(preview["files"].as_array().unwrap().len(), 2);
-    f.state.db.drop().await.unwrap();
-}
-
-#[tokio::test]
-async fn preview_marks_only_missing_format_details_and_sanitizes_stored_rules() {
-    let f = fixture("authoring_preview_format_details").await;
-    let (row, _) = make(&f, input(&f.chat.agent_id)).await;
-    for (code, rules, unavailable) in [
-        ("ornn_validation_failed", vec![], true),
-        ("ornn_package_rejected", vec![], true),
-        ("ornn_validation_failed", vec!["allowed_root_items"], false),
-        (
-            "ornn_validation_failed",
-            vec!["nyxid_ag_sentinel_secret", "unknown_rule"],
-            true,
-        ),
-        ("base_changed", vec![], false),
-        ("base_verify_failed", vec![], false),
-        ("base_interface_incompatible", vec![], false),
-        ("ornn_interface_change_requires_major", vec![], false),
-        ("ornn_dependency_rejected", vec![], false),
-        ("ornn_name_taken", vec![], false),
-    ] {
-        f.state
-            .db
-            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
-            .update_one(
-                doc! {"_id": &row.id},
-                doc! {"$set": {"failure_code": code, "failure_rules": &rules}},
-            )
-            .await
-            .unwrap();
-        let preview = review::authored_preview(&f.state, &f.owner, &row.agent_id, &row.id)
-            .await
-            .unwrap();
-        assert_eq!(
-            preview["failure_details_unavailable"], unavailable,
-            "{code}"
-        );
-        assert!(!preview.to_string().contains("sentinel_secret"));
-        assert!(!preview.to_string().contains("unknown_rule"));
-    }
+    assert_eq!(preview["failure_details_unavailable"], false);
+    assert_eq!(preview["failure_rules"], json!([]));
+    assert!(preview["failure_stage"].is_null());
+    assert_eq!(preview["scope"]["status"], "complete");
+    assert_eq!(preview["scope_unavailable"], false);
+    assert_eq!(preview["coverage"], json!([]));
+    assert_eq!(preview["coverage_omitted"], 0);
     f.state.db.drop().await.unwrap();
 }
 
@@ -3577,6 +3701,7 @@ async fn draft_tool_result_keeps_its_shape() {
         &f.state,
         &f.chat,
         parse_input(&input(&f.chat.agent_id)).unwrap(),
+        &review::UnavailableReader,
         &review::UnavailableReader,
     )
     .await
@@ -3596,12 +3721,16 @@ async fn draft_tool_result_keeps_its_shape() {
         "summary",
         "decider",
         "instructions",
+        "review_url",
         "proposal_id",
         "agent_id",
         "source",
     ]
     .into();
     assert_eq!(keys, expected);
+    let review_url = url::Url::parse(result["review_url"].as_str().unwrap()).unwrap();
+    assert!(matches!(review_url.scheme(), "http" | "https"));
+    assert!(review_url.host_str().is_some());
     assert_eq!(result["error"], "acknowledgement_required");
     assert_eq!(result["kind"], "action");
     assert_eq!(result["source"], "authored");
@@ -4214,6 +4343,1134 @@ async fn panel_link_to_a_group_member_thread_opens_its_authored_card() {
 }
 
 #[tokio::test]
+async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
+    let mut f = fixture("authoring_review_links").await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    let url = super::super::assistant_links::AssistantPage::ReviewCard {
+        conversation: &card.conversation_id,
+        card: &card.id,
+    }
+    .url(&f.state.config.frontend_url);
+    assert!(acks::refusal(&card).get("review_url").is_none());
+    assert!(url.starts_with("http://") || url.starts_with("https://"));
+    assert_eq!(
+        acks::refusal_with_frontend(&card, &f.state.config.frontend_url)["review_url"],
+        url
+    );
+    assert!(
+        acks::refusal(&card)["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("chat reply")
+    );
+    let (status, error) = crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &f.chat,
+        "learning_status",
+        &json!({"agent":f.chat.agent_id}),
+    )
+    .await
+    .unwrap();
+    assert!(!error);
+    assert!(status["can_maintain"].as_bool().unwrap());
+    let (listed, error) = crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &f.chat,
+        "learning_list_proposals",
+        &json!({"agent":f.chat.agent_id}),
+    )
+    .await
+    .unwrap();
+    assert!(!error);
+    let item = &listed["proposals"][0];
+    assert_eq!(item["acknowledgement_id"], card.id);
+    assert_eq!(item["card_status"], "pending");
+    assert_eq!(item["review_url"], url);
+    assert!(item["card_expires_at"].is_string());
+    learning::configure(&f.state.db, &f.owner, &f.chat.agent_id, true, 5)
+        .await
+        .unwrap();
+    let (_, error) = crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &f.chat,
+        "learning_run_now",
+        &json!({"agent":f.chat.agent_id}),
+    )
+    .await
+    .unwrap();
+    assert!(!error);
+    // Exact links can include cards outside the normal recent history, but never another owner/thread.
+    let mut cards = Vec::new();
+    acks::include_card(
+        &f.state.db,
+        &f.owner,
+        &card.conversation_id,
+        &card.id,
+        &mut cards,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cards.len(), 1);
+    let mut hidden = Vec::new();
+    acks::include_card(
+        &f.state.db,
+        &Uuid::new_v4().to_string(),
+        &card.conversation_id,
+        &card.id,
+        &mut hidden,
+    )
+    .await
+    .unwrap();
+    acks::include_card(
+        &f.state.db,
+        &f.owner,
+        "another-thread",
+        &card.id,
+        &mut hidden,
+    )
+    .await
+    .unwrap();
+    assert!(hidden.is_empty());
+    // A later turn is the same draft, never another proposal or approval card.
+    let turn = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"active_turn.turn_id":&turn}},
+        )
+        .await
+        .unwrap();
+    f.chat.turn_id = Some(turn);
+    let (again, same_card) = make(&f, input(&f.chat.agent_id)).await;
+    assert_eq!(again.id, proposal.id);
+    assert_eq!(same_card.id, card.id);
+    f.state.db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+        .update_one(doc! {"_id":&card.id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1))}}).await.unwrap();
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    let expired = create(
+        &f.state,
+        &f.chat,
+        serde_json::from_value(input(&f.chat.agent_id)).unwrap(),
+        &reader,
+        &reader,
+    )
+    .await
+    .unwrap();
+    assert_eq!(expired["status"], "expired");
+    assert_eq!(expired["review_url"], url);
+    assert!(
+        expired["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Request a new confirmation")
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .count_documents(doc! {"authored_skill.proposal_id":&proposal.id})
+            .await
+            .unwrap(),
+        1
+    );
+    let mut changed = input(&f.chat.agent_id);
+    changed["skill_md"] = "# A revised procedure".into();
+    let (different, _) = make(&f, changed).await;
+    assert_ne!(different.id, proposal.id);
+    f.state.db.drop().await.unwrap();
+}
+
+async fn another_authoring_chat(f: &Fixture) -> ChatAuthority {
+    let row = super::super::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.owner,
+        "Prepare the requested skill",
+    )
+    .await;
+    assert_ne!(row.id, f.row.id);
+    acks::for_key(&f.state.db, &f.owner, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn draft_in_chat(f: &Fixture, chat: &ChatAuthority) -> AppResult<Value> {
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    create(
+        &f.state,
+        chat,
+        parse_input(&input(&f.chat.agent_id)).unwrap(),
+        &reader,
+        &reader,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn concurrent_threads_share_one_draft_and_expired_review_origin() {
+    let f = fixture("authoring_concurrent_threads").await;
+    let other = another_authoring_chat(&f).await;
+    let barrier = tokio::sync::Barrier::new(2);
+    let run = async |chat: &ChatAuthority| {
+        barrier.wait().await;
+        draft_in_chat(&f, chat).await.unwrap()
+    };
+    let (first, second) = tokio::join!(run(&f.chat), run(&other));
+    assert_eq!(first["proposal_id"], second["proposal_id"]);
+    assert_eq!(first["acknowledgement_id"], second["acknowledgement_id"]);
+    assert_eq!(first["review_url"], second["review_url"]);
+    let cards = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    let card = cards
+        .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        first["review_url"]
+            .as_str()
+            .unwrap()
+            .contains(&card.conversation_id)
+    );
+    cards.update_one(doc! {"_id":&card.id}, doc! {"$set":{"status":"expired", "expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1))}}).await.unwrap();
+    let (first, second) = tokio::join!(run(&f.chat), run(&other));
+    for result in [first, second] {
+        assert_eq!(result["status"], "expired");
+        assert_eq!(result["acknowledgement_id"], card.id);
+    }
+    assert_eq!(
+        cards
+            .count_documents(doc! {"authored_skill":{"$ne":bson::Bson::Null}})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn allowed_unstarted_drafts_join_the_original_publication_without_another_card() {
+    let f = fixture("authoring_allowed_join").await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    let reservation = claims::reserve(&f.state, &f.chat, &proposal).await.unwrap();
+    let other = another_authoring_chat(&f).await;
+    let allowed = acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
+        .await
+        .unwrap();
+    assert_eq!(allowed.status, "allowed");
+    let (first, second) = tokio::join!(draft_in_chat(&f, &f.chat), draft_in_chat(&f, &other));
+    for result in [first.unwrap(), second.unwrap()] {
+        assert_eq!(result["status"], "waiting_publication");
+        assert_eq!(result["proposal_id"], proposal.id);
+        assert_eq!(result["acknowledgement_id"], card.id);
+        assert!(
+            result["review_url"]
+                .as_str()
+                .unwrap()
+                .contains(&card.conversation_id)
+        );
+    }
+    // A pending card allowed while another worker prepares is joined too.
+    let binding = publication::binding(
+        &proposal,
+        proposal.publication.as_ref().unwrap(),
+        proposal.agent_skills_revision,
+    );
+    let finalized = claims::finalize(&f.state, &reservation, &binding)
+        .await
+        .unwrap();
+    assert_eq!(finalized.id, card.id);
+    assert_eq!(finalized.status, "allowed");
+    let after = stored(&f, &proposal.id).await;
+    assert_eq!(
+        bson::to_bson(&after.publication).unwrap(),
+        bson::to_bson(&proposal.publication).unwrap()
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .count_documents(doc! {"authored_skill.proposal_id":&proposal.id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_identity() {
+    let f = fixture("authoring_orphan_recovery").await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    let cards = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    cards.delete_one(doc! {"_id":&card.id}).await.unwrap();
+    // Crash after publication preparation but before card insertion, followed
+    // by another turn in the origin conversation and a retry in another chat.
+    f.state.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&f.row.id},doc! {"$set":{
+            "active_turn.turn_id":Uuid::new_v4().to_string(),"active_turn.trigger_run_id":"unrelated-trigger",
+            "active_turn.voice_request_id":"unrelated-voice"}}).await.unwrap();
+    let other = another_authoring_chat(&f).await;
+    let (first, second) = tokio::join!(draft_in_chat(&f, &other), draft_in_chat(&f, &other));
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first["proposal_id"], proposal.id);
+    assert_eq!(first["acknowledgement_id"], second["acknowledgement_id"]);
+    assert!(first["review_url"].as_str().unwrap().contains(&f.row.id));
+    let recovered = cards
+        .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.requested_turn_id, card.requested_turn_id);
+    assert_eq!(recovered.trigger_run_id, card.trigger_run_id);
+    assert_eq!(recovered.voice_request_id, card.voice_request_id);
+    assert_eq!(
+        stored(&f, &proposal.id)
+            .await
+            .publication
+            .unwrap()
+            .operation_id,
+        proposal.publication.unwrap().operation_id
+    );
+    assert_eq!(
+        cards
+            .count_documents(doc! {"authored_skill.proposal_id":&proposal.id})
+            .await
+            .unwrap(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn obsolete_review_origins_and_started_publications_never_reuse_cards() {
+    for change in [
+        "revoked",
+        "replaced",
+        "deleted",
+        "started",
+        "uncertain",
+        "verified",
+        "lease",
+    ] {
+        let f = fixture("authoring_nonreuse_fences").await;
+        let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+        let other = another_authoring_chat(&f).await;
+        match change {
+            "revoked" => {
+                f.state
+                    .db
+                    .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&f.chat.api_key_id},
+                        doc! {"$set":{"is_active":false}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "replaced" => {
+                // Use the real replacement path: the encrypted credential is
+                // rebound and predecessor cards expire in the same transaction.
+                crate::services::key_service::rotate_api_key(
+                    &f.state.db,
+                    &f.state.encryption_keys,
+                    &f.owner,
+                    &f.chat.api_key_id,
+                )
+                .await
+                .unwrap();
+                assert!(matches!(
+                    card_authority(&f.state.db, &f.owner, &card).await,
+                    Err(AppError::Forbidden(_))
+                ));
+            }
+            "deleted" => {
+                f.state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .delete_one(doc! {"_id":&f.row.id})
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                let update = match change {
+                    "started" => doc! {"publication.started":true},
+                    "uncertain" => doc! {"publication.uncertain_dispatch":true},
+                    "verified" => doc! {"publication.verified_at":bson::DateTime::now()},
+                    "lease" => {
+                        doc! {"publication.lease_expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(5))}
+                    }
+                    _ => unreachable!(),
+                };
+                f.state
+                    .db
+                    .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                    .update_one(doc! {"_id":&proposal.id}, doc! {"$set":update})
+                    .await
+                    .unwrap();
+            }
+        }
+        let result = draft_in_chat(&f, &other).await.unwrap();
+        assert_ne!(result["proposal_id"], proposal.id, "{change}");
+        assert_ne!(result["acknowledgement_id"], card.id, "{change}");
+        assert!(
+            result["review_url"]
+                .as_str()
+                .unwrap()
+                .contains(&other.conversation_id)
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_preparation_cannot_finalize_after_origin_replacement() {
+    let f = fixture("authoring_generation_fence").await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    f.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+        .delete_one(doc! {"_id":&card.id})
+        .await
+        .unwrap();
+    let stale = claims::reserve(&f.state, &f.chat, &proposal).await.unwrap();
+    let binding = publication::binding(
+        &proposal,
+        proposal.publication.as_ref().unwrap(),
+        proposal.agent_skills_revision,
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.chat.api_key_id},
+            doc! {"$set":{"is_active":false}},
+        )
+        .await
+        .unwrap();
+    let other = another_authoring_chat(&f).await;
+    let current = draft_in_chat(&f, &other).await.unwrap();
+    assert_ne!(current["proposal_id"], proposal.id);
+    assert!(matches!(
+        claims::finalize(&f.state, &stale, &binding).await,
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .count_documents(doc! {"authored_skill.proposal_id":&proposal.id})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_orphan_without_an_origin_refuses_duplicate_creation() {
+    let f = fixture("authoring_legacy_orphan").await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    f.state
+        .db
+        .collection::<bson::Document>(
+            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+        )
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+        .delete_one(doc! {"_id":&card.id})
+        .await
+        .unwrap();
+    let other = another_authoring_chat(&f).await;
+    assert!(
+        matches!(draft_in_chat(&f, &other).await, Err(AppError::Conflict(message)) if message.contains("original review conversation"))
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .count_documents(doc! {"fingerprint":&proposal.fingerprint})
+            .await
+            .unwrap(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn destroyed_or_deleted_target_fences_stale_reservation_and_finalization() {
+    for deleted in [false, true] {
+        let f = fixture("authoring_target_fence").await;
+        let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+        f.state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .delete_one(doc! {"_id":&card.id})
+            .await
+            .unwrap();
+        let stale = claims::reserve(&f.state, &f.chat, &proposal).await.unwrap();
+        let binding = publication::binding(
+            &proposal,
+            proposal.publication.as_ref().unwrap(),
+            proposal.agent_skills_revision,
+        );
+        let agents = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+        if deleted {
+            agents
+                .delete_one(doc! {"_id":&proposal.agent_id})
+                .await
+                .unwrap();
+        } else {
+            agents
+                .update_one(
+                    doc! {"_id":&proposal.agent_id},
+                    doc! {"$set":{"destroyed_at":bson::DateTime::now()}},
+                )
+                .await
+                .unwrap();
+        }
+        let claims = f.state.db.collection::<bson::Document>(
+            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+        );
+        claims
+            .delete_many(doc! {"agent_id":&proposal.agent_id})
+            .await
+            .unwrap();
+        assert!(matches!(
+            claims::reserve(&f.state, &f.chat, &proposal).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            claims::finalize(&f.state, &stale, &binding).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert_eq!(claims.count_documents(doc! {}).await.unwrap(), 0);
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
+    let f = fixture("authoring_owner_improve").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &id, "POST").await;
+    finish(&f, card, true).await.unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/versions")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[{"version":"1.0"}]}})),
+        )
+        .mount(&server)
+        .await;
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    // An unknown pin is not found and creates nothing.
+    let missing = create_improve_draft(
+        &f.state,
+        &f.chat,
+        &f.chat.agent_id,
+        &Uuid::new_v4().to_string(),
+        &reader,
+        &reader,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(&missing, AppError::NotFound(m) if m == "Attached skill not found"));
+    let result = create_improve_draft(&f.state, &f.chat, &f.chat.agent_id, &id, &reader, &reader)
+        .await
+        .unwrap();
+    assert_eq!(result["error"], "acknowledgement_required", "{result}");
+    assert!(result["acknowledgement_id"].as_str().is_some());
+    let proposal: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":result["proposal_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(proposal.source, ProposalSource::Authored);
+    assert_eq!(proposal.status, "pending");
+    assert!(proposal.scope_encrypted.is_none());
+    assert!(proposal.scope_digest.is_none());
+    let encoded = f
+        .state
+        .encryption_keys
+        .decrypt(&proposal.body_encrypted)
+        .await
+        .unwrap();
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(f.state.audit_chain_hmac_key.as_slice()).unwrap();
+    mac.update(b"nyxid-authored-skill-v1\0");
+    mac.update(proposal.agent_id.as_bytes());
+    mac.update(&encoded);
+    assert_eq!(
+        proposal.fingerprint,
+        hex::encode(mac.finalize().into_bytes())
+    );
+    let body: GeneratedProposal = serde_json::from_slice(
+        &f.state
+            .encryption_keys
+            .decrypt(&proposal.body_encrypted)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.kind, "improve");
+    assert_eq!(body.name, "weekly-review");
+    let base = body.base_skill.as_ref().unwrap();
+    assert_eq!(base.skill_id, id);
+    assert_eq!(base.version, "1.0");
+    assert_eq!(base.sha256, row.publication.as_ref().unwrap().sha256);
+    // The editable guidance is the published body without its frontmatter,
+    // and the package's other text files come along.
+    assert_eq!(
+        body.skill_md,
+        input(&f.chat.agent_id)["skill_md"].as_str().unwrap()
+    );
+    assert_eq!(body.files.len(), 1);
+    assert_eq!(body.files[0].path, "references/checklist.md");
+    assert_eq!(body.files[0].content, "Verify dates before publishing.");
+    assert!(!body.description.is_empty());
+    // Repeating the same edit reuses the pending draft.
+    let again = create_improve_draft(&f.state, &f.chat, &f.chat.agent_id, &id, &reader, &reader)
+        .await
+        .unwrap();
+    assert_eq!(again["proposal_id"], result["proposal_id"]);
+    let mut edited = body.clone();
+    edited.skill_md.push_str("\nCheck the revised schedule.");
+    review::edit(
+        &f.state,
+        &f.owner,
+        &proposal.agent_id,
+        &proposal.id,
+        proposal.revision,
+        &serde_json::to_value(&edited).unwrap(),
+    )
+    .await
+    .unwrap();
+    let saved: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&proposal.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let encoded = f
+        .state
+        .encryption_keys
+        .decrypt(&saved.body_encrypted)
+        .await
+        .unwrap();
+    let expected =
+        crate::services::assistant_action_receipts::fingerprint_sensitive_material(&format!(
+            "{}:{}:{}",
+            saved.agent_id,
+            saved.model_contract,
+            String::from_utf8_lossy(&encoded)
+        ));
+    assert_eq!(saved.fingerprint, expected);
+    assert!(saved.scope_encrypted.is_none() && saved.scope_digest.is_none());
+    // "Test" reads the pin the way the agent does; a disabled pin is unreadable.
+    let owner = f.owner.clone();
+    let test = |state: crate::AppState, agent: String, skill: String| {
+        let owner = owner.clone();
+        async move {
+            crate::handlers::agent_skills::preview_attached(
+                axum::extract::State(state),
+                crate::test_utils::test_auth_user(&owner),
+                axum::extract::Path((agent, skill)),
+            )
+            .await
+            .map(|axum::Json(body)| body)
+        }
+    };
+    let live = test(f.state.clone(), f.chat.agent_id.clone(), id.clone())
+        .await
+        .unwrap();
+    assert!(live.readable);
+    assert!(!live.disabled);
+    assert!(live.excerpt.contains("Check outstanding work."), "{live:?}");
+    assert_eq!(live.version, "1.0");
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"skills.0.disabled":true}},
+        )
+        .await
+        .unwrap();
+    let off = test(f.state.clone(), f.chat.agent_id.clone(), id.clone())
+        .await
+        .unwrap();
+    assert!(off.disabled);
+    assert!(!off.readable);
+    assert!(off.excerpt.is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn editing_an_authored_draft_raises_a_fresh_card_that_publishes_the_edit() {
+    let f = fixture("authoring_edit_new_card").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let draft = json!({"schema_version":1,"kind":"new","name":"weekly-review",
+        "description":"Prepare a weekly review","skill_md":"# Weekly review\nEdited by the owner.",
+        "files":[],"base_skill":null,"rationale":"","safety_notes":""});
+    let axum::Json(edited) = crate::handlers::assistant_agent_learning::edit(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), row.id.clone())),
+        axum::Json(serde_json::from_value(json!({"revision":0,"draft":draft})).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited["status"], "updated");
+    assert_eq!(edited["conversation_id"], f.chat.conversation_id);
+    let fresh_id = edited["acknowledgement_id"].as_str().unwrap().to_owned();
+    assert_ne!(fresh_id, card.id);
+    let fresh: AssistantAcknowledgement = f
+        .state
+        .db
+        .collection(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .find_one(doc! {"_id":&fresh_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let reference = fresh.authored_skill.as_ref().unwrap();
+    assert_eq!(reference.proposal_id, row.id);
+    assert_eq!(reference.revision, 1);
+    // The fresh card publishes the edited revision.
+    let saved: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &saved, &id, "POST").await;
+    let decided = finish(&f, fresh, true).await.unwrap();
+    assert_eq!(decided.status, "used");
+    let agent: AssistantAgent = f
+        .state
+        .db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(agent.skills.len(), 1);
+    assert_eq!(agent.skills[0].skill_id, id);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ornn_format_verdict_refuses_the_draft_before_review() {
+    let f = fixture("authoring_ornn_preflight").await;
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":false,
+            "violations":[{"rule":"allowed-root-items","message":"Root item \"private-notes.md\" is not allowed."}]}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: Some(&f.chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(f.chat.clone())),
+    };
+    let error = create(
+        &f.state,
+        &f.chat,
+        serde_json::from_value(input(&f.chat.agent_id)).unwrap(),
+        &reader,
+        &reader,
+    )
+    .await
+    .unwrap_err();
+    let AppError::SkillDraftValidation(diagnostic) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(diagnostic.rule, "ornn_format_rejected");
+    assert_eq!(diagnostic.field, "files");
+    assert_eq!(diagnostic.ornn_rules, ["allowed-root-items"]);
+    // Ornn's message (which can quote filenames) never reaches the author.
+    assert!(!format!("{:?}", error.response_body().details).contains("private-notes"));
+    for collection in [
+        PROPOSALS_COLLECTION_NAME,
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn top_level_files_are_reviewed_and_packaged_under_references() {
+    let f = fixture("authoring_reference_paths").await;
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+        )
+        .mount(&server)
+        .await;
+    let mut value = input(&f.chat.agent_id);
+    value["files"] = json!([
+        {"path":"faq.md","content":"Opening hours are 9 to 5."},
+        {"path":"assets/notes.txt","content":"Plain notes."}
+    ]);
+    let (row, _card) = make(&f, value).await;
+    let draft: GeneratedProposal = serde_json::from_slice(
+        &f.state
+            .encryption_keys
+            .decrypt(&row.body_encrypted)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let paths: Vec<_> = draft.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["references/faq.md", "assets/notes.txt"]);
+    let archive =
+        publication::package_with_snapshot(&draft, "op", "weekly-review", "1.0", None).unwrap();
+    let names: Vec<_> = zip::ZipArchive::new(std::io::Cursor::new(archive))
+        .unwrap()
+        .file_names()
+        .map(str::to_owned)
+        .collect();
+    assert!(names.contains(&"weekly-review/references/faq.md".to_owned()));
+    assert!(names.contains(&"weekly-review/assets/notes.txt".to_owned()));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ornn_field_rules_are_checked_when_authoring() {
+    let f = fixture("authoring_ornn_field_rules").await;
+    for (field, value, rule) in [
+        (
+            "description",
+            "Answers for <VIP> customers",
+            "angle_brackets",
+        ),
+        ("name", "claude-helper", "reserved_name"),
+    ] {
+        let mut draft = input(&f.chat.agent_id);
+        draft[field] = json!(value);
+        let error = create(
+            &f.state,
+            &f.chat,
+            serde_json::from_value(draft).unwrap(),
+            &review::UnavailableReader,
+            &review::UnavailableReader,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, AppError::SkillDraftValidation(d) if d.rule == rule && d.field == field),
+            "{error:?}"
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+/// A specialist drafts its own skill in the default (denied) access mode; the
+/// owner's approval publishes and pins it to that specialist.
+#[tokio::test]
+async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
+    let f =
+        crate::services::assistant_authority_tests::fixture("authoring_specialist_publish").await;
+    assert!(!f.chat.is_orchestrator());
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"specialist_access_requests":"denied"}},
+        )
+        .await
+        .unwrap();
+    review::migrate_publication_targets(&f.state, false)
+        .await
+        .unwrap();
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        learning::FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+        )
+        .mount(&server)
+        .await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    assert_eq!(row.agent_id, f.chat.agent_id);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(preflight_request),
+        "the specialist's draft gets Ornn's pre-review check"
+    );
+    let id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &id, "POST").await;
+    assert_eq!(finish(&f, card, true).await.unwrap().status, "used");
+    let agent = f
+        .state
+        .db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(agent.skills.iter().any(|pin| pin.skill_id == id));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_source_read_timeout_keeps_retryable_reservation_without_a_card() {
+    let f = fixture("authoring_snapshot_approval_timeout").await;
+    let server = setup_ornn(&f).await;
+    let skill_id = Uuid::new_v4().to_string();
+    let pin = crate::models::catalog_skill_revision::SkillReference {
+        disabled: false,
+        source: "ornn".into(),
+        skill_id: skill_id.clone(),
+        name: "weekly-review".into(),
+        version: "1.0".into(),
+        sha256: "a".repeat(64),
+        dependencies: vec![],
+    };
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"skills":bson::to_bson(&vec![pin]).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let service = f
+        .state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"slug":"ornn-api"})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::service_approval_config::ServiceApprovalConfig {
+                id: Uuid::new_v4().to_string(),
+                user_id: f.owner.clone(),
+                service_id: service.id.clone(),
+                service_name: service.name.clone(),
+                approval_required: true,
+                approval_mode: crate::models::service_approval_config::ApprovalMode::PerRequest,
+                rules: vec![],
+                default_effect: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: Some(&f.chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(f.chat.clone())),
+    };
+    let mut value = input(&f.chat.agent_id);
+    value["base_skill"] = json!({"skill_id":skill_id,"version":"1.0"});
+    let result = create(
+        &f.state,
+        &f.chat,
+        serde_json::from_value(value).unwrap(),
+        &reader,
+        &reader,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(AppError::Conflict(message)) if message.starts_with("source_skill_unavailable:"))
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+            .count_documents(doc! {"source":"authored"})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {"user_id":&f.owner,"authored_skill":{"$ne":bson::Bson::Null}})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+            .count_documents(doc! {"user_id":&f.owner,"service_id":&service.id,"status":"pending"})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn preview_marks_only_missing_format_details_and_sanitizes_stored_rules() {
+    let f = fixture("authoring_preview_format_details").await;
+    let (row, _) = make(&f, input(&f.chat.agent_id)).await;
+    for (code, rules, unavailable) in [
+        ("ornn_validation_failed", vec![], true),
+        ("ornn_package_rejected", vec![], true),
+        ("ornn_validation_failed", vec!["allowed_root_items"], false),
+        (
+            "ornn_validation_failed",
+            vec!["nyxid_ag_sentinel_secret", "unknown_rule"],
+            true,
+        ),
+        ("base_changed", vec![], false),
+        ("base_verify_failed", vec![], false),
+        ("base_interface_incompatible", vec![], false),
+        ("ornn_interface_change_requires_major", vec![], false),
+        ("ornn_dependency_rejected", vec![], false),
+        ("ornn_name_taken", vec![], false),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"failure_code": code, "failure_rules": &rules, "publication.last_stage": "format_validate"}},
+            )
+            .await
+            .unwrap();
+        let preview = review::authored_preview(&f.state, &f.owner, &row.agent_id, &row.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            preview["failure_details_unavailable"], unavailable,
+            "{code}"
+        );
+        assert!(!preview.to_string().contains("sentinel_secret"));
+        assert!(!preview.to_string().contains("unknown_rule"));
+        assert_eq!(preview["failure_stage"], "format_validate");
+    }
+    f.state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"publication.last_stage": "nyxid_ag_sentinel_secret"}},
+        )
+        .await
+        .unwrap();
+    let preview = review::authored_preview(&f.state, &f.owner, &row.agent_id, &row.id)
+        .await
+        .unwrap();
+    assert!(preview["failure_stage"].is_null());
+    assert!(!preview.to_string().contains("sentinel_secret"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn scope_identity_acceptance_revision_and_durable_repair_cap() {
     let f = fixture("authoring_scope_cap").await;
     let mut value = input(&f.chat.agent_id);
@@ -4222,6 +5479,7 @@ async fn scope_identity_acceptance_revision_and_durable_repair_cap() {
         &f.state,
         &f.chat,
         parse_input(&value).unwrap(),
+        &review::UnavailableReader,
         &review::UnavailableReader,
     )
     .await
@@ -4370,6 +5628,7 @@ async fn scope_identity_acceptance_revision_and_durable_repair_cap() {
         &f.state,
         &f.chat,
         parse_input(&value).unwrap(),
+        &review::UnavailableReader,
         &review::UnavailableReader,
     )
     .await
@@ -4563,11 +5822,19 @@ async fn ornn_preflight_rules_are_safe_no_card_and_count_toward_repair_cap() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":false,"violations":[{"rule":"frontmatter.description","message":"PRIVATE_SENTINEL"},{"rule":"no-readme-md","value":"SECRET_SENTINEL"}]}})))
         .expect(3).mount(&server).await;
     for attempt in 1..=3 {
-        let error = crate::handlers::agent_skills::dispatch(
+        let reader = crate::handlers::agent_skills::Reader {
+            state: &f.state,
+            person: &f.owner,
+            thread_key: Some(&f.chat.api_key_id),
+            scopes: None,
+            chat: Some(std::sync::Arc::new(f.chat.clone())),
+        };
+        let error = create(
             &f.state,
             &f.chat,
-            "draft_agent_skill",
-            &input(&f.chat.agent_id),
+            parse_input(&input(&f.chat.agent_id)).unwrap(),
+            &reader,
+            &reader,
         )
         .await
         .unwrap_err();
@@ -4579,11 +5846,27 @@ async fn ornn_preflight_rules_are_safe_no_card_and_count_toward_repair_cap() {
             if attempt == 3 {
                 "repair_cap_report_remaining_rules_to_owner"
             } else {
-                "ornn_validation_failed"
+                "ornn_format_rejected"
             }
         );
-        assert!(diagnostic.rules.contains(&"frontmatter_description"));
-        assert!(diagnostic.rules.contains(&"no_readme_md"));
+        assert!(
+            diagnostic
+                .ornn_rules
+                .iter()
+                .any(|rule| rule == "frontmatter.description")
+        );
+        assert!(
+            diagnostic
+                .ornn_rules
+                .iter()
+                .any(|rule| rule == "no-readme-md")
+        );
+        assert!(
+            serde_json::to_value(&diagnostic)
+                .unwrap()
+                .get("rules")
+                .is_none()
+        );
         let text = serde_json::to_string(&diagnostic).unwrap();
         assert!(!text.contains("SENTINEL"));
     }
@@ -4761,8 +6044,17 @@ async fn repair_budget_counts_only_package_format_rejections() {
         crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
     );
     assert_eq!(attempts.count_documents(doc! {}).await.unwrap(), 0);
-    let mut format = valid;
-    format["files"][0]["path"] = "root.txt".into();
+    let format = valid;
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data":{"valid":false,"violations":[{"rule":"allowed-root-items"}]}}),
+        ))
+        .with_priority(1)
+        .expect(3)
+        .mount(&server)
+        .await;
     for attempt in 1..=3 {
         let error = crate::handlers::agent_skills::dispatch(
             &f.state,
@@ -4780,7 +6072,7 @@ async fn repair_budget_counts_only_package_format_rejections() {
             if attempt == 3 {
                 "repair_cap_report_remaining_rules_to_owner"
             } else {
-                "root_entry_not_allowed"
+                "ornn_format_rejected"
             }
         );
         assert_eq!(
@@ -4836,7 +6128,7 @@ async fn unavailable_scope_preview_distinguishes_decryption_parse_and_legacy_row
 }
 
 #[tokio::test]
-async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repair_event() {
+async fn relocated_authored_package_records_postapproval_failure_and_clears_rules_after_edit() {
     let f = fixture("authoring_legacy_root_preclaim").await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
     let mut body: GeneratedProposal = serde_json::from_slice(
@@ -4847,16 +6139,20 @@ async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repa
             .unwrap(),
     )
     .unwrap();
-    body.files[0].path = "legacy.md".into();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(&serde_json::to_vec(&body).unwrap())
-        .await
-        .unwrap();
-    f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
-        doc! {"_id":&row.id}, doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}},
-    ).await.unwrap();
+    let server = setup_ornn(&f).await;
+    // The root path is relocated before review, preserving main's released contract.
+    assert_eq!(
+        publication::package_path("legacy.md"),
+        "references/legacy.md"
+    );
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data":{"valid":false,"violations":[{"rule":"allowed-root-items"}]}}),
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
     let preview =
         review::authored_preview_for_card(&f.state, &f.owner, &row.agent_id, &row.id, &card.id)
             .await
@@ -4866,11 +6162,11 @@ async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repa
             .as_array()
             .unwrap()
             .iter()
-            .any(|file| file["path"] == "legacy.md")
+            .any(|file| file["path"] == "references/checklist.md")
     );
     assert!(matches!(
         finish(&f, card.clone(), true).await,
-        Err(AppError::SkillDraftValidation(_))
+        Err(AppError::Conflict(code)) if code == "ornn_validation_failed"
     ));
     let failed = stored(&f, &row.id).await;
     assert_eq!(
@@ -4878,9 +6174,14 @@ async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repa
         Some("ornn_validation_failed")
     );
     assert_eq!(failed.failure_rules, vec!["allowed_root_items"]);
+    let failed_preview =
+        review::authored_preview_for_card(&f.state, &f.owner, &row.agent_id, &row.id, &card.id)
+            .await
+            .unwrap();
+    assert_eq!(failed_preview["failure_stage"], "format_validate");
     assert_eq!(
         failed.publication.unwrap().last_stage.as_deref(),
-        Some("pre_claim")
+        Some("format_validate")
     );
     // A retry cannot create a second repair notification for the same transition.
     assert!(finish(&f, card, true).await.is_err());
@@ -4910,7 +6211,6 @@ async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repa
     assert!(edited.failure_code.is_none());
     assert!(edited.failure_rules.is_empty());
     assert!(edited.publication.is_none());
-    let server = setup_ornn(&f).await;
     let reader = crate::handlers::agent_skills::Reader {
         state: &f.state,
         person: &f.owner,
@@ -4930,14 +6230,6 @@ async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repa
     .await
     .map_err(|failure| failure.error)
     .unwrap();
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .any(|request| request.url.path() == "/api/v1/skill-format/validate")
-    );
     let new_card = acks::request(
         &f.state.db,
         &f.chat,
@@ -4962,6 +6254,7 @@ async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repa
     for value in [preview, card_preview] {
         assert!(value["failure_code"].is_null());
         assert_eq!(value["failure_rules"], json!([]));
+        assert!(value["failure_stage"].is_null());
     }
     let listed = review::list(&f.state, &f.owner, &row.agent_id, true)
         .await
@@ -4974,7 +6267,7 @@ async fn legacy_authored_root_file_records_definitive_pre_claim_failure_and_repa
 }
 
 #[tokio::test]
-async fn preflight_binding_failure_preserves_rules_in_pre_claim_transition() {
+async fn format_failure_preserves_rules_in_pre_claim_transition() {
     let f = fixture("authoring_preflight_binding_rules").await;
     let server = setup_ornn(&f).await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
@@ -5005,20 +6298,10 @@ async fn preflight_binding_failure_preserves_rules_in_pre_claim_transition() {
         scopes: None,
         chat: None,
     };
-    let failure = match review::approval_binding_typed(
-        &f.state,
-        &f.owner,
-        &row.agent_id,
-        &row.id,
-        row.revision,
-        row.agent_skills_revision,
-        &reader,
-    )
-    .await
-    {
-        Err(failure) => failure,
-        Ok(_) => panic!("invalid preflight accepted"),
-    };
+    let error = publication::validate(&reader, b"package")
+        .await
+        .unwrap_err();
+    let failure = review::BindingFailure::from_publication(error);
     assert_eq!(
         failure.code,
         Some(review::PublicationFailureCode::OrnnValidationFailed)

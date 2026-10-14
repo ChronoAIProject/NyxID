@@ -741,8 +741,10 @@ telemetry nor persistent browser storage.
 
 First-party access JWTs carry `sid`. Protected requests and refresh validate the
 bound session's liveness, so issuer revocation invalidates both existing and
-refreshed access tokens and cascades to MCP sessions. Legacy first-party tokens
-without `sid` retain their existing compatibility behavior.
+refreshed access tokens and cascades to the user's session-fallback MCP sessions
+(the only ones that authenticate without a bearer). MCP sessions of OAuth clients
+such as Claude and Codex present their own bearer on every request and survive.
+Legacy first-party tokens without `sid` retain their existing compatibility behavior.
 
 ---
 
@@ -1345,6 +1347,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 | `base_url`         | string | HTTP only | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
 | `auth_type`        | string | HTTP only | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
 | `auth_key_name`    | string | HTTP only | Header or query param name. Defaults based on `auth_type`.                            |
+| `auth_scheme` | string | No | Catalog bearer authorization scheme: an RFC 9110 token of 1–64 ASCII bytes. Omitted means `Bearer`. Valid only with bearer auth (including the `oauth2` alias). No user-connection override. |
 | `credential`       | string | HTTP only | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
 | `service_category` | string | No       | `"connection"` or `"internal"` for SSH services; `"connection"` (default), `"internal"`, or `"provider"` for HTTP. |
 | `ssh_config`       | object | SSH only | SSH target configuration with `host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, and `allowed_principals` |
@@ -1553,6 +1556,7 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `name`         | string  | No       | New display name (1-200 chars)                                          |
 | `description`  | string  | No       | New description (max 500 chars)                                         |
 | `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
+| `auth_scheme` | string or null | No | Replace the bearer scheme; `null` restores `Bearer`, omission preserves it. Catalog Managers follow own/shared row field rules; Tools Managers cannot set it. Admin Tool changes demote operations. |
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
 | `openapi_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars). The legacy alias `api_spec_url` is also accepted. |
 | `asyncapi_spec_url` | string  | No       | URL to an AsyncAPI spec for WebSocket or SSE documentation (max 2048 chars) |
@@ -3510,6 +3514,8 @@ List user's service bindings.
 | `auth_method` | string | Credential injection method |
 | `auth_key_name` | string | Header or parameter name used for credential injection |
 | `catalog_service_id` | UUID string, omitted | Source catalog service |
+| `icon_url` | URL string, omitted | Per-connection icon override set by the user |
+| `catalog_icon_url` | URL string, omitted | The catalog service's icon (its provider's uploaded icon, or a Tool's own icon); clients show it when there is no `icon_url` override |
 | `node_id` | UUID string, omitted | Selected credential node |
 | `node_priority` | integer | Node routing priority |
 | `ssh_auth_mode` | string | `cert`, `node_key`, or `proxy_only` |
@@ -6872,6 +6878,52 @@ curl -X DELETE http://localhost:3001/api/v1/admin/users/user-uuid-here/roles/rol
 
 ---
 
+### Admin Usage
+
+Platform-wide usage reports live under `/api/v1/admin/usage`
+(`GET /admin/usage`, `GET /admin/usage/analytics`,
+`GET /admin/usage/identities`, and `GET`/`PUT /admin/usage/workspace`). The
+full query and response contract is in
+[BILLING_ANALYTICS.md](BILLING_ANALYTICS.md#api-and-reporting-semantics).
+
+**Auth:** Admin or Operator, or any user holding the
+`nyxid:admin:usage:read` permission through a direct or group role. The seeded
+system role **Usage Viewer** (`usage_viewer`) carries it; assign it with
+`POST /api/v1/admin/users/{user_id}/roles/{role_id}` or add the permission to a
+custom role. Holders get read-only access: `PUT /admin/usage/workspace` stays
+admin-only. `GET /api/v1/users/me` reports the result as
+`capabilities.read_admin_usage`.
+
+#### GET /api/v1/admin/usage/identities
+
+Options for the Usage page's actor/owner filters, or labels for saved filter
+ids. Returns only `id`, `label` and optional `detail` (email, `Organization` or
+`Service account`).
+
+| Parameter | Type   | Description                                                             |
+|-----------|--------|-------------------------------------------------------------------------|
+| `kind`    | string | `actors` (people and service accounts) or `owners` (also organizations) |
+| `search`  | string | Case-insensitive substring                                              |
+| `ids`     | string | Comma-separated ids (at most 100) to label instead of searching         |
+
+Admins and Operators search the whole directory. Callers with only the usage
+permission see only identities recorded in the usage rollups, and the List
+report redacts its `selected_user` unless that identity appears in the report.
+
+```json
+{
+  "options": [
+    { "id": "550e8400-e29b-41d4-a716-446655440000", "label": "Jane Doe", "detail": "jane@example.com" }
+  ],
+  "total": 1
+}
+```
+
+**Errors:** `400` invalid `kind` or more than 100 `ids`; `403` without usage
+access; `503` (`12200`) when the lookup times out.
+
+---
+
 ### Admin Groups
 
 All admin group endpoints require the authenticated user to have `is_admin = true`.
@@ -8174,6 +8226,22 @@ Human owners and owning-org admins can `PATCH /api/v1/channel-bots/{id}` with `{
 
 Public messages use `post:<conversation_id>` addresses. Agents use `POST /api/v1/channel-relay/reply` with the callback's NyxID `message_id` and reply token. Replies are text-only and target that incoming post; caller metadata cannot change the target. Public callbacks omit owner access tokens. Public initiated sends and edits are unsupported. See [X channel setup and limitations](CHANNEL_BOT_RELAY.md#select-mentions-and-replies) for the CLI, routing, scope and billing details.
 
+## Channel bot health
+
+`GET /api/v1/channel-bots/{id}/health` returns metadata-only delivery diagnostics for anyone who can read the bot:
+- `diagnostics`: inbound, reply and webhook timestamps and errors, `subscription_state`, `consecutive_errors` and the stable `failure_reason`;
+- `mode` (`webhook` or `poll`);
+- the stable `recommended_action` (`none`, `reconnect`, `resubscribe`, `verify`, `wait_rate_limit`, `enable_billing`, `contact_admin`, `gateway`) and `recommended_action_text`;
+- `can_write`.
+
+Unauthorized callers get the not-found shape.
+
+`POST /api/v1/channel-bots/{id}/resubscribe` needs write access and is X-only. It re-registers the X Activity subscription, reads it back live, records a `channel_bot_resubscribed` audit row, and returns fresh health.
+
+Admins can use `GET /api/v1/admin/channel-bots` (`platform`, `status`, `limit` 1-500, `offset`; ordered by id), `GET /api/v1/admin/channel-bots/{id}/health` and `GET /api/v1/admin/channel-bots/webhook-rejections`. The last returns per-platform counters of deliveries refused before a bot was authenticated.
+
+All of these routes are denied to delegated `account:read` tokens. Failure codes and recovery are described in [X channel workflow, health and recovery](CHANNEL_BOT_RELAY.md#x-channel-workflow-health-and-recovery).
+
 ## Telegram New Channel Creation
 
 Telegram New is the separate `telegram-new` channel option. The existing `telegram` registration API and token-based setup remain available. See [Telegram New](TELEGRAM_NEW.md#api-and-storage) for request/response fields, status transitions, recovery rules, and administrator setup.
@@ -8361,6 +8429,33 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
 
+## Assistant skill review and image input
+
+`GET /api/v1/assistant/nyxagent/conversations/{id}` accepts an optional `card`
+UUID alongside the existing `limit` and `before_seq` pagination parameters.
+It includes that acknowledgement in the history response even when the card is
+outside the normal recent-card window. The caller must have access to the
+conversation, and the selected card must belong to that same authorized
+conversation. Omitting `card` preserves the existing history request behavior.
+
+Authored skill tool results and proposal listings include `review_url`, an
+absolute link to `/assistant?c={conversation_id}&card={acknowledgement_id}`.
+Proposal listings also expose the associated card state. Group pending-action
+responses carry an optional review link so the reviewing owner can open the
+complete file review. Authored review links replace chat confirmation phrases:
+typed channel replies cannot approve publication. The link identifies a review
+surface and grants no additional authority. See [Agent learning](AGENT_LEARNING.md)
+for the full draft, approval and explicit expired-card renewal contracts.
+
+`GET /api/v1/assistant-attachments/{id}/content` accepts a live conversation
+Agent Key for model image input. Alongside user-uploaded image selection, it can
+serve retained tool-returned raster images from that key's active turn. It
+rechecks conversation, owner, key, Stop, organization access and retention;
+an unrelated key or turn cannot retrieve the pixels. Capability negotiation
+controls optional model image rounds, so older NyxAgent deployments retain
+text-only behavior. See [Uploads](chat/10-uploads.md) for content limits and
+fallback behavior.
+
 ## Tools
 
 See [TOOLS.md](TOOLS.md) for the model, publication boundary, roles and CLI walkthrough.
@@ -8371,7 +8466,7 @@ See [TOOLS.md](TOOLS.md) for the model, publication boundary, roles and CLI walk
 
 Tool service writes and publication require platform admin authority in Phase 1. `/keys` hides platform tool bindings and retains BYOK bindings with `offering_kind`; human `/catalog` excludes tools by default (`?offering_kind=tool` or `include_all=true` opts in). MCP discovery includes tools under unchanged `{service_slug}__{endpoint.name}` identities. Runtime overlay storage and editor scopes are Phase 2.
 
-`POST /api/v1/services` supports `twin_of_service_id` (catalog UUID or slug) with a required new `slug`. It clones allowed transport/spec/discovery metadata and all endpoint rows into an internal, provider-less `tool` with no credential, default enabled/public platform-key configuration, and `catalog_twin` provenance. Copied endpoints receive new UUIDs, generation 1 and inactive draft state in the catalog create transaction. Request metadata overrides copied fields. Source credentials and provider links are never copied; configure the credential after creation. Eligible existing rows can instead flip through `PUT /services/{id}` with `offering_kind=tool`, retaining existing published operations. See [Tools](TOOLS.md) for CLI examples and the idempotent `scripts/tools/add-tool-twin.sh` POC. No tool rows are seeded.
+`POST /api/v1/services` supports `twin_of_service_id` (catalog UUID or slug) with a required new `slug`. It clones allowed transport/spec/discovery metadata and all endpoint rows into an internal, provider-less `tool` with no credential, default enabled/public platform-key configuration, and `catalog_twin` provenance. Copied endpoints receive new UUIDs, generation 1 and inactive draft state in the catalog create transaction. Request metadata overrides copied fields. Source credentials and provider links are never copied; configure the credential after creation. Eligible existing rows can instead flip through `PUT /services/{id}` with `offering_kind=tool`, retaining existing published operations. Manager twins use sanitized inheritance, restricted empty audience and live creator/role fences. See [Tools](TOOLS.md) for supported `admin tools add|apply|validate|icon` workflows. No tool rows are seeded.
 
 Tools updates distinguish omission from JSON `null` for `supplier` and `import_source`: omit to retain, null to clear. `GET /api/v1/keys?include_tool_bindings=true` includes otherwise-hidden platform Tool bindings with the existing KeyResponse shape; default listing still hides them and includes BYOK rows. Owner, membership, restricted API-key and delegated read semantics are unchanged. Tools `limits` is null when `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`, otherwise `{ rate_limit_per_second, burst }`.
 

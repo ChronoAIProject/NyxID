@@ -13,7 +13,11 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<Vec<ToolOffering>>> {
-    let admin = super::services_helpers::is_admin(&state, &auth).await?;
+    let admin = match super::services_helpers::is_admin(&state, &auth).await {
+        Ok(admin) => admin,
+        Err(error) if super::services_helpers::is_capability_denial(&error) => false,
+        Err(error) => return Err(error),
+    };
     Ok(Json(
         tools_service::list(
             &state.db,

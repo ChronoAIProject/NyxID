@@ -21,6 +21,7 @@ import {
   completeManagedOAuth,
   useManagedOnboarding,
 } from "@/hooks/use-channel-managed";
+import { ChannelBotHealthCard } from "./channel-bot-health-card";
 import type {
   ManagedFlowProps,
   ManagedDetailProps,
@@ -230,6 +231,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
     <DetailSection title="Connected account">
+      <ChannelBotHealthCard botId={bot.id} />
       <DetailRow label="Handle" value={bot.platform_bot_username} />
       <DetailRow
         label="Connection"

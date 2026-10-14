@@ -80,6 +80,41 @@ pub async fn require_admin_or_operator(
     Ok(())
 }
 
+/// Check that the caller may read platform-wide usage data
+/// (see [`role_service::can_read_admin_usage`]) and return their platform
+/// role, which decides how much identity data usage endpoints disclose.
+pub async fn require_admin_usage_read(
+    state: &AppState,
+    auth_user: &AuthUser,
+    endpoint_marker: &'static str,
+) -> AppResult<crate::models::user::PlatformRole> {
+    let user_id = auth_user.user_id.to_string();
+    let user_model = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    if !role_service::can_read_admin_usage(&state.db, &user_model, platform_role).await? {
+        return Err(AppError::Forbidden("Admin access required".to_string()));
+    }
+
+    let event_type = match platform_role {
+        crate::models::user::PlatformRole::Admin => return Ok(platform_role),
+        crate::models::user::PlatformRole::Operator => "admin.read.by_operator",
+        crate::models::user::PlatformRole::User => "admin.usage.read.by_role",
+    };
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth_user,
+        event_type,
+        Some(serde_json::json!({ "endpoint": endpoint_marker })),
+    );
+    Ok(platform_role)
+}
+
 /// Check that the caller may issue and revoke one-off credit grants: an
 /// Admin, or an Operator holding the Credits Manager role
 /// (see [`role_service::can_manage_credit_grants`]).

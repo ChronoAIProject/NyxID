@@ -31,7 +31,7 @@ async fn resource_document(
 ) -> AppResult<Document> {
     db.collection::<Document>(kind.collection())
         .find_one(doc! { "_id": id, "is_active": true })
-        .projection(doc! { "user_id": 1, "owner_user_id": 1, "created_by": 1, "name": 1, "label": 1, "slug": 1, "platform": 1 })
+        .projection(doc! { "user_id": 1, "owner_user_id": 1, "created_by": 1, "name": 1, "label": 1, "slug": 1, "platform": 1, "offering_kind": 1 })
         .session(session).await?
         .ok_or_else(|| AppError::NotFound("Active resource not found".into()))
 }
@@ -165,14 +165,56 @@ pub async fn require_resource_access(
     db: &Database,
     actor: &str,
     api_key_id: Option<&str>,
+    first_party_human: bool,
     kind: ResourceKind,
     id: &str,
 ) -> AppResult<(String, bool, Document)> {
     let mut session = db.client().start_session().await?;
     let resource = resource_document(db, &mut session, kind, id).await?;
     let owner = owner_from_document(&resource, kind)?;
-    let admin = authorize(db, &mut session, actor, api_key_id, &owner, false).await?;
+    let admin = authorize_resource(
+        db,
+        &mut session,
+        actor,
+        api_key_id,
+        first_party_human,
+        kind,
+        id,
+        &owner,
+        false,
+    )
+    .await?;
     Ok((owner, admin, resource))
+}
+
+/// Tool reassignment is a platform decision, regardless of current ownership.
+/// Human identity is checked at ingress; API-key owners cannot inherit it here.
+#[allow(clippy::too_many_arguments)]
+pub async fn authorize_resource(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &str,
+    api_key_id: Option<&str>,
+    first_party_human: bool,
+    kind: ResourceKind,
+    id: &str,
+    owner: &str,
+    for_commit: bool,
+) -> AppResult<bool> {
+    let resource = resource_document(db, session, kind, id).await?;
+    if kind == ResourceKind::Service && resource.get_str("offering_kind").ok() == Some("tool") {
+        require_tool_admin(
+            db,
+            session,
+            actor,
+            api_key_id,
+            first_party_human,
+            for_commit,
+        )
+        .await?;
+        return Ok(true);
+    }
+    authorize(db, session, actor, api_key_id, owner, for_commit).await
 }
 
 pub async fn destination_candidates(
@@ -233,4 +275,78 @@ pub async fn destination_candidates(
         .try_collect()
         .await?;
     Ok((rows, total))
+}
+
+async fn require_tool_admin(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &str,
+    api_key_id: Option<&str>,
+    first_party_human: bool,
+    for_commit: bool,
+) -> AppResult<()> {
+    if !first_party_human || api_key_id.is_some() {
+        return Err(AppError::Forbidden(
+            "Tool ownership transfers require a first-party human Admin".into(),
+        ));
+    }
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": actor, "is_active": true, "user_type": "person"})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(forbidden)?;
+    let admin = if for_commit {
+        super::tools_manager_service::fence_authority(db, session, actor).await?
+    } else {
+        super::role_service::resolve_platform_role(db, &user)
+            .await?
+            .is_admin()
+    };
+    if !admin {
+        return Err(AppError::Forbidden(
+            "Only an Admin may transfer Tool ownership".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Receipts for other assets retain previous-owner replay even after deletion.
+/// New receipts bind Tool kind durably; existing live Tools are also protected.
+pub async fn authorize_replay(
+    db: &Database,
+    session: &mut ClientSession,
+    receipt: &crate::models::ownership_transfer::OwnershipTransfer,
+    first_party_human: bool,
+) -> AppResult<()> {
+    let live_tool = receipt.resource_kind == "service"
+        && db
+            .collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .find_one(doc! {"_id": &receipt.resource_id, "offering_kind": "tool"})
+            .projection(doc! {"_id": 1})
+            .session(&mut *session)
+            .await?
+            .is_some();
+    if receipt.tool_transfer || live_tool {
+        require_tool_admin(
+            db,
+            session,
+            &receipt.actor_user_id,
+            receipt.actor_api_key_id.as_deref(),
+            first_party_human,
+            true,
+        )
+        .await
+    } else {
+        authorize(
+            db,
+            session,
+            &receipt.actor_user_id,
+            receipt.actor_api_key_id.as_deref(),
+            &receipt.previous_owner_user_id,
+            false,
+        )
+        .await
+        .map(|_| ())
+    }
 }

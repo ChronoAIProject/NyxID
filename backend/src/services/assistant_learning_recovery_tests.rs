@@ -63,6 +63,7 @@ async fn tool_base(f: &Fixture, server: &MockServer) -> Base {
         version: "1.0".into(),
         sha256: base.sha.clone(),
         dependencies: vec![],
+        disabled: false,
     };
     f.state
         .db
@@ -352,10 +353,7 @@ async fn writes(server: &MockServer) -> usize {
         .await
         .unwrap()
         .iter()
-        .filter(|r| {
-            matches!(r.method.as_str(), "PUT" | "POST")
-                && r.url.path() != "/api/v1/skill-format/validate"
-        })
+        .filter(|r| matches!(r.method.as_str(), "PUT" | "POST") && !super::preflight_request(r))
         .count()
 }
 

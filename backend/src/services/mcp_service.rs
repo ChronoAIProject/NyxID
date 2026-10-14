@@ -7285,6 +7285,7 @@ mod tests {
                 version: "1.0".into(),
                 sha256: "a".repeat(64),
                 dependencies: vec![],
+                disabled: false,
             },
         ]);
         service.skills_revision = Some(3);
@@ -7325,6 +7326,7 @@ mod tests {
                 version: "1.0".into(),
                 sha256: "b".repeat(64),
                 dependencies: vec![],
+                disabled: false,
             },
         ]);
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -9918,6 +9920,7 @@ mod tests {
         provider_service::seed_default_services(&db, &encryption)
             .await
             .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
@@ -10281,6 +10284,7 @@ mod tests {
         provider_service::seed_default_services(&db, &encryption)
             .await
             .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
@@ -12954,6 +12958,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -12963,6 +12968,10 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "admin".to_string(),
+                catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,

@@ -14,6 +14,19 @@ pub const REJECTIONS_COLLECTION_NAME: &str = "assistant_agent_learning_rejection
 pub const ROOTS_COLLECTION_NAME: &str = "assistant_agent_learning_skill_roots";
 pub const PUBLICATION_TARGETS_COLLECTION_NAME: &str = "assistant_learning_publication_targets";
 pub const MIGRATIONS_COLLECTION_NAME: &str = "assistant_learning_migrations";
+pub const AUTHORED_CLAIMS_COLLECTION_NAME: &str = "assistant_authored_draft_claims";
+
+/// A generation's original review surface, retained across interrupted preparation.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AuthoredDraftClaim {
+    pub proposal_id: String,
+    pub conversation_id: String,
+    pub api_key_id: String,
+    pub turn_id: String,
+    pub requested_turn_id: Option<String>,
+    pub voice_request_id: Option<String>,
+    pub trigger_run_id: Option<String>,
+}
 
 pub const DEFAULT_THRESHOLD: i64 = 15;
 #[allow(dead_code)]

@@ -4,8 +4,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { ReactNode } from "react";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
-import { resetSkillCatalog } from "@/lib/assistant/skills";
 import { ApiError } from "@/lib/api-client";
+
+vi.mock("@/hooks/use-agent-skills", () => ({
+  useSkillSearch: vi.fn(() => ({ data: { items: [], total_pages: 1 }, isLoading: false })),
+  useAgentSkills: vi.fn(() => ({ data: undefined })),
+  useSetAgentSkills: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useAttachLatestSkill: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+}));
+// The Skills tab is covered by plugins-view.skills.request.test.tsx.
 
 const mocks = vi.hoisted(() => ({
   useCatalog: vi.fn(),
@@ -164,7 +171,6 @@ function mockLoaded({
 describe("PluginsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    resetSkillCatalog();
     mockLoaded();
     mocks.addDialogProps = null;
     // Manage-modal hooks: a fully-shaped key + no-op mutations.
@@ -544,50 +550,5 @@ describe("PluginsView", () => {
     expect(
       screen.getByText("No plugins match this search."),
     ).toBeInTheDocument();
-  });
-
-  it("renders the skill catalog with the add-your-own card and installs a skill", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    expect(screen.getByText("Chrono AI Service Manual")).toBeInTheDocument();
-    expect(screen.getAllByText("Installed")).toHaveLength(1);
-    expect(screen.getByText("Add your own skill")).toBeInTheDocument();
-    expect(screen.queryByText("GitHub")).not.toBeInTheDocument();
-    // Author · version meta line for available skills.
-    expect(screen.getByText("Ornn · v1.2")).toBeInTheDocument();
-
-    await user.click(
-      screen.getAllByRole("button", { name: /^Install / })[0] as HTMLElement,
-    );
-    expect(screen.getAllByText("Installed")).toHaveLength(2);
-  });
-
-  it("leaves an installed skill's card inert (no management flow yet)", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    // Available skills are clickable; the installed one exposes no action.
-    expect(
-      screen.getByRole("button", { name: /^Install / }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /^Manage / }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("keeps installed skills across unmount and remount", async () => {
-    const user = userEvent.setup();
-    const first = render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    await user.click(
-      screen.getAllByRole("button", { name: /^Install / })[0] as HTMLElement,
-    );
-    expect(screen.getAllByText("Installed")).toHaveLength(2);
-    first.unmount();
-
-    render(<PluginsView />);
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    expect(screen.getAllByText("Installed")).toHaveLength(2);
   });
 });

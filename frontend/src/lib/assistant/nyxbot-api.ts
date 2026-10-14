@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
   nyxAgentChannelThreadListSchema,
@@ -15,8 +16,11 @@ import {
   nyxAgentChannelConnectSchema,
   nyxAgentChannelLinkedSchema,
   nyxAgentChannelListSchema,
+  nyxAgentConversationSchema,
+  nyxAgentModelSchema,
   nyxAgentSettingsSchema,
   type AssistantAgentCreate,
+  type AssistantAgentUpdate,
   type AssistantAgentGrantsRequest,
   type AssistantGroupForm,
   type AssistantGroupUpdate,
@@ -53,10 +57,7 @@ export const nyxBotApi = {
     );
   },
   /** An empty `display_name` or `persona` clears it. */
-  async updateAgent(
-    id: string,
-    body: { name?: string; description?: string; display_name?: string; persona?: string },
-  ) {
+  async updateAgent(id: string, body: AssistantAgentUpdate) {
     await assistantJson(agentPath(id), { method: "PATCH", body });
   },
   /** Replaces a specialist's grants. */
@@ -82,6 +83,19 @@ export const nyxBotApi = {
     await assistantJson(`${agentPath(agentId)}/memory/${encodeURIComponent(noteId)}`, {
       method: "DELETE",
     });
+  },
+  /** Models NyxAgent offers; `available: false` rows cannot be selected. */
+  async models() {
+    return z.array(nyxAgentModelSchema).parse(await assistantJson(`${ROOT}/models`));
+  },
+  /** Select the model for one thread; its context restarts on the new model. */
+  async changeModel(conversationId: string, model: string) {
+    return nyxAgentConversationSchema.parse(
+      await assistantJson(`${ROOT}/conversations/${encodeURIComponent(conversationId)}/model`, {
+        method: "PATCH",
+        body: { model },
+      }),
+    );
   },
   async settings() {
     return nyxAgentSettingsSchema.parse(await assistantJson(`${ROOT}/settings`));
@@ -185,9 +199,9 @@ export const nyxBotApi = {
     );
   },
   /** Accepted (202): replies arrive later as new messages. */
-  async postGroupMessage(id: string, text: string, attachmentIds?: string[]) {
+  async postGroupMessage(id: string, text: string, attachmentIds?: string[], recipientAgentIds?: string[]) {
     return assistantGroupPostedSchema.parse(
-      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}) } }),
+      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}), ...(recipientAgentIds?.length ? { recipient_agent_ids: recipientAgentIds } : {}) } }),
     );
   },
 };

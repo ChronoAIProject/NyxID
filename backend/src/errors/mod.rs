@@ -135,6 +135,10 @@ pub enum AppError {
     )]
     AssistantTurnRequired,
 
+    /// A NyxBot model selection names a model NyxAgent does not offer.
+    #[error("The selected model is not available. Choose another model in the model selector.")]
+    AssistantModelUnavailable,
+
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
 
@@ -788,6 +792,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
+            Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -1009,6 +1014,7 @@ impl AppError {
             Self::ToolOperationNotPublished => 12700,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
+            Self::AssistantModelUnavailable => 12103,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited => 1005,
@@ -1269,6 +1275,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
+            Self::AssistantModelUnavailable => "model_unavailable",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
@@ -1559,7 +1566,7 @@ impl AppError {
                     format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
                 }
                 AppError::SkillDraftValidation(diagnostic)
-                    if diagnostic.rule == "ornn_validation_failed" && diagnostic.rules.is_empty() =>
+                    if diagnostic.rule == "ornn_format_rejected" && diagnostic.ornn_rules.is_empty() =>
                 {
                     format!("Skill draft failed validation ({}); details unavailable.", diagnostic.rule)
                 }
@@ -1657,12 +1664,19 @@ mod tests {
             assert_eq!(response.message, local.to_string());
             assert_eq!(response.details.unwrap()["line"], 3);
         }
-        let mut ornn = skill_draft::SkillDraftValidation::at("ornn_validation_failed", "draft");
-        ornn.rules.clear();
+        let detailed: AppError =
+            skill_draft::SkillDraftValidation::ornn_rejected(["no-readme-md"]).into();
+        assert_eq!(detailed.response_body().message, detailed.to_string());
+        let local: AppError =
+            skill_draft::SkillDraftValidation::at("ornn_validation_failed", "draft")
+                .on_line(2)
+                .into();
+        assert_eq!(local.response_body().message, local.to_string());
+        let ornn = skill_draft::SkillDraftValidation::ornn_rejected([]);
         let ornn = AppError::SkillDraftValidation(Box::new(ornn));
         assert_eq!(
             ornn.response_body().message,
-            "Skill draft failed validation (ornn_validation_failed); details unavailable."
+            "Skill draft failed validation (ornn_format_rejected); details unavailable."
         );
     }
 
@@ -1978,6 +1992,15 @@ mod tests {
     }
 
     #[test]
+    fn assistant_model_unavailable_contract() {
+        let error = AppError::AssistantModelUnavailable;
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.error_code(), 12103);
+        assert_eq!(error.error_key(), "model_unavailable");
+        assert!(error.response_body().message.contains("model selector"));
+    }
+
+    #[test]
     fn assistant_turn_required_contract() {
         let error = AppError::AssistantTurnRequired;
         assert_eq!(error.status_code(), StatusCode::CONFLICT);
@@ -1991,6 +2014,7 @@ mod tests {
         let codes = vec![
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
+            AppError::AssistantModelUnavailable.error_code(),
             AppError::AdminUsageQueryTimeout.error_code(),
             AppError::WorkspaceDestinationsNotActivated.error_code(),
             AppError::NodeHttpSignatureUnsupported.error_code(),

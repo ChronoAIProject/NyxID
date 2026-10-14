@@ -35,7 +35,13 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { CreditsDeniedHost } from "@/components/billing/credits-denied-host";
 import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite, hasAdminRead } from "@/types/api";
+import {
+  canAdminWrite,
+  canManageCatalog,
+  canManageTools,
+  canReadAdminUsage,
+  hasAdminRead,
+} from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
@@ -44,7 +50,12 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
-import { ADMIN_CREDITS_TABS, KEY_DETAIL_TABS, isValidTab } from "@/lib/url-tabs";
+import {
+  ADMIN_BILLING_TABS,
+  ADMIN_CREDITS_TABS,
+  KEY_DETAIL_TABS,
+  isValidTab,
+} from "@/lib/url-tabs";
 
 import {
   LandingPage,
@@ -101,6 +112,7 @@ import {
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
   AdminCreditsPage,
+  AdminBillingPage,
   AdminInviteCodesPage,
   CliAuthPage,
   CliPairPage,
@@ -497,23 +509,26 @@ const toolsRoute = createRoute({
   getParentRoute: () => dashboardLayout,
   component: ToolsPage,
 });
-const adminToolsRoute = createRoute({
+export const adminToolsRoute = createRoute({
   path: "/admin/tools",
   getParentRoute: () => dashboardLayout,
   beforeLoad: () => {
-    if (!useAuthStore.getState().user?.is_admin)
+    if (!canManageTools(useAuthStore.getState().user))
       throw redirect({ to: "/tools" });
   },
   component: AdminToolsPage,
 });
 
-const servicesRedirectRoute = createRoute({
+export const servicesRedirectRoute = createRoute({
   path: "/services",
   getParentRoute: () => dashboardLayout,
   beforeLoad: async () => {
     const { user } = useAuthStore.getState();
-    if (user?.is_admin) {
-      // Admin users can still access the services management pages
+    if (
+      canManageCatalog(user) ||
+      canManageTools(user) ||
+      hasAdminRead(user)
+    ) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });
@@ -548,7 +563,7 @@ const connectionsRedirectRoute = createRoute({
   component: () => null,
 });
 
-const providersRedirectRoute = createRoute({
+export const providersRedirectRoute = createRoute({
   path: "/providers",
   getParentRoute: () => dashboardLayout,
   beforeLoad: ({ location }) => {
@@ -560,8 +575,7 @@ const providersRedirectRoute = createRoute({
       return;
     }
     const { user } = useAuthStore.getState();
-    if (user?.is_admin) {
-      // Admin users can still access the providers management pages
+    if (canManageCatalog(user)) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });
@@ -960,16 +974,24 @@ const orgJoinRoute = createRoute({
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: () => {
+  beforeLoad: ({ location }) => {
     const { user, isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
       throw redirect({ to: "/login" });
     }
     // Admin layout is reachable by both `admin` (read+write) and `operator`
     // (read-only). Per-action write controls inside admin pages are gated
-    // separately so operators see admin data but cannot mutate it.
-    if (!isLoading && !hasAdminRead(user)) {
+    // separately so operators see admin data but cannot mutate it. Holders of
+    // the usage-read role permission reach only the Usage page.
+    if (isLoading || hasAdminRead(user)) return;
+    const usagePath =
+      location.pathname === "/admin/usage" ||
+      location.pathname === "/admin/analytics";
+    if (!canReadAdminUsage(user)) {
       throw redirect({ to: "/dashboard" });
+    }
+    if (!usagePath) {
+      throw redirect({ to: "/admin/usage" });
     }
   },
   component: () => <Outlet />,
@@ -1122,6 +1144,15 @@ const adminCreditsRoute = createRoute({
   }),
 });
 
+const adminBillingRoute = createRoute({
+  path: "billing",
+  getParentRoute: () => adminLayout,
+  component: AdminBillingPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    ...(isValidTab(search.tab, ADMIN_BILLING_TABS) ? { tab: search.tab } : {}),
+  }),
+});
+
 const adminInviteCodesRoute = createRoute({
   path: "invite-codes",
   getParentRoute: () => adminLayout,
@@ -1262,6 +1293,7 @@ const routeTree = rootRoute.addChildren([
       adminAnalyticsRoute,
       adminIntegrityRoute,
       adminCreditsRoute,
+      adminBillingRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminUploadRetentionRoute,

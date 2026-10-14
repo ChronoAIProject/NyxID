@@ -10,6 +10,7 @@ import { useToolTopics } from "@/hooks/use-tools";
 import { useCatalogToolMutation } from "@/hooks/use-catalog-admin";
 import { addToolSchema } from "@/schemas/tools";
 import { useAuthStore } from "@/stores/auth-store";
+import { canManageTools, canWriteTool } from "@/types/api";
 import type { DownstreamService } from "@/types/api";
 import { useAppForm } from "@/components/ui/form";
 import { PageHeader } from "@/components/shared/page-header";
@@ -36,23 +37,27 @@ import {
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CatalogToolMetadata } from "@/components/services/catalog-tool-metadata";
+import { ServiceIcon } from "@/components/service-icon";
 
 export function AdminToolsPage() {
-  const { data: services = [], isLoading, error, refetch } = useServices();
-  const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
+  const { data: services = [], isLoading, error, refetch } = useServices(true);
+  const user = useAuthStore((state) => state.user);
+  const admin = canManageTools(user);
   const [adding, setAdding] = useState(false);
   const [createdTool, setCreatedTool] = useState<DownstreamService | null>(
     null,
   );
-  const tools = services.filter((s) => s.offering_kind === "tool");
+  const tools = services.filter(
+    (s) => s.offering_kind === "tool" && canWriteTool(user, s),
+  );
   const suppliers = Array.from(new Set(tools.map((s) => s.supplier ?? s.name)));
   if (!admin)
-    return <ErrorBanner message="Platform admin authority required" />;
+    return <ErrorBanner message="Tools management authority required" />;
   return (
     <div className="space-y-6">
       <PageHeader
         title="Tools"
-        description="Curate providers, operation publication, and import provenance."
+        description="Prepare tools and operations. Admins approve audience, prices and publication."
         actions={
           <AddCtaButton label="Add tool" onClick={() => setAdding(true)} />
         }
@@ -106,6 +111,9 @@ export function AdminToolsPage() {
                       className="border-t border-border/50 align-top"
                     >
                       <td className="space-y-3 p-4">
+                        {tool.icon_url && (
+                          <ServiceIcon iconUrl={tool.icon_url} size="md" />
+                        )}
                         <h2 className="text-15 font-semibold">{tool.name}</h2>
                         <Button variant="ghost" asChild>
                           <Link
@@ -155,14 +163,25 @@ function ProviderStatus({ tool }: { tool: DownstreamService }) {
     (e) => e.publication === "published" && e.is_active,
   ).length;
   const drafts = operations.filter((e) => e.publication === "draft").length;
+  const audiencePending =
+    tool.platform_key &&
+    (!tool.platform_key.enabled ||
+      (tool.platform_key.audience === "restricted" &&
+        tool.platform_key.allowed_owner_ids.length === 0));
   const blocker =
-    tool.auth_method !== "none" && !tool.credential_configured
-      ? "Store credential"
-      : !tool.openapi_spec_url
-        ? "No spec"
-        : published === 0
-          ? "Publish operations"
-          : "Ready";
+    tool.is_active === false
+      ? "Disabled"
+      : tool.auth_method !== "none" && !tool.credential_configured
+        ? tool.tools_credential_frozen
+          ? "Admin credential restoration"
+          : "Store credential"
+        : audiencePending
+          ? "Admin audience approval"
+          : published === 0
+            ? "Admin publication"
+            : tool.platform_key?.audience === "restricted"
+              ? "Restricted audience"
+              : "Ready";
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 py-3 text-12">
       <span>{tool.name}</span>
@@ -196,6 +215,7 @@ function AddToolDialog({
 }) {
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
+  const user = useAuthStore((state) => state.user);
   const form = useAppForm<z.infer<typeof addToolSchema>>({
     resolver: zodResolver(addToolSchema),
     defaultValues: {
@@ -246,12 +266,14 @@ function AddToolDialog({
                 auth_method,
                 auth_key_name,
                 service_category: "internal",
-                platform_key: {
+              });
+              if (user?.is_admin) {
+                body.platform_key = {
                   enabled: true,
                   audience: "public",
                   allowed_owner_ids: [],
-                },
-              });
+                };
+              }
               if (openapi_spec_url) body.openapi_spec_url = openapi_spec_url;
             }
             try {
@@ -302,14 +324,9 @@ function AddToolDialog({
                       (service) =>
                         service.service_type === "http" &&
                         service.offering_kind !== "tool" &&
-                        [
-                          "none",
-                          "bearer",
-                          "header",
-                          "query",
-                          "query_param",
-                          "basic",
-                        ].includes(service.auth_method),
+                        ["none", "bearer", "header", "query", "basic"].includes(
+                          service.auth_method,
+                        ),
                     )
                     .map((service) => (
                       <SelectItem key={service.id} value={service.id}>
@@ -428,6 +445,7 @@ function AddToolDialog({
 
 function CreatedToolStatus({ tool }: { tool: DownstreamService }) {
   const { data: operations = [] } = useEndpoints(tool.id);
+  const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   return (
     <section
       className="rounded-xl border border-border/50 bg-card p-4 text-12"
@@ -444,12 +462,16 @@ function CreatedToolStatus({ tool }: { tool: DownstreamService }) {
       <div className="mt-3 flex gap-2">
         <Button variant="secondary" asChild>
           <Link to="/services/$serviceId/edit" params={{ serviceId: tool.id }}>
-            Configure credential and pricing
+            {admin
+              ? "Configure credential and pricing"
+              : "Configure credential"}
           </Link>
         </Button>
         <Button variant="ghost" asChild>
           <Link to="/services/$serviceId" params={{ serviceId: tool.id }}>
-            Review and publish operations
+            {admin
+              ? "Review and publish operations"
+              : "Review and validate operations"}
           </Link>
         </Button>
       </div>

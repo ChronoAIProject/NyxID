@@ -132,10 +132,10 @@ it.each(["rejected", "invalidated"])('renders %s as terminal rather than a failu
   expect(screen.queryByText(/Publication could not finish/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
-it("reports that NyxBot was asked for a corrected package after a refusal", async () => {
+it("reports that the drafting agent was asked for a corrected package after a refusal", async () => {
   mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["discard"], failure_code: "ornn_validation_failed" });
   show({ ...card, status: "used" });
-  expect(await screen.findByText(/NyxBot was asked for a corrected draft/)).toBeVisible();
+  expect(await screen.findByText(/The agent that drafted it was asked for a corrected draft/)).toBeVisible();
   expect(screen.getByRole("button", { name: "Discard" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Retry publication" })).not.toBeInTheDocument();
 });
@@ -292,8 +292,8 @@ it.each([
 it("explains complete scope and bounded coverage in plain language", async () => {
   mocks.json.mockResolvedValue({ ...preview, scope: { status: "complete", omissions: [] }, coverage_omitted: 11, coverage: [{ id: "upload", name: "source.txt", reads: 0, percent: 0, lower_bound: false, expired: false }] });
   show();
-  expect(await screen.findByText("NyxBot says this draft covers everything requested. The read coverage shown here is what NyxID observed.")).toBeVisible();
-  expect(screen.getByText("What NyxBot read")).toBeVisible();
+  expect(await screen.findByText("The drafting agent declares this draft covers everything requested. The read coverage shown here is what NyxID observed.")).toBeVisible();
+  expect(screen.getByText("Observed reads in the drafting conversation")).toBeVisible();
   expect(screen.getByText("11 earlier uploads are not shown.")).toBeVisible();
 });
 
@@ -325,4 +325,31 @@ it("accepts backend nulls for scope, failure stage and optional coverage timesta
   expect(parsed.scope).toBeNull();
   expect(parsed.failure_stage).toBeNull();
   expect(parsed.coverage[0]?.since_reset_percent).toBeNull();
+});
+
+it.each([undefined, null])("shows no scope section for a scope-less draft (%s)", async (scope) => {
+  mocks.json.mockResolvedValue({ ...preview, scope });
+  show();
+  expect(await screen.findByText("Attach to Operations")).toBeVisible();
+  expect(screen.queryByText(/Scope not declared|declares this draft covers/)).toBeNull();
+  expect(screen.queryByLabelText("Declared omissions")).toBeNull();
+  expect(screen.queryByRole("checkbox")).toBeNull();
+});
+
+it.each([
+  ["NyxBot drafting for a specialist", "nyxbot-thread", "Operations"],
+  ["specialist self-drafting", "specialist-thread", "Research"],
+])("attributes scope and reads to the drafting conversation: %s", async (_case, conversationId, targetName) => {
+  mocks.json.mockResolvedValue({
+    ...preview,
+    agent_name: targetName,
+    scope: { status: "complete", omissions: [] },
+    coverage: [{ id: "source", name: "source.txt", reads: 1, percent: 100, lower_bound: false, expired: false }],
+  });
+  show({ ...card, id: `${conversationId}-card` });
+  expect(await screen.findByText(`Attach to ${targetName}`)).toBeVisible();
+  expect(screen.getByText(/The drafting agent declares this draft covers everything requested/)).toBeVisible();
+  expect(screen.getByText("Observed reads in the drafting conversation")).toBeVisible();
+  expect(screen.queryByText(`${targetName} says this draft covers everything requested.`)).toBeNull();
+  expect(screen.queryByText(`What ${targetName} read`)).toBeNull();
 });

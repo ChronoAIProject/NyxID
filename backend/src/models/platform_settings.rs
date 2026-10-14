@@ -25,6 +25,18 @@ pub struct PlatformSettings {
     pub utility_inference: Option<UtilityInference>,
     #[serde(default)]
     pub utility_inference_admin_modified: bool,
+    #[serde(default)]
+    pub billing: Option<BillingSettings>,
+}
+
+/// Global billing defaults edited on the central admin billing page.
+/// Prices remain service-owned; see `services::billing::config`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillingSettings {
+    /// Overdraft cap for newly provisioned wallets; `None` uses
+    /// `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS`.
+    #[serde(default)]
+    pub default_overdraft_cap_credits: Option<i64>,
 }
 
 /// Server-owned metadata tasks share one atomic, admin-selected route.
@@ -43,6 +55,7 @@ impl PlatformSettings {
             broker_policy_revision: 0,
             utility_inference: None,
             utility_inference_admin_modified: false,
+            billing: None,
         }
     }
 }

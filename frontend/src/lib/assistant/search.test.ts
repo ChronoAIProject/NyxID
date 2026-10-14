@@ -126,3 +126,12 @@ describe("/assistant search round-trip through a real router", () => {
     ).toEqual({ c: "nyxid-chat-mock-1", mock: 1 });
   });
 });
+
+it("accepts UUID card links while preserving the other search fields", () => {
+  const card = "12345678-1234-4123-8123-123456789012";
+  expect(parseAssistantSearch({ c: "nyxa-hidden", card, panel: "settings", panelTab: "profile" }))
+    .toEqual({ c: "nyxa-hidden", card, panel: "settings", panelTab: "profile" });
+  for (const invalid of ["", "bad", "<script>", 1, `${card}/extra`]) {
+    expect(parseAssistantSearch({ card: invalid })).toEqual({});
+  }
+});

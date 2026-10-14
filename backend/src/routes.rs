@@ -663,13 +663,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let service_routes = Router::new()
         .route(
+            "/{service_id}/icon",
+            post(handlers::catalog_icons::upload_tool).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
             "/{service_id}/concurrency",
             get(handlers::service_concurrency::get).put(handlers::service_concurrency::put),
         )
         .route("/", get(handlers::services::list_services))
         .route("/", post(handlers::services::create_service_request))
         .route("/{service_id}", get(handlers::services::get_service))
-        .route("/{service_id}", put(handlers::services::update_service))
+        .route(
+            "/{service_id}",
+            put(handlers::services::update_service_request),
+        )
         .route("/{service_id}", delete(handlers::services::delete_service))
         .route(
             "/{service_id}/resync-identity",
@@ -762,6 +769,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let provider_routes = Router::new()
+        .route(
+            "/{provider_id}/icon",
+            post(handlers::catalog_icons::upload).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/", get(handlers::providers::list_providers))
         .route("/", post(handlers::providers::create_provider))
         .route("/my-tokens", get(handlers::user_tokens::list_my_tokens))
@@ -923,6 +934,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = Router::new()
+        .route("/channel-bots", get(handlers::channel_bots::admin_list))
+        .route(
+            "/channel-bots/webhook-rejections",
+            get(handlers::channel_bots::admin_webhook_rejections),
+        )
+        .route(
+            "/channel-bots/{id}/health",
+            get(handlers::channel_bots::admin_health),
+        )
         .route(
             "/ownership/{kind}",
             get(handlers::admin_ownership::list_resources),
@@ -1034,6 +1054,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route(
+            "/assistant/feedback",
+            get(handlers::assistant_feedback::admin),
+        )
         .route("/usage", get(handlers::admin_usage::get_usage))
         .route(
             "/assistant/profile-routes",
@@ -1053,6 +1077,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_usage::get_analytics),
         )
         .route(
+            "/usage/identities",
+            get(handlers::admin_usage::get_identities),
+        )
+        .route(
             "/usage/workspace",
             get(handlers::admin_usage::get_workspace).put(handlers::admin_usage::save_workspace),
         )
@@ -1060,6 +1088,24 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/billing-ledger/verify",
             get(handlers::admin::verify_billing_ledger),
+        )
+        .route(
+            "/billing/config",
+            get(handlers::admin_billing::get_config).put(handlers::admin_billing::put_config),
+        )
+        .route("/billing/rates", get(handlers::admin_billing::get_rates))
+        .route(
+            "/billing/overview",
+            get(handlers::admin_billing::get_overview),
+        )
+        .route(
+            "/billing/services/{id}/resync",
+            post(handlers::admin_billing::resync_service),
+        )
+        .route(
+            "/billing/services/{id}",
+            get(handlers::admin_billing::get_service)
+                .put(handlers::admin_billing::update_service_billing),
         )
         .route(
             "/credits/grants",
@@ -1670,7 +1716,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::channel_bots::update_bot)
                 .delete(handlers::channel_bots::delete_bot),
         )
-        .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
+        .route("/{id}/verify", post(handlers::channel_bots::verify_bot))
+        .route("/{id}/health", get(handlers::channel_bots::health))
+        .route(
+            "/{id}/resubscribe",
+            post(handlers::channel_bots::resubscribe),
+        );
 
     let channel_conversation_routes = Router::new()
         .route(
@@ -2130,8 +2181,30 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
         )
         .route(
+            "/nyxagent/conversations/{id}/model",
+            patch(handlers::assistant_nyxagent::change_model),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/context",
+            get(handlers::assistant_nyxagent::context),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/context/reset",
+            post(handlers::assistant_nyxagent::reset_context),
+        )
+        .route(
             "/nyxagent/conversations/{id}/stop",
             post(handlers::assistant_nyxagent::stop),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/messages/{message_id}/feedback",
+            put(handlers::assistant_feedback::put_conversation)
+                .delete(handlers::assistant_feedback::delete_conversation),
+        )
+        .route(
+            "/nyxagent/groups/{id}/messages/{message_id}/feedback",
+            put(handlers::assistant_feedback::put_group)
+                .delete(handlers::assistant_feedback::delete_group),
         )
         .route(
             "/nyxagent/conversations/{id}/access-mode",
@@ -2154,6 +2227,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/agents/{id}/skills",
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
+        )
+        .route(
+            "/nyxagent/agents/{id}/skills/history",
+            get(handlers::agent_skills::history),
+        )
+        .route(
+            "/nyxagent/agents/{id}/skills/{skill_id}/preview",
+            get(handlers::agent_skills::preview_attached),
+        )
+        .route(
+            "/nyxagent/agents/{id}/skills/{skill_id}/improve",
+            post(handlers::agent_skills::improve),
         )
         .route(
             "/nyxagent/agents/{id}/learning",
@@ -2180,6 +2265,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
             get(handlers::assistant_agent_learning::authored_preview)
                 .put(handlers::assistant_agent_learning::edit),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/validate",
+            post(handlers::assistant_agent_learning::validate),
         )
         .route(
             "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",
@@ -2674,6 +2763,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/favicon.ico", get(handlers::brand_icons::favicon_ico))
         .route("/favicon.svg", get(handlers::brand_icons::favicon_svg))
         .route("/icon-512.png", get(handlers::brand_icons::icon_png))
+        .route("/catalog-icons/{id}", get(handlers::catalog_icons::serve))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .route(

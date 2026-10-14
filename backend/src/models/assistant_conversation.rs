@@ -46,7 +46,7 @@ pub enum TurnOrigin {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
     pub id: String,
-    /// `subagent_settled`, `permission_requested`, `permission_decided`,
+    /// `subagent_settled`, `permission_requested`, `permission_decided`, `skill_request_allowed`,
     /// `permission_expired`, `message`.
     pub kind: String,
     pub text: String,
@@ -88,6 +88,8 @@ pub struct TurnActivity {
     pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub digest: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(default)]
@@ -132,6 +134,13 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// The failed turn this turn retries (owner Retry only).
+    #[serde(default)]
+    pub retry_of: Option<String>,
+    /// Canonical call digests the retried turn completed. A repeated call
+    /// with the same tool and arguments is refused (`retry_duplicate_action`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_digests: Vec<String>,
     /// The running response, not the previous committed response head.
     #[serde(default)]
     pub running_response: Option<Box<RunningResponse>>,

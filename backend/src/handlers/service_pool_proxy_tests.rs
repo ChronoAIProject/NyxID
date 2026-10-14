@@ -877,16 +877,20 @@ async fn pool_proxy_overall_deadline_stops_before_backup_dispatch() {
         .update_one(
             doc! { "_id": &fixture.pool_id },
             doc! { "$set": {
-                "failover.per_attempt_timeout_ms": 5000,
-                "failover.overall_deadline_ms": 1000,
+                // The overall bound must expire before the per-attempt bound,
+                // with enough admission slack to actually dispatch the first
+                // request during parallel real-database fixture creation.
+                "failover.per_attempt_timeout_ms": 30000,
+                "failover.overall_deadline_ms": 10000,
                 "failover.retry_on": ["timeout"],
             } },
         )
         .await
         .unwrap();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(4), try_call(&fixture, "{}"))
-        .await
-        .expect("overall deadline must bound a pending transport request");
+    let outcome =
+        tokio::time::timeout(std::time::Duration::from_secs(20), try_call(&fixture, "{}"))
+            .await
+            .expect("overall deadline must bound a pending transport request");
     let response = match outcome {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -895,7 +899,7 @@ async fn pool_proxy_overall_deadline_stops_before_backup_dispatch() {
     let error: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     assert_eq!(error["error"], "service_pool_deadline_exceeded");
-    assert_eq!(error["details"]["attempts"][0]["attempt"], 1);
+    assert_eq!(error["details"]["attempts"][0]["attempt"], 1, "{error}");
     assert_eq!(error["details"]["attempts"][0]["reason"], "timeout");
     assert_eq!(fixture.first.requests.lock().await.len(), 1);
     assert!(fixture.second.requests.lock().await.is_empty());

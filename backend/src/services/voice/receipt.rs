@@ -111,6 +111,8 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            retry_of: None,
+            specialist_id: None,
             steering: None,
             author: None,
             id: id.clone(),
@@ -122,6 +124,8 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
             text,
             status: "completed".into(),
             error_code: None,
+            upstream_error_code: None,
+            error_detail: None,
             created_at: call.closed_at.unwrap_or_else(Utc::now),
             activities: vec![],
             activity_total: 0,
@@ -265,6 +269,8 @@ mod tests {
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                retry_of: None,
+                specialist_id: None,
                 steering: None,
                 author: None,
                 voice: None,
@@ -278,6 +284,8 @@ mod tests {
                 text: "Check my calendar".into(),
                 status: "completed".into(),
                 error_code: None,
+                upstream_error_code: None,
+                error_detail: None,
                 created_at: Utc::now(),
                 activities: Vec::new(),
                 activity_total: 0,

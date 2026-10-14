@@ -442,10 +442,12 @@ pub(crate) async fn fetch_catalog_service(api: &mut ApiClient, reference: &str) 
             // Discovery entries intentionally omit catalog IDs. Resolve a
             // listed slug from admin service responses, which carry the ID
             // required for catalog updates. Unlisted rows can still use IDs.
-            let listing: Value = api.get("/services").await.map_err(catalog_error)?;
-            listing["services"]
-                .as_array()
-                .and_then(|rows| rows.iter().find(|row| row["slug"] == reference))
+            let listing: Value = api
+                .get("/services?include_inactive=true")
+                .await
+                .map_err(catalog_error)?;
+            let rows = listing["services"].as_array().cloned().unwrap_or_default();
+            super::super::admin_catalog::unambiguous_row(&rows, reference)?
                 .cloned()
                 .ok_or_else(|| catalog_error(error))
         }

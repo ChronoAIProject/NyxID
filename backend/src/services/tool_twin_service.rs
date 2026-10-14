@@ -9,7 +9,15 @@ use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
 use serde_json::{Value, json};
 
-pub async fn prepare_create(db: &Database, mut body: Value) -> AppResult<Value> {
+pub async fn prepare_create(db: &Database, body: Value) -> AppResult<Value> {
+    prepare_create_for_actor(db, body, None).await
+}
+
+pub async fn prepare_create_for_actor(
+    db: &Database,
+    mut body: Value,
+    manager: Option<&str>,
+) -> AppResult<Value> {
     let Some(reference) = body.get("twin_of_service_id").and_then(Value::as_str) else {
         return Ok(body);
     };
@@ -19,10 +27,20 @@ pub async fn prepare_create(db: &Database, mut body: Value) -> AppResult<Value> 
         .await?
         .ok_or_else(|| AppError::NotFound("Twin source service not found".into()))?;
     super::retired_service_service::require_available(&source)?;
+    if manager.is_some_and(|id| {
+        source.visibility == "private"
+            && source
+                .owner_user_id
+                .as_deref()
+                .unwrap_or(&source.created_by)
+                != id
+    }) {
+        return Err(AppError::NotFound("Twin source service not found".into()));
+    }
     if source.service_type != "http"
         || !matches!(
             source.auth_method.as_str(),
-            "none" | "bearer" | "header" | "query" | "query_param" | "basic"
+            "none" | "bearer" | "header" | "query" | "basic"
         )
     {
         return Err(AppError::ValidationError(
@@ -60,19 +78,34 @@ pub async fn prepare_create(db: &Database, mut body: Value) -> AppResult<Value> 
     body["provider_config_id"] = Value::Null;
     body["credential"] = Value::Null;
     body["twin_of_service_id"] = source.id.clone().into();
-    let inherited = json!({
+    let mut inherited = json!({
         "name":source.name, "base_url":source.base_url,
-        "destination_targets":source.destination_targets, "auth_method":source.auth_method,
+        "auth_method":source.auth_method,
         "auth_key_name":source.auth_key_name, "openapi_spec_url":source.openapi_spec_url,
-        "asyncapi_spec_url":source.asyncapi_spec_url, "default_request_headers":source.default_request_headers,
-        "custom_user_agent":source.custom_user_agent, "capabilities":source.capabilities,
         "homepage_url":source.homepage_url, "repository_url":source.repository_url,
         "issues_url":source.issues_url, "examples_url":source.examples_url,
         "auth_notes":source.auth_notes, "known_limitations":source.known_limitations,
         "required_permissions":source.required_permissions, "description":source.description,
-        "platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]},
-        "import_source":{"kind":"catalog_twin","reference":source.slug,"version":source.updated_at.to_rfc3339(),"imported_at":chrono::Utc::now().to_rfc3339()}
+        "import_source":{"kind":"catalog_twin","reference":source.slug,"version":source.updated_at.to_rfc3339()}
     });
+    // Manager inheritance is the explicit safe allowlist above. Admin-only
+    // inheritance is added separately so future privileged fields cannot
+    // silently enter manager twins.
+    if manager.is_none() {
+        let privileged = json!({
+            "auth_scheme":source.auth_scheme,
+            "destination_targets":source.destination_targets,
+            "asyncapi_spec_url":source.asyncapi_spec_url,
+            "default_request_headers":source.default_request_headers,
+            "custom_user_agent":source.custom_user_agent,
+            "capabilities":source.capabilities,
+            "platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]}
+        });
+        inherited
+            .as_object_mut()
+            .unwrap()
+            .extend(privileged.as_object().unwrap().clone());
+    }
     let target = body
         .as_object_mut()
         .ok_or_else(|| AppError::ValidationError("Expected service object".into()))?;

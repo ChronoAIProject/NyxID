@@ -229,6 +229,10 @@ export type UiEvent =
         name: string;
         value: string | boolean;
       };
+    }
+  | {
+      name: 'ui.assistant_feedback_submitted';
+      props: { message_id: string; vote: 'up' | 'down' };
     };
 
 /**
@@ -237,6 +241,7 @@ export type UiEvent =
  * can cross-check emission sites against the declared set.
  */
 export const UI_EVENT_NAMES = [
+  'ui.assistant_feedback_submitted',
   'ui.dialog_opened',
   'ui.dialog_step_completed',
   'ui.dialog_abandoned',

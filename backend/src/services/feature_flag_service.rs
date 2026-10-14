@@ -150,6 +150,13 @@ const NYXBOT_THREAD_FOLLOW_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const SKILL_PIN_DISABLE_FLAG_KEY: &str = "assistant:skill-pin-disable";
+const SKILL_PIN_DISABLE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: SKILL_PIN_DISABLE_FLAG_KEY,
+    description: "Enables persisted disabled skill pins after all replicas understand the field.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -264,6 +271,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -294,6 +302,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -1826,6 +1835,7 @@ mod tests {
             vec![
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
+                "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
                 "assistant:operation-scopes",
                 "assistant:live-turn-gate",
