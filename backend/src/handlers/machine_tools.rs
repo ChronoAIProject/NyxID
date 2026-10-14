@@ -136,7 +136,7 @@ pub async fn call(
         return Ok(json!({
             "error": {
                 "code": 12416,
-                "message": "This machine predates the managed browser tools. Offer nyxid__machine_update: it raises an owner card and guides the host step if needed. Do not ask the owner to diagnose browser settings."
+                "message": "This machine predates the managed browser tools. Offer nyxid__machine_update: it applies the governing permission mode and guides the host step if needed. Do not ask the owner to diagnose browser settings."
             },
             "settings_path": AssistantPage::MachineSettings {node: &node.id}.path(),
         }));
@@ -254,23 +254,25 @@ pub async fn call(
     };
     let floor = machines::confirmation(&node, operation, &arguments)
         || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);
-    if let Some(need) = acks::confirmation_needed(&state.db, chat, facts, floor).await? {
-        let summary = format!(
-            "Allow {name} on {}{}",
-            node.name,
-            if operation == Operation::Exec {
-                format!(
-                    "; declared services: {}",
-                    declared_services
-                        .iter()
-                        .map(|row| row.slug.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            } else {
-                String::new()
-            }
-        );
+    let gate = acks::confirmation_needed(&state.db, chat, facts, floor).await?;
+    let confirmation_arguments = arguments.clone();
+    let summary = format!(
+        "Allow {name} on {}{}",
+        node.name,
+        if operation == Operation::Exec {
+            format!(
+                "; declared services: {}",
+                declared_services
+                    .iter()
+                    .map(|row| row.slug.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            String::new()
+        }
+    );
+    if let Some(need) = gate.ask() {
         // Outside webhook automations a mismatched card id raises a fresh
         // card for the exact arguments, as machine confirmation always has.
         let on_invalid = if need.webhook {
@@ -410,6 +412,21 @@ pub async fn call(
                 .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
                 .delete_one(mongodb::bson::doc! {"_id": &authority.lease_id})
                 .await;
+        }
+        if result
+            .as_ref()
+            .is_ok_and(|value| value.get("error").is_none())
+            && let Some(auto) = gate.auto_allowed()
+        {
+            acks::record_auto_allowed(
+                &state.db,
+                chat,
+                name,
+                &confirmation_arguments,
+                &auto,
+                &summary,
+            )
+            .await;
         }
         return result;
     }
@@ -644,6 +661,23 @@ pub async fn call(
         Some(chat.api_key_id.clone()),
         None,
     );
+    if result.get("error").is_none()
+        && !matches!(
+            result["status"].as_str(),
+            Some("failed" | "refused" | "cancelled")
+        )
+        && let Some(auto) = gate.auto_allowed()
+    {
+        acks::record_auto_allowed(
+            &state.db,
+            chat,
+            name,
+            &confirmation_arguments,
+            &auto,
+            &summary,
+        )
+        .await;
+    }
     Ok(tools::bounded_result(result))
 }
 

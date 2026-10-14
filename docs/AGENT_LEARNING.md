@@ -725,7 +725,8 @@ operation scopes, approvals, memory visibility or existing B2 pins.
 
 ## Owner-requested skill authoring
 
-Authored draft results include an absolute `review_url` identifying both the
+In Auto and Ask every time, authored draft results include an absolute
+`review_url` identifying both the
 conversation and acknowledgement (`/assistant?c=...&card=...`). Channel agents
 must send this full link when there is no `confirm_phrase`. Group pending rows
 show **Review draft** without Confirm/Allow/Deny; chat replies never authorize
@@ -739,14 +740,14 @@ Listing honors the same person/pilot gate as authoring; automatic learning's
 own enrollment gate is unchanged. Authored proposal items add latest
 `acknowledgement_id`, `card_status`, `card_expires_at` and `review_url`.
 
-Re-drafting identical content in another turn reuses a pending, never-dispatched
+In those reviewed modes, re-drafting identical content in another turn reuses a pending, never-dispatched
 proposal and its latest pending/expired card if the original owner's conversation
 and its bound authoring key remain valid. Expired cards link to **Request a new confirmation**. Reuse never
 moves cards, approves them or bypasses publication fences. Changed content gets
 a new draft; started, uncertain or verified publication is not reusable. An
 unstarted proposal marked `publication_failed` only because its confirmation
 expired also keeps its original review link; only explicit owner renewal creates
-a new confirmation for that operation. An allowed, unexpired card with no
+a new confirmation for that operation in the reviewed modes. An allowed, unexpired card with no
 publication started or active lease returns `waiting_publication` and the same
 review link. This joins the original operation without another card, Ornn read
 or publication dispatch.
@@ -763,10 +764,11 @@ proposals with a valid card are adopted. A legacy orphan without recorded origin
 must be reviewed or discarded before retrying; NyxID refuses to guess a different
 review conversation or silently create a duplicate.
 
-`draft_agent_skill` drafts for review and never publishes on a model's
-authority. NyxBot drafts for any agent it maintains; a specialist drafts only for
-its own agent. It reuses the default-off `assistant:agent-learning` flag,
-encrypted proposal store, and the one-card fenced publication saga. The additive
+`draft_agent_skill` delegates publication to NyxID: a Full-access owner turn
+publishes and pins immediately with a linked automatic receipt, while Auto and
+Ask every time require owner review first. NyxBot drafts for any agent it
+maintains; a specialist drafts only for its own agent. It reuses the default-off `assistant:agent-learning` flag,
+encrypted proposal store, and the same fenced publication saga in both paths. The additive
 proposal source defaults to `learned`; `authored` proposals do not require
 automatic learning enrollment or conversation evidence. Flag discovery skips
 membership resolution when no relevant rollout is enabled. Owner NyxBot and
@@ -802,7 +804,8 @@ Build agents from description (role/scope), persona (tone/style), and Ornn skill
 preview and propose attaching existing skills before drafting uncovered procedures.
 Never package or publish through Ornn Playground, sandboxes, machines or raw
 Ornn upload APIs. NyxID validates bounded text, rejects credential shapes, encrypts
-the draft and shows all proposed files on one owner approval card. The card stores
+the draft and, in Auto and Ask every time, shows all proposed files on one owner
+approval card. The card stores
 only IDs/revisions; its human review view reads the encrypted proposal.
 
 Approval uses the existing server ZIP builder and signed approving-person Ornn
@@ -909,9 +912,14 @@ Older replicas fail closed when presented with a newer approval binding.
 have no omissions; reduced declarations have 1–8 omissions of at most 200
 characters each, using the authored text/credential rules. Scope is encrypted
 separately and binds both request identity and the owner's approval digest.
-Acceptance stores the revision, digest and omission count, with a metadata-only
-audit entry. It can resume only that same operation; an edit voids acceptance.
-Legacy proposals show undeclared scope and keep their original digest behavior.
+In Auto and Ask every time, separate owner acceptance stores the revision, digest
+and omission count, with a metadata-only audit entry. It can resume only that
+same operation; an edit voids acceptance. Full access bypasses this request to
+proceed and publishes reduced-scope drafts immediately. Its automatic receipt
+records only the omission count and consent bypass; its proposal link shows the
+decrypted omissions to the owner. No human `ScopeAcceptance` is
+fabricated. Legacy and owner-started scope-less drafts show no scope section and
+keep their original digest behavior.
 
 Ornn `ornn_format_rejected` preflight refusals count toward the durable
 three-rejection budget for a conversation/turn; ordinary local field, size,
@@ -1078,8 +1086,8 @@ An older binary leaves undelivered skill-notification markers untouched and
 cannot deliver them; retain those rows and upgrade again to recover delivery.
 Do not run old and new workers simultaneously. A marker records notification
 admission to a NyxBot turn, not successful attachment: upstream turn failure can
-still require the owner to resume NyxBot, and attachment always requires its
-separate owner review card.
+still require the owner to resume NyxBot. Attachment uses a separate owner
+review card in Auto and Ask every time, or an automatic receipt in Full access.
 
 When source or persisted destination authority is temporarily unavailable,
 keep the owner decision and defer notification retries for 60 seconds, doubling

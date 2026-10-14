@@ -377,6 +377,7 @@ pub struct MessageResponse {
     steering: Option<steering::SteeringResponse>,
     voice: Option<VoiceTranscriptResponse>,
     execution_pending: bool,
+    continuation_of: Option<String>,
     id: String,
     seq: i64,
     turn_id: String,
@@ -403,6 +404,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .map(steering::SteeringResponse::from),
             voice: row.voice.map(VoiceTranscriptResponse::from),
             execution_pending: row.execution_pending,
+            continuation_of: row.continuation_of,
             id: row.id,
             seq: row.seq,
             turn_id: row.turn_id,
@@ -575,7 +577,13 @@ pub async fn history(
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
-    let mut acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
+    let mut acknowledgements = acknowledgements::history_for_messages(
+        &state.db,
+        &user_id,
+        &id,
+        rows.first().map(|message| message.created_at),
+    )
+    .await?;
     if let Some(card) = query.card {
         acknowledgements::include_card(
             &state.db,
@@ -811,6 +819,8 @@ pub struct AcknowledgementResponse {
     kind: String,
     status: String,
     summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link: Option<String>,
     /// `user` or `orchestrator` (a subagent's request its orchestrator decides).
     decider: String,
     decided_by: Option<String>,
@@ -837,6 +847,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             kind: row.kind,
             status: row.status,
             summary: row.summary,
+            link: row.link,
             trigger_run_id: row.trigger_run_id,
             decider: row.decider,
             decided_by: row.decided_by,
@@ -897,6 +908,12 @@ pub async fn decide_acknowledgement(
     if row.decider == "orchestrator" {
         super::assistant_team::permission_decided(&state, &user, &row).await;
     }
+    if matches!(body.decision, Decision::Deny) {
+        Box::pin(super::assistant_team::owner_denial_decided(
+            &state, &user, &row,
+        ))
+        .await;
+    }
     if matches!(body.decision, Decision::Allow)
         && let Some(action) = row.machine_context.as_ref()
     {
@@ -905,7 +922,7 @@ pub async fn decide_acknowledgement(
     Ok(Json(row.into()))
 }
 
-/// Retired: every chat runs with Full access. Kept so older clients get a
+/// Retired conversation consent mode. Kept so older clients get a
 /// stable, explicit answer instead of a 404.
 pub async fn change_access_mode(
     State(state): State<AppState>,
@@ -917,7 +934,7 @@ pub async fn change_access_mode(
         StatusCode::GONE,
         Json(json!({
             "error": "access_mode_retired",
-            "message": "Every NyxBot chat runs with Full access; the Ask/Full choice was removed.",
+            "message": "Conversation consent modes were retired. Change the permission mode in NyxBot settings or the composer.",
         })),
     )
         .into_response())

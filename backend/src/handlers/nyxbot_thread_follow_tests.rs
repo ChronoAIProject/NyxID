@@ -376,6 +376,7 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         .await
         .unwrap();
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: vec![],
         conversation_id: Some(id.into()),

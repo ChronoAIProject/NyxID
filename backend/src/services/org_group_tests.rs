@@ -83,6 +83,7 @@ async fn start(
     .await
     .unwrap();
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         conversation_id: Some(row.id),
         attachment_ids: vec![],
@@ -880,6 +881,19 @@ async fn org_group_http_tools_and_demoted_or_inactive_members_are_refused() {
     .await;
     assert!(!error);
     assert_eq!(listing["groups"][0]["id"], group.id);
+    // The fixture's member runs in Full access, which bypasses the webhook
+    // floor (covered by `full_access_webhook_change_executes_with_receipt_while_auto_asks`).
+    // Auto keeps the floor: the destructive leave must raise a card.
+    super::assistant_settings_service::update(
+        &f.state.db,
+        &f.member,
+        super::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let mut automation = chat.clone();
     automation.confirmation_policy =
         Some(crate::models::trigger_schedule::ConfirmationPolicy::Destructive);
@@ -890,7 +904,7 @@ async fn org_group_http_tools_and_demoted_or_inactive_members_are_refused() {
         &serde_json::json!({"group":group.id,"leave":true}),
     )
     .await;
-    assert!(error);
+    assert!(error, "{card}");
     assert_eq!(card["error"], "acknowledgement_required");
     groups::get(&f.state.db, &f.member, &group.id, None)
         .await
@@ -1204,6 +1218,7 @@ async fn org_group_request_upload_isolation_retention_and_rotated_key_revocation
     let row = start(&f, &b, &agent, &first).await;
     finish(&f, &row).await;
     let mut resumed = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         conversation_id: Some(row.id.clone()),
         attachment_ids: vec![],

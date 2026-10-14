@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { z } from "zod";
+import { DecisionReceipt } from "./decision-receipt";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -132,8 +133,9 @@ function CoverageList({ data }: { readonly data: AuthoredPreview }) {
 export const SAVED_EDIT_NOTICE =
   "Draft saved. A new review card for this version was posted in this conversation; confirm it there.";
 
-export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision }: {
+export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed = false, deciding, onDecision }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
+  readonly confirmationsBypassed?: boolean;
   readonly deciding: boolean;
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
@@ -216,10 +218,18 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {actions.includes("reprepare") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Review updated package</Button> : null}
     {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
   </div> : null;
+  if (confirmationsBypassed) {
+    return <DecisionReceipt acknowledgement={card} retired={card.status === "pending"}
+      summary={data?.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}` : undefined} />;
+  }
   if (data?.state && data.state !== "active") {
-    const status = <p role="status" className="ml-[30px] text-11 text-muted-foreground">
-      {data.state === "pinned" ? "Skill published and attached" : data.state === "discarded" ? "Skill draft discarded" : data.state === "invalidated" ? "Skill draft is no longer available" : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available." : "This confirmation no longer matches the draft."}
-    </p>;
+    const stateSummary = data.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}`
+      : data.state === "discarded" ? "Skill draft discarded"
+      : data.state === "invalidated" ? "Skill draft is no longer available"
+      : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available."
+      : "This confirmation no longer matches the draft.";
+    const status = <DecisionReceipt acknowledgement={data.state === "pinned" ? { ...card, status: "allowed", decided_by: "user" } : card}
+      summary={stateSummary} />;
     if (!buttons && !error && !notice) return status;
     // An older card of a rebuilt draft can still raise the new package's card.
     return <div className="space-y-2">
@@ -231,6 +241,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
       </div>
     </div>;
   }
+  if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
   return <section aria-label="Review skill draft" className="ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4">
     <p className="text-[13px] font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
     {data ? <p className="text-[12px]">Attach to {data.agent_name}</p> : null}

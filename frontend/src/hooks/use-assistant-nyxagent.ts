@@ -46,16 +46,18 @@ function liveSend(
   attachmentIds?: string[],
   attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
   adoptExisting?: boolean,
+  acknowledgementId?: string,
 ) {
   const actorId = currentCreditsActor();
   const onFailed = (id: string, turnId: string, code: string) =>
     notifyTurnCredits(id, turnId, code, actorId);
-  if (attachmentIds?.length) {
+  if (attachmentIds?.length || acknowledgementId) {
     return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
       ...(!conversationId && agent ? { agent } : {}),
       attachmentIds,
       attachments,
       adoptExisting,
+      acknowledgementId,
     });
   }
   return conversationId || !agent
@@ -65,18 +67,28 @@ function liveSend(
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
 export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
+  const narration = "Then tell the user in one or two plain sentences what you did and the result.";
+  const instruction = continuationInstruction(acknowledgement);
+  return `${instruction} ${narration}`;
+}
+
+function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): string {
   switch (acknowledgement.kind) {
     case "service":
       return `Approved: this chat may use ${
         acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
       }. Continue.`;
     case "skills":
-      return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and ask you to confirm attaching it on a separate card. Do not request the skill again.`;
+      return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`;
     case "operations":
       return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
+    case "machine":
+    case "saved_login":
+      return `Approved: ${acknowledgement.summary} Continue within the updated machine and saved-login grants.`;
     case "account":
       return "Approved: account management for this chat. Continue.";
     case "action":
+      if (acknowledgement.authored_skill) return `The skill publication was allowed: ${acknowledgement.summary}. Check the attached skills and tell the user which skill/version was attached to which agent. Do not publish it again.`;
       return `Confirmed: ${acknowledgement.summary} (acknowledgement_id ${acknowledgement.id}). Retry it now.`;
   }
 }
@@ -315,7 +327,8 @@ export function useNyxAgentAssistantChat({
         });
         return;
       }
-      void send(continuationText(acknowledgement)).catch(() => undefined);
+      void liveSend(selectedConversationId, continuationText(acknowledgement), onConversationAdopted,
+        undefined, undefined, undefined, undefined, acknowledgement.id).catch(() => undefined);
     },
     onSettled: async () => {
       await Promise.all([
@@ -343,6 +356,7 @@ export function useNyxAgentAssistantChat({
         conversationId,
         continuationForAll(queued.acknowledgements),
         onConversationAdopted,
+        undefined, undefined, undefined, undefined, queued.acknowledgements[0]?.id,
       ).catch(() => undefined);
     }
   });

@@ -22,8 +22,7 @@ unchanged.
 
 ## 2. Requirements as stated
 
-1. No Ask/Full choice: only Full access (destructive account actions still ask
-   for confirmation by default; the owner can turn that off).
+1. Full access never asks; Auto confirms sensitive/destructive actions; Ask every time confirms changes. The owner chooses the workspace mode and agent overrides.
 2. NyxBot is the chief of staff; it creates specialists and can destroy them.
 3. A specialist asks NyxBot for permission; NyxBot grants or refuses based on
    what the user asked.
@@ -102,13 +101,12 @@ notice).
 - Unchanged: secret exclusions, per-service proxy approval policies, node
   routing, billing to the acting person.
 
-## 6. Full access only
+## 6. Thread authority and permission modes
 
-New and legacy NyxBot threads run with Full access. A legacy Ask-mode row
+New and legacy NyxBot threads retain the full account authority needed by NyxBot; the owner-level permission mode and agent override govern confirmations. A legacy Ask-mode row
 upgrades inside `begin_turn` (the transaction that claims the turn) and its stale
 consent cards expire. `PATCH /conversations/{id}/access-mode` answers `410 Gone`;
-`POST /turns` ignores `access_mode`. The mode selector, draft preference and
-Full confirmation dialog are gone.
+`POST /turns` ignores `access_mode`. The conversation-level consent selector is retired. The composer permission selector updates the owner setting described under Access modes.
 
 ## 7. Native tools
 
@@ -1129,19 +1127,45 @@ Specialist threads are sandboxed. Only the owner's NyxBot may request or grant a
 # Access modes
 
 NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
-`nyxmode` (default) confirms sensitive and destructive actions, `ask_every_time`
-confirms every changing action, and `autopilot` bypasses routine cards. Policy
-floors such as service approvals, machine confirmation, webhook policy and guest
-rules always remain enforced. The legacy `skip_destructive_confirmation` field is
+**Auto** (`nyxmode`, default) confirms sensitive and destructive actions, **Ask every time** (`ask_every_time`)
+confirms every changing action, and **Full access** (`autopilot`) never asks.
+It bypasses every confirmation, including webhook automation, machine and
+saved-login policies, pairing/updates, authored publication and service approvals.
+Each successful bypass leaves a non-consumable automatic receipt
+(`decided_by: access_mode`, reason `access_mode`, `webhook`, `policy` or `approval`),
+shown in history and excluded from user decisions. Explicit deny rules, grants,
+guests and execution fences remain enforced. The legacy `skip_destructive_confirmation` field is
 kept synchronized for one rolling release; rows without `access_mode` migrate
 from its value (`true` means `autopilot`). Specialists may override the owner
 mode with `access_mode_override`.
 
 ### Access modes
 
-NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; policy floors remain enforced in every mode. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
+NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses them with receipts. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
 
-The policy floor cannot be bypassed by Autopilot: per-service proxy approvals, `machine_confirm`, webhook confirmation policy, and guest access rules always remain authoritative.
+Per-service `approval_mode`, per-machine `machine_confirm`, saved-login
+`confirm_each_sign_in`, webhook `confirmation_policy`, machine-update cards and
+skill-publication review still ask in Auto and Ask every time. Guests never
+confirm or widen authority.
+
+Policy writes retire obsolete owner asks when the effective mode becomes Full
+access. A one-time, idempotent startup sweep also retires pre-upgrade asks. Both
+walk only pending owner-action rows and chat-key approvals in bounded batches,
+resolve each user/agent mode once, and retain Auto/Ask overrides and routed
+specialist requests. Approval retirement uses the approval service's guarded
+expiry lifecycle (`decided_at`, unique `decision_idempotency_key`); it records no
+successful action. History, group and voice reads never perform mode retirement.
+
+Permission and model selectors live in the composer toolbar (model appears only
+with an existing thread). Owner decisions remain as compact receipts with who,
+summary, risk and time. Browser continuations submit `acknowledgement_id`,
+validated against an allowed/used user decision in that conversation, persisted
+as optional `AssistantMessage.continuation_of`, and shown as “Continuing after
+your decision”. Agents explain the resulting action or skipped work in plain
+words, including skill/version/agent after attachment. Channel modes that ask
+retain “yes NNNN”. Deploy the frontend accepting `decided_by: access_mode`,
+`continuation_of` and routed `machine`/`saved_login` requests first, or together
+with the backend.
 ### Editable skills and attached pins
 
 Attached Ornn skill pins are exact, bounded guidance. Each pin can be disabled
@@ -1153,7 +1177,7 @@ in this order: every backend replica (older replicas reject the field and the
 top-level edit `revision`), then the frontend (it shows the toggle only while the
 flag is on for the viewer), then the flag. NyxBot may disable or remove a pin
 without a card; attaching a new pin or re-enabling a disabled one needs the
-owner's card, whose summary marks disabled pins. Approving an improved version
+owner's card in Auto and Ask every time, whose summary marks disabled pins; Full access attaches immediately with a receipt. Approving an improved version
 keeps its base pin's disabled state.
 
 Per attached pin the app offers **Test** (`GET /agents/{id}/skills/{skill_id}/preview`:
@@ -1175,8 +1199,8 @@ release). `POST …/proposals/{proposal_id}/validate` with `{draft}` dry-runs th
 proposal's own validator. Both refuse with a field diagnostic
 (`details: {rule, field, line?, limit?, actual?, unit?}`, never the offending
 text), which the app shows beside the field with rule-keyed remediation.
-Publishing is a two-step owner confirmation: requesting a card does not publish;
-confirming the exact card publishes and attaches the pinned version. Authored
+In Auto and Ask every time, publishing is a two-step owner confirmation: requesting a card does not publish;
+confirming the exact card publishes and attaches the pinned version. Full access publishes and pins immediately through the same publication core, owner identity, leases and fences, with a linked receipt. Authored
 drafts are confirmed only from their conversation card; saving an edit to one
 raises a fresh card for the saved revision in the conversation of its newest
 card (else NyxBot's home thread), because a renewal only repeats the same

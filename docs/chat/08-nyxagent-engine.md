@@ -211,22 +211,27 @@ deletes the conversation instead. Rotation and revocation remain available to th
 ## Authority: NyxBot access modes and granted specialists
 
 Every owner has one persistent **NyxBot** agent. The workspace access mode is
-selected in NyxBot settings and is visible in the conversation and group
-headers; an agent may have its own override, shown on the agent page and in its
+selected in NyxBot settings and is visible in the composer toolbars; an agent may have its own override, shown on the agent page and in its
 thread. The server resolves the effective mode from that persisted policy, so a
 client cannot widen access by submitting a different mode. The three modes are:
 
-- **Autopilot** proceeds without ordinary action cards. Webhook, machine, and
-  saved-login confirmation floors still apply.
-- **NyxMode** proceeds automatically for ordinary actions and asks before
+- **Full access** (`autopilot`) never asks. It bypasses mode, webhook,
+  machine/saved-login, service approval, pairing/update and skill-publication
+  confirmations. Successful bypassed actions leave automatic allowance receipts.
+- **Auto** (`nyxmode`) proceeds automatically for ordinary actions and asks before
   sensitive or destructive actions.
-- **Ask Every Time** asks before every action that changes something; reads do
+- **Ask every time** (`ask_every_time`) asks before every action that changes something; reads do
   not prompt.
 
 Confirmation cards identify the action and requested scope, the risk class
 (`change`, `sensitive`, or `destructive`), the effective mode, and why the card
-was required. Existing per-service proxy approval policies remain an independent
-floor. Specialist requests and grants are still owner/orchestrator-authorized;
+was required. Webhook `confirmation_policy`, per-machine `machine_confirm`,
+saved-login `confirm_each_sign_in`, per-service `approval_mode`, machine-update
+cards and skill-publication review apply in Auto and Ask every time. Full access
+bypasses all of them. Explicit deny rules, grants, guest restrictions, live
+turn/key fences and publication leases remain enforced. Guests cannot confirm
+or widen authority.
+Specialist requests and grants are still owner/orchestrator-authorized;
 specialists hold only their explicit grants on every thread:
 `allow_all_services=false`, `allow_auto_connected_services=false`,
 `allowed_service_ids`/`allowed_platform_service_ids` from the agent's `grants`,
@@ -244,7 +249,7 @@ its grants (`proxy::assistant_model_call`), whether the owner's own row, an org
 row or the catalog row resolves it. Nothing else widens: the key's allowlist,
 inventory, delegation tokens, consent screens and MCP tools stay its grants.
 
-Legacy settings rows without `access_mode` are read with the NyxMode default and
+Legacy settings rows without `access_mode` are read with the Auto default and
 are migrated on settings writes. The retired
 `PATCH /conversations/{id}/access-mode` endpoint remains a compatibility route
 that returns `410 Gone` with `{"error":"access_mode_retired"}`; current clients
@@ -255,7 +260,8 @@ cleared to inherit the workspace mode.
 ## Acknowledgements
 
 `assistant_acknowledgements` is a transcript collection with UUID `_id`, owner,
-conversation, credential key, kind (`service`, `account`, `action`), applicable
+conversation, credential key, kind (`service`, `account`, `action`, `operations`,
+`skills`, `machine`, `saved_login`), applicable
 service id/slug/name or tool/argument digest/summary, status, creation/decision/
 expiry dates, and the last persisted user turn that requested it. Debug is
 redacted. Index `(conversation_id,status,created_at)` has no TTL. Pending requests
@@ -265,8 +271,47 @@ conversation and credential generation. Service and account requests come only
 from specialist threads and carry `decider: "orchestrator"` (NyxBot decides) and a
 bounded `request_excerpt` of the message that started the requesting work (the
 user's own words when the user spoke to the specialist). Action confirmations
-keep `decider: "user"`. Decided rows record `decided_by` (`user` or `orchestrator`)
+keep `decider: "user"`. Decided rows record `decided_by` (`user`, `orchestrator`, or `access_mode`)
 and NyxBot's bounded `reason`.
+
+Automatic allowance receipts are action rows with `status: allowed`,
+`decider: user`, `decided_by: access_mode`, and
+`confirmation: {risk, access_mode: autopilot, reason: access_mode|webhook|policy|approval}`. They are
+written best effort only after success, with creation and decision at the same
+instant and expiry equal to creation. They never satisfy card consumption,
+never count as pending and are excluded from the model's user-decision note.
+Their metadata-only audit is `assistant_action_auto_allowed`. History renders
+“Allowed automatically · Full access” with the action summary, risk and the
+bypassed automation, machine/saved-login or service-approval policy. Full-access
+authored publication uses the same leased publication-and-pin core, under the
+chat owner's signed identity, and links the persisted proposal for inspection or discard.
+Switching to Full access retires pending owner confirmations, respecting agent
+overrides. Policy writes and an idempotent startup sweep visit only pending owner
+action rows and chat-key approvals in bounded batches, resolving each user/agent's
+mode once. History, group and voice reads do not retire asks or re-read mode policy
+for retirement. Approval expiry uses the approval service's pending status guard,
+decision time and unique expiry marker. Retirement records expiry, not success;
+the retried action writes its automatic receipt after it runs.
+
+Permission-mode receipt rollout: deploy the frontend accepting `decided_by: access_mode`,
+optional `continuation_of` and routed `machine`/`saved_login` requests before backend
+writers, or ship both in one release.
+Unknown future deciders are tolerated. After allowance the agent reports what it
+did and the result in plain words; after denial it reports what it skipped. Skill
+attachment reports name, version and target agent. Asking channel modes retain
+the “yes NNNN” owner protocol.
+
+Full access never requests permission to proceed, including when an authored
+skill declares reduced scope. The encrypted declaration remains bound to the
+proposal, and the automatic publication receipt records only the omission count
+and that separate consent was bypassed. Its proposal link shows decrypted
+omissions to the owner; omission text stays out of plaintext receipts, audit and
+events. NyxID does not create a human scope acceptance for this path. Auto and Ask every time retain explicit, revision-bound
+reduced-scope acceptance on the complete review card. Successful automatic
+publication returns the outcome for narration in the same turn; reviewed
+publication queues one durable completion event. Package failures retain their
+safe rules and queue one repair event to the original drafting conversation,
+even when Full access produced no review card.
 
 Only keys identified by their actual credential row get this authority; a platform
 label alone grants nothing. Their MCP listing/search includes all services visible
@@ -348,15 +393,18 @@ orchestrator through `nyxid__decide_permission`, or by the user on the card in t
 subagent's thread) queues a `permission_decided` event and wakes the subagent with
 an event turn; the browser sends nothing. For user-decided cards in an
 orchestrator's thread (action confirmations), a successful **Allow** resumes the
-assistant: when no turn is running, the browser sends an ordinary, visible user turn (`Approved: this
+assistant: when no turn is running, the browser sends a continuation turn with `acknowledgement_id` (`Approved: this
 chat may use <service>. Continue.`, `Approved: account management for this chat.
 Continue.`, or `Confirmed: <summary> (acknowledgement_id <id>). Retry it now.`).
-The continuation is a normal turn with no extra authority; the allowed grant is
+The server validates an allowed/used user-decided card in the same conversation
+and stores its ID as the user message's optional `continuation_of`. The message
+DTO carries this field; the browser shows “Continuing after your decision” as a
+muted system line. The continuation is a normal turn with no extra authority; the allowed grant is
 what the retried tool call consumes. If the user allows a card while a turn is
 still running (cards appear as soon as the tool call is refused, usually before
 the reply finishes), the running turn cannot observe the decision: NyxAgent ends
 a turn on a card and answers same-turn repeats locally. The browser therefore
-queues the continuation and sends one visible turn covering every card allowed
+queues the continuation and sends one marked continuation turn covering every card allowed
 during that turn as soon as it settles; nothing is sent if the user pressed Stop.
 **Deny** sends nothing.
 
@@ -1107,11 +1155,11 @@ Scheduled and assistant-webhook work enters the same engine with
 the run record and active turn therefore agree even across a crash. This branch
 executes only for trigger turns, adding no database query to ordinary turn start.
 Scheduled trigger instructions retain owner authority. Webhook data is untrusted:
-`confirmation_policy = changes` (default) enforces owner cards on every changing
+In Auto and Ask every time, `confirmation_policy = changes` (default) enforces owner cards on every changing
 tool call, using the same HTTP/catalog classifier as guest access and explicit
 native tool contracts. The owner may explicitly select `destructive` with a
 warning to confirm only destructive calls. This policy is snapshotted per run
-and is not bypassed by the global skip-destructive setting. Agent grants and
+and is bypassed with a `webhook` receipt in Full access. Agent grants and
 billing continue through the existing engine. Webhooks default to a dedicated
 thread for every agent, keeping event text out of the home context used by later
 owner turns and private channel chats. An explicit `home` choice carries UI/tool
@@ -1153,14 +1201,14 @@ waits for its next UTC budget window, all capped at the initial grace deadline.
 Machine tools in scheduled turns retain the same live machine/login grants,
 owner-control lockout and `machine_confirm` rules as owner-initiated turns.
 Webhook turns add their per-run confirmation policy. One exact-argument,
-one-use owner action card satisfies both policies when both require approval.
+one-use owner action card satisfies both policies in Auto and Ask every time. Full access bypasses both with an automatic receipt.
 Exec, file writes/attachment saves, job cancellation and changing computer
 input are destructive because they can overwrite data or interrupt arbitrary
 work. Saved-login filling and requesting owner control are changing, but not
 destructive: they are restricted field insertion or an owner handoff rather
 than arbitrary execution. Machine listing, saved-login metadata, file listing,
 file reads and job status pass the webhook read-only gate; machine-level `all`
-confirmation still applies to operations as configured. Both direct native
+confirmation applies in Auto and Ask every time; Full access bypasses it with a `policy` receipt. Both direct native
 calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
 cannot use machine tools or the human desktop/control routes.
 

@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import { ApiError } from "@/lib/api-client";
 
 const mocks = vi.hoisted(() => ({
   feature: vi.fn(),
+  json: vi.fn(),
   review: vi.fn(),
   approve: vi.fn(),
   configure: vi.fn(),
@@ -16,6 +18,10 @@ const mocks = vi.hoisted(() => ({
   consent: vi.fn(),
 }));
 
+vi.mock("@/lib/assistant/assistant-http", () => ({ assistantJson: mocks.json }));
+vi.mock("@/stores/auth-store", () => ({
+  useAuthStore: (select: (state: unknown) => unknown) => select({ user: { id: "owner" } }),
+}));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: mocks.feature }));
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ to, search, ...props }: ComponentProps<"a"> & { to: string; search?: Record<string, string> }) =>
@@ -303,4 +309,28 @@ describe("AgentLearningReview", () => {
     render(<AgentLearningReview agentId="agent" />);
     expect(screen.getAllByRole("button", { name: "Reject" })).toHaveLength(1);
   });
+});
+
+it("opens the linked automatically published proposal for inspection and discards its exact attachment", async () => {
+  mocks.feature.mockReturnValue(true);
+  const previous = mocks.review();
+  mocks.review.mockReturnValue({ ...previous, data: { proposals: [{ ...proposal, source: "authored", status: "pinned", auto_allowed: true }] } });
+  mocks.json.mockResolvedValue({
+    id: "proposal", agent_id: "agent", agent_name: "Operations", revision: 2,
+    skills_revision: 3, current_skills_revision: 3, status: "pinned",
+    name: "weekly-review", version: "1.0", files: [],
+    scope: { status: "reduced", omissions: ["Archived notes are omitted"] },
+  });
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}>
+      <AgentLearningReview agentId="agent" proposalId="proposal" />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByRole("list", { name: "Declared omissions" })).toHaveTextContent("Archived notes are omitted");
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Skill draft" })).toHaveValue(proposal.draft.skill_md);
+  expect(screen.getByRole("textbox", { name: "Skill draft" })).toHaveAttribute("readonly");
+  expect(screen.queryByText("Confirm this authored skill from its conversation card.")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Discard and detach" }));
+  await waitFor(() => expect(mocks.reject).toHaveBeenCalledWith({ proposalId: "proposal", revision: 2 }));
 });

@@ -688,6 +688,7 @@ mod tests {
             &state.db,
             owner,
             &engine::TurnRequest {
+                acknowledgement_id: None,
                 retry_of: None,
                 attachment_ids: Vec::new(),
                 agent_id: None,

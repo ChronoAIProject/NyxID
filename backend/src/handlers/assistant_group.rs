@@ -297,6 +297,7 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
         org_access: None,
@@ -676,7 +677,7 @@ pub(crate) async fn group_note(
         "You are {} in the group chat {} with the user and {}. Your reply is posted to the \
         group as you. Answer what was asked of you. To hand work to a member write their \
         @name; mention nobody when you are done or answering the user. The user cannot see \
-        confirmation cards here: when an action needs confirmation, ask them to reply with \
+        confirmation cards here: only when a tool result contains a confirmation card, ask them to reply with \
         its confirm_phrase (for example \"yes 4821\"). When a result has review_url instead \
         of confirm_phrase, send that full URL so the owner can review all files in NyxID. \
         Group replies never approve publication of a skill draft.",

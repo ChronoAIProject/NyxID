@@ -308,6 +308,32 @@ pub trait OrnnReader: Sync {
             Err(_) => OrnnOutcome::Uncertain,
         }
     }
+
+    /// Owner-authorized publication uses the injected transport with the
+    /// acting person's identity, without the conversation's restricted key.
+    async fn classified_as_owner(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> OrnnOutcome {
+        self.classified(method, path, body).await
+    }
+}
+
+pub struct OwnerPublicationReader<'a, R: OrnnReader>(pub &'a R);
+
+#[async_trait::async_trait]
+impl<R: OrnnReader> OrnnReader for OwnerPublicationReader<'_, R> {
+    async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
+        self.classified(http::Method::GET, path, Vec::new())
+            .await
+            .into_app_result()
+    }
+
+    async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
+        self.0.classified_as_owner(method, path, body).await
+    }
 }
 
 pub use crate::models::assistant_agent::SkillSelection as Selection;
@@ -761,6 +787,61 @@ pub fn needs_confirmation(agent: &AssistantAgent, selection: &Selection) -> bool
             Some(current) => current.disabled && !s.disabled,
         }
     })
+}
+
+/// Apply the same owner gate for skill attachment from every native call.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_for_chat(
+    db: &Database,
+    reader: &impl OrnnReader,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    agent: &AssistantAgent,
+    selection: &Selection,
+    args: &Value,
+    summary: &str,
+) -> AppResult<Result<SkillsResponse, Value>> {
+    use super::assistant_acknowledgement_service as acks;
+    let tool = "nyxid__set_agent_skills";
+    let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
+        if !acks::consume_action(db, chat, id, tool, args).await? {
+            return Ok(Err(json!({"error": "acknowledgement_invalid"})));
+        }
+        true
+    } else {
+        false
+    };
+    let gate = if !confirmed
+        && (needs_confirmation(agent, selection)
+            || acks::webhook_confirmation_required(chat, false, false))
+    {
+        acks::confirmation_needed(
+            db,
+            chat,
+            acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+            false,
+        )
+        .await?
+    } else {
+        acks::Gate::Proceed
+    };
+    if let Some(need) = gate.ask()
+        && let Some(refusal) = acks::confirm_action(db, chat, tool, args, &need, summary).await?
+    {
+        return Ok(Err(refusal));
+    }
+    let updated = Box::pin(set(
+        db,
+        reader,
+        &chat.user_id,
+        &agent.id,
+        selection,
+        confirmed || gate.auto_allowed().is_some(),
+    ))
+    .await?;
+    if let Some(auto) = gate.auto_allowed() {
+        acks::record_auto_allowed(db, chat, tool, args, &auto, summary).await;
+    }
+    Ok(Ok(updated))
 }
 
 pub async fn set(

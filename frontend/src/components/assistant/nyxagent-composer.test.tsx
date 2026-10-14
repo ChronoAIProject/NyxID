@@ -103,3 +103,9 @@ describe("NyxAgent web steering", () => {
     expect(screen.getByRole("note")).toHaveTextContent("Steering · Guidance applied to this reply.");
   });
 });
+
+it("passes the permission toolbar through uploads to the measured composer", () => {
+  const initial = { ...props(), toolbar: <button>Permission mode</button> };
+  const view = mount(initial);
+  expect(view.container.querySelector("[data-composer-toolbar]")).toContainElement(screen.getByRole("button", { name: "Permission mode" }));
+});

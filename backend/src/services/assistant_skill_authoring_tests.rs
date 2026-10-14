@@ -1125,13 +1125,16 @@ fn authoring_guidance_uses_three_parts_and_existing_skills_first() {
     assert!(prompt.ends_with(" Description=role/scope; persona=tone; skills=procedures."));
     for preserved in [
         "For uncovered settings (agent-key creation, security, profile, billing, organizations), give the exact page with nyxid__settings_link.",
-        "Its keys use nothing else.",
+        "the owner's account and connected services.",
         "When the owner must finish a connect link, channel bot setup or verification outside chat, explain what to do and end your turn.",
         "NyxID resumes you when they finish; never ask them to reply that they are done or connected.",
         "Service approvals wait for the owner in the app, phone or Telegram and continue automatically; report timeouts.",
         "After posting work, end your turn; NyxID wakes you with replies when the group is quiet so you can report back.",
         "Link existing personal or organization bots from nyxid__list_channel_bots to yourself or a specialist with nyxid__connect_channel_bot by id or label.",
         "Create Telegram, Discord, Slack, Lark or other bots with nyxid__channel_bot_setup_link; share its link, never request bot secrets in chat or send the user to Studio.",
+        "and ask the owner when unsure.",
+        "When work is specialized or parallel, or the user asks for an agent",
+        "Never tell the user to create an agent themselves. An agent key is different: a raw API key the user creates on its settings page.",
     ] {
         assert!(prompt.contains(preserved), "{preserved}");
     }
@@ -5282,6 +5285,15 @@ async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
         )
         .mount(&server)
         .await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"name": "Research \"quoted\"\nteam"}},
+        )
+        .await
+        .unwrap();
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
     assert_eq!(row.agent_id, f.chat.agent_id);
     assert!(
@@ -5305,6 +5317,32 @@ async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
         .unwrap()
         .unwrap();
     assert!(agent.skills.iter().any(|pin| pin.skill_id == id));
+    let thread = f
+        .state
+        .db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let event = thread
+        .pending_events
+        .iter()
+        .find(|e| e.kind == "skill_publication")
+        .unwrap();
+    assert!(
+        event
+            .text
+            .contains(&super::super::assistant_nyxagent::identifier(&agent.name))
+    );
+    assert!(!event.text.contains(&agent.name));
+    assert!(event.text.contains(&format!("agent_id {}", agent.id)));
+    assert!(!event.text.contains(['"', '\n']));
+    assert!(event.text.contains("1.0"));
+    assert!(event.text.contains(acks::DECISION_NARRATION));
+
     f.state.db.drop().await.unwrap();
 }
 
@@ -6335,6 +6373,313 @@ async fn format_failure_preserves_rules_in_pre_claim_transition() {
         thread.pending_events.iter().any(
             |event| event.kind == "skill_publication" && event.text.contains("frontmatter_tag")
         )
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_access_authored_skill_publishes_and_pins_with_receipt_while_auto_reviews() {
+    use crate::models::assistant_settings::AccessMode;
+    for (mode, asks, reduced) in [
+        (AccessMode::Autopilot, false, false),
+        (AccessMode::Nyxmode, true, false),
+        (AccessMode::Autopilot, false, true),
+        (AccessMode::Nyxmode, true, true),
+        (AccessMode::AskEveryTime, true, true),
+    ] {
+        let f = fixture("mode_authored_publication").await;
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let server = setup_ornn(&f).await;
+        let skill_id = Uuid::new_v4().to_string();
+        let archive = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let uploaded = archive.clone();
+        let published_id = skill_id.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/skill-format/validate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/skills"))
+            .respond_with(move |request: &wiremock::Request| {
+                *uploaded.lock().unwrap() = request.body.clone();
+                ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":published_id}}))
+            })
+            .mount(&server)
+            .await;
+        let downloaded = archive.clone();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/v1/skills/{skill_id}/versions/1.0/download"
+            )))
+            .respond_with(move |_: &wiremock::Request| {
+                ResponseTemplate::new(200).set_body_bytes(downloaded.lock().unwrap().clone())
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/skills/{skill_id}/closure")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[]}})))
+            .mount(&server)
+            .await;
+        let verified = archive.clone();
+        let returned_id = skill_id.clone();
+        let owner = f.owner.clone();
+        Mock::given(method("GET")).and(path(format!("/api/v1/skills/{skill_id}"))).respond_with(move |_:&wiremock::Request| {
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":returned_id,"name":"weekly-review","version":"1.0","skillHash":publication::hash(&verified.lock().unwrap()),"description":"Weekly review","isPrivate":true,"createdBy":owner,"sharedWithUsers":[],"sharedWithOrgs":[],"grants":[],"metadata":{"category":"plain"}}}))
+        }).mount(&server).await;
+        let reader = crate::handlers::agent_skills::Reader {
+            state: &f.state,
+            person: &f.owner,
+            thread_key: Some(&f.chat.api_key_id),
+            scopes: None,
+            chat: Some(std::sync::Arc::new(f.chat.clone())),
+        };
+        let mut value = input(&f.chat.agent_id);
+        if reduced {
+            value["scope"] = json!({"status":"reduced","omissions":["SOURCE_SENTINEL_ALPHA historical imports", "SOURCE_SENTINEL_BETA archived notes"]});
+        }
+        let result = Box::pin(create(
+            &f.state,
+            &f.chat,
+            parse_input(&value).unwrap(),
+            &reader,
+            &reader,
+        ))
+        .await
+        .unwrap();
+        let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let agent = f
+            .state
+            .db
+            .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+            .find_one(doc! {"_id":&f.chat.agent_id})
+            .await
+            .unwrap()
+            .unwrap();
+        if asks {
+            assert_eq!(result["error"], "acknowledgement_required");
+            assert!(result["review_url"].is_string());
+            assert_eq!(rows[0].status, "pending");
+            assert!(agent.skills.is_empty());
+            assert!(archive.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(result["status"], "pinned");
+            assert!(result.get("confirm_phrase").is_none());
+            assert!(result.get("review_url").is_none());
+            assert_eq!(rows[0].status, "allowed");
+            assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
+            assert!(rows[0].summary.contains("weekly-review 1.0"));
+            assert!(rows[0].summary.contains(&agent.name));
+            assert!(!rows[0].summary.contains("http"));
+            if reduced {
+                assert!(rows[0].summary.contains("2 declared omission(s)"));
+                let receipt = serde_json::to_string(&rows[0]).unwrap();
+                assert!(!receipt.contains("SOURCE_SENTINEL_ALPHA"));
+                assert!(!receipt.contains("SOURCE_SENTINEL_BETA"));
+                for omission in value["scope"]["omissions"].as_array().unwrap() {
+                    assert!(!receipt.contains(omission.as_str().unwrap()));
+                }
+                let audits: Vec<bson::Document> = f
+                    .state
+                    .db
+                    .collection(crate::models::audit_log::COLLECTION_NAME)
+                    .find(doc! {})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                let thread =
+                    super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                        .await
+                        .unwrap();
+                let plaintext = format!(
+                    "{}{}",
+                    serde_json::to_string(&audits).unwrap(),
+                    serde_json::to_string(&thread.pending_events).unwrap()
+                );
+                assert!(!plaintext.contains("SOURCE_SENTINEL_ALPHA"));
+                assert!(!plaintext.contains("SOURCE_SENTINEL_BETA"));
+                let scope_preview = review::authored_preview(
+                    &f.state,
+                    &f.owner,
+                    &agent.id,
+                    result["proposal_id"].as_str().unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(scope_preview["scope"], value["scope"]);
+                assert!(
+                    rows[0]
+                        .summary
+                        .contains("separate consent bypassed by Full access")
+                );
+            } else {
+                assert!(!rows[0].summary.contains("Reduced scope"));
+            }
+            assert_eq!(rows[0].link.as_deref(), result["proposal_url"].as_str());
+            let dto = serde_json::to_value(
+                crate::handlers::assistant_nyxagent::AcknowledgementResponse::from(rows[0].clone()),
+            )
+            .unwrap();
+            assert_eq!(dto["link"], result["proposal_url"]);
+            let mut legacy = bson::to_document(&rows[0]).unwrap();
+            legacy.remove("link");
+            let legacy: crate::models::assistant_acknowledgement::AssistantAcknowledgement =
+                bson::from_document(legacy).unwrap();
+            assert!(legacy.link.is_none());
+            assert!(!bson::to_document(&legacy).unwrap().contains_key("link"));
+            let legacy_dto = serde_json::to_value(
+                crate::handlers::assistant_nyxagent::AcknowledgementResponse::from(legacy),
+            )
+            .unwrap();
+            assert!(legacy_dto.get("link").is_none());
+            assert_eq!(agent.skills.len(), 1);
+            assert_eq!(agent.skills[0].skill_id, skill_id);
+            assert_eq!(
+                agent.skills[0].sha256,
+                publication::hash(&archive.lock().unwrap())
+            );
+            let proposal = f
+                .state
+                .db
+                .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":result["proposal_id"].as_str().unwrap()})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(proposal.status, "pinned");
+            let publication = proposal.publication.as_ref().unwrap();
+            assert!(publication.reduced_scope_acceptance.is_none());
+            assert_eq!(publication.approved_by.as_deref(), Some(f.owner.as_str()));
+            let items = review::list(&f.state, &f.owner, &agent.id, true)
+                .await
+                .unwrap();
+            assert!(items[0].auto_allowed);
+            assert_eq!(items[0].draft.as_ref().unwrap().name, "weekly-review");
+            review::reject(
+                &f.state,
+                &f.owner,
+                &agent.id,
+                &proposal.id,
+                proposal.revision,
+                "rejected",
+            )
+            .await
+            .unwrap();
+            let detached = f
+                .state
+                .db
+                .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                .find_one(doc! {"_id": &agent.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(detached.skills.is_empty());
+        }
+        server.verify().await;
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn automatic_format_failure_repairs_original_drafting_conversation_without_a_card() {
+    let f = fixture("automatic_format_repair").await;
+    let server = setup_ornn(&f).await;
+    let (row, _) = make(&f, input(&f.chat.agent_id)).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .delete_many(doc! {"authored_skill.proposal_id": &row.id})
+        .await
+        .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"valid": false, "violations": [{"rule": "no-readme-md"}]}
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: Some(&f.chat.api_key_id),
+        scopes: None,
+        chat: Some(std::sync::Arc::new(f.chat.clone())),
+    };
+    let binding = publication::binding(
+        &row,
+        row.publication.as_ref().unwrap(),
+        row.agent_skills_revision,
+    );
+    for _ in 0..2 {
+        assert!(
+            review::approve_automatically(
+                &f.state,
+                &f.chat,
+                &row.agent_id,
+                &row.id,
+                &binding,
+                &crate::services::agent_skill_service::OwnerPublicationReader(&reader),
+            )
+            .await
+            .is_err()
+        );
+    }
+    let failed: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        failed.failure_code.as_deref(),
+        Some("ornn_validation_failed")
+    );
+    assert_eq!(failed.failure_rules, ["no_readme_md"]);
+    assert_eq!(
+        pending_skill_event_count(&f.state.db, &f.row.id, &row.id).await,
+        1
+    );
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| {
+                request.method.as_str() == "POST" && request.url.path() == "/api/v1/skills"
+            })
     );
     f.state.db.drop().await.unwrap();
 }

@@ -46,6 +46,7 @@ export interface DirectTextBlock {
 }
 
 export interface DirectAssistantMessage {
+  readonly continuation_of?: string | null;
   readonly id: string;
   readonly role: "user" | "assistant";
   readonly schema_version: 1;

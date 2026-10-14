@@ -236,7 +236,7 @@ fn description(name: &str) -> String {
                 administration and billing are available only in the UI.",
         if destructive(name) {
             "Destructive: NyxID shows the user a single-use confirmation card unless their \
-            access mode is Autopilot; retry with its acknowledgement_id."
+            access mode is Full access; retry with its acknowledgement_id."
         } else if read_only(name) {
             "Non-destructive. Read-only."
         } else {
@@ -615,12 +615,18 @@ impl AccountTools<'_> {
         // One card answers every reason to confirm (webhook policy and the
         // governing access mode) and is consumed exactly once.
         let facts = acks::ActionFacts::of(acks::classify_owner_action(tool_name, args));
-        if let Some(need) = acks::confirmation_needed(self.db, chat, facts, false).await? {
+        let gate = acks::confirmation_needed(self.db, chat, facts, false).await?;
+        let summary = if gate != acks::Gate::Proceed {
+            Some(self.action_summary(&chat.user_id, name, args).await?)
+        } else {
+            None
+        };
+        if let Some(need) = gate.ask() {
             // Resolve ownership and a human-readable summary before requesting
             // authority, preserving not-found refusals and key restrictions.
-            let summary = self.action_summary(&chat.user_id, name, args).await?;
+            let summary = summary.as_deref().unwrap_or_default();
             if let Some(refusal) =
-                acks::confirm_action(self.db, chat, tool_name, args, &need, &summary).await?
+                acks::confirm_action(self.db, chat, tool_name, args, &need, summary).await?
             {
                 return Ok(ToolResult {
                     permission_request: None,
@@ -630,6 +636,17 @@ impl AccountTools<'_> {
             }
         }
         let value = self.dispatch(&chat.user_id, auth, name, args).await?;
+        if let Some(auto) = gate.auto_allowed() {
+            acks::record_auto_allowed(
+                self.db,
+                chat,
+                tool_name,
+                args,
+                &auto,
+                summary.as_deref().unwrap_or_default(),
+            )
+            .await;
+        }
         Ok(ToolResult {
             permission_request: None,
             value,

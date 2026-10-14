@@ -434,11 +434,22 @@ pub async fn ssh_exec(
                         auth_user.api_key_id.as_deref(),
                         &tele,
                         TelemetryEvent::SshTunnelOpened {
-                            service_slug,
+                            service_slug: service_slug.clone(),
                             mode: "exec".to_string(),
                         },
                     );
 
+                    if response.exit_code == 0 {
+                        crate::services::approval_service::record_chat_approval(
+                            &state.db,
+                            auth_user.assistant_chat.as_deref(),
+                            auth_context.approval_bypass,
+                            &service_id,
+                            &service_slug,
+                            &operation,
+                        )
+                        .await;
+                    }
                     return Ok(Json(response));
                 }
                 Err(error @ AppError::RateLimited) => return Err(error),

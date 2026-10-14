@@ -1018,6 +1018,7 @@ async fn b4_duplicate_action_fence_through_tools_call() {
         &f.state.db,
         &f.owner,
         &crate::services::assistant_nyxagent::TurnRequest {
+            acknowledgement_id: None,
             retry_of: Some(failed_turn.clone()),
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -2029,7 +2030,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
         Some(json!(1)),
     )
     .await
-    .unwrap();
+    .unwrap_err();
     let card = result(response, true).await;
     assert_eq!(card["error"], "acknowledgement_required");
     let id = card["acknowledgement_id"].as_str().unwrap();
@@ -2052,7 +2053,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
             None
         )
         .await
-        .is_none()
+        .is_ok()
     );
     acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
         .await
@@ -2067,14 +2068,14 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
-        .is_none()
+        .is_ok()
     );
     assert!(
         webhook_service_gate(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
-        .is_some()
+        .is_err()
     );
     auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Destructive);
     assert!(
@@ -2082,7 +2083,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
-        .is_none()
+        .is_ok()
     );
     service
         .durable_endpoint_metadata
@@ -2094,12 +2095,12 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
-        .is_some()
+        .is_err()
     );
 }
 
 #[tokio::test]
-async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive() {
+async fn webhook_native_changes_keep_owner_cards_in_auto() {
     use crate::models::trigger_schedule::ConfirmationPolicy;
     let f = orchestrator_fixture("webhook_native_cards").await;
     let mut auth = authenticate(&f).await;
@@ -2109,7 +2110,7 @@ async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive()
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -2435,7 +2436,7 @@ async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasse
 }
 
 #[tokio::test]
-async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructive_is_enabled() {
+async fn assistant_operation_scopes_auto_requires_exact_one_use_owner_card() {
     use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
     use crate::services::{
         agent_operation_scope_service as scopes, assistant_team_service as team,
@@ -2475,7 +2476,7 @@ async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructiv
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -3041,7 +3042,7 @@ async fn assistant_operation_scopes_rollout_gate_blocks_configuration_and_pendin
 }
 
 #[tokio::test]
-async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
+async fn specialist_machine_update_dispatch_auto_preserves_one_owner_card() {
     use crate::services::assistant_team_service as team;
     for universal in [false, true] {
         let f = fixture("mcp_specialist_update_card").await;
@@ -3063,7 +3064,7 @@ async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
             &f.state.db,
             &f.owner,
             crate::services::assistant_settings_service::Update {
-                skip_destructive_confirmation: Some(true),
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
                 ..Default::default()
             },
         )
@@ -3166,7 +3167,7 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -4210,7 +4211,7 @@ async fn owner_access_mode_gates_service_operations_by_effect() {
                 &f.state, auth, service, endpoint, &prepared, tool, &args, None,
             )
             .await
-            .is_some()
+            .is_err()
         }
     };
     let matrix = [
@@ -4252,7 +4253,7 @@ async fn owner_access_mode_gates_service_operations_by_effect() {
 }
 
 /// Meta tools are classified by name at dispatch: SSH commands are
-/// destructive (NyxMode asks), while Autopilot proceeds to the tool itself.
+/// destructive (Auto asks), while Full access proceeds to the tool itself.
 #[tokio::test]
 async fn owner_access_mode_gates_meta_tools_at_dispatch() {
     use crate::models::assistant_settings::AccessMode;
@@ -4284,7 +4285,7 @@ async fn owner_access_mode_gates_meta_tools_at_dispatch() {
         !row.summary.contains("uptime"),
         "commands never enter a card"
     );
-    // Discovery never asks, even in Ask Every Time.
+    // Discovery never asks, even in Ask every time.
     set_access_mode(&f, AccessMode::AskEveryTime).await;
     let listed =
         text(direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await).await;
@@ -4430,4 +4431,120 @@ async fn specialist_conversation_key_cannot_call_assistant_management_routes() {
             .is_some_and(|tools| !tools.is_empty())
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
+    use crate::models::{
+        assistant_settings::AccessMode,
+        service_approval_config::{COLLECTION_NAME as CONFIGS, ServiceApprovalConfig},
+    };
+    for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+        let f = orchestrator_fixture("mode_service_approval").await;
+        set_access_mode(&f, mode).await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hit = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(any(move || {
+                    hit.fetch_add(1, Ordering::SeqCst);
+                    async { Json(json!({"ok":true})) }
+                })),
+            )
+            .await
+            .unwrap();
+        });
+        let service = connected(&f.state.db, &f.owner, "mode-approval", &address).await;
+        let now = chrono::Utc::now();
+        f.state
+            .db
+            .collection::<ServiceApprovalConfig>(CONFIGS)
+            .insert_one(ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: f.owner.clone(),
+                service_id: service.clone(),
+                service_name: "Mode approval".into(),
+                approval_required: true,
+                approval_mode: Default::default(),
+                rules: vec![],
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let auth = authenticate(&f).await;
+        let args = json!({"method":"GET","path":"/work"});
+        if asks {
+            let future = call(&f, &auth, "mode-approval__request", args);
+            tokio::pin!(future);
+            tokio::time::timeout(std::time::Duration::from_secs(10),async {
+                loop {
+                    tokio::select! { value=&mut future => panic!("Approval was not awaited: {}",value.status()), _=tokio::time::sleep(std::time::Duration::from_millis(25))=>{} }
+                    if f.state.db.collection::<mongodb::bson::Document>(crate::models::approval_request::COLLECTION_NAME).count_documents(doc! {"service_id":&service}).await.unwrap()==1 {break;}
+                }
+            }).await.unwrap();
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            assert!(
+                acks::history(&f.state.db, &f.owner, &f.row.id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            let value = result(call(&f, &auth, "mode-approval__request", args).await, false).await;
+            assert_eq!(value["ok"], true);
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::approval_request::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {"service_id":&service})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].status, "allowed");
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "approval");
+            assert_eq!(rows[0].summary, "mcp:GET /work on GitHub");
+            let value = result(
+                call(
+                    &f,
+                    &auth,
+                    "mode-approval__request",
+                    json!({"method":"DELETE","path":"/remove"}),
+                )
+                .await,
+                false,
+            )
+            .await;
+            assert_eq!(value["ok"], true);
+            assert_eq!(hits.load(Ordering::SeqCst), 2);
+            let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2, "one receipt for each successful operation");
+            let destructive = rows.iter().find(|r| r.summary.contains("/remove")).unwrap();
+            assert_eq!(
+                destructive.confirmation.as_ref().unwrap().risk,
+                "destructive"
+            );
+            assert_eq!(
+                destructive.confirmation.as_ref().unwrap().reason,
+                "approval"
+            );
+            assert!(rows.iter().all(|r| r.status == "allowed"));
+        }
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    }
 }

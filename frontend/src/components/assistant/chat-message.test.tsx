@@ -925,6 +925,12 @@ it("does not invent an HTTP status when service failure metadata lacks it", () =
   expect(screen.queryByText(/HTTP undefined/)).toBeNull();
 });
 
+it("renders a decision continuation as a system status without the owner's instruction bubble", () => {
+  render(<ChatMessageBubble message={{ ...BASE, role: "user", content: "Confirmed: attach it now", continuation_of: "11111111-1111-4111-8111-111111111111" }} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Continuing after your decision");
+  expect(screen.queryByText("Confirmed: attach it now")).not.toBeInTheDocument();
+});
+
 describe("message timestamps", () => {
   const SENT = "2026-10-12T07:40:43.000Z";
   const at = Date.parse(SENT);

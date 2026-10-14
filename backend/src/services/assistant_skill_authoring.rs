@@ -29,8 +29,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const TOOL_NAME: &str = "draft_agent_skill";
-pub const SPECIALIST_GUIDANCE: &str = "\nYour skills: Ornn skills hold your repeatable procedures, checklists, references and templates. To create or improve one, call nyxid__draft_agent_skill with your own agent ID (from nyxid__get_agent_skills); to improve, pass the attached skill as base_skill. The owner reviews one card; NyxID packages, validates, publishes privately to Ornn and pins it. Never package or publish skills through raw Ornn upload APIs, sandboxes or machines, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting.";
-pub const GUIDANCE: &str = "\nAgents: description defines role/scope; persona defines tone/style; Ornn skills hold repeatable procedures, checklists, domain references, output templates and multi-step workflows. For uncovered procedures, use nyxid__draft_agent_skill only after search_agent_skills, preview_agent_skill and proposing suitable existing skills with set_agent_skills. Drafts need one owner review card; NyxID packages, publishes and pins. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting; the owner card publishes without a tool retry.";
+pub const SPECIALIST_GUIDANCE: &str = "\nYour skills: Ornn skills hold your repeatable procedures, checklists, references and templates. To create or improve one, call nyxid__draft_agent_skill with your own agent ID (from nyxid__get_agent_skills); to improve, pass the attached skill as base_skill. Full access publishes immediately; otherwise the owner reviews one card; NyxID packages, validates, publishes privately to Ornn and pins it. Never package or publish skills through raw Ornn upload APIs, sandboxes or machines, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting.";
+pub const GUIDANCE: &str = "\nAgents: description defines role/scope; persona defines tone/style; Ornn skills hold repeatable procedures, checklists, domain references, output templates and multi-step workflows. For uncovered procedures, use nyxid__draft_agent_skill only after search_agent_skills, preview_agent_skill and proposing suitable existing skills with set_agent_skills. Full access publishes immediately; other modes need one owner review card; NyxID packages, publishes and pins. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting; the owner card publishes without a tool retry.";
 
 /// No membership reads on the default-off or person-only rollout path.
 pub async fn enabled(db: &Database, actor: &str) -> AppResult<bool> {
@@ -41,7 +41,7 @@ pub async fn enabled(db: &Database, actor: &str) -> AppResult<bool> {
 }
 
 /// NyxBot drafts for any agent it maintains; a specialist only for itself.
-/// Guests never draft. Every draft still needs the owner's review card.
+/// Guests never draft. Full access publishes directly; other modes need the owner's review card.
 pub async fn require_author(db: &Database, chat: &ChatAuthority) -> AppResult<()> {
     if chat.guest {
         return Err(AppError::Forbidden(
@@ -379,7 +379,12 @@ pub async fn create(
         updated_at: now,
     };
     let reservation = claims::reserve(state, chat, &candidate).await?;
-    if let Some(card) = &reservation.card {
+    let automatic = !chat.guest
+        && acks::effective_access_mode(&state.db, chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot;
+    if let Some(card) = &reservation.card
+        && !automatic
+    {
         return Ok(reused_result(
             state,
             card,
@@ -412,11 +417,18 @@ pub async fn create(
                     )
                 )
             {
-                return Err(AppError::Conflict("source_skill_unavailable: NyxID could not read the source skill from Ornn. Approve any pending Ornn request, then draft again.".into()));
+                return Err(AppError::Conflict(if automatic {
+                    "source_skill_unavailable: NyxID could not read the source skill from Ornn under the current grants and policy."
+                } else {
+                    "source_skill_unavailable: NyxID could not read the source skill from Ornn. Approve any pending Ornn request, then draft again."
+                }.into()));
             }
             return Err(failure.error);
         }
     };
+    if automatic {
+        return publish_automatically(state, chat, &agent, id, &binding, reader).await;
+    }
     let card = claims::finalize(state, &reservation, &binding).await?;
     Ok(reused_result(state, &card, id, &agent.id))
 }
@@ -680,6 +692,12 @@ async fn submit_owner_draft(
             return Err(failure.error);
         }
     };
+    if !chat.guest
+        && acks::effective_access_mode(&state.db, chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        return publish_automatically(state, chat, &agent, &id, &binding, reader).await;
+    }
     let card = acks::request(
         &state.db,
         chat,
@@ -694,6 +712,87 @@ async fn submit_owner_draft(
     )
     .await?;
     Ok(draft_result(state, &card, &id, &agent.id))
+}
+
+/// The automatic path shares the reviewed publication saga, then writes one
+/// non-consumable receipt with a link to the persisted proposal.
+pub async fn publish_automatically(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    id: &str,
+    binding: &Value,
+    reader: &impl super::agent_skill_service::OrnnReader,
+) -> AppResult<Value> {
+    let proposal = state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":id,"agent_id":&agent.id,"owner_id":&agent.user_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Skill proposal not found".into()))?;
+    let name = proposal
+        .publication
+        .as_ref()
+        .map(|p| p.name.as_str())
+        .unwrap_or("authored skill")
+        .to_owned();
+    let mut result = Box::pin(review::approve_automatically(
+        state,
+        chat,
+        &agent.id,
+        id,
+        binding,
+        &super::agent_skill_service::OwnerPublicationReader(reader),
+    ))
+    .await?;
+    let url = format!(
+        "{}/assistant?agent={}&proposal={}",
+        state.config.frontend_url.trim_end_matches('/'),
+        agent.id,
+        id
+    );
+    let mut summary = format!(
+        "Skill {} {} published and attached to {}",
+        name,
+        result["version"].as_str().unwrap_or_default(),
+        agent.name
+    );
+    // Full access bypasses every request to proceed, including reduced-scope
+    // consent. Persist only its count; the linked preview decrypts the declaration.
+    if let Some(encrypted) = &proposal.scope_encrypted {
+        let scope: DraftScope =
+            serde_json::from_slice(&state.encryption_keys.decrypt(encrypted).await?)
+                .map_err(|_| AppError::Conflict("Skill draft changed".into()))?;
+        if scope.status == "reduced" {
+            summary.push_str(&format!(
+                "; Reduced scope: {} declared omission(s); separate consent bypassed by Full access",
+                scope.omissions.len(),
+            ));
+        }
+    }
+    acks::record_auto_allowed_with_link(
+        &state.db,
+        chat,
+        review::TOOL,
+        binding,
+        &acks::AutoAllowed {
+            class: acks::OwnerActionClass::Sensitive,
+            mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            reason: "access_mode",
+        },
+        &summary,
+        Some(&url),
+    )
+    .await;
+    result["proposal_id"] = id.into();
+    result["agent_id"] = agent.id.clone().into();
+    result["proposal_url"] = url.into();
+    result["instructions"] = format!(
+        "Publication and attachment completed. Do not publish or attach again. {}",
+        acks::DECISION_NARRATION
+    )
+    .into();
+    Ok(result)
 }
 
 const CARD_SUMMARY: &str = "Review the complete skill draft, publish it privately to Ornn and attach its exact version to this agent.";
@@ -758,6 +857,12 @@ pub async fn raise_review_card(
     )
     .await
     .map_err(|failure| failure.error)?;
+    if !chat.guest
+        && acks::effective_access_mode(&state.db, chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        return publish_automatically(state, chat, &agent, proposal_id, &binding, reader).await;
+    }
     let card = acks::request(
         &state.db,
         chat,

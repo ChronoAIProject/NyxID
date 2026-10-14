@@ -1463,6 +1463,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                continuation_of: None,
                 retry_of: None,
                 specialist_id: None,
                 steering: None,
@@ -1705,6 +1706,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            link: None,
             requester_agent_id: None,
             confirmation: None,
             authored_skill: None,
@@ -2082,6 +2084,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            link: None,
             requester_agent_id: None,
             confirmation: None,
             authored_skill: None,
@@ -2831,5 +2834,97 @@ async fn learned_edit_refuses_new_invalid_description_before_review_card() {
     assert_eq!(stored.revision, 0);
     assert!(stored.publication.is_none());
     assert_eq!(cards.count_documents(doc! {}).await.unwrap(), before);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_events_are_bounded_deduplicated_and_identifier_safe() {
+    use super::super::assistant_nyxagent::{MAX_PENDING_EVENTS, identifier};
+    use crate::models::assistant_conversation::AssistantConversation;
+
+    let f = orchestrator_fixture("publication_event_bound").await;
+    let mut row = proposal(false);
+    row.source = ProposalSource::Authored;
+    row.owner_id = f.owner.clone();
+    row.agent_id = f.chat.agent_id.clone();
+    let publication = row.publication.as_mut().unwrap();
+    publication.name = "skill\"\nname".into();
+    publication.version = "1.0\"\nversion".into();
+    let publication = publication.clone();
+    let mut agent = f
+        .state
+        .db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    agent.name = "Research \"quoted\"\nteam".into();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": "card", "conversation_id": &f.row.id, "user_id": &f.owner,
+            "api_key_id": &f.chat.api_key_id, "kind": "action", "summary": "Review skill",
+            "status": "allowed", "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(1)),
+        })
+        .await
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    for i in 0..MAX_PENDING_EVENTS + 5 {
+        let event = team::event("existing", format!("Earlier event {i}"), None);
+        push_publication_event(&f.state.db, &mut session, &f.row.id, &f.owner, &event)
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        push_failure_event(
+            &f.state.db,
+            &mut session,
+            &row,
+            &publication,
+            PublicationFailureCode::OrnnValidationFailed,
+            &["no_readme_md".into()],
+        )
+        .await
+        .unwrap();
+        push_pinned_event(&f.state.db, &mut session, &row, &publication, &agent)
+            .await
+            .unwrap();
+    }
+    session.commit_transaction().await.unwrap();
+    let thread = f
+        .state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id": &f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(thread.pending_events.len(), MAX_PENDING_EVENTS);
+    assert_eq!(thread.pending_events[0].text, "Earlier event 7");
+    let events: Vec<_> = thread
+        .pending_events
+        .iter()
+        .filter(|event| event.kind == "skill_publication")
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_ne!(events[0].id, events[1].id);
+    for event in &events {
+        assert_eq!(event.agent_id.as_deref(), Some(row.agent_id.as_str()));
+        assert!(event.text.contains(&identifier(&publication.name)));
+        assert!(event.text.contains(&identifier(&publication.version)));
+        assert!(event.text.contains(&format!("agent_id {}", row.agent_id)));
+        assert!(!event.text.contains(['"', '\n']));
+    }
+    assert!(events[0].text.contains("requires a corrected package"));
+    assert!(events[1].text.contains(&identifier(&agent.name)));
+    assert!(
+        events[1]
+            .text
+            .contains("published and attached; not yet tested")
+    );
     f.state.db.drop().await.unwrap();
 }

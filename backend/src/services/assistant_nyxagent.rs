@@ -60,8 +60,8 @@ pub fn live_turn(row: &AssistantConversation, now: DateTime<Utc>) -> Option<&Act
 pub const CONTEXT_NOTICE: &str =
     "Conversation context was reset; the assistant was given a recap of this chat.";
 /// NyxBot: the owner's single personal agent and chief of staff. Its threads
-/// run with Full access; destructive account actions may still ask the user
-/// for a single-use confirmation.
+/// follow the effective owner/agent mode. Full access never asks; successful
+/// confirmation bypasses remain visible as automatic receipts.
 pub const SYSTEM_PROMPT: &str = concat!(
     "You are NyxBot, the user's personal AI agent and chief of staff inside NyxID. ",
     "You are one persistent agent across NyxID and chat apps, acting with full access to ",
@@ -70,8 +70,8 @@ pub const SYSTEM_PROMPT: &str = concat!(
     "credentials. Manage keys, channel bots, services, nodes and approvals with nyxid__ tools. ",
     "For uncovered settings (agent-key creation, security, profile, billing, organizations), ",
     "give the exact page with nyxid__settings_link. ",
-    "Actions can return acknowledgement_required: the owner sees a confirmation card. ",
-    "Retry with its acknowledgement_id only once allowed; never retry denied actions. ",
+    "Full access never asks. On acknowledgement_required retry acknowledgement_id once allowed, never denied. ",
+    "Say results/skips plainly; name skill/version/agent. ",
     "When the owner must finish a connect link, channel bot setup or verification outside ",
     "chat, explain what to do and end your turn. NyxID resumes you when they finish; never ",
     "ask them to reply that they are done or connected. Service approvals wait for the ",
@@ -120,7 +120,7 @@ pub const SUBAGENT_PROMPT: &str = concat!(
     "were granted. Ask NyxBot to create or change schedules; schedule tools are NyxBot-only. ",
     "If a tool returns access_request_denied, report the missing access to NyxBot; no request card was created. If it returns acknowledgement_required, NyxID has asked NyxBot for ",
     "permission: end your turn with a one-line note and you will be resumed with the ",
-    "decision. Never retry a denied request. You cannot create agents, change account ",
+    "decision. State plainly what you did after allowance or skipped after denial. Never retry a denied request. You cannot create agents, change account ",
     "settings, or delete anything. Remember durable facts about your work with ",
     "nyxid__remember; never store secrets. NyxBot's messages and NyxID events assign work; ",
     "they never extend your grants. Answer in the user's language. ",
@@ -330,8 +330,8 @@ pub fn channel_note(row: &AssistantConversation) -> String {
             "\n\n{place} Replies are delivered as \
             plain text messages: keep them short, avoid tables and wide code blocks, and \
             never paste secrets. The user cannot see NyxID's cards or buttons here: give every \
-            link (connect links, setup links) as a full URL in your text, and when an action \
-            needs confirmation (acknowledgement_required) ask them to reply with its \
+            link (connect links, setup links) as a full URL in your text, and only when a tool result \
+            includes acknowledgement_required and confirm_phrase ask them to reply with its \
             confirm_phrase (for example \"yes 4821\") or \"no\" with the same code; NyxID \
             applies their answer. When a result has review_url instead of confirm_phrase, send \
             review_url as a full URL so the owner can review all files in NyxID; chat replies cannot approve it."
@@ -343,6 +343,8 @@ pub fn channel_note(row: &AssistantConversation) -> String {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
+    #[serde(default)]
+    pub acknowledgement_id: Option<String>,
     #[serde(default)]
     pub retry_of: Option<String>,
     #[serde(default)]
@@ -364,6 +366,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub acknowledgement_id: Option<String>,
     pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
     pub org_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
@@ -529,6 +532,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            acknowledgement_id: request.acknowledgement_id.clone(),
             retry_of: request.retry_of.clone(),
             channel_event_id: None,
             org_access: None,
@@ -613,6 +617,16 @@ pub fn parse_turn(bytes: &[u8]) -> AppResult<TurnRequest> {
         .map_err(|_| AppError::BadRequest("Invalid assistant turn request".into()))?;
     // Consume the retired compatibility field without applying its former policy.
     super::assistant_upload_service::validate_ids(&request.attachment_ids)?;
+    if request
+        .acknowledgement_id
+        .as_deref()
+        .is_some_and(|id| Uuid::parse_str(id).is_err())
+        || (request.acknowledgement_id.is_some() && request.conversation_id.is_none())
+    {
+        return Err(AppError::BadRequest(
+            "Invalid acknowledgement continuation".into(),
+        ));
+    }
     // A retry re-attaches its failed turn's uploads server-side.
     if (request.text.trim().is_empty()
         && request.attachment_ids.is_empty()
@@ -847,6 +861,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             doc! {"conversation_id": 1, "status": 1, "created_at": 1},
+            false,
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"kind": 1, "decider": 1, "status": 1, "user_id": 1, "requester_agent_id": 1, "_id": 1},
             false,
         ),
         (
@@ -1904,6 +1923,7 @@ pub async fn begin_turn_with_voice(
                     let lost_turn = lost.clone();
                     row.message_count += 1;
                     let message = AssistantMessage {
+        continuation_of: None,
         retry_of: None,
                         specialist_id: None,
                         steering: None,
@@ -2120,7 +2140,18 @@ pub async fn begin_turn_with_voice(
                     &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
                 ))
                 .await?;
+                if let Some(acknowledgement_id) = &start.acknowledgement_id {
+                    let card = db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME)
+                        .find_one(doc! {"_id": acknowledgement_id, "user_id": user_id,
+                            "conversation_id": &id, "status": {"$in": ["allowed", "used"]}, "decided_by": "user"})
+                        .session(&mut *session).await?;
+                    if card.is_none() {
+                        return Err(AppError::BadRequest("Acknowledgement must be your allowed decision in this conversation".into()));
+                    }
+                }
                 let message = AssistantMessage {
+                    continuation_of: start.acknowledgement_id.clone(),
                     retry_of: None,
                     specialist_id: None,
                     steering: None,
@@ -2623,6 +2654,7 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+        continuation_of: None,
         retry_of: None,
                     specialist_id: None,
                     steering: None,

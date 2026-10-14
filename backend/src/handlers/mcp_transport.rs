@@ -71,6 +71,12 @@ enum ToolOutcome {
     Error,
 }
 
+#[derive(Clone)]
+struct AutomaticServiceApprovalReceipt {
+    auto: crate::services::assistant_acknowledgement_service::AutoAllowed,
+    summary: String,
+}
+
 fn tool_succeeded(response: &Response) -> bool {
     response.status().is_success()
         && matches!(
@@ -2145,6 +2151,7 @@ async fn dispatch_tools_call(
         ))
         .await;
     }
+    let mut auto_allowed = None;
     if tool_name.starts_with("nyx__")
         && !matches!(
             tool_name,
@@ -2185,7 +2192,7 @@ async fn dispatch_tools_call(
         };
         let gate = async {
             match acks::confirmation_needed(&state.db, chat, facts, false).await? {
-                Some(need) => {
+                acks::Gate::Ask(need) => {
                     acks::confirm_action(
                         &state.db,
                         chat,
@@ -2196,7 +2203,11 @@ async fn dispatch_tools_call(
                     )
                     .await
                 }
-                None => Ok(None),
+                acks::Gate::AutoAllowed(auto) => {
+                    auto_allowed = Some(auto);
+                    Ok(None)
+                }
+                acks::Gate::Proceed => Ok(None),
             }
         };
         match Box::pin(gate).await {
@@ -2253,7 +2264,27 @@ async fn dispatch_tools_call(
         client_accepts_sse,
         billing_egress_permit,
     ) {
-        return future.await;
+        let response = future.await;
+        let service_receipt = response
+            .extensions()
+            .get::<AutomaticServiceApprovalReceipt>();
+        let auto_allowed = service_receipt.map(|receipt| receipt.auto).or(auto_allowed);
+        if tool_succeeded(&response)
+            && let (Some(auto), Some(chat)) = (auto_allowed, auth.chat.as_ref())
+        {
+            crate::services::assistant_acknowledgement_service::record_auto_allowed(
+                &state.db,
+                chat,
+                tool_name,
+                &arguments,
+                &auto,
+                &service_receipt
+                    .map(|receipt| receipt.summary.clone())
+                    .unwrap_or_else(|| meta_action_summary(tool_name, &arguments)),
+            )
+            .await;
+        }
+        return response;
     }
 
     // Service execution has its own frame; native tools must not carry its
@@ -2522,7 +2553,7 @@ async fn dispatch_service_tool(
     {
         return refused;
     }
-    if let Some(refused) = webhook_service_gate(
+    let mut auto_allowed = match webhook_service_gate(
         state,
         auth,
         service,
@@ -2534,13 +2565,23 @@ async fn dispatch_service_tool(
     )
     .await
     {
-        return refused;
-    }
+        Ok(auto) => auto,
+        Err(refused) => return refused,
+    };
     let operation = prepared.operation_descriptor();
-    if let Err(resp) =
-        authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
-    {
-        return resp;
+    match authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await {
+        Ok(Some(auto)) => {
+            auto_allowed = Some((
+                auto,
+                format!(
+                    "{} on {}",
+                    operation.operation_summary(),
+                    service.service_name
+                ),
+            ));
+        }
+        Ok(None) => {}
+        Err(resp) => return resp,
     }
 
     let async_watch = if endpoint.async_operation.is_some() {
@@ -2640,6 +2681,12 @@ async fn dispatch_service_tool(
 
     let concurrency = response.concurrency.take();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
+    if !is_error && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref()) {
+        crate::services::assistant_acknowledgement_service::record_auto_allowed(
+            &state.db, chat, tool_name, &arguments, &auto, &summary,
+        )
+        .await;
+    }
     let mut result = content_result(request.id.clone(), content, is_error);
     if let Some(failure) = failure {
         result.extensions_mut().insert(failure);
@@ -2717,7 +2764,7 @@ async fn authorize_mcp_tool_operation(
     service: &mcp_service::McpToolService,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
-) -> Result<(), Response> {
+) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     let target = crate::services::mcp_approval::approval_target_for_tool(
         &state.db,
         &auth.effective_approval_owner_user_id(),
@@ -2741,14 +2788,14 @@ async fn authorize_mcp_operation(
     target: crate::services::mcp_approval::McpApprovalTarget,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
-) -> Result<(), Response> {
+) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     // A shell can do anything: SSH stays the owner's. Service calls were
     // checked against the owner's guest access before this point.
     if guest_turn(auth) && operation.protocol == operation_descriptor::Protocol::Ssh {
         return Err(guest_refused(request_id));
     }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
-    let approval_outcome = approval_service::evaluate_and_check(
+    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
         &target.service_owner_user_id,
@@ -2758,6 +2805,7 @@ async fn authorize_mcp_operation(
         &auth.approval_requester_id(),
         auth.auth_method == AuthMethod::Session,
         target.is_auto_connected,
+        auth.chat.as_ref(),
     )
     .await
     .map_err(|e| {
@@ -2774,7 +2822,7 @@ async fn authorize_mcp_operation(
         approval_service::ApprovalOutcome::Allowed { required: true } if guest_turn(auth) => {
             return Err(guest_refused(request_id));
         }
-        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(automatic),
         approval_service::ApprovalOutcome::Denied => {
             return Err(tool_result(
                 request_id,
@@ -2872,7 +2920,7 @@ async fn authorize_mcp_operation(
             tool_result(request_id, &format!("{mapped}"), true)
         })?;
 
-    Ok(())
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -3094,7 +3142,7 @@ fn meta_action_summary(tool: &str, args: &serde_json::Value) -> String {
 /// Apply the owner's access mode and any webhook automation policy to one
 /// service operation, classified by its catalog/HTTP effects. (Named for the
 /// webhook policy it first enforced; it now carries both.)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 async fn webhook_service_gate(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3104,10 +3152,18 @@ async fn webhook_service_gate(
     tool: &str,
     args: &serde_json::Value,
     request_id: Option<serde_json::Value>,
-) -> Option<Response> {
+) -> Result<
+    Option<(
+        crate::services::assistant_acknowledgement_service::AutoAllowed,
+        String,
+    )>,
+    Response,
+> {
     use crate::services::assistant_acknowledgement_service as acks;
     // Guest calls are limited by the owner's per-service guest access instead.
-    let chat = auth.chat.as_ref().filter(|chat| !chat.guest)?;
+    let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
+        return Ok(None);
+    };
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
@@ -3129,16 +3185,22 @@ async fn webhook_service_gate(
         crate::services::assistant_nyxagent::identifier(&service.service_slug),
     );
     let result = async {
-        match acks::confirmation_needed(&state.db, chat, facts, false).await? {
-            Some(need) => acks::confirm_action(&state.db, chat, tool, args, &need, &summary).await,
-            None => Ok(None),
+        let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
+        if let Some(need) = gate.ask()
+            && let Some(refusal) =
+                acks::confirm_action(&state.db, chat, tool, args, &need, &summary).await?
+        {
+            return Ok::<_, crate::errors::AppError>(Err(tool_result(
+                request_id.clone(),
+                &refusal.to_string(),
+                true,
+            )));
         }
+        Ok(Ok(gate.auto_allowed().map(|auto| (auto, summary))))
     };
-    let result = Box::pin(result).await;
-    match result {
-        Ok(None) => None,
-        Ok(Some(refusal)) => Some(tool_result(request_id, &refusal.to_string(), true)),
-        Err(_) => Some(tool_result(
+    match Box::pin(result).await {
+        Ok(result) => result,
+        Err(_) => Err(tool_result(
             request_id,
             "Confirmation could not be checked",
             true,
@@ -3556,7 +3618,7 @@ async fn handle_meta_call_tool(
     {
         return refused;
     }
-    if let Some(refused) = webhook_service_gate(
+    let mut auto_allowed = match webhook_service_gate(
         state,
         auth,
         service,
@@ -3568,13 +3630,23 @@ async fn handle_meta_call_tool(
     )
     .await
     {
-        return refused;
-    }
+        Ok(auto) => auto,
+        Err(refused) => return refused,
+    };
     let operation = prepared.operation_descriptor();
-    if let Err(resp) =
-        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
-    {
-        return resp;
+    match authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await {
+        Ok(Some(auto)) => {
+            auto_allowed = Some((
+                auto,
+                format!(
+                    "{} on {}",
+                    operation.operation_summary(),
+                    service.service_name
+                ),
+            ));
+        }
+        Ok(None) => {}
+        Err(resp) => return resp,
     }
 
     // Auto-activate so future tools/list responses include this service.
@@ -3694,6 +3766,17 @@ async fn handle_meta_call_tool(
 
     let concurrency = response.concurrency.take();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
+    if !is_error && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref()) {
+        crate::services::assistant_acknowledgement_service::record_auto_allowed(
+            &state.db,
+            chat,
+            tool_name,
+            &inner_args,
+            &auto,
+            &summary,
+        )
+        .await;
+    }
 
     // Embed tools/list_changed inline for SSE-capable clients
     let mut result = if changed && client_accepts_sse {
@@ -4854,13 +4937,13 @@ async fn handle_mcp_ssh_exec(
         operation_descriptor::SshOperationKind::Exec,
         Some(command),
     );
-    if let Err(resp) = authorize_mcp_operation(
+    let approval_auto = match authorize_mcp_operation(
         state,
         auth,
         crate::services::mcp_approval::McpApprovalTarget {
             service_id: service_id.clone(),
-            service_name: service.name,
-            service_slug: service.slug,
+            service_name: service.name.clone(),
+            service_slug: service.slug.clone(),
             service_owner_user_id,
             // SSH services are not auto-provisioned.
             is_auto_connected: false,
@@ -4870,8 +4953,9 @@ async fn handle_mcp_ssh_exec(
     )
     .await
     {
-        return resp;
-    }
+        Ok(auto) => auto,
+        Err(resp) => return resp,
+    };
 
     // Build the request body and call the SSH exec endpoint internally
     let body = super::ssh_exec::SshExecRequest {
@@ -4918,7 +5002,16 @@ async fn handle_mcp_ssh_exec(
             });
             let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
             let is_error = response.exit_code != 0;
-            tool_result(request_id, &text, is_error)
+            let mut result = tool_result(request_id, &text, is_error);
+            if !is_error && let Some(auto) = approval_auto {
+                result
+                    .extensions_mut()
+                    .insert(AutomaticServiceApprovalReceipt {
+                        auto,
+                        summary: format!("{} on {}", operation.operation_summary(), service.name),
+                    });
+            }
+            result
         }
         Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
             return concurrency_limited_response(request_id);

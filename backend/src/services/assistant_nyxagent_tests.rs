@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: None,
@@ -264,6 +265,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
         .map(|i| AssistantMessage {
             author: None,
             activity_total: 0,
+            continuation_of: None,
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -361,6 +363,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
         AssistantMessage {
             author: None,
             activity_total: 0,
+            continuation_of: None,
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -386,6 +389,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
         AssistantMessage {
             author: None,
             activity_total: 0,
+            continuation_of: None,
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -422,6 +426,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        continuation_of: None,
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -488,6 +493,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        continuation_of: None,
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -539,6 +545,7 @@ fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        continuation_of: None,
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -590,6 +597,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        continuation_of: None,
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -1532,6 +1540,7 @@ async fn settle(
 
 fn retry(id: &str, text: &str, retry_of: &str) -> TurnRequest {
     TurnRequest {
+        acknowledgement_id: None,
         retry_of: Some(retry_of.into()),
         ..request(Some(id), text)
     }
@@ -1918,6 +1927,7 @@ fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
         author: None,
         activity_total: 0,
+        continuation_of: None,
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -2918,6 +2928,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        continuation_of: None,
         specialist_id: None,
         retry_of: None,
         upstream_error_code: None,
@@ -2967,6 +2978,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        continuation_of: None,
         specialist_id: None,
         retry_of: None,
         upstream_error_code: None,

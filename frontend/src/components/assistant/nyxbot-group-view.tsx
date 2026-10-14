@@ -790,7 +790,7 @@ export function NyxAgentGroupPage({
   return (
     <AssistantShell
       title={group?.name ?? "Group"}
-      headerActions={<div className="flex items-center gap-2"><AccessModeSwitcher /><NyxBotSettingsButton /></div>}
+      headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
@@ -902,6 +902,7 @@ export function NyxAgentGroupPage({
             }}
           />
           <UploadComposer
+            toolbar={<AccessModeSwitcher disabled={transcript.post.isPending} />}
             key={`${user?.id}:${groupId}`}
             scope={{ kind: "groups", id: groupId }}
             active={false}

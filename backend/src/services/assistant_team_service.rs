@@ -1368,6 +1368,14 @@ pub async fn set_agent_policy(
     )
     .await;
     super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
+    if current.access_mode_override != updated.access_mode_override {
+        super::assistant_acknowledgement_service::retire_full_access_confirmations(
+            db,
+            None,
+            Some(&updated.id),
+        )
+        .await?;
+    }
     Ok(updated)
 }
 

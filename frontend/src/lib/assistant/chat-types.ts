@@ -20,6 +20,7 @@ export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
   readonly feedback?: { readonly vote: "up" | "down"; readonly comment?: string | null } | null;
+  readonly continuation_of?: string | null;
   readonly steering?: import("@/schemas/assistant-nyxagent").NyxAgentSteering | null;
   readonly artifacts?: ArtifactContentBlock[];
   readonly id: string;

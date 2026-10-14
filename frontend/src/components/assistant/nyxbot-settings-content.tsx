@@ -174,8 +174,8 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                   <span>
                     Approvals are bypassed: NyxBot deletes keys, channel bots, services and
                     nodes and changes access without asking you first. Deletions cannot be
-                    undone. Webhook automations, machine confirmation settings and
-                    saved-login confirmations still ask.
+                    undone. Automation, machine, saved-login, publication and service-approval
+                    confirmations are also bypassed and recorded in chat.
                   </span>
                 </div>
               ) : null}

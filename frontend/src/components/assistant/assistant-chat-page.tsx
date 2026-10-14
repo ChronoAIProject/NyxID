@@ -26,6 +26,7 @@ import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
 import {
   agentHandle,
   agentTitle,
+  effectiveAccessMode,
   groupWithDisplayNames,
   withDisplayName,
 } from "@/lib/assistant/nyxbot-labels";
@@ -531,7 +532,7 @@ export function NyxAgentAssistantChatPage() {
 
 function NyxAgentThreadPage() {
   const voiceEnabled = useFeature("assistant:voice");
-  const voiceSettings = useNyxBotSettings(voiceEnabled);
+  const nyxBotSettings = useNyxBotSettings();
   const [voiceThread, setVoiceThread] = useState<string>();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
@@ -570,6 +571,8 @@ function NyxAgentThreadPage() {
   // The open thread's agent, else the agent in the URL, else NyxBot.
   const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
   const selectedAgent = selectedAgentOf(agents.data?.agents, threadAgent?.id, search.agent);
+  const openDetailsAgentId = detailsAgentId ?? (search.proposal ? selectedAgent?.id : undefined);
+
   const draftAgent: NyxAgentConversationAgent | undefined = selectedAgent
     ? {
         id: selectedAgent.id,
@@ -660,6 +663,14 @@ function NyxAgentThreadPage() {
   const channelPlatform = selectedId ? (conversation?.channel?.platform ?? null) : null;
   // The home stays until the first message of its new NyxBot thread shows.
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
+  const agentOverride = agents.data?.agents.find((row) => row.id === headerAgent?.id)?.access_mode_override;
+  const accessMode = effectiveAccessMode(nyxBotSettings.data?.access_mode, agentOverride);
+  const composerToolbar = <>
+    <AccessModeSwitcher disabled={destroyed || chat.isStreaming}
+      agentOverride={agentOverride} />
+    {selectedId && conversation ? <ThreadModelSelect conversationId={selectedId}
+      model={conversation.model} disabled={destroyed || chat.isStreaming} /> : null}
+  </>;
   const threadPanels = headerAgent && !showHome ? (
     <div className="shrink-0 px-4 pt-3 sm:px-6">
       <div className="mx-auto w-full max-w-[758px] space-y-2">
@@ -671,23 +682,6 @@ function NyxAgentThreadPage() {
           destroyed={destroyed}
           channelPlatform={channelPlatform}
           onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-          controls={
-            <>
-              <AccessModeSwitcher
-                agentOverride={
-                  agents.data?.agents.find((row) => row.id === headerAgent.id)
-                    ?.access_mode_override
-                }
-              />
-              {selectedId && conversation ? (
-                <ThreadModelSelect
-                  conversationId={selectedId}
-                  model={conversation.model}
-                  disabled={destroyed || chat.isStreaming}
-                />
-              ) : null}
-            </>
-          }
         />
         {headerAgent.kind === "nyxbot" ? (
           <TeamStrip agents={agents.data?.agents ?? []} onOpenConversation={go} />
@@ -726,11 +720,15 @@ function NyxAgentThreadPage() {
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {threadPanels}
         <AgentDetailsSheet
-          agentId={detailsAgentId}
+          agentId={openDetailsAgentId}
           agents={agents.data?.agents ?? []}
-          open={detailsAgentId !== undefined}
+          proposalId={search.proposal}
+          open={openDetailsAgentId !== undefined}
           onOpenChange={(open) => {
-            if (!open) setDetailsAgentId(undefined);
+            if (!open) {
+              setDetailsAgentId(undefined);
+              if (search.proposal) navigateTo({ c: search.c, agent: search.agent, draft: search.draft ? true : undefined });
+            }
           }}
           onDeleted={() => {
             setDetailsAgentId(undefined);
@@ -790,6 +788,7 @@ function NyxAgentThreadPage() {
             <NyxAgentThreadMessageList
               session={chat.session}
               renderMessage={(message) => {
+                if (message.continuation_of) return <p role="status" className="ml-[30px] px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
                 if (message.role === "event") return <NyxBotEventNotice message={message} />;
                 if (message.role === "orchestrator") {
                   return <NyxBotOrchestratorMessage message={message} />;
@@ -838,6 +837,7 @@ function NyxAgentThreadPage() {
                   <ReviewCardTarget selected={search.card === acknowledgement.id}>
                   <NyxAgentAcknowledgementCard
                     acknowledgement={acknowledgement}
+                    accessMode={accessMode}
                     deciding={Boolean(chat.decidingAcknowledgement)}
                     onDecision={async (choice, acceptReducedScope) => {
                       await chat.decideAcknowledgement({ id: acknowledgement.id, choice, acceptReducedScope });
@@ -852,6 +852,7 @@ function NyxAgentThreadPage() {
                 `card:${search.card ?? ""}`,
                 `deciding:${chat.decidingAcknowledgement ?? ""}`,
                 `channel:${channelPlatform ?? ""}`,
+                `mode:${accessMode}`,
                 ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
@@ -870,12 +871,13 @@ function NyxAgentThreadPage() {
         )}
         {voiceEnabled && voiceThread && voiceThread === selectedId && !destroyed && !channelPlatform && (
           <div className="absolute inset-x-0 top-3 z-20 mx-auto w-full max-w-[758px] px-4">
-            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={voiceSettings.data?.voice}
+            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={nyxBotSettings.data?.voice}
               onClose={() => { setVoiceThread(undefined); setFocusRequest((n) => n + 1); }} />
           </div>
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <NyxAgentComposer
+            toolbar={composerToolbar}
             conversation={chat.conversation}
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
             onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {

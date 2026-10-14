@@ -570,8 +570,8 @@ async fn machine_receipt_records_correlated_cards_without_arguments_or_output() 
 #[path = "machine_discovery_tests.rs"]
 mod discovery;
 
-/// Machine work follows each machine's own confirmation setting in Autopilot
-/// and NyxMode; Ask Every Time asks before every change, with one card that
+/// Auto follows each machine's own confirmation setting
+/// and Auto; Ask every time asks before every change, with one card that
 /// runs the exact command once.
 #[tokio::test]
 async fn ask_every_time_cards_machine_changes_once() {
@@ -638,51 +638,133 @@ async fn ask_every_time_cards_machine_changes_once() {
     f.state.db.drop().await.unwrap();
 }
 
-/// Autopilot never bypasses a machine's own confirmation setting.
+/// Full access bypasses configured policy after authorization; Auto awaits it.
 #[tokio::test]
-async fn autopilot_keeps_the_machine_confirmation_floor() {
+async fn full_access_machine_policy_executes_with_receipt_while_auto_asks() {
     use crate::models::assistant_settings::AccessMode;
-    let f = orchestrator_fixture("machine_autopilot_floor").await;
-    let node = node(&f, &f.owner).await;
-    f.state
-        .db
-        .collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": &node.id},
-            doc! {"$set": {"machine_confirm": "changes"}},
+    for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+        let f = orchestrator_fixture("machine_mode_policy").await;
+        let node = node(&f, &f.owner).await;
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&node.id},
+                doc! {"$set":{"machine_confirm":"changes"}},
+            )
+            .await
+            .unwrap();
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-    crate::services::assistant_settings_service::update(
-        &f.state.db,
-        &f.owner,
-        crate::services::assistant_settings_service::Update {
-            access_mode: Some(AccessMode::Autopilot),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let auth = authenticated_machine_chat(&f).await;
-    let (task, mut requests) = peer(&f, &node, json!({"exit_code":0,"status":"finished"})).await;
-    let card = machine_mcp_call(
-        &f,
-        &auth,
-        "nyx__machine_exec",
-        json!({"machine":node.id,"command":"true"}),
-    )
-    .await;
-    assert_eq!(card["error"], "acknowledgement_required");
-    assert!(requests.try_recv().is_err());
-    let confirmation = acks::history(&f.state.db, &f.owner, &f.row.id)
+        let auth = authenticated_machine_chat(&f).await;
+        let (task, mut requests) =
+            peer(&f, &node, json!({"exit_code":0,"status":"finished"})).await;
+        let value = machine_mcp_call(
+            &f,
+            &auth,
+            "nyx__machine_exec",
+            json!({"machine":node.id,"command":"true"}),
+        )
+        .await;
+        let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "policy");
+        if asks {
+            assert_eq!(value["error"], "acknowledgement_required");
+            assert!(requests.try_recv().is_err());
+            assert_eq!(rows[0].status, "pending");
+        } else {
+            assert_eq!(value["exit_code"], 0);
+            assert_eq!(
+                requests.recv().await.unwrap().operation,
+                nyxid_machine::Operation::Exec
+            );
+            assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+            assert_eq!(rows[0].status, "allowed");
+        }
+        task.abort();
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn full_access_saved_login_policy_fills_with_receipt_while_auto_asks() {
+    use crate::models::assistant_settings::AccessMode;
+    for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+        let f = orchestrator_fixture("machine_mode_login_policy").await;
+        let node = node(&f, &f.owner).await;
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &node.id},
+                doc! {"$set": {"machine_confirm":"none","machine.browser_isolated":true}},
+            )
+            .await
+            .unwrap();
+        let login = crate::services::saved_login_service::put(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.owner,
+            None,
+            serde_json::from_value(
+                json!({"label":"Fixture","allowed_origins":["https://fixture.example"],
+                "username":"fixture-user","password":"fixture-secret","confirm_each_sign_in":true}),
+            )
+            .unwrap(),
+        )
         .await
-        .unwrap()
-        .pop()
-        .unwrap()
-        .confirmation
         .unwrap();
-    assert_eq!(confirmation.reason, "policy");
-    assert_eq!(confirmation.access_mode, None);
-    task.abort();
-    f.state.db.drop().await.unwrap();
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let auth = authenticated_machine_chat(&f).await;
+        let (task, mut requests) = peer(
+            &f,
+            &node,
+            json!({"status":"filled","origin":"https://fixture.example"}),
+        )
+        .await;
+        let args = json!({"machine":node.id,"login":login.id,"field":"password"});
+        let result = machine_mcp_call(&f, &auth, "nyx__machine_fill_login", args).await;
+        assert!(!result.to_string().contains("fixture-secret"));
+        let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "policy");
+        if asks {
+            assert_eq!(result["error"], "acknowledgement_required");
+            assert!(requests.try_recv().is_err());
+            assert_eq!(rows[0].status, "pending");
+        } else {
+            assert_eq!(result["filled"], "password");
+            assert_eq!(
+                requests.recv().await.unwrap().operation,
+                nyxid_machine::Operation::FillLogin
+            );
+            assert_eq!(rows[0].status, "allowed");
+            assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+        }
+        task.abort();
+        f.state.db.drop().await.unwrap();
+    }
 }

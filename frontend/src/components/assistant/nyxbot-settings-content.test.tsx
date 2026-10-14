@@ -234,23 +234,23 @@ function renderPage() {
 }
 
 // The legacy "Confirm destructive actions" switch is now the access mode:
-// NyxMode (the default) confirms sensitive and destructive actions, Autopilot
+// Auto (the default) confirms sensitive and destructive actions, Full access
 // is the old "off" position and carries the same warning.
 it("confirms destructive actions by default and saves only a changed access mode", async () => {
   const user = renderPage();
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const mode = await within(page).findByRole("combobox", { name: "Access mode" });
-  expect(mode).toHaveTextContent("NyxMode");
+  expect(mode).toHaveTextContent("Auto");
   expect(
-    within(page).getByText("Acts on ordinary requests; asks before sensitive or destructive actions."),
+    within(page).getByText("Acts on its own; asks before sensitive or destructive actions."),
   ).toBeVisible();
   const save = within(page).getByRole("button", { name: "Save settings" });
   expect(save).toBeDisabled();
   expect(within(page).queryByText(/without asking you first/)).not.toBeInTheDocument();
 
   await user.click(mode);
-  await user.click(await screen.findByRole("option", { name: "Autopilot" }));
-  expect(mode).toHaveTextContent("Autopilot");
+  await user.click(await screen.findByRole("option", { name: "Full access" }));
+  expect(mode).toHaveTextContent("Full access");
   expect(
     within(page).getByText(/deletes keys, channel bots, services and\s+nodes and changes access without asking you first/),
   ).toBeVisible();
@@ -266,10 +266,10 @@ it("confirms destructive actions by default and saves only a changed access mode
     ]),
   );
   await waitFor(() => expect(save).toBeDisabled());
-  expect(mode).toHaveTextContent("Autopilot");
+  expect(mode).toHaveTextContent("Full access");
 });
 
-it("asks before every change in Ask Every Time and explains the specialist request policy", async () => {
+it("asks before every change in Ask every time and explains the specialist request policy", async () => {
   const user = renderPage();
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const requests = await within(page).findByRole("combobox", { name: "Specialist access requests" });
@@ -278,7 +278,7 @@ it("asks before every change in Ask Every Time and explains the specialist reque
     within(page).getByText(/you can still grant it in the specialist's details/),
   ).toBeVisible();
   await user.click(within(page).getByRole("combobox", { name: "Access mode" }));
-  await user.click(await screen.findByRole("option", { name: "Ask Every Time" }));
+  await user.click(await screen.findByRole("option", { name: "Ask every time" }));
   expect(
     within(page).getByText("Asks before every action that changes something. Reading never asks."),
   ).toBeVisible();
