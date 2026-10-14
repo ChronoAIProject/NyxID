@@ -2100,7 +2100,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
 }
 
 #[tokio::test]
-async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive() {
+async fn webhook_native_changes_keep_owner_cards_in_auto() {
     use crate::models::trigger_schedule::ConfirmationPolicy;
     let f = orchestrator_fixture("webhook_native_cards").await;
     let mut auth = authenticate(&f).await;
@@ -2110,7 +2110,7 @@ async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive()
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -3042,7 +3042,7 @@ async fn assistant_operation_scopes_rollout_gate_blocks_configuration_and_pendin
 }
 
 #[tokio::test]
-async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
+async fn specialist_machine_update_dispatch_auto_preserves_one_owner_card() {
     use crate::services::assistant_team_service as team;
     for universal in [false, true] {
         let f = fixture("mcp_specialist_update_card").await;
@@ -3064,7 +3064,7 @@ async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
             &f.state.db,
             &f.owner,
             crate::services::assistant_settings_service::Update {
-                skip_destructive_confirmation: Some(true),
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
                 ..Default::default()
             },
         )
