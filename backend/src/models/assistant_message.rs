@@ -50,6 +50,9 @@ pub struct AssistantMessage {
     /// Failed turn this user message retries, when applicable.
     #[serde(default)]
     pub retry_of: Option<String>,
+    /// Owner decision that caused this browser continuation turn.
+    #[serde(default)]
+    pub continuation_of: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

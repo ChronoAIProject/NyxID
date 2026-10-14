@@ -83,6 +83,7 @@ async fn start(
     .await
     .unwrap();
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         conversation_id: Some(row.id),
         attachment_ids: vec![],
@@ -1204,6 +1205,7 @@ async fn org_group_request_upload_isolation_retention_and_rotated_key_revocation
     let row = start(&f, &b, &agent, &first).await;
     finish(&f, &row).await;
     let mut resumed = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         conversation_id: Some(row.id.clone()),
         attachment_ids: vec![],

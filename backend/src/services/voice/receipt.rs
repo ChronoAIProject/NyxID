@@ -111,6 +111,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -267,6 +268,7 @@ mod tests {
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                continuation_of: None,
                 retry_of: None,
                 specialist_id: None,
                 steering: None,

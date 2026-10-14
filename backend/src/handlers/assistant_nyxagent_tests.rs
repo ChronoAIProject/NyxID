@@ -12,7 +12,7 @@ use axum::{
     http::{HeaderMap, Uri},
     routing::post,
 };
-use mongodb::bson::doc;
+use mongodb::bson::{self, doc};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -57,6 +57,7 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        continuation_of: None,
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -935,6 +936,7 @@ async fn context_route_lists_running_actions_as_pending() {
         &db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: vec![],
             conversation_id: None,
@@ -1143,6 +1145,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1409,6 +1412,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1461,6 +1465,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1607,6 +1612,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1662,6 +1668,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1880,6 +1887,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1970,6 +1978,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -3488,6 +3497,7 @@ async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -3575,4 +3585,126 @@ async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
             .any(|row| row.id == "nyxagent/retired" && !row.available)
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn turns_store_and_return_decision_continuations_and_reject_foreign_or_pending_cards() {
+    let (state, _, server) = setup_stream(
+        "decision_continuations",
+        Duration::ZERO,
+        vec![Frame::Created, Frame::Completed],
+    )
+    .await;
+    run_turn_to_reply(&state).await;
+    let conversation = settled(&state).await;
+    let card = Uuid::new_v4().to_string();
+    let collection = state.db.collection::<mongodb::bson::Document>(
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    );
+    collection.insert_one(doc! {"_id":&card,"conversation_id":&conversation.id,"user_id":OWNER,
+        "api_key_id":&conversation.credential_api_key_id,"kind":"action","status":"pending","decider":"user",
+        "decided_by":"user","summary":"Attach weekly-review 1.0 to NyxBot","created_at":bson::DateTime::now(),
+        "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(10))}).await.unwrap();
+    let request = || {
+        let mut request = Request::builder().method("POST").uri("/api/v1/assistant/nyxagent/turns")
+            .body(Body::from(json!({"text":"Apply the allowed action and report the result","conversation_id":conversation.id,"acknowledgement_id":card}).to_string())).unwrap();
+        request.extensions_mut().insert(SERVER_TURN_POLICY);
+        request
+    };
+    for invalid in [
+        doc! {"status":"pending"},
+        doc! {"status":"allowed","conversation_id":"foreign"},
+        doc! {"status":"allowed","conversation_id":&conversation.id,"user_id":"foreign"},
+        doc! {"status":"allowed","user_id":OWNER,"decided_by":"access_mode"},
+    ] {
+        collection
+            .update_one(doc! {"_id":&card}, doc! {"$set":invalid})
+            .await
+            .unwrap();
+        let error = turns(State(state.clone()), test_auth_user(OWNER), request())
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, AppError::BadRequest(_)), "{error}");
+        assert!(
+            engine::get(&state.db, OWNER, &conversation.id)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+    }
+    for status in ["allowed", "used"] {
+        collection.update_one(doc! {"_id":&card},doc! {"$set":{"status":status,"conversation_id":&conversation.id,"user_id":OWNER,"decided_by":"user"}}).await.unwrap();
+        let response = turns(State(state.clone()), test_auth_user(OWNER), request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        settled(&state).await;
+        let Json(history) = history(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(conversation.id.clone()),
+            Query(HistoryQuery::default()),
+        )
+        .await
+        .unwrap();
+        let value = serde_json::to_value(history).unwrap();
+        let continued: Vec<_> = value["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["continuation_of"] == card)
+            .collect();
+        assert_eq!(continued.len(), if status == "allowed" { 1 } else { 2 });
+        assert!(continued.iter().all(|message| message["role"] == "user"));
+    }
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn denied_owner_action_queues_plain_narration_without_an_execution_continuation() {
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("denied_owner_narration")
+            .await;
+    let card = acknowledgements::request(
+        &f.state.db,
+        &f.chat,
+        acknowledgements::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id": Uuid::new_v4().to_string()})),
+            summary: "Delete node Workstation",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let decided = decide_acknowledgement(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path((f.row.id.clone(), card.id)),
+        Json(AcknowledgementDecision {
+            decision: Decision::Deny,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(decided.status, "denied");
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let event = row
+        .pending_events
+        .iter()
+        .find(|event| event.kind == "action_denied")
+        .unwrap();
+    assert!(event.text.contains("Delete node Workstation"));
+    assert!(event.text.contains("Do not execute or retry"));
+    assert!(event.text.contains(acknowledgements::DECISION_NARRATION));
+    f.state.db.drop().await.unwrap();
 }

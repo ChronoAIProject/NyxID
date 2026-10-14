@@ -73,6 +73,7 @@ fn preferences() -> VoicePreferences {
 }
 fn turn(id: Option<&str>, text: &str) -> engine::TurnRequest {
     engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: vec![],
         conversation_id: id.map(str::to_string),
@@ -487,6 +488,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -577,6 +579,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 crate::models::assistant_message::COLLECTION_NAME,
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
+                continuation_of: None,
                 retry_of: None,
                 specialist_id: None,
                 steering: None,

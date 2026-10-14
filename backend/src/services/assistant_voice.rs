@@ -237,6 +237,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                continuation_of: None,
                 retry_of: None,
                 specialist_id: None,
                 steering: None,
@@ -346,6 +347,7 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+        continuation_of: None,
         retry_of: None,
                         specialist_id: None,
                         steering: None,
@@ -748,6 +750,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -952,7 +955,7 @@ pub(crate) async fn continuation(
         return Err(AppError::Conflict("Voice task was stopped".into()));
     }
     let text = format!(
-        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action.",
+        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action. Then tell the user in one or two plain sentences what you did and the result.",
         card.status, card.id
     );
     let now = Utc::now();

@@ -191,7 +191,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             return schedules::reschedule(&state.db, job, expiry).await;
         }
         Some(format!(
-            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions.\n{}",
+            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. Then tell the user in one or two plain sentences what you did and the result.\n{}",
             crate::services::assistant_acknowledgement_service::decisions_note(&cards)
         ))
     } else {
@@ -381,6 +381,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         _ => "Your final reply stays in the web thread.",
     };
     let start = engine::TurnStart {
+        acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
         org_access: None,
@@ -969,6 +970,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                    continuation_of: None,
                     retry_of: None,
                         specialist_id: None,
                         steering: None,

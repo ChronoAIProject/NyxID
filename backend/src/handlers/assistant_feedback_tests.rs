@@ -33,6 +33,7 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             error_detail: None,
             specialist_id: None,
@@ -123,6 +124,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "turn-r3".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
@@ -168,6 +170,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             seq: 2,
             turn_id: "turn-direct".into(),
@@ -343,6 +346,7 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "b5-turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
@@ -407,6 +411,7 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "s2-turn".into(),
             ..fixtures::message(
@@ -455,6 +460,7 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "s3-turn".into(),
             ..fixtures::message(
@@ -548,6 +554,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
@@ -621,6 +628,7 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                continuation_of: None,
                 retry_of: None,
                 turn_id: id.into(),
                 role: role.into(),
@@ -878,6 +886,7 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
@@ -967,6 +976,7 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "turn".into(),
             ..fixtures::message(
@@ -1083,6 +1093,7 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             turn_id: "t".into(),
             ..fixtures::message(
@@ -1293,6 +1304,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     let answered = asked + Duration::milliseconds(1500);
     for message in [
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             role: "user".into(),
             turn_id: "turn-ctx".into(),
@@ -1301,6 +1313,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
             ..fixtures::message("ctx-user".into(), conversation_id.into(), f.owner.clone())
         },
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             seq: 2,
             turn_id: "turn-ctx".into(),

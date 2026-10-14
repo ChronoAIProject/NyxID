@@ -115,6 +115,7 @@ pub async fn reserve(
             let response = row.active_turn.as_ref().unwrap().running_response.as_ref().unwrap();
             let now = Utc::now();
             let message = AssistantMessage {
+                continuation_of: None,
                 specialist_id: None,
                 steering: Some(Box::new(Steering {
                     finalized: false,
