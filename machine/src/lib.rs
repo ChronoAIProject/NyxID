@@ -60,6 +60,8 @@ pub struct MachineProfile {
     pub computer: bool,
     pub browser: Option<bool>,
     pub authority_versions: Vec<u32>,
+    /// Exact turn/job cancellation; absent on older nodes.
+    pub exact_cancel: bool,
     /// Absent on old nodes; never inferred from protocol v2 alone.
     pub separated: Option<context::Support>,
     pub os: String,
@@ -114,6 +116,7 @@ pub enum Operation {
     Computer,
     Browser,
     Cancel,
+    CancelExact,
     Upgrade,
     UpgradeStatus,
     ContainerInspect,
@@ -133,6 +136,7 @@ impl Operation {
         match self {
             Self::ProxyUpload => false,
             Self::AuthorityRenew | Self::AuthorityRevoke => profile.authority_v2(),
+            Self::CancelExact => profile.enabled() && profile.exact_cancel,
             Self::Cancel | Self::Upgrade | Self::UpgradeStatus => profile.enabled(),
             Self::ContainerInspect
             | Self::ContainerMigrate
@@ -199,5 +203,33 @@ pub struct Response {
 impl std::fmt::Debug for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("MachineResponse { [REDACTED] }")
+    }
+}
+
+#[cfg(test)]
+mod exact_cancel_tests {
+    use super::*;
+    #[test]
+    fn exact_cancel_is_explicit_and_preserves_old_operation_permissions() {
+        let mut old: MachineProfile =
+            serde_json::from_value(serde_json::json!({"version": PROTOCOL_VERSION, "shell": true}))
+                .unwrap();
+        assert!(!old.exact_cancel);
+        assert!(!Operation::CancelExact.allowed(&old));
+        for operation in [
+            Operation::Cancel,
+            Operation::Exec,
+            Operation::Job,
+            Operation::JobCancel,
+        ] {
+            assert!(operation.allowed(&old));
+        }
+        old.exact_cancel = true;
+        assert!(Operation::CancelExact.allowed(&old));
+        assert_eq!(
+            serde_json::to_value(Operation::CancelExact).unwrap(),
+            "cancel_exact"
+        );
+        assert_eq!(serde_json::to_value(Operation::Cancel).unwrap(), "cancel");
     }
 }

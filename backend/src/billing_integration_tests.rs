@@ -201,8 +201,28 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 ];
 
 #[derive(Default)]
-struct FakeLago {
+pub(crate) struct FakeLago {
     wallet_creates: AtomicUsize,
+    wallet_balance: Option<crate::models::credits::Credits>,
+    wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+}
+
+impl FakeLago {
+    pub(crate) fn with_wallet_balance(balance: crate::models::credits::Credits) -> Self {
+        Self {
+            wallet_balance: Some(balance),
+            ..Default::default()
+        }
+    }
+    pub(crate) fn with_wallet_gate(
+        entered: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            wallet_gate: Some((entered, resume)),
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -217,9 +237,15 @@ impl LagoApi for FakeLago {
 
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
         self.wallet_creates.fetch_add(1, Ordering::SeqCst);
+        if let Some((entered, resume)) = &self.wallet_gate {
+            entered.notify_one();
+            resume.notified().await;
+        }
         Ok(LagoWallet {
             id: format!("{customer_id}:wallet"),
-            balance_credits: crate::models::credits::Credits::from_whole(10_000),
+            balance_credits: self
+                .wallet_balance
+                .unwrap_or_else(|| crate::models::credits::Credits::from_whole(10_000)),
         })
     }
 
@@ -2659,7 +2685,7 @@ fn assert_coverage_cases_are_exhaustive() {
     }
 }
 
-fn billing_service(
+pub(crate) fn billing_service(
     db: &mongodb::Database,
     lago: Arc<FakeLago>,
     default_overdraft_cap_credits: i64,
@@ -2722,7 +2748,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
     }
 }
 
-async fn create_usage_index(db: &mongodb::Database) {
+pub(crate) async fn create_usage_index(db: &mongodb::Database) {
     db.collection::<UsageMeterRow>(USAGE_METER)
         .create_index(
             IndexModel::builder()
@@ -2746,7 +2772,7 @@ async fn insert_fresh_rates(db: &mongodb::Database) {
         .expect("insert billing coverage rates");
 }
 
-fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
+pub(crate) fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
     BillingRateCache {
         id: BillingRateCache::cache_id(metric, None),
         lago_metric_code: metric.to_string(),

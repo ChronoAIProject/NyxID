@@ -271,3 +271,45 @@ describe("delivered message recipients", () => {
     expect(screen.queryByText(new RegExp(RESEARCHER))).toBeNull();
   });
 });
+
+describe("group message timestamps", () => {
+  it("stamps both the owner's messages and agent replies with their date", () => {
+    group = makeGroup([NYXBOT]);
+    const base = {
+      group_id: group.id,
+      activities: [],
+      attachments: [],
+      created_at: "2026-10-01T00:00:00Z",
+    };
+    const user = { ...base, id: "u", seq: 1, role: "user", text: "hi" };
+    const reply = {
+      ...base,
+      id: "a",
+      seq: 2,
+      role: "agent",
+      text: "hello",
+      created_at: "2026-10-02T09:15:00Z",
+      agent: { id: NYXBOT, name: "NyxBot", kind: "nyxbot" },
+    };
+    const { container } = render(
+      <>
+        {[user, reply].map((message) => (
+          <GroupMessageRow
+            key={message.id}
+            groupId={group.id}
+            message={message as unknown as AssistantGroupMessage}
+            names={[]}
+            members={group.members}
+            onOpenAgent={() => undefined}
+          />
+        ))}
+      </>,
+    );
+    const times = [...container.querySelectorAll("time")];
+    expect(times.map((time) => time.getAttribute("datetime"))).toEqual([
+      "2026-10-01T00:00:00.000Z",
+      "2026-10-02T09:15:00.000Z",
+    ]);
+    for (const time of times) expect(time).toHaveTextContent(/2026/);
+  });
+});

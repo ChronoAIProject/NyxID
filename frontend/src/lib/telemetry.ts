@@ -119,6 +119,7 @@ export const AUTOCAPTURE_DENYLIST = [
  * response) that would leak if captured.
  */
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
+  /^\/onboarding\/link(?:\/|$)/,
   /^\/connect\/bot\/[^/]+/,
   /^\/login\/(?:device|agent-key|code)(?:\/|$)/,
   /\/verify-email\/[^/]+/,
@@ -223,7 +224,7 @@ export function initTelemetry(args: InitTelemetryArgs): void {
       // Strip query strings from every captured URL.
       if (event.properties) {
         const props = event.properties as Record<string, unknown>;
-        for (const value of [props.$pathname, props.$current_url]) {
+        for (const value of [props.$pathname, props.$current_url, props.$referrer]) {
           if (typeof value !== 'string') continue;
           try {
             if (isSensitivePath(new URL(value, window.location.origin).pathname)) return null;

@@ -21,7 +21,7 @@ impl TelegramNewService<'_> {
                 },
                 doc! {
                     "$set": {"next_connection_attempt_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(60))},
-                    "$inc": {"connection_attempts": 1_i64},
+                    "$inc": {"connection_attempts": 1_i64, "connection_generation": 1_i64},
                 },
             ).sort(doc! {"next_connection_attempt_at": 1, "created_at": 1})
                 .return_document(ReturnDocument::After).await? else { break };
@@ -31,10 +31,10 @@ impl TelegramNewService<'_> {
             let requests = &requests;
             async move {
             let Some(bot_id) = request.telegram_bot_id else { return };
-            if self.connect(&request.actor_user_id, &request.id, bot_id, request.revision).await.is_err() {
+            if self.connect_claimed(&request, bot_id).await.is_err() {
                 let delay = 2_i64.pow(request.connection_attempts.min(5));
                 let _ = requests.update_one(
-                    doc! {"_id": &request.id, "auto_connect": true, "active": true, "status": {"$in": ["ready", "provisioning"]}},
+                    doc! {"_id": &request.id, "connection_generation": request.connection_generation, "auto_connect": true, "active": true, "status": {"$in": ["ready", "provisioning"]}},
                     doc! {"$set": {
                         "next_connection_attempt_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(delay)),
                         "connection_error": "Telegram setup is taking longer than usual. We are retrying automatically.",

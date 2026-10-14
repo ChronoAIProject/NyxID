@@ -571,6 +571,9 @@ pub async fn preview_with_agent(
     destination: &str,
     capacity: u32,
 ) -> AppResult<TransferPreview> {
+    if kind == ResourceKind::ChannelBot {
+        super::platform_bot_authority::refuse_platform_bot(db, resource_id).await?;
+    }
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
     let owner = access::resource_owner(db, &mut session, kind, resource_id).await?;
@@ -624,6 +627,9 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
         expected_version,
         capacity,
     } = command;
+    if kind == ResourceKind::ChannelBot {
+        super::platform_bot_authority::refuse_platform_bot(db, resource_id).await?;
+    }
     valid_id(request_id)?;
     if Uuid::parse_str(request_id).is_ok_and(|id| id.get_version_num() != 4) {
         return Err(AppError::ValidationError(
@@ -747,6 +753,11 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
                 return Err(AppError::Conflict(
                     "The resource changed. Review a fresh transfer preview".into(),
                 ));
+            }
+            // The fence bumps the bot's route revision, so it must follow the
+            // version check that hashes the bot document.
+            if kind == ResourceKind::ChannelBot {
+                super::platform_bot_authority::fence_personal_routes(&db, &resource_id, &owner, transaction).await?;
             }
             if reviewed.moves_oauth_credential
                 && reviewed.oauth_credential_id.as_deref() != refresh_key_id.as_deref()

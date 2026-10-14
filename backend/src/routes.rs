@@ -957,7 +957,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/feature-flags",
-            get(handlers::admin_feature_flags::list_feature_flags),
+            get(handlers::admin_feature_flags::list_feature_flags)
+                .post(handlers::admin_feature_flags::create_feature_flag),
+        )
+        .route(
+            "/feature-flag-targets",
+            get(handlers::admin_feature_flags::list_feature_flag_targets),
         )
         .route(
             "/feature-flags/{flag_key}",
@@ -1054,6 +1059,50 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route(
+            "/platform-bots",
+            get(handlers::platform_bots::list).post(handlers::platform_bots::convert),
+        )
+        .route(
+            "/platform-bots/{id}",
+            get(handlers::platform_bots::get).delete(handlers::platform_bots::delete),
+        )
+        .route(
+            "/platform-bots/{id}/cleanup",
+            get(handlers::platform_bots::cleanup_tasks),
+        )
+        .route(
+            "/platform-bots/{id}/cleanup/{task}/inspect",
+            post(handlers::platform_bots::inspect_cleanup),
+        )
+        .route(
+            "/platform-bots/{id}/cleanup/{task}/resolve",
+            post(handlers::platform_bots::resolve_cleanup),
+        )
+        .route(
+            "/platform-bots/{id}/guide/services",
+            get(handlers::platform_bots::eligible_guide_services),
+        )
+        .route(
+            "/platform-bots/{id}/guide/models",
+            post(handlers::platform_bots::discover_guide_models),
+        )
+        .route(
+            "/platform-bots/{id}/guide",
+            axum::routing::put(handlers::platform_bots::configure_guide),
+        )
+        .route(
+            "/platform-bots/{id}/pause",
+            post(handlers::platform_bots::pause),
+        )
+        .route(
+            "/platform-bots/{id}/verify",
+            post(handlers::platform_bots::verify),
+        )
+        .route(
+            "/platform-bots/{id}/repair",
+            post(handlers::platform_bots::repair),
+        )
         .route(
             "/assistant/feedback",
             get(handlers::assistant_feedback::admin),
@@ -1904,6 +1953,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .route(
+            "/onboarding/link/preview",
+            post(handlers::platform_binding::preview),
+        )
+        .route(
+            "/onboarding/templates",
+            get(handlers::platform_setups::templates),
+        )
         .route("/tools/topics", get(handlers::catalog::tool_topics))
         .route(
             "/machines/pair/request",
@@ -2419,6 +2476,76 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/onboarding/setups/{id}/binding",
+            post(handlers::platform_setups::attach_binding),
+        )
+        .route(
+            "/onboarding/link/approve",
+            post(handlers::platform_binding::approve),
+        )
+        .route(
+            "/onboarding/link/deny",
+            post(handlers::platform_binding::deny),
+        )
+        .route(
+            "/onboarding/bindings",
+            get(handlers::platform_binding::list_owned),
+        )
+        .route(
+            "/onboarding/bindings/{id}/revoke",
+            post(handlers::platform_binding::revoke),
+        )
+        .route(
+            "/onboarding/anonymous-drafts",
+            get(handlers::platform_setups::anonymous_drafts),
+        )
+        .route(
+            "/onboarding/setups/{id}/adopt",
+            post(handlers::platform_setups::adopt_draft),
+        )
+        .route(
+            "/onboarding/setups/archived",
+            get(handlers::platform_setups::archived),
+        )
+        .route(
+            "/onboarding/setups",
+            get(handlers::platform_setups::list).post(handlers::platform_setups::create),
+        )
+        .route(
+            "/onboarding/setups/{id}",
+            get(handlers::platform_setups::get)
+                .put(handlers::platform_setups::edit)
+                .delete(handlers::platform_setups::cancel),
+        )
+        .route(
+            "/onboarding/setups/{id}/telegram-launch",
+            post(handlers::platform_setups::launch_creation),
+        )
+        .route(
+            "/onboarding/setups/{id}/approval",
+            get(handlers::platform_setups::approval).post(handlers::platform_setups::approve),
+        )
+        .route(
+            "/onboarding/setups/{id}/child-approval",
+            post(handlers::platform_setups::approve_child),
+        )
+        .route(
+            "/onboarding/setups/{id}/review",
+            post(handlers::platform_setups::review),
+        )
+        .route(
+            "/onboarding/setups/{id}/publish",
+            post(handlers::platform_setups::publish),
+        )
+        .route(
+            "/onboarding/setups/{id}/activate",
+            post(handlers::platform_setups::activate),
+        )
+        .route(
+            "/onboarding/setups/{id}/pause",
+            post(handlers::platform_setups::pause),
+        )
         .route(
             "/machines/{node_id}/activity",
             get(handlers::machine_activity::list),

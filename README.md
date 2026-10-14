@@ -71,6 +71,11 @@ vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role rea
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
 
+Feature flag access can be delegated to any user or group with
+`feature-flag-operator` (create flags and manage their own) or
+`feature-flag-admin` (manage all flags, including built-ins). Both roles use
+Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-roles-and-management).
+
 ## What NyxID Does
 
 - **Connect Stripe to agents** — [Stripe Apps OAuth](docs/STRIPE_OAUTH.md) supports a managed account connection and read-only customer, invoice, payment, and subscription tools.
@@ -141,7 +146,7 @@ After the CLI is installed, choose where it should log in:
 |---|---|---|
 | **What it is** | We run the NyxID backend for you in the cloud | You run the NyxID backend on your own machine |
 | **Best for** | Getting started quickly, no server setup | Full control, private networks, offline use |
-| **Status** | Early access (invite code below) | Open — anyone can run it |
+| **Status** | Open sign-up | Open — anyone can run it |
 
 > **Driving NyxID from an AI coding agent?** Hand it this single line at any point — it tells the agent to install the `nyxid` CLI plus the Nyx skill files:
 >
@@ -176,12 +181,11 @@ After the CLI is installed, choose where it should log in:
 Start using NyxID in under a minute — no Docker, no setup.
 
 1. Open **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)** in a new tab (Cmd/Ctrl-click, or right-click → Open Link in New Tab) so you can keep this checklist open.
-2. Enter invite code: **`NYX-FGNY85AF`**
-3. Sign in with Google, GitHub, or Apple
-4. Open `AI Services`, add and connect your first external service, and run the API Usage verification curl
-5. After the service is verified, wire your AI tool to NyxID's MCP endpoint
+2. Sign up with Google, GitHub, or Apple
+3. Open `AI Services`, add and connect your first external service, and run the API Usage verification curl
+4. After the service is verified, wire your AI tool to NyxID's MCP endpoint
 
-The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**. Early access is limited to 20 users.
+The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**.
 
 #### Self-Host
 

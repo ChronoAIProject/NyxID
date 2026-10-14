@@ -22,6 +22,9 @@ at the user's request for the broader CI reliability fix.
   swap while just one rustc process remained. The reserve adds margin for
   memory peaks without reducing compiler/test concurrency or changing
   swappiness. Failure to establish the reserve fails the setup step explicitly.
+  In October 2026 the reserve was raised to 16 GiB and extended to the release
+  image-inputs build: a single nyxid rustc exhausted 16 GiB RAM plus the 8 GiB
+  reserve, and main's passing compiles already left only about 1 GiB swap free.
 - Bound Linux build dependency installation to five minutes per step, with
   noninteractive apt, 20-second HTTP/HTTPS acquisition timeouts and two download
   retries. Failed index updates and installations fail the job. A September 30

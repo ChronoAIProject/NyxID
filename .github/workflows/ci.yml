@@ -499,6 +499,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -506,15 +508,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: backend-image-inputs
-      # The release compile of the backend crate peaks above the hosted runner's
-      # 16 GB RAM plus 3 GB swap; without headroom the runner is OOM-killed and
-      # reports "received a shutdown signal". With 8 GB more, peak use is ~5 GB swap.
-      - name: Add swap for the release compile
-        run: |
-          sudo fallocate -l 8G /swapfile-build
-          sudo chmod 600 /swapfile-build
-          sudo mkswap /swapfile-build
-          sudo swapon /swapfile-build
       - name: Build backend image binary
         run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
       - name: Check backend Docker embedded assets

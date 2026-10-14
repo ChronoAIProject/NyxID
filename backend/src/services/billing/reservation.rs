@@ -1105,8 +1105,9 @@ async fn estimate_layer_reservations(
             super::amounts::rate_pico(rate.credits_per_unit_pico, rate.credits_per_unit_micros);
         // Preserve the existing one-unit gate for standalone legacy charges
         // and resale. New component configurations estimate every platform unit.
-        let estimated_quantity = if layer == BillingLayer::Resale
-            || (ctx.platform_components.is_empty() && metric.is_legacy())
+        let estimated_quantity = if !ctx.has_native_text_bound()
+            && (layer == BillingLayer::Resale
+                || (ctx.platform_components.is_empty() && metric.is_legacy()))
         {
             1
         } else {

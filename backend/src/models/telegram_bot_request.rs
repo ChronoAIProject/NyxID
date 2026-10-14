@@ -43,6 +43,10 @@ pub enum TelegramRequestStatus {
 pub struct TelegramBotRequest {
     #[serde(rename = "_id")]
     pub id: String,
+    #[serde(default)]
+    pub setup_authority: Option<super::platform_installation::SetupStepAuthority>,
+    #[serde(default)]
+    pub connection_generation: i64,
     pub actor_user_id: String,
     pub owner_user_id: String,
     pub manager_bot_id: i64,

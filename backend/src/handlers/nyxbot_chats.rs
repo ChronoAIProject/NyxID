@@ -1042,6 +1042,11 @@ pub(crate) async fn update_chat(
     settings: &ChatSettings,
 ) -> AppResult<Value> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?;
     let group = is_group(&chat);
     if chat.kind.is_none() && (settings.reply_mode.is_some() || settings.members.is_some()) {
         return Err(AppError::Conflict(
@@ -1203,14 +1208,27 @@ pub(crate) async fn set_private_chats(
         ));
     }
     let row = load_channel(state, owner, channel_id).await?;
-    state
+    // Narrowing to the owner stays available on any channel; only widening is fenced.
+    let mut filter = doc! {"_id": &row.id, "user_id": owner};
+    if private_chats == "everyone" {
+        crate::services::platform_bot_authority::require_personal_routes(
+            &state.db,
+            &row.channel_bot_id,
+        )
+        .await?;
+        filter.insert("status", doc! {"$in": ["pending", "active"]});
+    }
+    let updated = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
-            doc! {"_id": &row.id, "user_id": owner},
+            filter,
             doc! {"$set": {"private_chats": private_chats, "updated_at": bson::DateTime::now()}},
         )
         .await?;
+    if updated.matched_count != 1 {
+        return Err(AppError::Conflict("Channel authority changed".into()));
+    }
     audit(
         state,
         owner,

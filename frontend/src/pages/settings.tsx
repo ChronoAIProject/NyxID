@@ -1,3 +1,4 @@
+import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { PageHeader } from "@/components/shared/page-header";
 import { useState } from "react";
@@ -133,7 +134,8 @@ export function SettingsPage({
         </TabsContent>
         <TabsContent value="security">
           <SecurityTab />
-        </TabsContent>
+        <OwnedOnboardingBindings />
+          </TabsContent>
         <TabsContent value="sessions">
           <SessionsTab />
         </TabsContent>

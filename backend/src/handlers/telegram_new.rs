@@ -340,9 +340,43 @@ pub(crate) async fn webhook_with_service(
     body: &[u8],
 ) -> AppResult<StatusCode> {
     if let Some((bot, update)) = service.webhook(headers, body).await? {
+        match super::platform_binding::handle_command(state, &bot, &update, service).await {
+            Ok(true) => return Ok(StatusCode::OK),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "Platform binding command refused");
+                return Ok(native_dispatch_status(&error));
+            }
+        }
+        match crate::services::platform_guide_service::dispatch(state, &bot, &update, service).await
+        {
+            Ok(true) => return Ok(StatusCode::OK),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "Platform guide reply refused");
+                return Ok(native_dispatch_status(&error));
+            }
+        }
         relay_manager_channel(state.clone(), bot, update).await;
     }
     Ok(StatusCode::OK)
+}
+
+/// Intentional closed/invalid/admission outcomes are ACKs; infrastructure failures
+/// before durable admission must let Telegram retry. Receipt dedup prevents replay.
+pub(crate) fn native_dispatch_status(error: &AppError) -> StatusCode {
+    match error {
+        AppError::Conflict(_)
+        | AppError::Forbidden(_)
+        | AppError::NotFound(_)
+        | AppError::ValidationError(_)
+        | AppError::BadRequest(_)
+        | AppError::RateLimited
+        | AppError::ServiceConcurrencyLimited
+        | AppError::ChannelBotNotFound(_)
+        | AppError::ChannelBotInactive(_) => StatusCode::OK,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 pub(crate) async fn relay_manager_channel(

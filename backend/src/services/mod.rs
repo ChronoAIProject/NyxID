@@ -147,8 +147,12 @@ pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;
 pub mod par_service;
+pub(crate) mod platform_binding_service;
+pub(crate) mod platform_bot_authority;
+pub(crate) mod platform_bot_config_service;
 pub mod platform_credential_service;
 pub mod platform_settings_service;
+pub(crate) mod platform_setup_service;
 pub mod pool_failover;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
@@ -311,4 +315,24 @@ pub mod tool_twin_service;
 
 pub mod catalog_icon_service;
 
+pub mod platform_provisioning_service;
+
+pub mod platform_inference_service;
+
+pub mod platform_runtime_service;
+
+pub mod platform_native_receipt_service;
+
+pub mod platform_customer_service;
+pub mod platform_guide_service;
+#[cfg(test)]
+mod platform_lifecycle_acceptance_tests;
+#[cfg(test)]
+pub(crate) mod platform_onboarding_test_support;
+#[cfg(test)]
+mod platform_provisioning_acceptance_tests;
+
+pub mod platform_setup_notice_service;
+
+pub(crate) mod nyxbot_gateway_service;
 pub mod tools_manager_service;
