@@ -203,7 +203,11 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     state
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .insert_one(bot)
+        .replace_one(
+            doc! {"_id": bot.get_str("_id").unwrap().to_owned()},
+            bot.clone(),
+        )
+        .upsert(true)
         .await
         .unwrap();
     state

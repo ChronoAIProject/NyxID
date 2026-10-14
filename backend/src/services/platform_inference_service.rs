@@ -2281,6 +2281,25 @@ mod tests {
             crate::models::platform_setup::SetupState::ReadyForTest
         );
         let bot = ready.resources.channel_bot_id.as_deref().unwrap();
+        let personal_key = super::super::key_service::create_api_key(
+            &f.state.db,
+            &f.owner,
+            "Personal callback",
+            "read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("https://callback.nyxid.test/personal"),
+        )
+        .await
+        .unwrap();
         // The durable child marker closes ordinary routes in every conversation class.
         for kind in ["private", "group", "supergroup", "channel", "topic"] {
             assert!(matches!(
@@ -2292,7 +2311,7 @@ mod tests {
                     "test-chat",
                     kind,
                     Some("700"),
-                    "missing-personal-key",
+                    &personal_key.id,
                     true,
                     true
                 )
