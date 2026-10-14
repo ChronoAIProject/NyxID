@@ -1877,6 +1877,140 @@ async fn retired_access_mode_route_answers_gone_and_every_chat_reports_full() {
 }
 
 #[tokio::test]
+async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
+    use crate::models::assistant_acknowledgement::{
+        AssistantAcknowledgement, COLLECTION_NAME as ACKS,
+    };
+    use crate::services::assistant_acknowledgement_service as acks;
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("receipt_history_pages")
+            .await;
+    let messages = f
+        .state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME);
+    let mut message = messages
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    let start = Utc::now() - chrono::Duration::minutes(40);
+    messages
+        .update_one(
+            doc! {"_id": &message.id},
+            doc! {"$set": {"created_at": bson::DateTime::from_chrono(start)}},
+        )
+        .await
+        .unwrap();
+    let card = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id":"kept"})),
+            summary: "Keep this node",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.row.id, &card.id, false)
+        .await
+        .unwrap();
+    let decisions = f.state.db.collection::<AssistantAcknowledgement>(ACKS);
+    decisions
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {
+                "created_at": bson::DateTime::from_chrono(start + chrono::Duration::seconds(30)),
+            }},
+        )
+        .await
+        .unwrap();
+    let auto = acks::AutoAllowed {
+        class: acks::OwnerActionClass::Sensitive,
+        mode: crate::models::assistant_settings::AccessMode::Autopilot,
+        reason: "access_mode",
+    };
+    for index in 1..=30 {
+        let at = start + chrono::Duration::minutes(index);
+        message.id = uuid::Uuid::new_v4().to_string();
+        message.seq = index + 1;
+        message.created_at = at;
+        messages.insert_one(&message).await.unwrap();
+        let summary = format!("Automatic change {index}");
+        acks::record_auto_allowed(
+            &f.state.db,
+            &f.chat,
+            "nyxid__update_agent_key",
+            &json!({"index":index}),
+            &auto,
+            &summary,
+        )
+        .await;
+        decisions
+            .update_one(
+                doc! {"summary": &summary},
+                doc! {"$set": {
+                    "created_at": bson::DateTime::from_chrono(at + chrono::Duration::seconds(1)),
+                }},
+            )
+            .await
+            .unwrap();
+    }
+    let page = |limit, before_seq| {
+        history(
+            State(f.state.clone()),
+            test_auth_user(&f.owner),
+            Path(f.row.id.clone()),
+            Query(HistoryQuery {
+                card: None,
+                limit: Some(limit),
+                before_seq,
+            }),
+        )
+    };
+    let Json(all) = page(50, None).await.unwrap();
+    assert_eq!(all.acknowledgements.len(), 31);
+    assert!(
+        all.acknowledgements
+            .iter()
+            .any(|r| r.id == card.id && r.status == "denied")
+    );
+    let Json(latest) = page(10, None).await.unwrap();
+    assert_eq!(
+        latest.acknowledgements.len(),
+        20,
+        "always retain the newest twenty"
+    );
+    let Json(older) = page(10, Some(12)).await.unwrap();
+    assert_eq!(older.messages.first().unwrap().seq, 2);
+    assert!(
+        older
+            .acknowledgements
+            .iter()
+            .any(|r| r.summary == "Automatic change 1")
+    );
+    assert!(
+        older
+            .acknowledgements
+            .iter()
+            .any(|r| r.summary == "Automatic change 30")
+    );
+    let mut ids: Vec<_> = older.acknowledgements.iter().map(|r| &r.id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        older.acknowledgements.len(),
+        "page/newest overlap is deduplicated"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
     use crate::models::{
         approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS},

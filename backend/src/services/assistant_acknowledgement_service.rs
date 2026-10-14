@@ -1255,6 +1255,17 @@ pub async fn history(
     user: &str,
     conversation: &str,
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
+    history_for_messages(db, user, conversation, None).await
+}
+
+/// Keep decisions beside the messages being displayed, including older pages.
+/// The latest twenty remain visible even on an empty or narrowly loaded page.
+pub async fn history_for_messages(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    oldest_message: Option<DateTime<Utc>>,
+) -> AppResult<Vec<AssistantAcknowledgement>> {
     let thread = super::assistant_nyxagent::get(db, user, conversation).await?;
     expire(db, user, conversation).await?;
     let collection = db.collection::<AssistantAcknowledgement>(ACKS);
@@ -1282,6 +1293,19 @@ pub async fn history(
         .try_collect()
         .await?;
     rows.extend(decided);
+    if let Some(oldest) = oldest_message {
+        let visible: Vec<_> = collection
+            .find(doc! {
+                "user_id": user, "conversation_id": conversation,
+                "status": {"$ne": "pending"},
+                "created_at": {"$gte": bson::DateTime::from_chrono(oldest)},
+            })
+            .await?
+            .try_collect()
+            .await?;
+        let mut ids: std::collections::HashSet<_> = rows.iter().map(|r| r.id.clone()).collect();
+        rows.extend(visible.into_iter().filter(|r| ids.insert(r.id.clone())));
+    }
     rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
     Ok(rows)
 }

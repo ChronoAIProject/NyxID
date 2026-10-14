@@ -570,7 +570,13 @@ pub async fn history(
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
-    let mut acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
+    let mut acknowledgements = acknowledgements::history_for_messages(
+        &state.db,
+        &user_id,
+        &id,
+        rows.first().map(|message| message.created_at),
+    )
+    .await?;
     if let Some(card) = query.card {
         acknowledgements::include_card(
             &state.db,
