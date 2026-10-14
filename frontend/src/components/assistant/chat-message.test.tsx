@@ -791,3 +791,9 @@ it("focuses the comment field and closes it with Escape, showing save failures",
   fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
+
+it("renders a decision continuation as a system status without the owner's instruction bubble", () => {
+  render(<ChatMessageBubble message={{ ...BASE, role: "user", content: "Confirmed: attach it now", continuation_of: "11111111-1111-4111-8111-111111111111" }} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Continuing after your decision");
+  expect(screen.queryByText("Confirmed: attach it now")).not.toBeInTheDocument();
+});

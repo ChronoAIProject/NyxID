@@ -1,3 +1,4 @@
+import { DecisionReceipt } from "./decision-receipt";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -105,9 +106,13 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
   </div> : null;
   if (data?.state && data.state !== "active") {
-    const status = <p role="status" className="ml-[30px] text-[11px] text-muted-foreground">
-      {data.state === "pinned" ? "Skill published and attached" : data.state === "discarded" ? "Skill draft discarded" : data.state === "invalidated" ? "Skill draft is no longer available" : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available." : "This confirmation no longer matches the draft."}
-    </p>;
+    const stateSummary = data.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}`
+      : data.state === "discarded" ? "Skill draft discarded"
+      : data.state === "invalidated" ? "Skill draft is no longer available"
+      : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available."
+      : "This confirmation no longer matches the draft.";
+    const status = <DecisionReceipt acknowledgement={data.state === "pinned" ? { ...card, status: "allowed", decided_by: "user" } : card}
+      summary={stateSummary} />;
     if (!buttons && !error && !notice) return status;
     // An older card of a rebuilt draft can still raise the new package's card.
     return <div className="space-y-2">
@@ -119,6 +124,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
       </div>
     </div>;
   }
+  if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
   return <section aria-label="Review skill draft" className="ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4">
     <p className="text-[13px] font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
     {data ? <p className="text-[12px]">Attach to {data.agent_name}</p> : null}

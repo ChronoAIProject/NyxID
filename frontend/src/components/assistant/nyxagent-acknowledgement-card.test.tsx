@@ -92,10 +92,10 @@ it.each([
 });
 
 it.each([
-  ["orchestrator", "allowed", "Scope matches the user's request", "Allowed by NyxBot: Scope matches the user's request"],
-  ["orchestrator", "denied", null, "Denied by NyxBot"],
-  ["user", "denied", null, "Denied by you"],
-  ["user", "allowed", null, "Allowed by you"],
+  ["orchestrator", "allowed", "Scope matches the user's request", "NyxBot allowed"],
+  ["orchestrator", "denied", null, "NyxBot denied"],
+  ["user", "denied", null, "You denied"],
+  ["user", "allowed", null, "You allowed"],
 ] as const)(
   "shows who decided a routed request (%s, %s)",
   (decidedBy, status, reason, text) => {
@@ -113,14 +113,14 @@ it.each([
       />,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      `${text} · Allow this agent to use GitHub?`,
+      `${text} · ${acknowledgement.summary}`,
     );
   },
 );
 
 it.each([
-  [{ risk: "destructive", access_mode: "nyxmode", reason: "access_mode" }, "Destructive", "Your access mode is NyxMode."],
-  [{ risk: "change", access_mode: "ask_every_time", reason: "access_mode" }, "Change", "Your access mode is Ask Every Time."],
+  [{ risk: "destructive", access_mode: "nyxmode", reason: "access_mode" }, "Destructive", "Your access mode is Auto."],
+  [{ risk: "change", access_mode: "ask_every_time", reason: "access_mode" }, "Change", "Your access mode is Ask every time."],
   [{ risk: "sensitive", access_mode: null, reason: "webhook" }, "Sensitive", "This automation's confirmation policy asks."],
   [{ risk: "change", reason: "policy" }, "Change", "This machine's or saved login's confirmation setting asks."],
 ] as const)("explains an action card's risk and why it asks (%o)", (confirmation, risk, why) => {

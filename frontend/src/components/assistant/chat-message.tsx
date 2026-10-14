@@ -353,6 +353,9 @@ export function ChatMessageBubble({
         props: { message_id: message.id, vote: selected },
       });
   };
+  if (message.continuation_of) {
+    return <p role="status" className="px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
+  }
   if (message.role === "user") {
     return (
       <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">

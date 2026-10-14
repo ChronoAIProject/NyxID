@@ -509,6 +509,7 @@ export class NyxAgentTransport {
         ...images(id, message.attachments),
         via: message.via,
         steering: message.steering,
+        continuation_of: message.continuation_of,
       };
       this.settledViews.set(message, view);
       return view;
@@ -540,6 +541,7 @@ export class NyxAgentTransport {
           feedback: settled?.feedback ?? undefined,
           errorCode: settled?.error_code,
           steering: settled?.steering,
+          continuation_of: settled?.continuation_of ?? message.continuation_of,
           via: settled?.via,
           turnId: settled?.turn_id,
           content: message.blocks.map((block) => block.text).join("\n\n"),
@@ -655,6 +657,7 @@ export class NyxAgentTransport {
       readonly attachments?: readonly NyxAgentAttachment[];
       readonly adoptExisting?: boolean;
       readonly retryOf?: string;
+      readonly acknowledgementId?: string;
     } = {},
   ) {
     const generation = this.identity();
@@ -699,10 +702,12 @@ export class NyxAgentTransport {
             role: message.role === "assistant" ? ("assistant" as const) : ("user" as const),
             schema_version: 1 as const,
             created_at: message.created_at,
+            continuation_of: message.continuation_of,
             blocks: [{ type: "text" as const, block_id: message.id, text: message.text }],
           })),
           {
             id: userMessageId,
+            continuation_of: options.acknowledgementId,
             role: "user",
             schema_version: 1,
             created_at: now,
@@ -727,6 +732,7 @@ export class NyxAgentTransport {
               : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
             text,
             ...(options.retryOf ? { retry_of: options.retryOf } : {}),
+            ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
           headers: { Accept: "text/event-stream" },

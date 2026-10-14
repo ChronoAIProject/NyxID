@@ -93,7 +93,7 @@ it.each(["changed", "unavailable"])("blocks approval when content is %s", async 
   if (state === "changed") mocks.json.mockResolvedValue({ ...preview, state: "changed", actions: [] });
   else mocks.json.mockRejectedValue(new Error("Unavailable"));
   show();
-  if (state === "changed") await screen.findByText("This confirmation no longer matches the draft.");
+  if (state === "changed") await screen.findByText(/This confirmation no longer matches the draft/);
   else await screen.findByRole("alert");
   expect(screen.queryByRole("button", { name: "Allow and publish" })).not.toBeInTheDocument();
 });
@@ -128,7 +128,7 @@ it("renews an expired card for read-only reconciliation", async () => {
 it.each(["rejected", "invalidated"])('renders %s as terminal rather than a failure', async (status) => {
   mocks.json.mockResolvedValue({ ...preview, status, state: status === "rejected" ? "discarded" : "invalidated", actions: [], failure_code: "evidence_unavailable", files: [] });
   show({ ...card, status: "allowed" });
-  expect(await screen.findByText(status === "rejected" ? "Skill draft discarded" : "Skill draft is no longer available")).toBeVisible();
+  expect(await screen.findByText(status === "rejected" ? /Skill draft discarded/ : /Skill draft is no longer available/)).toBeVisible();
   expect(screen.queryByText(/Publication could not finish/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
@@ -156,7 +156,7 @@ it("keeps a conflicting uncertain version available for read-only checks", async
 it("shows the settled publication result", async () => {
   mocks.json.mockResolvedValue({ ...preview, status: "pinned", state: "pinned", actions: [], files: [] });
   show({ ...card, status: "used" });
-  expect(await screen.findByText("Skill published and attached")).toBeVisible();
+  expect(await screen.findByText(/Skill weekly-review 1.0 published and attached to Operations/)).toBeVisible();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
 it("shows an active publication without offering another check", async () => {

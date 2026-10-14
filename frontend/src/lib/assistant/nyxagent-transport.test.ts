@@ -1502,3 +1502,28 @@ describe("sent images", () => {
     expect(most).toBe(1);
   });
 });
+
+it("persists decision continuation provenance through the request, optimistic turn and history without losing its turn count", async () => {
+  const transport = new NyxAgentTransport();
+  const card = "11111111-1111-4111-8111-111111111111";
+  const bodies: unknown[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const stored = history();
+  stored.messages[0] = { ...stored.messages[0]!, continuation_of: card };
+  globalThis.__nyxidAssistantHttpMock = async ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) {
+      bodies.push(JSON.parse(String(init.body))); await gate; return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(stored);
+  };
+  const sending = transport.send(id, "Continue after the decision", vi.fn(), undefined, { acknowledgementId: card });
+  await vi.waitFor(() => expect(bodies).toHaveLength(1));
+  expect(bodies[0]).toMatchObject({ acknowledgement_id: card });
+  expect(transport.session(id).messages.find((row) => row.role === "user")?.continuation_of).toBe(card);
+  expect(transport.session(id).expectedTurnCount).toBe(1);
+  release(); await sending;
+  expect(transport.session(id).messages.find((row) => row.id === "u")?.continuation_of).toBe(card);
+  expect(transport.session(id).expectedTurnCount).toBe(1);
+});

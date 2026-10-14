@@ -148,6 +148,14 @@ describe("NyxBot message and card schemas", () => {
     ).toMatchObject({ decider: "orchestrator", decided_by: "orchestrator" });
   });
 
+  it("accepts automatic receipts and tolerates future deciders and bypass reasons", () => {
+    const row = { id: "12345678-1234-4123-8123-123456789012", kind: "action", status: "allowed", summary: "Run the action", service_slug: null, service_name: null, tool_name: "tool", created_at: at, decided_at: at, expires_at: at,
+      decided_by: "access_mode", confirmation: { risk: "change", access_mode: "autopilot", reason: "approval" } };
+    expect(nyxAgentAcknowledgementSchema.parse(row)).toMatchObject({ decided_by: "access_mode", confirmation: { reason: "approval" } });
+    expect(nyxAgentAcknowledgementSchema.parse({ ...row, decided_by: "future", confirmation: { ...row.confirmation, reason: "future" } })).toMatchObject({ decided_by: "user", confirmation: { reason: "access_mode" } });
+    expect(nyxAgentMessageSchema.parse({ ...message, role: "user", continuation_of: row.id }).continuation_of).toBe(row.id);
+  });
+
   it("parses a history with team members", () => {
     const page = nyxAgentHistorySchema.parse({
       conversation: { ...legacyConversation, members: [] },

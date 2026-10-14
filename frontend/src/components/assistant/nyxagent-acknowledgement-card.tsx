@@ -1,3 +1,4 @@
+import { DecisionReceipt } from "./decision-receipt";
 import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -24,23 +25,6 @@ function title(row: NyxAgentAcknowledgement): string {
   return `Confirm: ${row.summary}`;
 }
 
-const statusLabel = {
-  pending: "Pending",
-  allowed: "Allowed",
-  denied: "Denied",
-  expired: "Expired",
-  used: "Used",
-};
-
-/** "Allowed by NyxBot: <reason>" for decisions whose decider is recorded. */
-function decisionLabel(row: NyxAgentAcknowledgement): string {
-  const status = statusLabel[row.status];
-  if ((row.status !== "allowed" && row.status !== "denied") || !row.decided_by) return status;
-  const by = row.decided_by === "orchestrator" ? "NyxBot" : "you";
-  const reason = row.reason?.trim();
-  return reason ? `${status} by ${by}: ${reason}` : `${status} by ${by}`;
-}
-
 export function NyxAgentAcknowledgementCard({
   acknowledgement,
   deciding,
@@ -55,11 +39,7 @@ export function NyxAgentAcknowledgementCard({
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
   if (acknowledgement.status !== "pending") {
-    return (
-      <p role="status" className="ml-[30px] px-[7px] text-11 text-muted-foreground">
-        {decisionLabel(acknowledgement)} · {label}
-      </p>
-    );
+    return <DecisionReceipt acknowledgement={acknowledgement} />;
   }
 
   async function decide(choice: "allow" | "deny") {

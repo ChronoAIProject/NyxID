@@ -124,6 +124,7 @@ export const nyxAgentCapabilitiesSchema = z.object({
 export const nyxAgentMessageSchema = z.object({
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),
+  continuation_of: z.string().nullish(),
   id: z.string(),
   seq: z.number().int().positive(),
   turn_id: z.string(),
@@ -156,7 +157,7 @@ export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
 export const nyxAgentActionConfirmationSchema = z.object({
   risk: z.enum(["read", "change", "sensitive", "destructive"]),
   access_mode: nyxAgentAccessModeSchema.nullish(),
-  reason: z.enum(["access_mode", "webhook", "policy"]),
+  reason: z.enum(["access_mode", "webhook", "policy", "approval"]).catch("access_mode"),
 });
 export type NyxAgentActionConfirmation = z.infer<typeof nyxAgentActionConfirmationSchema>;
 
@@ -180,7 +181,7 @@ export const nyxAgentAcknowledgementSchema = z.object({
   summary: z.string(),
   /** `orchestrator`: a specialist's request that NyxBot decides (the user may too). */
   decider: z.enum(["user", "orchestrator"]).default("user"),
-  decided_by: z.enum(["user", "orchestrator"]).nullable().default(null),
+  decided_by: z.enum(["user", "orchestrator", "access_mode"]).catch("user").nullable().default(null),
   reason: z.string().nullable().default(null),
   confirmation: nyxAgentActionConfirmationSchema.nullish(),
   service_slug: z.string().nullable(),
