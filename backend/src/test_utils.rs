@@ -64,14 +64,18 @@ const STALE_TEST_DB_SWEEP_LEASE: Duration = Duration::from_secs(90);
 static LOOPBACK_REVOCATION_URLS: std::sync::LazyLock<dashmap::DashMap<String, ()>> =
     std::sync::LazyLock::new(dashmap::DashMap::new);
 
+// Used only by the local-only Catalog E2E, which coverage builds exclude.
+#[cfg(not(coverage))]
 pub(crate) struct LoopbackRevocationGuard(String);
 
+#[cfg(not(coverage))]
 impl Drop for LoopbackRevocationGuard {
     fn drop(&mut self) {
         LOOPBACK_REVOCATION_URLS.remove(&self.0);
     }
 }
 
+#[cfg(not(coverage))]
 pub(crate) fn register_loopback_revocation_url(url: &str) -> LoopbackRevocationGuard {
     let parsed = url::Url::parse(url).expect("owned revocation mock URL");
     assert_eq!(parsed.scheme(), "http");

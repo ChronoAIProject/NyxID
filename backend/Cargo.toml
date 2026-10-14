@@ -127,3 +127,7 @@ gcp-kms = ["google-cloud-kms"]
 
 [package.metadata.dist]
 dist = false
+
+[lints.rust]
+# cargo-llvm-cov builds with `--cfg coverage`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }

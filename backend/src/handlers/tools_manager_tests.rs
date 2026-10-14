@@ -19,6 +19,10 @@ use mongodb::bson::{Document, doc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+// Local-only E2Es (ignored in CI) are excluded from cargo-llvm-cov builds:
+// they never execute there, and instrumenting them pushes the single backend
+// test crate past the coverage runner's memory.
+#[cfg(not(coverage))]
 #[path = "catalog_manager_e2e_tests.rs"]
 mod catalog_e2e;
 
@@ -2208,6 +2212,7 @@ async fn tools_manager_published_byok_bills_user_without_platform_audience() {
 
 /// Executed by scripts/tools/test-tools-manager-e2e.sh, never against a remote
 /// database or vendor. The real CLI, Axum ingress, proxy and billing run here.
+#[cfg(not(coverage))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the locally built CLI; run scripts/tools/test-tools-manager-e2e.sh"]
 async fn tools_manager_local_fake_vendor_e2e() {
