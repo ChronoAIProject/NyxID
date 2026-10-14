@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::{

@@ -1,3 +1,5 @@
+#![allow(clippy::needless_borrow)]
+
 use crate::services::{
     platform_inference_service as inference, platform_runtime_service as runtime,
 };
