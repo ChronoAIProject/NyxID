@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { ServiceIcon } from "@/components/service-icon";
 
 export function ToolsPage() {
   const { data: tools = [], isLoading, error, refetch } = useTools();
@@ -100,9 +101,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
     <Card>
       <CardContent className="space-y-3 p-4">
         <div>
-          {tool.icon_url && (
-            <img src={tool.icon_url} alt="" className="size-6" />
-          )}
+          {tool.icon_url && <ServiceIcon iconUrl={tool.icon_url} size="md" />}
           <h3 className="text-15 font-semibold">{tool.name}</h3>
           <p className="text-11 text-text-tertiary">
             {tool.supplier ?? tool.provider_label}

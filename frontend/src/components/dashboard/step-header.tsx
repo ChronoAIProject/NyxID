@@ -20,11 +20,14 @@ import { DialogDescription, DialogTitle } from "@/components/ui/dialog";
  */
 export function StepHeader({
   slug,
+  iconUrl,
   title,
   description,
 }: {
   /** Catalog slug for the brand glyph. Omitted for custom endpoints. */
   readonly slug?: string | null;
+  /** Uploaded catalog icon; preferred over the slug glyph when present. */
+  readonly iconUrl?: string | null;
   readonly title: ReactNode;
   readonly description?: ReactNode;
 }) {
@@ -32,7 +35,7 @@ export function StepHeader({
     <div className="flex items-start gap-3">
       {slug && (
         <div className="mt-0.5 shrink-0">
-          <ServiceIcon slug={slug} size="md" />
+          <ServiceIcon slug={slug} iconUrl={iconUrl} size="md" />
         </div>
       )}
       <div className="min-w-0 space-y-1">

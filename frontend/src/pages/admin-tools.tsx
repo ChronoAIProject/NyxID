@@ -37,6 +37,7 @@ import {
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CatalogToolMetadata } from "@/components/services/catalog-tool-metadata";
+import { ServiceIcon } from "@/components/service-icon";
 
 export function AdminToolsPage() {
   const { data: services = [], isLoading, error, refetch } = useServices(true);
@@ -111,7 +112,7 @@ export function AdminToolsPage() {
                     >
                       <td className="space-y-3 p-4">
                         {tool.icon_url && (
-                          <img src={tool.icon_url} alt="" className="size-6" />
+                          <ServiceIcon iconUrl={tool.icon_url} size="md" />
                         )}
                         <h2 className="text-15 font-semibold">{tool.name}</h2>
                         <Button variant="ghost" asChild>

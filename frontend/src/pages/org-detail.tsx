@@ -94,6 +94,7 @@ import { OrgApprovalConfigs } from "@/components/orgs/org-approval-configs";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import { OrgDeveloperAppsTab } from "@/components/orgs/org-developer-apps-tab";
 import { OrgServiceAccountsTab } from "@/components/orgs/org-service-accounts-tab";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
 export function OrgDetailPage() {
   const { orgId } = useParams({ strict: false }) as { orgId: string };
@@ -966,6 +967,7 @@ function RolePermissionCard({
                     />
                     <ServiceIcon
                       slug={service.catalog_service_slug}
+                      iconUrl={connectionIconUrl(service)}
                       size="sm"
                     />
                     <Label

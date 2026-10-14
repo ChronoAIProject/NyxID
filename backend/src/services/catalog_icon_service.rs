@@ -25,7 +25,7 @@ pub fn asset_id<'a>(base_url: &str, value: &'a str) -> AppResult<&'a str> {
 
 pub fn validate(svg: &str) -> AppResult<()> {
     let invalid = || {
-        AppError::ValidationError("Use a static SVG with a viewBox; scripts, styles, external resources and animation are unsupported".into())
+        AppError::ValidationError("Use a static SVG with xmlns=\"http://www.w3.org/2000/svg\" and a viewBox; scripts, styles, external resources and animation are unsupported".into())
     };
     if svg.len() > MAX_SVG_BYTES || svg.is_empty() {
         return Err(invalid());
@@ -33,6 +33,9 @@ pub fn validate(svg: &str) -> AppResult<()> {
     let mut reader = Reader::from_str(svg);
     let mut depth = 0usize;
     let mut root = false;
+    // Browsers render an un-namespaced root as generic XML, which shows as a
+    // broken image inside <img>, so the SVG namespace is mandatory.
+    let mut root_namespaced = false;
     loop {
         let event = reader.read_event().map_err(|_| invalid())?;
         let empty = matches!(&event, Event::Empty(_));
@@ -158,8 +161,13 @@ pub fn validate(svg: &str) -> AppResult<()> {
                     {
                         return Err(invalid());
                     }
-                    if key == "xmlns" && value != "http://www.w3.org/2000/svg" {
-                        return Err(invalid());
+                    if key == "xmlns" {
+                        if value != "http://www.w3.org/2000/svg" {
+                            return Err(invalid());
+                        }
+                        if depth == 0 {
+                            root_namespaced = true;
+                        }
                     }
                 }
                 if !empty {
@@ -182,7 +190,7 @@ pub fn validate(svg: &str) -> AppResult<()> {
             _ => {}
         }
     }
-    if !root || depth != 0 {
+    if !root || !root_namespaced || depth != 0 {
         return Err(invalid());
     }
     Ok(())
@@ -270,6 +278,10 @@ mod tests {
             assert!(validate(&format!("<svg viewBox=\"0 0 24 24\">{body}</svg>")).is_err());
         }
         assert!(validate("<!DOCTYPE svg><svg viewBox=\"0 0 1 1\"/>").is_err());
+        assert!(
+            validate("<svg viewBox=\"0 0 1 1\"/>").is_err(),
+            "an SVG without the SVG namespace renders as a broken image"
+        );
         assert!(validate("<svg/>").is_err());
         assert!(validate("<svg viewBox=\"0 0 1 1\"><path></svg>").is_err());
         assert!(validate("<svg viewBox=\"0 0 1 1\"/><svg viewBox=\"0 0 1 1\"/>").is_err());

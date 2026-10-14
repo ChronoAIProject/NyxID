@@ -1936,11 +1936,15 @@ function IconEditor({
   keyId,
   slug,
   iconUrl,
+  catalogIconUrl,
   readOnly,
 }: {
   readonly keyId: string;
   readonly slug: string;
+  /** This connection's own override, edited here. */
   readonly iconUrl?: string | null;
+  /** The catalog icon shown when there is no override. */
+  readonly catalogIconUrl?: string | null;
   readonly readOnly: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -1981,7 +1985,7 @@ function IconEditor({
   return (
     <>
       <div className="flex shrink-0 items-center gap-1">
-        <ServiceIcon slug={slug} iconUrl={iconUrl} size="md" />
+        <ServiceIcon slug={slug} iconUrl={iconUrl || catalogIconUrl} size="md" />
         {!readOnly && (
           <Button
             size="icon"
@@ -2004,7 +2008,7 @@ function IconEditor({
           <div className="flex items-center gap-3 py-2">
             <ServiceIcon
               slug={slug}
-              iconUrl={valid ? trimmed : iconUrl}
+              iconUrl={valid ? trimmed || catalogIconUrl : iconUrl || catalogIconUrl}
               size="lg"
             />
             <div className="min-w-0 flex-1 space-y-2">
@@ -2599,6 +2603,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               keyId={keyInfo.id}
               slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
               iconUrl={keyInfo.icon_url}
+              catalogIconUrl={keyInfo.catalog_icon_url}
               readOnly={readOnly}
             />
             <div className="flex flex-col gap-2">

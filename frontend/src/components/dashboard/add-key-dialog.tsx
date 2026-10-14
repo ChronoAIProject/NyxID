@@ -447,6 +447,7 @@ function CatalogGrid({
         </button>
         <StepHeader
           slug={postHogRepresentative?.slug}
+          iconUrl={postHogRepresentative?.icon_url}
           title="Connect PostHog"
           description="Choose where your existing PostHog project is hosted."
         />
@@ -518,7 +519,7 @@ function CatalogGrid({
             className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
           >
             <div className="flex w-full items-start justify-between gap-2">
-              <ServiceIcon slug={entry.slug} size="sm" />
+              <ServiceIcon slug={entry.slug} iconUrl={entry.icon_url} size="sm" />
               <div className="flex flex-wrap justify-end gap-1">
                 {entry.service_type === "ssh" && (
                   <Badge variant="secondary" className="text-10">
@@ -614,6 +615,7 @@ function RoutingStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={
           catalogEntry
             ? `Configure routing for ${catalogEntry.name}`
@@ -833,6 +835,7 @@ function KeyForm({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={
           catalogEntry ? `Configure ${catalogEntry.name}` : "Custom endpoint"
         }
@@ -1244,6 +1247,7 @@ function NodeSetupStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={
           catalogEntry ? `${catalogEntry.name} — Node setup` : "Node setup"
         }
@@ -1993,6 +1997,7 @@ function OAuthStep({
       <div className="space-y-4">
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`Authorize ${catalogEntry.name}`}
           description={`Open ${catalogEntry.name} to approve access. Leave this open — it updates automatically when you're done.`}
         />
@@ -2098,6 +2103,7 @@ function OAuthStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
         description="This service uses OAuth to authenticate. Click the button below to connect your account."
       />
@@ -2543,6 +2549,7 @@ function DeviceCodeStep({
 
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
           description="This service uses a device code to authenticate. Click continue to request a code."
         />
@@ -2589,6 +2596,7 @@ function DeviceCodeStep({
         </button>
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
           description={`Requesting code from ${catalogEntry.name}...`}
         />
@@ -2604,6 +2612,7 @@ function DeviceCodeStep({
       <div className="space-y-4">
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${catalogEntry.name} connected`}
           description={`Your ${catalogEntry.name} account has been connected successfully.`}
         />
@@ -2639,6 +2648,7 @@ function DeviceCodeStep({
         </button>
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
           description="Something went wrong. Review the error below and try again."
         />
@@ -2674,6 +2684,7 @@ function DeviceCodeStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
         description={`Enter this code at ${catalogEntry.name} to finish authenticating.`}
       />
@@ -2799,6 +2810,7 @@ function OAuthCredentialsStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={`Setup ${catalogEntry.name} credentials`}
         description="This service requires your own OAuth app credentials."
       />

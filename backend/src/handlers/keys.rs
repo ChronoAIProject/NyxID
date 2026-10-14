@@ -452,8 +452,12 @@ pub struct KeyResponse {
     pub catalog_service_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_slug: Option<String>,
+    /// Per-connection icon override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_url: Option<String>,
+    /// The catalog service's icon, for display when there is no override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_icon_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2792,6 +2796,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         catalog_service_id: result.service.catalog_service_id.clone(),
         catalog_service_slug: None,
         icon_url: result.service.icon_url.clone(),
+        catalog_icon_url: None,
         catalog_service_name: None,
         revocation: None,
         node_id: result.service.node_id.clone(),
@@ -2934,6 +2939,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         catalog_service_id: view.catalog_service_id,
         catalog_service_slug: view.catalog_service_slug,
         icon_url: view.icon_url,
+        catalog_icon_url: view.catalog_icon_url,
         catalog_service_name: view.catalog_service_name,
         revocation: None,
         node_id: view.node_id,

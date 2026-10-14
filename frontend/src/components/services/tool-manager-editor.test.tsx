@@ -72,17 +72,16 @@ it("skips credential entry for no-auth and uploads a Tool-owned SVG", async () =
       service={{
         ...tool,
         auth_method: "none",
-        icon_url: "/catalog-icons/local",
+        icon_url: "https://nyx.example/catalog-icons/local",
       }}
     />,
   );
   expect(
     screen.queryByLabelText("Shared vendor credential"),
   ).not.toBeInTheDocument();
-  expect(screen.getByAltText("Current tool icon")).toHaveAttribute(
-    "src",
-    "/catalog-icons/local",
-  );
+  expect(
+    screen.getByRole("img", { name: "Current tool icon" }).querySelector("img"),
+  ).toHaveAttribute("src", "https://nyx.example/catalog-icons/local");
   const file = new File(['<svg viewBox="0 0 24 24"/>'], "local.svg", {
     type: "image/svg+xml",
   });

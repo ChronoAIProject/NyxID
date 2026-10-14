@@ -576,7 +576,10 @@ pub struct KeyView {
     pub catalog_service_id: Option<String>,
     pub catalog_service_slug: Option<String>,
     pub catalog_service_name: Option<String>,
+    /// Per-connection icon override.
     pub icon_url: Option<String>,
+    /// The catalog service's own icon, shown when there is no override.
+    pub catalog_icon_url: Option<String>,
     pub node_id: Option<String>,
     pub node_priority: i32,
     pub service_type: String,
@@ -2691,6 +2694,13 @@ pub async fn list_keys_read_only_with_tool_bindings(
                 .get(view.endpoint_id.as_str())
                 .map(|ep| ep.user_id.as_str())
                 .unwrap_or(user_id);
+            view.catalog_icon_url = super::catalog_service::catalog_icon_url(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id)),
+            );
             view.platform_key_available = platform_key_service::available_with_grants(
                 catalog,
                 catalog
@@ -2796,6 +2806,8 @@ pub async fn get_key(
         } else {
             None
         };
+        view.catalog_icon_url =
+            super::catalog_service::catalog_icon_url(catalog, provider.as_ref());
         view.platform_key_available = super::platform_key_service::available_with_provider(
             db,
             catalog,
@@ -4580,6 +4592,7 @@ fn build_key_view(
         catalog_service_slug: catalog_ds.map(|ds| ds.slug.clone()),
         catalog_service_name: catalog_ds.map(|ds| ds.name.clone()),
         icon_url: svc.icon_url.clone(),
+        catalog_icon_url: None,
         node_id: svc.node_id.clone(),
         node_priority: svc.node_priority,
         service_type: svc.service_type.clone(),

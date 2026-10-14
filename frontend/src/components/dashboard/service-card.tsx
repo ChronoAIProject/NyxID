@@ -76,11 +76,7 @@ export function ServiceCard({
       {/* Title + Badges row */}
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
-          {service.icon_url ? (
-            <img src={service.icon_url} alt="" className="size-8" />
-          ) : (
-            <ServiceIcon slug={service.slug} size="md" />
-          )}
+          <ServiceIcon slug={service.slug} iconUrl={service.icon_url} size="md" />
           <h3 className="truncate text-lg font-normal text-foreground">
             {service.name}
           </h3>

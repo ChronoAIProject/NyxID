@@ -505,19 +505,12 @@ export function ConnectLinkContent({
                     <ConnectionArc />
                     <div className="flex w-20 flex-col items-center gap-2.5">
                       <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
-                        {catalog?.icon_url ? (
-                          <img
-                            src={catalog.icon_url}
-                            alt=""
-                            className="size-9 object-contain"
-                          />
-                        ) : (
-                          <ServiceIcon
-                            slug={preview.data.service_slug}
-                            size="xl"
-                            className="text-foreground"
-                          />
-                        )}
+                        <ServiceIcon
+                          slug={preview.data.service_slug}
+                          iconUrl={catalog?.icon_url}
+                          size="xl"
+                          className="text-foreground"
+                        />
                       </div>
                       <span className="text-xs font-medium">
                         {preview.data.service_name}

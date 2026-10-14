@@ -3514,6 +3514,8 @@ List user's service bindings.
 | `auth_method` | string | Credential injection method |
 | `auth_key_name` | string | Header or parameter name used for credential injection |
 | `catalog_service_id` | UUID string, omitted | Source catalog service |
+| `icon_url` | URL string, omitted | Per-connection icon override set by the user |
+| `catalog_icon_url` | URL string, omitted | The catalog service's icon (its provider's uploaded icon, or a Tool's own icon); clients show it when there is no `icon_url` override |
 | `node_id` | UUID string, omitted | Selected credential node |
 | `node_priority` | integer | Node routing priority |
 | `ssh_auth_mode` | string | `cert`, `node_key`, or `proxy_only` |

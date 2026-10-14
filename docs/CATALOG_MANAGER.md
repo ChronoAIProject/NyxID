@@ -272,12 +272,21 @@ Each upload receives an immutable asset URL. If the provider update
 fails after upload, the existing icon remains selected; correct the error and
 rerun the command.
 
-Files must be UTF-8 static SVGs, at most 128 KiB, with a `viewBox`. Scripts,
+Files must be UTF-8 static SVGs, at most 128 KiB, with
+`xmlns="http://www.w3.org/2000/svg"` on the root and a `viewBox`. (Browsers show
+an un-namespaced SVG as a broken image, so uploads without the namespace are
+refused.) Scripts,
 event handlers, styles, animation, embedded images and external resources are
 rejected. Convert style declarations to SVG presentation attributes before
 uploading. Shapes, groups, gradients, masks and clipping paths are supported.
 Use an official vendor source and observe its brand-use terms. Verify the
 resulting URL loads and inspect the catalog on light and dark backgrounds.
+
+The web UI draws uploaded icons the way it draws built-in glyphs: as a single
+shape in the muted text colour (greyscale for third-party icon hosts that do
+not allow cross-origin reads). Vendor colours therefore do not show; prefer a
+clear silhouette mark without an opaque background rectangle. If an icon ever
+fails to load, the UI falls back to the built-in glyph.
 
 ## Separate Tools Manager authority
 

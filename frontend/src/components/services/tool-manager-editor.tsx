@@ -13,6 +13,7 @@ import {
   toolManagerDestinationSchema as destinationSchema,
   toolManagerCredentialSchema as schema,
 } from "@/schemas/tools";
+import { ServiceIcon } from "@/components/service-icon";
 
 export function ToolManagerEditor({ service }: { service: DownstreamService }) {
   const mutation = useCatalogToolMutation();
@@ -122,11 +123,9 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
       <section className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
         <h2 className="text-15 font-semibold">Tool icon</h2>
         {service.icon_url && (
-          <img
-            src={service.icon_url}
-            alt="Current tool icon"
-            className="size-8"
-          />
+          <span role="img" aria-label="Current tool icon" className="inline-flex">
+            <ServiceIcon iconUrl={service.icon_url} size="lg" />
+          </span>
         )}
         <Input
           type="file"

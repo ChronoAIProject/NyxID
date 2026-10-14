@@ -3637,7 +3637,7 @@ async fn tools_manager_icon_assets_eligibility_and_request_audit() {
         auth.clone(),
         Path(tool.id.clone()),
         Json(super::catalog_icons::Upload {
-            svg: "<svg viewBox=\"0 0 1 1\"/>".into(),
+            svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"/>".into(),
         }),
     )
     .await
