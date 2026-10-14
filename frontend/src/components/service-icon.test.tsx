@@ -21,7 +21,7 @@ describe("ServiceIcon", () => {
     ["tools-firecrawl", "api-firecrawl"],
   ])("renders the brand SVG for %s", (slug, catalogSlug) => {
     const { container } = render(<ServiceIcon slug={slug} size="md" />);
-    const svg = container.querySelector(`svg[data-slug="${catalogSlug}"]`);
+    const svg = container.querySelector<SVGSVGElement>(`svg[data-slug="${catalogSlug}"]`);
     expect(svg).toBeInTheDocument();
     expect(svg).toHaveAttribute("fill", "currentColor");
     expect(svg).toHaveAttribute("aria-hidden", "true");
