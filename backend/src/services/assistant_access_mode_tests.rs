@@ -914,7 +914,9 @@ async fn full_access_set_agent_operations_widens_with_receipt_while_auto_asks() 
             assert!(!error, "{value}");
             assert_eq!(current.operation_scope_revisions[&service], 2);
             assert!(!current.operation_scopes.contains_key(&service));
+            assert_eq!(rows[0].status, "allowed");
             assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
             assert_eq!(
                 rows[0].tool_name.as_deref(),
                 Some("nyxid__set_agent_operations")

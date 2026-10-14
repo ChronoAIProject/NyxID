@@ -2111,7 +2111,9 @@ async fn full_access_machine_capabilities_widens_with_receipt_while_auto_asks() 
         } else {
             assert!(!error, "{value}");
             assert!(current.assignments[&n.id].capabilities.files);
+            assert_eq!(rows[0].status, "allowed");
             assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
             assert_eq!(
                 rows[0].tool_name.as_deref(),
                 Some("nyxid__machine_capabilities")
