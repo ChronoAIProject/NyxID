@@ -695,7 +695,10 @@ async fn full_access_account_success_records_one_non_consumable_receipt_and_no_u
     );
     assert_eq!(
         receipt.summary,
-        format!("Change agent key 'ci-bot' ({}): name", &key[..8])
+        format!(
+            "Change agent key 'ci-bot' ({}): name",
+            done.value["key_prefix"].as_str().unwrap()
+        )
     );
     assert_eq!(receipt.created_at, receipt.decided_at.unwrap());
     assert_eq!(receipt.expires_at, receipt.created_at);
