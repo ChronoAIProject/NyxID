@@ -582,7 +582,7 @@ pub(crate) async fn permission_decided(
             "Do not retry it; finish what you can and report."
         }
     );
-    note.push_str(" ");
+    note.push(' ');
     note.push_str(acks::DECISION_NARRATION);
     if request.trigger_run_id.is_none() {
         notify(

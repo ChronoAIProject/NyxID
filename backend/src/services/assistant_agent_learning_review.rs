@@ -1450,7 +1450,7 @@ async fn discard_automatic(
     audit(
         &state.db,
         actor,
-        &row,
+        row,
         "assistant_learning_proposal_rejected",
     )
     .await;

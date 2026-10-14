@@ -3013,7 +3013,7 @@ fn meta_action_summary(tool: &str, args: &serde_json::Value) -> String {
 /// Apply the owner's access mode and any webhook automation policy to one
 /// service operation, classified by its catalog/HTTP effects. (Named for the
 /// webhook policy it first enforced; it now carries both.)
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 async fn webhook_service_gate(
     state: &AppState,
     auth: &McpAuthContext,

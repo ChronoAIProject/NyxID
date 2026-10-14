@@ -626,7 +626,7 @@ impl AccountTools<'_> {
             // authority, preserving not-found refusals and key restrictions.
             let summary = summary.as_deref().unwrap_or_default();
             if let Some(refusal) =
-                acks::confirm_action(self.db, chat, tool_name, args, &need, &summary).await?
+                acks::confirm_action(self.db, chat, tool_name, args, &need, summary).await?
             {
                 return Ok(ToolResult {
                     permission_request: None,
