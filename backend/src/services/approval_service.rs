@@ -309,23 +309,12 @@ pub async fn evaluate_for_chat(
         auto_connected,
     )
     .await?;
-    if matches!(outcome, ApprovalOutcome::NeedsApproval(_))
+    if let ApprovalOutcome::NeedsApproval(ref pending) = outcome
         && let Some(chat) = chat.filter(|chat| !chat.guest)
         && acks::effective_access_mode(db, chat).await?
             == crate::models::assistant_settings::AccessMode::Autopilot
     {
-        let outcome = evaluate_and_check(
-            db,
-            actor,
-            service_owner,
-            service_id,
-            descriptor,
-            requester_type,
-            requester_id,
-            true,
-            auto_connected,
-        )
-        .await?;
+        let outcome = ApprovalOutcome::Allowed { required: pending.resolution.required };
         let receipt =
             matches!(outcome, ApprovalOutcome::Allowed { .. }).then_some(acks::AutoAllowed {
                 class: match descriptor.verb {
