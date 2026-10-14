@@ -218,6 +218,10 @@ export function buildStudioBreadcrumbs(
   if (path === "/channel-bots/connect") {
     return finish([page("/channel-bots"), { label: "Setup links" }]);
   }
+  const platformSetup = path.match(/^\/onboarding\/setups\/[^/]+$/);
+  if (platformSetup) {
+    return finish([page("/onboarding/setups"), named(path, "Bot setup")]);
+  }
   if (path === "/providers/callback") {
     return finish([
       page("/keys", { tab: "services" }),
