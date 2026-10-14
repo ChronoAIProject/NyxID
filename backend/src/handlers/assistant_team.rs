@@ -342,7 +342,7 @@ pub(crate) async fn owner_denial_decided(
     }
     notify(state, owner, &row.conversation_id, vec![team::event("action_denied", format!(
         "The owner denied: {}. Do not execute or retry this action. Explain plainly what you skipped. {}",
-        engine::identifier(&row.summary), acks::DECISION_NARRATION), None)]).await;
+        engine::excerpt(&row.summary, 2000), acks::DECISION_NARRATION), None)]).await;
 }
 
 /// Type-erased settlement hook. `run_turn` awaits this so the detached turn's

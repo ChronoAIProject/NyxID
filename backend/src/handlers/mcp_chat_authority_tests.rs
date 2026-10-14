@@ -2436,7 +2436,7 @@ async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasse
 }
 
 #[tokio::test]
-async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructive_is_enabled() {
+async fn assistant_operation_scopes_auto_requires_exact_one_use_owner_card() {
     use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
     use crate::services::{
         agent_operation_scope_service as scopes, assistant_team_service as team,
@@ -2476,7 +2476,7 @@ async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructiv
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -3167,7 +3167,7 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
