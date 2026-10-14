@@ -332,6 +332,9 @@ pub async fn evaluate_for_chat(
                     crate::models::service_approval_config::ApprovalVerb::Read => {
                         acks::OwnerActionClass::Read
                     }
+                    crate::models::service_approval_config::ApprovalVerb::Destructive => {
+                        acks::OwnerActionClass::Destructive
+                    }
                     _ => acks::OwnerActionClass::Change,
                 },
                 mode: crate::models::assistant_settings::AccessMode::Autopilot,

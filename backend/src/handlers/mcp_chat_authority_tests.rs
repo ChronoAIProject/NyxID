@@ -4517,6 +4517,33 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
             assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "approval");
             assert!(rows[0].summary.contains("mode-approval"));
             assert!(rows[0].summary.contains("/work"));
+            let value = result(
+                call(
+                    &f,
+                    &auth,
+                    "mode-approval__proxy",
+                    json!({"method":"DELETE","path":"/remove"}),
+                )
+                .await,
+                false,
+            )
+            .await;
+            assert_eq!(value["ok"], true);
+            assert_eq!(hits.load(Ordering::SeqCst), 2);
+            let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2, "one receipt for each successful operation");
+            let destructive = rows.iter().find(|r| r.summary.contains("/remove")).unwrap();
+            assert_eq!(
+                destructive.confirmation.as_ref().unwrap().risk,
+                "destructive"
+            );
+            assert_eq!(
+                destructive.confirmation.as_ref().unwrap().reason,
+                "approval"
+            );
+            assert!(rows.iter().all(|r| r.status == "allowed"));
         }
         server.abort();
         f.state.db.drop().await.unwrap();
