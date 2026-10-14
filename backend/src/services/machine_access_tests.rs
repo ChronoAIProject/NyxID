@@ -2169,7 +2169,10 @@ async fn full_access_machine_pairing_completes_with_receipt_while_auto_asks() {
             .unwrap();
         assert_eq!(rows.len(), 1);
         if asks {
-            assert!(!error, "pairing retains its existing refusal-result transport");
+            assert!(
+                !error,
+                "pairing retains its existing refusal-result transport"
+            );
             assert_eq!(result["error"], "acknowledgement_required");
             assert_eq!(machine.status, "pending");
             assert_eq!(rows[0].status, "pending");
