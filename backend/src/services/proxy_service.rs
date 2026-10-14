@@ -1413,6 +1413,9 @@ pub async fn resolve_proxy_target(
     // as `Connect your <provider> instance first` instead of building
     // a request against the placeholder. See ChronoAIProject/NyxID#160.
     if service.auth_method == "none" {
+        if service.provider_config_id.is_none() && service.platform_key.is_some() {
+            super::platform_key_service::require(db, &service, user_id).await?;
+        }
         let base_url = resolve_gateway_url_override(db, user_id, &service)
             .await?
             .unwrap_or_else(|| service.base_url.clone());
@@ -1494,6 +1497,23 @@ pub(crate) async fn resolve_catalog_platform_target(
     mut service: DownstreamService,
     rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 ) -> AppResult<ProxyTarget> {
+    if super::platform_key_service::no_auth_platform_service(&service) {
+        super::platform_key_service::require(db, &service, owner_id).await?;
+        return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
+            base_url: service.base_url.clone(),
+            auth_method: "none".into(),
+            auth_key_name: String::new(),
+            credential: String::new(),
+            catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+            user_service_default_headers: vec![],
+            ws_frame_injections: service.ws_frame_injections.clone(),
+            connection_id: None,
+            service,
+        });
+    }
     let actor = EffectiveActor::from_user_id(owner_id);
     let authorized = authorize_master_credential(db, &service, &actor).await?;
     let (auth_method, auth_key_name) =
@@ -1592,6 +1612,9 @@ pub async fn resolve_proxy_target_lenient(
         return Ok((target, true));
     }
     if service.auth_method == "none" {
+        if service.provider_config_id.is_none() && service.platform_key.is_some() {
+            super::platform_key_service::require(db, &service, user_id).await?;
+        }
         let (base_url, has_server_credential) =
             match resolve_gateway_url_override(db, user_id, &service).await {
                 Ok(Some(url)) => (url, true),
@@ -2897,12 +2920,16 @@ async fn finish_resolution(
         .clone()
         .unwrap_or_default();
 
-    if super::platform_key_service::binding(&user_service) == "platform"
+    if (super::platform_key_service::binding(&user_service) == "platform"
         && (user_service.auth_method != "none"
-            || user_service.credential_binding.as_deref() == Some("platform"))
+            || user_service.credential_binding.as_deref() == Some("platform")
+            || catalog_proxy_authorization.platform_key_configured))
+        || (catalog_proxy_authorization.no_auth_platform_service
+            && catalog_proxy_authorization.platform_key_configured)
     {
         let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
-        if !super::platform_key_service::has_platform_key(&catalog_service) {
+        let no_auth = super::platform_key_service::no_auth_platform_service(&catalog_service);
+        if !no_auth && !super::platform_key_service::has_platform_key(&catalog_service) {
             return Err(AppError::NotFound(
                 "Service is no longer available".to_string(),
             ));
@@ -2913,11 +2940,19 @@ async fn finish_resolution(
                 "Platform keys cannot be routed through a node".to_string(),
             ));
         }
-        let (auth_method, auth_key_name) =
-            super::platform_key_service::effective_auth(db, &catalog_service).await?;
+        let (auth_method, auth_key_name) = if no_auth {
+            ("none".into(), String::new())
+        } else {
+            super::platform_key_service::effective_auth(db, &catalog_service).await?
+        };
         let actor = EffectiveActor::from_user_id(effective_owner_id);
-        let authorized = authorize_master_credential(db, &catalog_service, &actor).await?;
-        let credential = if materialize_credentials {
+        let authorized = if no_auth {
+            super::platform_key_service::require(db, &catalog_service, effective_owner_id).await?;
+            None
+        } else {
+            Some(authorize_master_credential(db, &catalog_service, &actor).await?)
+        };
+        let credential = if let Some(authorized) = authorized.filter(|_| materialize_credentials) {
             crate::mw::rate_limit::enforce_platform_user_limit(
                 db,
                 platform_user_rate_limit,
@@ -2950,7 +2985,8 @@ async fn finish_resolution(
         minimal_service.token_exchange_config = catalog_service.token_exchange_config.clone();
         minimal_service.inference = catalog_service.inference.clone();
 
-        let master_credential_revision = {
+        let uses_master_credential = !no_auth;
+        let master_credential_revision = if !uses_master_credential { None } else {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&catalog_service.credential_encrypted);
@@ -2974,11 +3010,11 @@ async fn finish_resolution(
             catalog_service_slug: catalog_service_slug.clone(),
             node_id: None,
             user_service_id: user_service.id.clone(),
-            has_server_credential: true,
+            has_server_credential: uses_master_credential,
             api_key_id: None,
             credential_epoch: 1,
             master_credential_revision,
-            master_credential: true,
+            master_credential: uses_master_credential,
             credential_source: None,
             org_routing,
             pool_selection,
@@ -3230,6 +3266,9 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    auth_scheme: Option<String>,
+    platform_key_configured: bool,
+    no_auth_platform_service: bool,
     offering_kind: crate::models::downstream_service::OfferingKind,
     concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     inference: Option<crate::models::downstream_service::ServiceInference>,
@@ -3260,6 +3299,9 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        auth_scheme: service.auth_scheme.clone(),
+        platform_key_configured: service.platform_key.is_some(),
+        no_auth_platform_service: super::platform_key_service::no_auth_platform_service(&service),
         offering_kind: service.offering_kind,
         concurrency_policy: service.concurrency_policy.clone(),
         inference: service.inference.clone(),
@@ -3278,6 +3320,7 @@ fn apply_catalog_proxy_authorization(
     authorization: &CatalogProxyAuthorization,
 ) {
     service.offering_kind = authorization.offering_kind;
+    service.auth_scheme = authorization.auth_scheme.clone();
     service.concurrency_policy = authorization.concurrency_policy.clone();
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
@@ -3842,6 +3885,7 @@ fn build_minimal_downstream_service(
         credential_encrypted: vec![],
         platform_key: None,
         auth_type: None,
+        auth_scheme: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
         streaming_supported: true,
@@ -3856,6 +3900,9 @@ fn build_minimal_downstream_service(
         is_active: true,
         created_by: "system".to_string(),
         catalog_manager_created: false,
+        tools_manager_created: false,
+        icon_url: None,
+        tools_credential_frozen: false,
         identity_propagation_mode: user_service.identity_propagation_mode.clone(),
         identity_include_user_id: user_service.identity_include_user_id,
         identity_include_email: user_service.identity_include_email,
@@ -4133,7 +4180,10 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     };
 
     let destination_client;
-    let client = if target.target_id.is_some() || target.auth_method == "github_git" {
+    let client = if target.target_id.is_some()
+        || target.auth_method == "github_git"
+        || target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+    {
         destination_client = target_http_client();
         &destination_client
     } else {
@@ -4310,7 +4360,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             request = request.header(&target.auth_key_name, &target.credential);
         }
         "bearer" => {
-            request = request.bearer_auth(&target.credential);
+            request = request.header(
+                reqwest::header::AUTHORIZATION,
+                super::catalog_auth_scheme::header_value(
+                    target.service.auth_scheme.as_deref(),
+                    &target.credential,
+                )?,
+            );
         }
         "bot_bearer" => {
             // Discord bot tokens use `Authorization: Bot <token>` instead of
@@ -6087,6 +6143,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -6099,6 +6156,9 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -6925,6 +6985,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_forwarding_never_follows_vendor_redirects() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let vendor = MockServer::start().await;
+        Mock::given(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/other", vendor.uri())),
+            )
+            .mount(&vendor)
+            .await;
+        Mock::given(path("/other"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&vendor)
+            .await;
+        let mut target = make_proxy_target(vendor.uri());
+        target.service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        target.auth_method = "bearer".into();
+        target.credential = "fake-local-only".into();
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "start",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 307);
+        let requests = vendor.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].headers["authorization"],
+            "Bearer fake-local-only"
+        );
+    }
+
+    #[tokio::test]
     async fn forward_request_rejects_backslash_in_requested_path_injection() {
         let err = forward_request(
             &Client::new(),
@@ -7421,6 +7526,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -7433,6 +7539,9 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -7772,6 +7881,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -7784,6 +7894,9 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -8009,6 +8122,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -8021,6 +8135,9 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -8265,6 +8382,7 @@ mod tests {
             credential_encrypted: vec![],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -8275,6 +8393,9 @@ mod tests {
             is_active: true,
             created_by: "system".into(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".into(),
             identity_include_user_id: false,
             identity_include_email: false,

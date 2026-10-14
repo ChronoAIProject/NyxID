@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
@@ -70,15 +71,29 @@ export interface MachineDesktopMetadata {
   readonly reason: string | null;
   readonly context_id?: string | null;
 }
-export function useMachineDesktops(conversation: string) {
+/**
+ * A conversation's machine desktops. Agents open them during a turn, so an
+ * idle thread with none polls nothing; the list is re-read when a turn ends.
+ */
+export function useMachineDesktops(conversation: string, turnActive = false) {
+  const queryClient = useQueryClient();
+  const queryKey = ["machine-desktops", conversation];
+  const wasActive = useRef(turnActive);
+  useEffect(() => {
+    if (wasActive.current && !turnActive) {
+      void queryClient.invalidateQueries({ queryKey, exact: true });
+    }
+    wasActive.current = turnActive;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnActive, conversation]);
   return useQuery({
-    queryKey: ["machine-desktops", conversation],
+    queryKey,
     queryFn: () =>
       api.get<MachineDesktopMetadata[]>(
         `/assistant/nyxagent/machines?${new URLSearchParams({ conversation_id: conversation })}`,
       ),
     enabled: Boolean(conversation),
-    refetchInterval: 5000,
+    refetchInterval: (query) => (turnActive || query.state.data?.length ? 5000 : false),
   });
 }
 

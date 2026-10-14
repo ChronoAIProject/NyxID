@@ -290,7 +290,7 @@ export function DevicesBindPage() {
                           allowed to proxy through. You can add more later from
                           the API Keys page.
                         </FormDescription>
-                        <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
+                        <div className="relative max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
                           {isServicesLoading ? (
                             <p className="px-2 py-3 text-12 text-muted-foreground">
                               Loading services...

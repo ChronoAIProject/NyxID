@@ -3857,6 +3857,10 @@ async fn execute_resolved_proxy_inner(
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Response> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
+    let ornn_preflight = request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillPreflight>()
+        .is_some();
     let permission_bound =
         auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound;
     let ResolvedProxyExecution {
@@ -3980,6 +3984,22 @@ async fn execute_resolved_proxy_inner(
             ))
     {
         return Err(AppError::Forbidden("Ornn skills require your own signed identity; shared master credentials are not supported".into()));
+    }
+
+    // Assistant agents publish skill content only through the reviewed draft
+    // flow, which builds the package server-side; raw uploads need a ZIP they
+    // cannot produce and would skip the owner's review.
+    if auth_user.assistant_chat.is_some()
+        && catalog_service_slug.as_deref() == Some("ornn-api")
+        && request
+            .extensions()
+            .get::<super::agent_skills::OrnnSkillPublication>()
+            .is_none()
+        && super::agent_skills::raw_skill_publication(request.method(), path)
+    {
+        return Err(AppError::Forbidden(
+            "Create or update Ornn skills with nyxid__draft_agent_skill (name, description, skill_md, files); NyxID packages, validates and publishes it after the owner's review. If that tool is missing, skill authoring is not enabled for this account; tell the owner. Never ask for a ZIP.".into(),
+        ));
     }
 
     // Record the resolved service slug so the outer wrapper can attach it
@@ -4439,6 +4459,13 @@ async fn execute_resolved_proxy_inner(
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(_) if durable_candidate => {}
+        // A draft's pre-review format check never raises an approval prompt.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if ornn_preflight => {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "Ornn format check skipped: approval required".to_string(),
+            ));
+        }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
             let notify_user_ids = approval_service::approval_notification_recipients(
                 &state.db,
@@ -6041,7 +6068,12 @@ async fn execute_resolved_proxy_inner(
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
-            if is_pool_attempt || operation_scoped || permission_ingress.is_some() {
+            if is_pool_attempt
+                || operation_scoped
+                || permission_ingress.is_some()
+                || target.service.offering_kind
+                    == crate::models::downstream_service::OfferingKind::Tool
+            {
                 proxy_service::no_redirect_http_client()
             } else {
                 &state.http_client
@@ -7288,8 +7320,13 @@ pub(crate) fn build_downstream_ws_request(
             headers.insert(name, value);
         }
         "bearer" => {
-            let (_, value) =
-                make_header(b"authorization", &format!("Bearer {}", target.credential))?;
+            let (_, value) = make_header(
+                b"authorization",
+                &crate::services::catalog_auth_scheme::header_value(
+                    target.service.auth_scheme.as_deref(),
+                    &target.credential,
+                )?,
+            )?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         "basic" => {

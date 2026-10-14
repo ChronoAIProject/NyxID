@@ -1,4 +1,7 @@
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -13,7 +16,6 @@ import {
   CircleAlert,
   MessageSquare,
   Sparkles,
-  Wrench,
   X,
   ThumbsDown,
   ThumbsUp,
@@ -27,6 +29,8 @@ import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
+import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
+import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { MachineToolCard } from "./machine-tool-card";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
@@ -78,6 +82,22 @@ function ThinkingBlock({
   );
 }
 
+function ToolStatusIcon({
+  status,
+}: {
+  readonly status: RuntimeToolCallInfo["status"];
+}) {
+  if (status === "running") return <PulseDot className="mx-[3px]" />;
+  if (status === "error") {
+    return (
+      <X aria-label="Failed" className="h-3 w-3 shrink-0 text-destructive" />
+    );
+  }
+  return (
+    <Check aria-label="Succeeded" className="h-3 w-3 shrink-0 text-success" />
+  );
+}
+
 function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
@@ -87,6 +107,9 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const running =
     steps.some((step) => step.status === "running") ||
     tools.some((tool) => tool.status === "running");
+  const failed =
+    steps.filter((step) => step.status === "error").length +
+    tools.filter((tool) => tool.status === "error").length;
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
       <button
@@ -100,8 +123,7 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         />
         {running ? (
           <PulseDot />
-        ) : tools.some((tool) => tool.status === "error") ||
-          steps.some((step) => step.status === "error") ? (
+        ) : failed ? (
           <X className="h-3 w-3 text-destructive" />
         ) : (
           <Check className="h-3 w-3 text-success" />
@@ -109,6 +131,9 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         <span>
           {count} {count === 1 ? "action" : "actions"}
         </span>
+        {failed ? (
+          <span className="text-destructive">· {failed} failed</span>
+        ) : null}
       </button>
       {open ? (
         <div className="space-y-1 border-t border-hairline px-2.5 py-2">
@@ -133,13 +158,22 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
           ))}
           {tools.map((tool) => (
             <details key={tool.id} className="text-11 text-muted-foreground">
-              <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5">
-                {tool.status === "running" ? (
-                  <PulseDot />
-                ) : (
-                  <Wrench className="h-3 w-3 text-text-tertiary" />
-                )}
-                <span className="font-mono">{tool.name || tool.id}</span>
+              <summary
+                data-tool-status={tool.status}
+                className="flex cursor-pointer list-none items-center gap-2 py-0.5"
+              >
+                <ToolStatusIcon status={tool.status} />
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate",
+                    tool.status === "error" && "text-destructive",
+                  )}
+                >
+                  {describeToolActivity(tool.name || tool.id, tool.status)}
+                </span>
+                <span className="max-w-[45%] shrink-0 truncate font-mono text-10 text-text-tertiary">
+                  {tool.name || tool.id}
+                </span>
               </summary>
               {tool.result ? (
                 <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
@@ -213,6 +247,50 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
   );
 }
 
+/**
+ * What the reply is waiting on, with the seconds since it started waiting: the
+ * model can think for many seconds before its first word, which must not read
+ * as a frozen page. Ticks only itself, never the transcript.
+ */
+function WaitingStatus({
+  running,
+  last,
+}: {
+  /** The running tool, described. */
+  readonly running?: string;
+  /** Otherwise the last tool's outcome, described. */
+  readonly last?: string;
+}) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const elapsed = seconds >= 3 ? ` · ${String(seconds)}s` : "";
+  if (running) {
+    return (
+      <span data-running-tool className="ml-1.5 truncate text-11 text-muted-foreground">
+        {running}
+        {elapsed}
+      </span>
+    );
+  }
+  if (last) {
+    return (
+      <span data-last-tool className="ml-1.5 truncate text-11 text-text-tertiary">
+        {last}
+        {elapsed}
+      </span>
+    );
+  }
+  return elapsed ? (
+    <span data-waiting-status className="ml-1.5 text-11 text-muted-foreground">
+      Thinking{elapsed}
+    </span>
+  ) : null;
+}
+
 export function ChatMessageBubble({
   message,
   interactiveCards = true,
@@ -284,14 +362,14 @@ export function ChatMessageBubble({
             {steeringNotice(message.steering.code, message.steering.outcome)}
           </p>
         )}
-        {content}
         {message.images?.length ? (
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className={cn("flex flex-wrap gap-2", content && "mb-2")}>
             {message.images.map((image) => (
               <ToolImage key={image.id} image={image} />
             ))}
           </div>
         ) : null}
+        {content}
         {feedbackError ? (
           <p role="alert" className="mt-1 text-11 text-destructive">
             Unable to save feedback. Try again.
@@ -309,9 +387,14 @@ export function ChatMessageBubble({
     message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
+  // Machine screenshots render inside their tool card.
+  const replyImages = (message.images ?? []).filter(
+    (image) => !message.toolCalls?.some((tool) => tool.machine?.screenshot_id === image.id),
+  );
   const runningTool = streaming
     ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
     : undefined;
+  const lastTool = streaming ? message.toolCalls?.at(-1) : undefined;
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -338,6 +421,13 @@ export function ChatMessageBubble({
               images={message.images}
             />
           ))}
+        {replyImages.length ? (
+          <div className={cn("flex flex-wrap gap-2", content ? "mb-2" : "mt-2")}>
+            {replyImages.map((image) => (
+              <ToolImage key={image.id} image={image} />
+            ))}
+          </div>
+        ) : null}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.status === "error" && message.errorDetail ? (
           <ErrorDetails detail={message.errorDetail} />
@@ -357,20 +447,6 @@ export function ChatMessageBubble({
                 {retryError}
               </p>
             ) : null}
-          </div>
-        ) : null}
-        {message.images?.length ? (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {message.images
-              .filter(
-                (image) =>
-                  !message.toolCalls?.some(
-                    (tool) => tool.machine?.screenshot_id === image.id,
-                  ),
-              )
-              .map((image) => (
-                <ToolImage key={image.id} image={image} />
-              ))}
           </div>
         ) : null}
         {interactiveCards
@@ -397,14 +473,10 @@ export function ChatMessageBubble({
             <PulseDot />
             <PulseDot className="[animation-delay:120ms]" />
             <PulseDot className="[animation-delay:240ms]" />
-            {runningTool ? (
-              <span
-                data-running-tool
-                className="ml-1.5 truncate font-mono text-11 text-muted-foreground"
-              >
-                {runningTool.name}
-              </span>
-            ) : null}
+            <WaitingStatus
+              running={runningTool ? `${describeToolActivity(runningTool.name, "running")}…` : undefined}
+              last={!runningTool && lastTool ? describeToolActivity(lastTool.name, lastTool.status) : undefined}
+            />
           </div>
         ) : null}
         {message.status === "error" && message.error ? (
@@ -590,6 +662,82 @@ function EmptyState({ children }: { readonly children?: ReactNode }) {
   );
 }
 
+interface MessageRowProps {
+  readonly message: ChatMessage;
+  readonly conversationId: string | undefined;
+  readonly feedbackEnabled: boolean;
+  readonly renderMessage?: (message: ChatMessage) => ReactNode;
+  readonly projectionVersion?: string | number;
+  /** Windowed lists measure each mounted row. */
+  readonly index?: number;
+  readonly measure?: (element: HTMLDivElement | null) => void;
+}
+
+/**
+ * A row renders again only when its message or the projection changes: a
+ * streamed token re-renders the streaming row, not the whole transcript.
+ * `renderMessage` is rebuilt on every parent render, so it must derive its
+ * output from the message and state named in `projectionVersion`.
+ */
+const MessageRow = memo(
+  function MessageRow({
+    message,
+    conversationId,
+    feedbackEnabled,
+    renderMessage,
+    index,
+    measure,
+  }: MessageRowProps) {
+    return (
+      <div id={`message-${message.id}`} data-index={index} ref={measure}>
+        {renderMessage?.(message) ?? (
+          <ChatMessageEntry
+            message={message}
+            conversationId={conversationId}
+            feedbackEnabled={feedbackEnabled}
+          />
+        )}
+      </div>
+    );
+  },
+  (previous, next) =>
+    previous.message === next.message &&
+    previous.conversationId === next.conversationId &&
+    previous.feedbackEnabled === next.feedbackEnabled &&
+    previous.projectionVersion === next.projectionVersion &&
+    previous.index === next.index &&
+    previous.measure === next.measure &&
+    Boolean(previous.renderMessage) === Boolean(next.renderMessage),
+);
+
+/**
+ * Longer transcripts mount only the rows near the viewport, so a long thread
+ * opens, streams and scrolls with a bounded DOM. Shorter ones stay whole, which
+ * keeps the browser's find-in-page working where it matters most.
+ */
+export const WINDOW_AFTER_MESSAGES = 30;
+/** `gap-4` at default display spacing; the rendered gap is read back. */
+const DEFAULT_ROW_GAP_PX = 16;
+const ROW_OVERSCAN = 6;
+
+/** A first guess at a row's height; real heights replace it once measured. */
+function estimateRowHeight(message: ChatMessage | undefined): number {
+  if (!message) return 80;
+  const lines = Math.ceil(message.content.length / (message.role === "user" ? 70 : 95));
+  return Math.min(2400, (message.role === "user" ? 44 : 64) + 20 * lines);
+}
+
+/** `#message-<id>` links (voice transcripts) may point at an unmounted row. */
+function hashMessageId(): string | undefined {
+  const hash = typeof window === "undefined" ? "" : window.location.hash;
+  if (!hash.startsWith("#message-")) return undefined;
+  try {
+    return decodeURIComponent(hash.slice("#message-".length));
+  } catch {
+    return undefined;
+  }
+}
+
 export function ChatMessageList({
   session,
   bottomInset,
@@ -599,6 +747,7 @@ export function ChatMessageList({
   projectionVersion,
   renderMessage,
   feedbackEnabled = false,
+  focusMessageId,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
@@ -608,25 +757,91 @@ export function ChatMessageList({
   readonly projectionVersion?: string | number;
   readonly renderMessage?: (message: ChatMessage) => ReactNode;
   readonly feedbackEnabled?: boolean;
+  /** A row to bring into view once (a linked review card), even when unmounted. */
+  readonly focusMessageId?: string;
 }) {
   const [detectedMessageId, setDetectedMessageId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const previousConversationRef = useRef<string | undefined>(undefined);
   const previousUserMessageRef = useRef<string | undefined>(undefined);
+  const previousWindowedRef = useRef(false);
   const messages = session?.messages ?? EMPTY_MESSAGES;
+  // Windowing starts when a thread opens long, or while the reader follows the
+  // newest message; never under a reader who scrolled up, whose place a mode
+  // switch would lose. Once on, it stays on for that thread.
+  const long = messages.length > WINDOW_AFTER_MESSAGES;
+  const conversationKey = session?.conversationId ?? session?.clientId;
+  const modeRef = useRef<{ readonly conversation?: string; readonly windowed: boolean }>({
+    windowed: false,
+  });
+  if (modeRef.current.conversation !== conversationKey) {
+    modeRef.current = { conversation: conversationKey, windowed: long };
+  } else if (!modeRef.current.windowed && long && followingRef.current) {
+    modeRef.current = { conversation: conversationKey, windowed: true };
+  }
+  const windowed = modeRef.current.windowed;
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const [rowGap, setRowGap] = useState(DEFAULT_ROW_GAP_PX);
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    enabled: windowed,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (index) => estimateRowHeight(messages[index]),
+    getItemKey: (index) => messages[index]?.id ?? index,
+    overscan: ROW_OVERSCAN,
+    gap: rowGap,
+    scrollMargin,
+    // Keep the rows on screen in place when older messages load above them.
+    anchorTo: "end",
+    // A transcript opens at its newest message.
+    initialOffset: () => (followingRef.current ? Number.MAX_SAFE_INTEGER : 0),
+    useFlushSync: false,
+  });
+  const windowedRef = useRef(windowed);
+  windowedRef.current = windowed;
+
+  /**
+   * A jump (opening a thread, sending) tells a windowed list where it is at
+   * once, so the newest rows render without a blank frame. Following a growing
+   * reply only moves the scrollbar: the rows at the end are already mounted.
+   */
+  const pinToBottom = (jump: boolean) => {
+    const element = scrollRef.current;
+    if (!element) return;
+    if (jump && windowedRef.current) virtualizer.scrollToEnd();
+    else element.scrollTop = element.scrollHeight;
+    lastScrollTopRef.current = element.scrollTop;
+  };
+  const pinRef = useRef(pinToBottom);
+  pinRef.current = pinToBottom;
+
   useLayoutEffect(() => {
     const element = scrollRef.current;
+    const content = contentRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
+    // The viewport resizing, a streamed reply growing, or an image loading.
     const observer = new ResizeObserver(() => {
-      if (!followingRef.current) return;
-      element.scrollTop = element.scrollHeight;
-      lastScrollTopRef.current = element.scrollTop;
+      // Display spacing scales the gap between rows; keep the windowed
+      // geometry on the rendered value.
+      if (content) {
+        const gap = Number.parseFloat(getComputedStyle(content).rowGap);
+        if (Number.isFinite(gap)) setRowGap((current) => (current === gap ? current : gap));
+      }
+      if (followingRef.current) pinRef.current(false);
     });
     observer.observe(element);
+    if (content) observer.observe(content);
     return () => observer.disconnect();
   }, []);
+  // Rows are positioned below the notice; the virtualizer needs that offset.
+  useLayoutEffect(() => {
+    const offset = windowed ? (listRef.current?.offsetTop ?? 0) : 0;
+    if (offset !== scrollMargin) setScrollMargin(offset);
+  }, [notice, scrollMargin, windowed]);
   const terminalAssistant = messages.at(-1);
   const emptyTerminal = Boolean(
     session &&
@@ -666,20 +881,57 @@ export function ChatMessageList({
       previousUserMessageRef.current &&
       previousUserMessageRef.current !== latestUserMessageId,
     );
+    const windowedChanged = previousWindowedRef.current !== windowed;
+    const jump = conversationChanged || newUserMessage || windowedChanged;
     if (conversationChanged || newUserMessage) followingRef.current = true;
     previousConversationRef.current = session?.conversationId;
     previousUserMessageRef.current = latestUserMessageId;
-    const element = scrollRef.current;
-    if (!element || !followingRef.current) return;
-    element.scrollTop = element.scrollHeight;
-    lastScrollTopRef.current = element.scrollTop;
+    previousWindowedRef.current = windowed;
+    if (followingRef.current) pinRef.current(jump);
   }, [
+    windowed,
     bottomInset,
     latestUserMessageId,
     messages,
     projectionVersion,
     session?.conversationId,
   ]);
+
+  // Bring a linked row into view once, mounting it first when it is windowed out.
+  const focusIndex = focusMessageId
+    ? messages.findIndex((message) => message.id === focusMessageId)
+    : -1;
+  const focusedRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!focusMessageId) {
+      focusedRef.current = undefined;
+      return;
+    }
+    if (focusIndex < 0 || focusedRef.current === focusMessageId) return;
+    focusedRef.current = focusMessageId;
+    followingRef.current = false;
+    if (windowed) virtualizer.scrollToIndex(focusIndex, { align: "center" });
+  }, [focusIndex, focusMessageId, virtualizer, windowed]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const revealedHashRef = useRef<string | undefined>(undefined);
+  const revealHash = useCallback(() => {
+    const id = hashMessageId();
+    const index = id ? messagesRef.current.findIndex((message) => message.id === id) : -1;
+    if (index < 0 || !windowedRef.current) return;
+    revealedHashRef.current = id;
+    followingRef.current = false;
+    virtualizer.scrollToIndex(index, { align: "center" });
+  }, [virtualizer]);
+  useEffect(() => {
+    window.addEventListener("hashchange", revealHash);
+    return () => window.removeEventListener("hashchange", revealHash);
+  }, [revealHash]);
+  // A link opened with the hash already set: reveal it once its row has loaded.
+  const hashTargetLoaded = messages.some((message) => message.id === hashMessageId());
+  useEffect(() => {
+    if (hashTargetLoaded && windowed && revealedHashRef.current !== hashMessageId()) revealHash();
+  }, [hashTargetLoaded, revealHash, windowed]);
 
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const element = event.currentTarget;
@@ -692,13 +944,21 @@ export function ChatMessageList({
     lastScrollTopRef.current = element.scrollTop;
   }
 
+  const rows = windowed
+    ? virtualizer.getVirtualItems().map((item) => ({ index: item.index, start: item.start }))
+    : messages.map((_, index) => ({ index, start: 0 }));
+  const firstStart = rows[0]?.start ?? scrollMargin;
+
   return (
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
+      className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
+      // The windowed list anchors rows itself; the browser's anchoring would double it.
+      style={windowed ? { overflowAnchor: "none" } : undefined}
     >
       <div
+        ref={contentRef}
         className="mx-auto flex min-h-full w-full max-w-[758px] flex-col gap-4 pt-6"
         style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
       >
@@ -711,17 +971,36 @@ export function ChatMessageList({
           </div>
         ) : null}
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
-        {messages.map((message) => (
-          <div id={`message-${message.id}`} key={message.id}>
-            {renderMessage?.(message) ?? (
-              <ChatMessageEntry
-                message={message}
-                conversationId={session?.conversationId}
-                feedbackEnabled={feedbackEnabled}
-              />
-            )}
+        {/* One element tree in both modes, so crossing the threshold never
+            remounts a row (or restarts a streaming reply's reveal). */}
+        <div
+          ref={listRef}
+          className={windowed ? "relative w-full" : "contents"}
+          style={windowed ? { height: virtualizer.getTotalSize() } : undefined}
+        >
+          <div
+            className={windowed ? "absolute inset-x-0 top-0 flex flex-col gap-4" : "contents"}
+            style={
+              windowed ? { transform: `translateY(${String(firstStart - scrollMargin)}px)` } : undefined
+            }
+          >
+            {rows.map(({ index }) => {
+              const message = messages[index]!;
+              return (
+                <MessageRow
+                  key={message.id}
+                  message={message}
+                  conversationId={session?.conversationId}
+                  feedbackEnabled={feedbackEnabled}
+                  renderMessage={renderMessage}
+                  projectionVersion={projectionVersion}
+                  index={windowed ? index : undefined}
+                  measure={windowed ? virtualizer.measureElement : undefined}
+                />
+              );
+            })}
           </div>
-        ))}
+        </div>
         {footer}
         {emptyTurnDetected ? (
           <span data-empty-turn-error className="sr-only" aria-hidden="true" />

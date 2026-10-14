@@ -503,8 +503,10 @@ async fn migrate_targets(
     Ok(MigrationOutcome::Complete)
 }
 
+/// The card's chat may carry an approval: the owner's NyxBot for any agent it
+/// maintains, or a specialist for its own agent (it drafts only for itself).
 fn approval_actor_allowed(agent: &AssistantAgent, actor: &str, chat: &ChatAuthority) -> bool {
-    agent.user_id == actor && !chat.guest && chat.is_orchestrator()
+    agent.user_id == actor && !chat.guest && (chat.is_orchestrator() || chat.agent_id == agent.id)
 }
 
 fn resumes_publication(

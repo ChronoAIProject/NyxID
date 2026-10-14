@@ -9,7 +9,7 @@ import {
 import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
 import { NewGroupDialog } from "@/components/assistant/nyxbot-group-forms";
 import { useFeature } from "@/hooks/use-feature-flag";
-import { useNyxAgentAssistantChat } from "@/hooks/use-assistant-nyxagent";
+import { useNyxAgentThreads } from "@/hooks/use-assistant-nyxagent";
 import { selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
@@ -21,8 +21,6 @@ import { groupWithDisplayNames } from "@/lib/assistant/nyxbot-labels";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
-
-const noop = () => undefined;
 
 export function AssistantEngineSidebar({
   engine,
@@ -41,27 +39,23 @@ export function AssistantEngineSidebar({
   });
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
-  const agents = useNyxBotAgents(nyxagentEnabled);
   const groups = useNyxBotGroups(nyxagentEnabled);
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
   const openThread = search.draft ? undefined : search.c;
   const openGroup = onChatRoute ? search.g : undefined;
   const home = onChatRoute && !search.c && !search.draft && !search.agent && !search.g;
+  const openThreadAgentId = useSyncExternalStore(
+    nyxAgentTransport.subscribe,
+    () => nyxAgentTransport.getConversation(openThread)?.agent?.id,
+  );
+  const agents = useNyxBotAgents(nyxagentEnabled);
   // An open group expands no agent; otherwise the open thread's agent, the
   // agent in the URL, or NyxBot.
   const selectedAgent = openGroup
     ? undefined
-    : selectedAgentOf(
-        agents.data?.agents,
-        nyxAgentTransport.getConversation(openThread)?.agent?.id,
-        search.agent,
-      );
-  const nyx = useNyxAgentAssistantChat({
-    enabled: nyxagentEnabled,
-    onConversationAdopted: noop,
-    threadsAgentId: selectedAgent?.id,
-  });
+    : selectedAgentOf(agents.data?.agents, openThreadAgentId, search.agent);
+  const nyx = useNyxAgentThreads({ agentId: selectedAgent?.id, enabled: nyxagentEnabled });
   const actorKey = ["assistant", "actor", userId, "sidebar"];
   // The earlier engines' chats are not listed in NyxAgent mode, so they are
   // not fetched either.
@@ -153,10 +147,10 @@ export function AssistantEngineSidebar({
         conversations={[...rows.values()].sort((a, b) =>
           b.last_message_at.localeCompare(a.last_message_at),
         )}
-        onRename={nyx.renameConversation}
+        onRename={(id, title) => nyxAgentTransport.rename(id, title)}
         onDelete={async (id) => {
           if (isNyxAgentConversationId(id)) {
-            await nyx.deleteConversation(id);
+            await nyxAgentTransport.delete(id);
           } else if (isDirectConversationId(id)) {
             if (rows.get(id)?.active_turn) return;
             await directAssistantTransport.deleteConversation(id);

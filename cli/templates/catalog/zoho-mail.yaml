@@ -27,6 +27,15 @@ providers:
       access_type: offline
       prompt: consent
     documentation_url: https://www.zoho.com/mail/help/api/
+    playbook:
+      scope_source:
+        kind: documented_minimum
+        url: https://www.zoho.com/mail/help/api/
+        note: Zoho publishes no Mail CLI. These READ scopes cover the three operations below.
+      revocation:
+        kind: nyxid_incompatible
+        source: https://www.zoho.com/mail/help/api/using-oauth-2.html#revoke
+        note: Zoho documents POST with the refresh token in the URL query. NyxID's revocation transport supports form and JSON, so remote revocation is not configured.
 services:
   - slug: api-zoho-mail
     name: Zoho Mail
@@ -34,6 +43,31 @@ services:
     description: Read Zoho Mail accounts, folders and messages.
     base_url: https://mail.${zoho_domain}/api
     auth_method: bearer
+    auth_scheme: Zoho-oauthtoken
     homepage_url: https://www.zoho.com/mail/
-    auth_notes: Zoho documents the `Zoho-oauthtoken` header scheme; NyxID sends `Bearer`. If reads return 401 with a fresh token, Zoho is rejecting the Bearer scheme.
+    auth_notes: NyxID injects Authorization with Zoho's documented Zoho-oauthtoken scheme.
     known_limitations: One Zoho data center per row. Pricing https://www.zoho.com/mail/zohomail-pricing.html
+    operations:
+      - name: list_accounts
+        method: GET
+        path: /accounts
+        description: List the connected user's mail accounts.
+      - name: list_folders
+        method: GET
+        path: /accounts/{accountId}/folders
+        description: List folders in the selected mail account.
+        parameters: [{name: accountId, in: path, required: true, schema: {type: string}}]
+      - name: list_messages
+        method: GET
+        path: /accounts/{accountId}/messages/view
+        description: List messages in the selected mail folder.
+        parameters:
+          - {name: accountId, in: path, required: true, schema: {type: string}}
+          - {name: folderId, in: query, required: true, schema: {type: string}}
+          - {name: start, in: query, schema: {type: integer, minimum: 1}}
+          - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200}}
+    smoke_test: {operation: list_accounts}
+# Upload a static SVG whose brand-use terms you have checked:
+# nyxid admin catalog icon zoho-mail --file zoho-mail.svg
+# Configuration readiness leaves the real vendor smoke and outside-user
+# connection gates open. No vendor SVG or account credentials are bundled.

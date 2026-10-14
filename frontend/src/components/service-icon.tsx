@@ -1,6 +1,6 @@
 import { SERVICE_ICONS, FallbackIcon } from "@/components/service-icons";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * Fixed icon-size scale for service brand glyphs, anchored to the app's
@@ -91,6 +91,35 @@ export function ServiceIcon({
   );
 }
 
+/**
+ * Whether an icon URL can be read cross-origin (needed for CSS masks),
+ * remembered per URL so lists of the same icon probe once and later mounts
+ * start directly in mask mode.
+ */
+const corsReadable = new Map<string, boolean>();
+const pendingProbes = new Map<string, Promise<boolean>>();
+
+function probeCorsReadable(url: string): Promise<boolean> {
+  const pending = pendingProbes.get(url);
+  if (pending) return pending;
+  const probe = new Promise<boolean>((resolve) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.referrerPolicy = "no-referrer";
+    image.onload = () => {
+      corsReadable.set(url, true);
+      resolve(true);
+    };
+    image.onerror = () => {
+      corsReadable.set(url, false);
+      resolve(false);
+    };
+    image.src = url;
+  });
+  pendingProbes.set(url, probe);
+  return probe;
+}
+
 function ServiceIconImage({
   slug,
   iconUrl,
@@ -102,18 +131,69 @@ function ServiceIconImage({
   readonly size: ServiceIconSize;
   readonly className?: string;
 }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
+  // "image": greyscale <img> (works for any host, falls back on error).
+  // "mask": the image drawn as a mask in the glyph colour, so uploaded art is
+  // the same single-colour shape as the built-in glyphs in every theme.
+  // Masks need a CORS-readable image, so the upgrade waits for a probe.
+  const [mode, setMode] = useState<"image" | "mask" | "failed">(() =>
+    corsReadable.get(iconUrl) === true ? "mask" : "image",
+  );
+  useEffect(() => {
+    if (corsReadable.has(iconUrl)) return;
+    let active = true;
+    void probeCorsReadable(iconUrl).then((readable) => {
+      if (active && readable) {
+        setMode((current) => (current === "image" ? "mask" : current));
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [iconUrl]);
+
+  if (mode === "failed") {
     return <ServiceIcon slug={slug ?? "custom"} size={size} className={className} />;
+  }
+  if (mode === "mask") {
+    const mask = `url(${JSON.stringify(iconUrl)})`;
+    return (
+      <span
+        aria-hidden="true"
+        data-icon-mode="mask"
+        className={cn(
+          SIZE_CLASS[size],
+          "inline-block shrink-0 bg-current text-muted-foreground",
+          className,
+        )}
+        style={{
+          maskImage: mask,
+          WebkitMaskImage: mask,
+          maskSize: "contain",
+          WebkitMaskSize: "contain",
+          maskRepeat: "no-repeat",
+          WebkitMaskRepeat: "no-repeat",
+          maskPosition: "center",
+          WebkitMaskPosition: "center",
+        }}
+      />
+    );
   }
   return (
     <img
       src={iconUrl}
       alt=""
       aria-hidden="true"
+      data-icon-mode="image"
       referrerPolicy="no-referrer"
-      onError={() => setFailed(true)}
-      className={cn(SIZE_CLASS[size], "shrink-0 object-contain", className)}
+      onError={() => setMode("failed")}
+      // Until (or unless) the mask upgrade applies, uploaded brand art renders
+      // monochrome so it sits with the built-in glyphs; dark themes lift it so
+      // mid-tone logos stay legible.
+      className={cn(
+        SIZE_CLASS[size],
+        "shrink-0 object-contain grayscale dark:brightness-150",
+        className,
+      )}
     />
   );
 }

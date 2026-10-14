@@ -280,10 +280,10 @@ pub async fn virtual_service_for(
     chat: &acks::ChatAuthority,
 ) -> McpToolService {
     let mut service = virtual_service(chat);
-    // Only owner NyxBot chats need this rollout lookup. A flag-store failure
-    // hides authoring alone, preserving the existing tools for every caller.
+    // Owner chats (NyxBot and specialists, which draft only for themselves)
+    // need this rollout lookup. A flag-store failure hides authoring alone,
+    // preserving the existing tools for every caller.
     if !chat.guest
-        && chat.is_orchestrator()
         && super::assistant_skill_authoring::enabled(db, &chat.user_id)
             .await
             .unwrap_or(false)

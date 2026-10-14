@@ -26,6 +26,10 @@ use serde_json::{Value, json};
 pub(crate) struct OrnnSkillRead;
 #[derive(Clone, Copy)]
 pub(crate) struct OrnnSkillPublication;
+/// Drafting's pre-review format check. Never worth an owner approval prompt:
+/// where policy would ask, the check is skipped (publication validates later).
+#[derive(Clone, Copy)]
+pub(crate) struct OrnnSkillPreflight;
 pub(crate) struct Reader<'a> {
     pub(crate) state: &'a AppState,
     pub(crate) person: &'a str,
@@ -203,6 +207,9 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     request.extensions_mut().insert(OrnnSkillRead);
     if publication {
         request.extensions_mut().insert(OrnnSkillPublication);
+        if path.split('?').next() == Some("/api/v1/skill-format/validate") {
+            request.extensions_mut().insert(OrnnSkillPreflight);
+        }
     }
     let mut slug = String::new();
     let response = match Box::pin(super::proxy::proxy_request_inner(
@@ -240,6 +247,21 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
     match to_bytes(response.into_body(), skills::MAX_ARCHIVE).await {
         Ok(bytes) => OrnnOutcome::Ok(bytes.to_vec()),
         Err(_) => OrnnOutcome::Interrupted,
+    }
+}
+
+/// Ornn routes that publish skill content without NyxID's review: create
+/// (`POST /skills`, `POST /skills/pull`), new versions (`PUT /skills/{id}`,
+/// `POST /skills/{id}/refresh`) and source relinking (`PUT /skills/{id}/source`).
+pub(crate) fn raw_skill_publication(method: &http::Method, path: &str) -> bool {
+    let route = path.split('?').next().unwrap_or(path).trim_matches('/');
+    let segments: Vec<_> = route.split('/').collect();
+    match segments.as_slice() {
+        ["api", "v1", "skills"] | ["api", "v1", "skills", "pull"] => method == http::Method::POST,
+        ["api", "v1", "skills", id] => method == http::Method::PUT && !id.is_empty(),
+        ["api", "v1", "skills", id, "refresh"] => method == http::Method::POST && !id.is_empty(),
+        ["api", "v1", "skills", id, "source"] => method == http::Method::PUT && !id.is_empty(),
+        _ => false,
     }
 }
 
@@ -481,8 +503,15 @@ pub async fn improve(
         scopes: None,
         chat: Some(std::sync::Arc::new(chat.clone())),
     };
+    let validator = Reader {
+        state: &state,
+        person: &owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
     let result = crate::services::assistant_skill_authoring::create_improve_draft(
-        &state, &chat, &id, &skill_id, &reader,
+        &state, &chat, &id, &skill_id, &reader, &validator,
     )
     .await?;
     let text = |key: &str| result[key].as_str().unwrap_or_default().to_owned();
@@ -528,9 +557,11 @@ pub(crate) async fn dispatch(
             scopes: None,
             chat: Some(std::sync::Arc::new(chat.clone())),
         };
+        // The pre-review format check is the agent's own Ornn request, so it
+        // keeps the thread key's approval policy, turn fence and attribution.
         return Ok((
             Box::pin(crate::services::assistant_skill_authoring::create(
-                state, chat, input, &reader,
+                state, chat, input, &reader, &reader,
             ))
             .await?,
             true,
@@ -789,6 +820,39 @@ pub(crate) async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_skill_publication_matches_only_content_writes() {
+        use http::Method;
+        for (verb, path, expected) in [
+            (Method::POST, "/api/v1/skills", true),
+            (Method::POST, "api/v1/skills/?skip_validation=true", true),
+            (Method::POST, "/api/v1/skills/pull", true),
+            (
+                Method::PUT,
+                "/api/v1/skills/0c263626-03ee-4937-a3b5-aace86e15b30",
+                true,
+            ),
+            (
+                Method::GET,
+                "/api/v1/skills/0c263626-03ee-4937-a3b5-aace86e15b30",
+                false,
+            ),
+            (Method::POST, "/api/v1/skill-format/validate", false),
+            (Method::GET, "/api/v1/skill-search", false),
+            (Method::PUT, "/api/v1/skills/x/permissions", false),
+            (Method::PUT, "/api/v1/skills/pull", false),
+            (Method::POST, "/api/v1/skills/abc/refresh", true),
+            (Method::PUT, "/api/v1/skills/abc/source", true),
+            (Method::GET, "/api/v1/skills/abc/source", false),
+        ] {
+            assert_eq!(
+                raw_skill_publication(&verb, path),
+                expected,
+                "{verb} {path}"
+            );
+        }
+    }
     use crate::services::{
         agent_skill_service::OrnnReader, assistant_authority_tests::orchestrator_fixture,
     };

@@ -688,8 +688,14 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
         let (value, error) =
             execute_tool(&state, &sub_chat, &format!("nyxid__{name}"), &json!({})).await;
         assert!(error, "{name}");
-        assert_eq!(value["error"], "orchestrator_only", "{name}");
+        // Specialists draft their own skills; every other team tool is NyxBot's.
+        if assistant_team_tools::is_agent_tool(name) {
+            assert_ne!(value["error"], "orchestrator_only", "{name}");
+        } else {
+            assert_eq!(value["error"], "orchestrator_only", "{name}");
+        }
     }
+    assert!(assistant_team_tools::is_agent_tool("draft_agent_skill"));
     let (value, error) = execute_tool(
         &state,
         &sub_chat,

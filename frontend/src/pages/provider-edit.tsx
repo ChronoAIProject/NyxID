@@ -1,6 +1,7 @@
 import { ProviderServices } from "@/components/providers/provider-services";
 import { useState } from "react";
-import type { ProviderConfig } from "@/types/api";
+import { canAdminWrite, type ProviderConfig } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
 import {
   useChangeReview,
@@ -71,6 +72,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
   const isMounted = useEditorMounted();
   const navigate = useNavigate();
   const updateMutation = useUpdateProvider(providerId);
+  const isAdmin = canAdminWrite(useAuthStore((state) => state.user));
 
   const form = useAppForm<UpdateProviderFormData>({
     resolver: zodResolver(updateProviderSchema),
@@ -432,6 +434,16 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <p className="text-xs text-muted-foreground">
                         Only fill in if you want to change the client secret.
                       </p>
+                      {!isAdmin && provider.has_client_secret && (
+                        <p className="text-xs text-muted-foreground">
+                          Catalog Managers: on a provider someone else
+                          created, URLs, credential mode and token settings
+                          can change only before anyone has connected, and
+                          only with the current client ID and secret
+                          re-entered here. Replacing the client requires an
+                          Admin.
+                        </p>
+                      )}
                       <FormMessage />
                     </FormItem>
                   )}

@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.69.0"
+version = "0.70.1"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -127,3 +127,7 @@ gcp-kms = ["google-cloud-kms"]
 
 [package.metadata.dist]
 dist = false
+
+[lints.rust]
+# cargo-llvm-cov builds with `--cfg coverage`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }

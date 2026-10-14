@@ -152,7 +152,7 @@ Platform-admin service account create/update with explicit `catalog:skills:read/
 
 Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
-Catalog Manager (`catalog_manager`, `nyxid:catalog:services:write`) lets an Operator create providers and public HTTP catalog services, edit rows they created, and set the first OAuth client on a provider that has none; replacing others' clients, deletes, and credential/identity/billing/policy fields stay Admin-only. Rows a Catalog Manager creates are marked `catalog_manager_created`; on those rows a non-admin may change the row or its endpoints only while holding the role, anonymous rules stay Admin-only, and destination changes are refused once an Admin attaches a credential or foreign provider. Unmarked rows keep the plain creator rule. Classify every new provider/service request field in `handlers/catalog_authority.rs` (exhaustive destructuring). CLI: `nyxid admin provider ...`, `nyxid admin catalog add|apply|validate` with secret-free manifests (`cli/templates/catalog/`). See `docs/CATALOG_MANAGER.md`.
+Catalog Manager (`catalog_manager`, `nyxid:catalog:services:write`) lets an Operator create providers and public HTTP catalog services, edit rows they created, and complete shared rows (including seeded ones) through the CLI: on any provider, scopes/`supports_oauth_scopes`/name/description/docs/API key instructions and link/icon (display links must be absolute http(s)) and the first OAuth client; its URLs, credential mode and token settings only before anyone has connected through it (no user tokens/connections/own clients reference it), and once a platform client exists only with that client re-entered in the same request (constant-time proof of possession; secretless clients stay Admin-only). Manager provider writes are version-guarded on `updated_at`. On shared catalog rows (public, unowned, HTTP, non-internal, non-Tool) they edit descriptive fields and the spec URL and add/update/delete/discover/pause/publish operations. Replacing or clearing others' clients, provider deactivation, deactivating or deleting rows they did not create, private/owned/Tool rows, and credential/identity/billing/policy fields stay Admin-only. Rows a Catalog Manager creates are marked `catalog_manager_created`; on those rows a non-admin may change the row or its endpoints only while holding the role, anonymous rules stay Admin-only, and destination changes are refused once an Admin attaches a credential or foreign provider. Unmarked rows keep the plain creator rule. Classify every new provider/service request field in `handlers/catalog_authority.rs` (exhaustive destructuring). CLI: `nyxid admin provider ...`, `nyxid admin catalog add|apply|validate` with secret-free manifests (`cli/templates/catalog/`). See `docs/CATALOG_MANAGER.md`.
 
 CatalogEditor `PUT /keys/{catalog_uuid}` accepts only `recommended_skill_refs` with live/token catalog write authority (plus the existing role for legacy editors). It uses the shared skill transaction against one server-observed revision, returns safe metadata without requiring read scope, and never rebases conflicts. Explicit revision/replay clients use `/catalog-curation/services/{id}/skills`. Human key writes keep their original handler; other SA purposes, API-key, delegated, and relay writes remain denied.
 
@@ -736,3 +736,17 @@ NyxAgent model selection is owner-authenticated, validated against live models,
 and changing an existing thread resets its upstream context.
 Assistant reply feedback is a human-only NyxAgent conversation and group feature: `PUT`/`DELETE` feedback routes require the engine flag and participant ownership, while `/admin/assistant/feedback` is admin/operator-only (filters `model`, `agent_kind`, `has_error`; pre-snapshot rows show no context). Controls are hidden for replay, legacy Aevatar, stopped, and failed replies; comments are optional and bounded. Writes are scoped to the parent conversation or group, purged with it, and atomic per person and reply. Each change stores a metadata-only reply context snapshot and emits one `nyxid::assistant_feedback` log line (`submitted`/`changed`/`comment_updated`/`withdrawn`); comment, prompt and reply text are never logged. See `docs/chat/08-nyxagent-engine.md#reply-feedback`.
 
+
+
+### Tools Manager boundary
+
+Tools Manager is Operator-only (`nyxid:catalog:tools:write`) and binds every
+mutation to own server-marked Tool rows and live first-party human authority.
+Admin alone publishes and configures audience/prices. Manager creation uses a
+restricted empty audience; twin inheritance is sanitized. First credential and
+destination version commit atomically, with a durable freeze after first set.
+Contract edits demote live operations and advance generation transactionally;
+no-op discovery/planning must not mutate state. Tool icons reuse static-SVG
+validation and recheck authority on attachment. Keep manifest/wizard credentials
+in zeroizing memory, env names only in saved manifests, no credential reads in
+dry-run/validate, no redirects on shared-credential transport. See docs/TOOLS.md.

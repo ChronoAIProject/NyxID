@@ -763,6 +763,10 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     assert!(!approval_actor_allowed(&agent, "owner", &chat));
     chat.guest = false;
     chat.role = crate::models::assistant_conversation::AgentRole::Subagent;
+    // A specialist's card approves only its own agent's draft.
+    chat.agent_id = agent.id.clone();
+    assert!(approval_actor_allowed(&agent, "owner", &chat));
+    chat.agent_id = "another-agent".into();
     assert!(!approval_actor_allowed(&agent, "owner", &chat));
 }
 
@@ -2141,6 +2145,7 @@ async fn authored_org_skill_refuses_personal_fallback() {
         &f.state,
         &f.chat,
         input,
+        &UnavailableReader,
         &UnavailableReader,
     )
     .await

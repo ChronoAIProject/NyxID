@@ -42,3 +42,27 @@ export function usePublication() {
     },
   });
 }
+
+export function useToolIcon() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      serviceId,
+      file,
+    }: {
+      serviceId: string;
+      file: File;
+    }) => {
+      if (file.size > 128 * 1024) throw new Error("SVG exceeds 128 KiB");
+      const bytes = await file.arrayBuffer();
+      const svg = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      return api.post<{ icon_url: string }>(`/services/${serviceId}/icon`, {
+        svg,
+      });
+    },
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["services"] });
+      void client.invalidateQueries({ queryKey: ["tools"] });
+    },
+  });
+}

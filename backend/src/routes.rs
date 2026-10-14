@@ -663,13 +663,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let service_routes = Router::new()
         .route(
+            "/{service_id}/icon",
+            post(handlers::catalog_icons::upload_tool).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
             "/{service_id}/concurrency",
             get(handlers::service_concurrency::get).put(handlers::service_concurrency::put),
         )
         .route("/", get(handlers::services::list_services))
         .route("/", post(handlers::services::create_service_request))
         .route("/{service_id}", get(handlers::services::get_service))
-        .route("/{service_id}", put(handlers::services::update_service))
+        .route(
+            "/{service_id}",
+            put(handlers::services::update_service_request),
+        )
         .route("/{service_id}", delete(handlers::services::delete_service))
         .route(
             "/{service_id}/resync-identity",

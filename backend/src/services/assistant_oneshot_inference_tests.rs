@@ -490,7 +490,10 @@ async fn assistant_oneshot_timeout_cancels_without_retry_and_settles_meter() {
     )
     .await;
     let mut bounds = limits();
-    bounds.timeout = Duration::from_secs(2);
+    // The deadline includes model discovery and real database admission.
+    // Leave those steps enough time under parallel suite load so the test
+    // exercises cancellation of a dispatched inference, not admission.
+    bounds.timeout = Duration::from_secs(10);
     let start = std::time::Instant::now();
     assert!(
         one_shot_text(&state, ACTOR, "Summarize", "Data", bounds)
@@ -498,10 +501,12 @@ async fn assistant_oneshot_timeout_cancels_without_retry_and_settles_meter() {
             .is_none()
     );
     assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "Generous CI ceiling; the requested deadline is 2 s"
+        start.elapsed() < Duration::from_secs(20),
+        "The 10 s deadline must cancel before the 30 s vendor response"
     );
-    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
+    let requests = mock.received_requests().await.unwrap();
+    let paths: Vec<_> = requests.iter().map(|r| r.url.path()).collect();
+    assert_eq!(paths, ["/models", "/responses"]);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let rows = crate::services::channel_x_tests::billing::settled(&state).await;

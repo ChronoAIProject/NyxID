@@ -29,7 +29,8 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 pub const TOOL_NAME: &str = "draft_agent_skill";
-pub const GUIDANCE: &str = "\nAgents: description defines role/scope; persona defines tone/style; Ornn skills hold repeatable procedures, checklists, domain references, output templates and multi-step workflows. For uncovered procedures, use nyxid__draft_agent_skill only after search_agent_skills, preview_agent_skill and proposing suitable existing skills with set_agent_skills. Drafts need one owner review card; NyxID packages, publishes and pins. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs. Never include secrets. End your turn after drafting; the owner card publishes without a tool retry.";
+pub const SPECIALIST_GUIDANCE: &str = "\nYour skills: Ornn skills hold your repeatable procedures, checklists, references and templates. To create or improve one, call nyxid__draft_agent_skill with your own agent ID (from nyxid__get_agent_skills); to improve, pass the attached skill as base_skill. The owner reviews one card; NyxID packages, validates, publishes privately to Ornn and pins it. Never package or publish skills through raw Ornn upload APIs, sandboxes or machines, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting.";
+pub const GUIDANCE: &str = "\nAgents: description defines role/scope; persona defines tone/style; Ornn skills hold repeatable procedures, checklists, domain references, output templates and multi-step workflows. For uncovered procedures, use nyxid__draft_agent_skill only after search_agent_skills, preview_agent_skill and proposing suitable existing skills with set_agent_skills. Drafts need one owner review card; NyxID packages, publishes and pins. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting; the owner card publishes without a tool retry.";
 
 /// No membership reads on the default-off or person-only rollout path.
 pub async fn enabled(db: &Database, actor: &str) -> AppResult<bool> {
@@ -39,9 +40,13 @@ pub async fn enabled(db: &Database, actor: &str) -> AppResult<bool> {
     }
 }
 
+/// NyxBot drafts for any agent it maintains; a specialist only for itself.
+/// Guests never draft. Every draft still needs the owner's review card.
 pub async fn require_author(db: &Database, chat: &ChatAuthority) -> AppResult<()> {
-    if chat.guest || !chat.is_orchestrator() {
-        return Err(AppError::Forbidden("Only the owner's NyxBot may draft agent skills; specialists can use request_agent_skills".into()));
+    if chat.guest {
+        return Err(AppError::Forbidden(
+            "Guests cannot draft agent skills".into(),
+        ));
     }
     if !enabled(db, &chat.user_id).await? {
         return Err(AppError::Forbidden(
@@ -167,16 +172,28 @@ pub(crate) fn parse_input(value: &Value) -> AppResult<DraftInput> {
     serde_json::from_value(value.clone()).map_err(|_| invalid("invalid_shape", "draft"))
 }
 
+/// `reader` reads as the drafting chat; `validator` sends the pre-review
+/// format check (the drafting chat for agents, the person for owner drafts).
 pub async fn create(
     state: &AppState,
     chat: &ChatAuthority,
-    input: DraftInput,
+    mut input: DraftInput,
     reader: &impl super::agent_skill_service::OrnnReader,
+    validator: &impl super::agent_skill_service::OrnnReader,
 ) -> AppResult<Value> {
     require_author(&state.db, chat).await?;
     let agent = team::maintained_agent(&state.db, &chat.user_id, &input.agent).await?;
     if agent.destroyed_at.is_some() {
         return Err(AppError::NotFound("Agent not found".into()));
+    }
+    if !chat.is_orchestrator() && agent.id != chat.agent_id {
+        return Err(AppError::Forbidden(
+            "Specialists may draft skills only for their own agent; ask NyxBot for others".into(),
+        ));
+    }
+    // The owner reviews the paths Ornn will receive.
+    for file in &mut input.files {
+        file.path = super::assistant_learning_publication::package_path(&file.path).into_owned();
     }
     if agent.user_id != chat.user_id {
         return Err(AppError::Conflict("owner_binding_unavailable: Ornn currently publishes person-owned skills only. Ask an organization maintainer to attach an existing approved skill; no personal publication fallback is allowed".into()));
@@ -223,7 +240,9 @@ pub async fn create(
         safety_notes: String::new(),
     };
     let encoded = validate_body(&body)?;
+    validation::ornn_rules(&body)?;
     review::validate_proposal_base(&state.db, &agent, &body, ProposalSource::Authored).await?;
+    ornn_preflight(validator, &body).await?;
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(state.audit_chain_hmac_key.as_slice())
         .expect("HMAC key");
     mac.update(b"nyxid-authored-skill-v1\0");
@@ -298,6 +317,26 @@ pub async fn create(
 #[path = "assistant_skill_authoring_claims.rs"]
 mod claims;
 
+/// Ornn checks the exact package before the owner is asked to review it, so
+/// a refused format returns to the author as fixable rule identifiers. Only
+/// an explicit verdict refuses: an unavailable Ornn or an unreadable base
+/// leaves the existing retryable draft flow unchanged, and publication
+/// validates again after approval.
+async fn ornn_preflight(
+    validator: &impl super::agent_skill_service::OrnnReader,
+    body: &GeneratedProposal,
+) -> AppResult<()> {
+    match super::assistant_learning_publication::preflight(validator, body).await {
+        Ok(Some(rules)) => Err(
+            crate::errors::skill_draft::SkillDraftValidation::ornn_rejected(
+                rules.iter().map(String::as_str),
+            )
+            .into(),
+        ),
+        Ok(None) | Err(_) => Ok(()),
+    }
+}
+
 fn reused_result(
     state: &AppState,
     card: &AssistantAcknowledgement,
@@ -338,6 +377,7 @@ pub async fn create_improve_draft(
     agent_id: &str,
     skill_id: &str,
     reader: &impl super::agent_skill_service::OrnnReader,
+    validator: &impl super::agent_skill_service::OrnnReader,
 ) -> AppResult<Value> {
     require_author(&state.db, chat).await?;
     let agent = team::maintained_agent(&state.db, &chat.user_id, agent_id).await?;
@@ -375,6 +415,8 @@ pub async fn create_improve_draft(
                 "skill_files_unsupported: only .md and .txt text files can be edited here; improve this skill through NyxBot".into(),
             ));
         };
+        // The owner reviews the paths Ornn will receive.
+        let path = super::assistant_learning_publication::package_path(&path).into_owned();
         extra.push(GeneratedFile { path, content });
     }
     let description = agent
@@ -404,9 +446,15 @@ pub async fn create_improve_draft(
         "skill-improve:{}:{}:{}",
         agent.id, pin.skill_id, pin.version
     );
-    submit_owner_draft(state, chat, &agent, body, reader, |fingerprint| {
-        Ok(format!("{seed}:{fingerprint}"))
-    })
+    submit_owner_draft(
+        state,
+        chat,
+        &agent,
+        body,
+        reader,
+        validator,
+        |fingerprint| Ok(format!("{seed}:{fingerprint}")),
+    )
     .await
 }
 
@@ -427,11 +475,14 @@ async fn submit_owner_draft(
     agent: &crate::models::assistant_agent::AssistantAgent,
     body: GeneratedProposal,
     reader: &impl super::agent_skill_service::OrnnReader,
+    validator: &impl super::agent_skill_service::OrnnReader,
     seed: impl FnOnce(&str) -> AppResult<String>,
 ) -> AppResult<Value> {
     let agent = agent.clone();
     let encoded = validate_body(&body)?;
+    validation::ornn_rules(&body)?;
     review::validate_proposal_base(&state.db, &agent, &body, ProposalSource::Authored).await?;
+    ornn_preflight(validator, &body).await?;
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(state.audit_chain_hmac_key.as_slice())
         .expect("HMAC key");
     mac.update(b"nyxid-authored-skill-v1\0");

@@ -259,7 +259,11 @@ export function ConnectCard({
     <section className="rounded-xl border border-border/70 bg-card">
       <div className="flex items-center gap-3 px-4 py-3">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
-          <ServiceIcon slug={block.catalog_slug} size="sm" />
+          <ServiceIcon
+            slug={block.catalog_slug}
+            iconUrl={catalogEntry?.icon_url}
+            size="sm"
+          />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">

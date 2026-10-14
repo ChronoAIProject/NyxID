@@ -353,7 +353,7 @@ async fn writes(server: &MockServer) -> usize {
         .await
         .unwrap()
         .iter()
-        .filter(|r| matches!(r.method.as_str(), "PUT" | "POST"))
+        .filter(|r| matches!(r.method.as_str(), "PUT" | "POST") && !super::preflight_request(r))
         .count()
 }
 

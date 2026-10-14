@@ -7242,7 +7242,7 @@ mod skill_authoring_discovery_tests {
     }
 
     #[tokio::test]
-    async fn only_owner_nyxbot_tools_list_reads_authoring_flag() {
+    async fn only_owner_agent_tools_list_reads_authoring_flag() {
         let (state, reads) = observed_state("authoring_discovery_reads").await;
         feature_flag_service::set_platform_override(
             &state.db,
@@ -7253,8 +7253,8 @@ mod skill_authoring_discovery_tests {
         )
         .await
         .unwrap();
+        // Guests and non-chat callers never read the flag or see the tool.
         for auth in [
-            chat_auth(AgentRole::Subagent, false),
             chat_auth(AgentRole::Orchestrator, true),
             chat_auth(AgentRole::Subagent, true),
             McpAuthContext::user("owner".into(), AuthMethod::ApiKey),
@@ -7264,11 +7264,14 @@ mod skill_authoring_discovery_tests {
             assert_eq!(reads.load(Ordering::SeqCst), 0);
             assert!(!names.iter().any(|name| name == "nyxid__draft_agent_skill"));
         }
-        reads.store(0, Ordering::SeqCst);
-        let auth = chat_auth(AgentRole::Orchestrator, false);
-        let names = Box::pin(tool_names(&state, &auth)).await;
-        assert_eq!(reads.load(Ordering::SeqCst), 1);
-        assert!(names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        // Owner NyxBot and specialist chats (specialists draft for themselves).
+        for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+            reads.store(0, Ordering::SeqCst);
+            let auth = chat_auth(role, false);
+            let names = Box::pin(tool_names(&state, &auth)).await;
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+            assert!(names.iter().any(|name| name == "nyxid__draft_agent_skill"));
+        }
         state.db.drop().await.unwrap();
     }
 

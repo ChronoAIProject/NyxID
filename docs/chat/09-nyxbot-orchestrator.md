@@ -1039,7 +1039,8 @@ reference, output templates and multi-step workflows. NyxBot searches existing
 skills, previews exact versions, then proposes attachment with `set_agent_skills`
 and its owner card. With `assistant:agent-learning` enabled for the person,
 `draft_agent_skill` covers procedures no existing skill fits. The name emphasizes
-that this is a draft, not model-authorized publication. Specialists request skills
+that this is a draft, not model-authorized publication. Specialists draft their
+own skills the same way (only for their own agent) and request other skills
 through NyxBot; guest and channel-guest turns cannot draft.
 
 The authoring tool accepts an immutable agent ID, a lowercase hyphenated skill

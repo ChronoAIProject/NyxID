@@ -1,3 +1,4 @@
+import { useAuthStore } from "@/stores/auth-store";
 import { PublicationOperations } from "@/components/services/tool-publication";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import type { CreateEndpointPayload } from "@/lib/endpoint-changes";
@@ -51,6 +52,7 @@ function EndpointListEditor({
   service,
   canWrite = true,
 }: EndpointListProps) {
+  const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   const { data: endpoints, isLoading } = useEndpoints(serviceId);
   const createMutation = useCreateEndpoint();
   const updateMutation = useUpdateEndpoint();
@@ -137,8 +139,8 @@ function EndpointListEditor({
     <div className="space-y-3">
       {deletion.dialog}
       <div className="flex items-center gap-2">
-        <AddCtaButton label="Add Endpoint" onClick={handleAdd} />
-        {hasApiSpecUrl && (
+        {canWrite && <AddCtaButton label="Add Endpoint" onClick={handleAdd} />}
+        {canWrite && hasApiSpecUrl && (
           <Button
             variant="outline"
             onClick={() => void handleDiscover()}
@@ -222,11 +224,14 @@ function EndpointListEditor({
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7"
+                        disabled={!canWrite}
                         onClick={() => handleEdit(ep)}
                       >
                         <Pencil className="h-3 w-3" />
                         <span className="sr-only">Edit endpoint</span>
                       </Button>
+                      {canWrite &&
+                        (service?.offering_kind !== "tool" || admin) && (
                       <Button
                         variant="ghost"
                         size="icon"
@@ -245,6 +250,7 @@ function EndpointListEditor({
                         <Trash2 className="h-3 w-3 text-destructive" />
                         <span className="sr-only">Delete endpoint</span>
                       </Button>
+                        )}
                     </div>
                   </td>
                 </tr>

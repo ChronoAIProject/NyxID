@@ -340,6 +340,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: AdminProviderCommands,
     },
+    /// Prepare Tools with a manifest or wizard (publication is Admin-only)
+    Tools {
+        #[command(subcommand)]
+        command: AdminToolsCommands,
+    },
     /// Add, apply and validate catalog services from a manifest (Admin or Catalog Manager)
     Catalog {
         #[command(subcommand)]
@@ -382,6 +387,17 @@ pub enum AdminProviderCommands {
         /// Fields to change (JSON or YAML, no secrets)
         #[arg(long)]
         file: Option<std::path::PathBuf>,
+        /// Send the OAuth client with the change (prompts unless env vars are given). A Catalog
+        /// Manager changing URLs or token settings on a provider whose client someone else set
+        /// must re-enter that client; an Admin sending a different client replaces it
+        #[arg(long)]
+        with_client: bool,
+        /// Read the client ID from this environment variable
+        #[arg(long, requires = "with_client")]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long, requires = "with_client")]
+        client_secret_env: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -484,6 +500,57 @@ pub enum AdminCatalogCommands {
     Validate {
         #[command(flatten)]
         manifest: ManifestArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminToolsCommands {
+    /// Upload and attach an immutable static SVG to a provider-less Tool
+    Icon {
+        tool: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Onboard a twin or new HTTP API; save only secret-free metadata
+    Add {
+        #[arg(long, conflicts_with = "template")]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        skip_credentials: bool,
+        #[arg(long)]
+        credential_env: Option<String>,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Reconcile by slug, without rotating credentials; reruns are no-ops
+    Apply {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read-only readiness report (exit 0 ready, 2 pending, 1 failed)
+    Validate {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -285,7 +285,7 @@ pub struct CatalogImportSource {
     pub imported_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DownstreamService {
     #[serde(default)]
     pub offering_kind: OfferingKind,
@@ -330,6 +330,9 @@ pub struct DownstreamService {
     /// - `path`: inject credential into URL path (Telegram bot token style)
     /// - `none`: no credential injection
     pub auth_method: String,
+    /// Optional RFC 9110 bearer scheme. Absent retains `Bearer`; catalog-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
     /// Header name, query param name, body field name, or path placeholder
     /// for the credential (depends on `auth_method`).
     pub auth_key_name: String,
@@ -381,6 +384,12 @@ pub struct DownstreamService {
     /// other row keeps the plain creator rule.
     #[serde(default)]
     pub catalog_manager_created: bool,
+    /// Server-owned provenance. Legacy rows remain Admin-only for Tool writes.
+    #[serde(default)]
+    pub tools_manager_created: bool,
+    /// Sticky after the first credential, including after an Admin clears it.
+    #[serde(default)]
+    pub tools_credential_frozen: bool,
     /// Current catalog owner after an administrative transfer. Legacy rows use
     /// `created_by`; creator attribution is never rewritten by a transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -418,6 +427,10 @@ pub struct DownstreamService {
     /// When set, this service was auto-created for the provider's API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_config_id: Option<String>,
+
+    /// Optional immutable static SVG asset for provider-less Tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
 
     // --- Rich metadata for AI agent discovery (issue #148) ---
     /// Public product or docs landing page
@@ -571,6 +584,17 @@ fn default_delegation_scope() -> String {
     "llm:proxy".to_string()
 }
 
+impl std::fmt::Debug for DownstreamService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownstreamService")
+            .field("id", &self.id)
+            .field("slug", &self.slug)
+            .field("offering_kind", &self.offering_kind)
+            .field("credential_encrypted", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 pub mod test_helpers {
     use super::*;
@@ -599,6 +623,7 @@ pub mod test_helpers {
             credential_encrypted: Vec::new(),
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -609,6 +634,9 @@ pub mod test_helpers {
             is_active: true,
             created_by: "test".to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -711,6 +739,7 @@ mod tests {
             credential_encrypted: vec![1, 2, 3],
             platform_key: None,
             auth_type: Some("bearer".to_string()),
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -721,6 +750,9 @@ mod tests {
             is_active: true,
             created_by: "admin".to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -806,6 +838,7 @@ mod tests {
             credential_encrypted: vec![1],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -816,6 +849,9 @@ mod tests {
             is_active: true,
             created_by: "admin".to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
