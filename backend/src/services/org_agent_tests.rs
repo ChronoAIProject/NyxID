@@ -155,9 +155,9 @@ impl Fixture {
                 .await
                 .unwrap();
         }
-        // These tests exercise the legacy permission-card contract explicitly:
-        // Full access keeps card assertions independent of access-mode prompts, and
-        // routed mode keeps the specialist request cards (production defaults to denied).
+        // Full access isolates organization ACL tests from owner confirmations.
+        // Tests of owner cards select Auto explicitly; routed mode preserves
+        // specialist request cards (production defaults to denied).
         for (i, id) in ids.iter().enumerate() {
             db.collection(crate::models::assistant_settings::COLLECTION_NAME)
                 .insert_one(crate::models::assistant_settings::AssistantSettings {
@@ -1941,7 +1941,7 @@ async fn org_agent_nyxbot_widening_card_belongs_to_requesting_member() {
         &f.state.db,
         &f.member,
         super::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -2080,7 +2080,7 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         &f.state.db,
         &f.member,
         super::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
