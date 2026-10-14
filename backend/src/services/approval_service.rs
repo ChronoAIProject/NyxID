@@ -278,6 +278,92 @@ pub async fn evaluate_and_check(
     }))
 }
 
+/// An assistant approval bypass is returned to the dispatcher so its receipt
+/// is written only after successful execution. Explicit deny rules still win.
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_for_chat(
+    db: &Database,
+    actor: &str,
+    service_owner: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass: bool,
+    auto_connected: bool,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+) -> AppResult<(
+    ApprovalOutcome,
+    Option<super::assistant_acknowledgement_service::AutoAllowed>,
+)> {
+    use super::assistant_acknowledgement_service as acks;
+    let outcome = evaluate_and_check(
+        db,
+        actor,
+        service_owner,
+        service_id,
+        descriptor,
+        requester_type,
+        requester_id,
+        bypass,
+        auto_connected,
+    )
+    .await?;
+    if matches!(outcome, ApprovalOutcome::NeedsApproval(_))
+        && let Some(chat) = chat.filter(|chat| !chat.guest)
+        && acks::effective_access_mode(db, chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        let outcome = evaluate_and_check(
+            db,
+            actor,
+            service_owner,
+            service_id,
+            descriptor,
+            requester_type,
+            requester_id,
+            true,
+            auto_connected,
+        )
+        .await?;
+        let receipt =
+            matches!(outcome, ApprovalOutcome::Allowed { .. }).then_some(acks::AutoAllowed {
+                class: match descriptor.verb {
+                    crate::models::service_approval_config::ApprovalVerb::Read => {
+                        acks::OwnerActionClass::Read
+                    }
+                    _ => acks::OwnerActionClass::Change,
+                },
+                mode: crate::models::assistant_settings::AccessMode::Autopilot,
+                reason: "approval",
+            });
+        return Ok((outcome, receipt));
+    }
+    Ok((outcome, None))
+}
+
+pub async fn record_chat_approval(
+    db: &Database,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    auto: Option<super::assistant_acknowledgement_service::AutoAllowed>,
+    service_id: &str,
+    service_name: &str,
+    descriptor: &OperationDescriptor,
+) {
+    if let (Some(chat), Some(auto)) = (chat, auto) {
+        let operation = descriptor.operation_summary();
+        super::assistant_acknowledgement_service::record_auto_allowed(
+            db,
+            chat,
+            "service_approval",
+            &serde_json::json!({"service_id":service_id,"operation":operation}),
+            &auto,
+            &format!("{} on {}", operation, service_name),
+        )
+        .await;
+    }
+}
+
 pub async fn approval_notification_recipients(
     db: &Database,
     approval_owner_user_id: &str,
