@@ -806,6 +806,7 @@ async fn full_access_set_agent_skills_attaches_with_receipt_while_auto_asks() {
             );
             assert_eq!(rows[0].summary, "Attach example 1.0 to NyxBot");
             assert_eq!(rows[0].confirmation.as_ref().unwrap().risk, "sensitive");
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
         }
         f.state.db.drop().await.unwrap();
     }

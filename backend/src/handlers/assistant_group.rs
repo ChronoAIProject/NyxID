@@ -735,6 +735,7 @@ pub(crate) async fn org_pending_actions(
     access: &crate::services::org_group_service::Access,
 ) -> AppResult<Vec<Value>> {
     use crate::models::assistant_acknowledgement::AssistantAcknowledgement;
+    use crate::services::assistant_acknowledgement_service as acks;
     let mut out = Vec::new();
     let people = crate::services::org_group_service::participants(&state.db, &access.group).await?;
     let threads: std::collections::HashMap<_, _> =
