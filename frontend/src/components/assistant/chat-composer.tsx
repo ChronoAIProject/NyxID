@@ -9,7 +9,7 @@ import {
   type ReactNode,
   type UIEvent,
 } from "react";
-import { Mic, Send, Square } from "lucide-react";
+import { FileText, ImageIcon, Mic, Send, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import {
@@ -18,6 +18,11 @@ import {
   mentionCandidates,
   type MentionQuery,
 } from "@/lib/assistant/nyxbot-mentions";
+import {
+  isLongPaste,
+  stripAttachmentMention,
+  type AttachmentMention,
+} from "@/lib/assistant/attachment-mentions";
 import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
@@ -111,6 +116,15 @@ export function ChatComposer({
   );
 }
 
+type MentionOption =
+  | { readonly type: "agent"; readonly id: string; readonly name: string; readonly agent: ComposerMention }
+  | {
+      readonly type: "attachment";
+      readonly id: string;
+      readonly name: string;
+      readonly attachment: AttachmentMention;
+    };
+
 /** An agent that can be `@mentioned` from the composer (group chats). */
 export interface ComposerMention {
   readonly id: string;
@@ -153,6 +167,15 @@ interface ChatComposerProps {
    * `@name `, arrows move, Escape dismisses.
    */
   readonly mentions?: readonly ComposerMention[];
+  /** Attached files, mentionable as `@handle` in the same list. */
+  readonly attachmentMentions?: readonly AttachmentMention[];
+  /**
+   * A long paste: attach it as a file and return its handle, which is placed
+   * at the caret. Undefined keeps it as ordinary pasted text.
+   */
+  readonly onLongText?: (text: string) => string | undefined;
+  /** The text a saved draft keeps, when it differs from what is on screen. */
+  readonly draftText?: (content: string) => string;
   readonly onSend: (content: string) => Promise<void>;
   readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
@@ -189,6 +212,9 @@ function DraftedChatComposer({
   onFiles,
   placeholder,
   mentions,
+  attachmentMentions,
+  onLongText,
+  draftText,
   onSend,
   onContentChange,
   onStop,
@@ -202,8 +228,29 @@ function DraftedChatComposer({
   const mentionListId = `${useId()}-mentions`;
   const [mention, setMention] = useState<MentionQuery>();
   const [mentionIndex, setMentionIndex] = useState(0);
-  const mentionOptions =
-    mentions && mention ? mentionCandidates(mentions, mention.query) : [];
+  const mentionOptions: MentionOption[] = mention
+    ? [
+        ...mentionCandidates(mentions ?? [], mention.query).map((agent) => ({
+          type: "agent" as const,
+          id: agent.id,
+          name: agent.name,
+          agent,
+        })),
+        ...mentionCandidates(
+          (attachmentMentions ?? []).map((attachment) => ({
+            ...attachment,
+            name: attachment.handle,
+            display_name: attachment.label,
+          })),
+          mention.query,
+        ).map((attachment) => ({
+          type: "attachment" as const,
+          id: `attachment:${attachment.handle}`,
+          name: attachment.handle,
+          attachment,
+        })),
+      ]
+    : [];
   const mentionOpen = mentionOptions.length > 0;
   const selectedMention = mentionOpen
     ? mentionOptions[Math.min(mentionIndex, mentionOptions.length - 1)]
@@ -238,6 +285,9 @@ function DraftedChatComposer({
   const textMeasureRef = useRef<HTMLSpanElement>(null);
   const composingRef = useRef(false);
   const pendingTransitionRef = useRef<PendingDraftTransition | null>(null);
+  const draftTextRef = useRef(draftText);
+  draftTextRef.current = draftText;
+  const savedText = (text: string) => draftTextRef.current?.(text) ?? text;
 
   if (
     renderedOwnerUserIdRef.current !== ownerUserId ||
@@ -316,7 +366,7 @@ function DraftedChatComposer({
     const key = draftKeyRef.current;
     const store = useAssistantDraftStore.getState();
     if (userId && key && store.ownerUserId === userId) {
-      store.saveDraft(userId, key, contentRef.current);
+      store.saveDraft(userId, key, savedText(contentRef.current));
     }
   }, [cancelScheduledSave]);
 
@@ -341,14 +391,14 @@ function DraftedChatComposer({
         store.saveDraft(
           transition.nextUserId,
           transition.previousKey,
-          transition.liveContent,
+          savedText(transition.liveContent),
         );
         if (transition.migrateScreenDraft && transition.nextKey) {
           store.clearDraft(transition.nextUserId, transition.previousKey);
           store.saveDraft(
             transition.nextUserId,
             transition.nextKey,
-            transition.liveContent,
+            savedText(transition.liveContent),
           );
         }
       }
@@ -562,6 +612,22 @@ function DraftedChatComposer({
     element.setSelectionRange(caret, caret);
   }, [draftKey, focusRequest, locked]);
 
+  // A removed attachment takes its `@handle` references with it.
+  const attachmentHandles = (attachmentMentions ?? []).map((item) => item.handle).join(" ");
+  const previousHandlesRef = useRef(attachmentHandles);
+  useEffect(() => {
+    const previous = previousHandlesRef.current.split(" ").filter(Boolean);
+    previousHandlesRef.current = attachmentHandles;
+    const current = new Set(attachmentHandles.split(" "));
+    const removed = previous.filter((handle) => !current.has(handle));
+    if (!removed.length) return;
+    const next = removed.reduce(stripAttachmentMention, contentRef.current);
+    if (next === contentRef.current) return;
+    updateContent(next);
+    scheduleDraftSave();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachmentHandles]);
+
   function updateContent(nextContent: string) {
     contentRef.current = nextContent;
     if (textMeasureRef.current) {
@@ -574,7 +640,7 @@ function DraftedChatComposer({
 
   /** Re-read the mention under the caret after typing or moving the caret. */
   function syncMention(element: HTMLTextAreaElement) {
-    if (!mentions?.length) return;
+    if (!mentions?.length && !attachmentMentions?.length) return;
     const caret = element.selectionStart;
     const next =
       caret === element.selectionEnd ? activeMention(element.value, caret) : undefined;
@@ -594,6 +660,19 @@ function DraftedChatComposer({
     updateContent(next.text);
     scheduleDraftSave();
     setMention(undefined);
+  }
+
+  /** Put `text` where the caret is, replacing any selection, as its own word. */
+  function insertAtCaret(text: string) {
+    const element = textareaRef.current;
+    const value = contentRef.current;
+    const start = element?.selectionStart ?? value.length;
+    const end = element?.selectionEnd ?? value.length;
+    const before = value.slice(0, start);
+    const spaced = before && !/\s$/.test(before) ? ` ${text}` : text;
+    pendingCaretRef.current = start + spaced.length;
+    updateContent(`${before}${spaced}${value.slice(end)}`);
+    scheduleDraftSave();
   }
 
   async function submit() {
@@ -677,6 +756,11 @@ function DraftedChatComposer({
         style={{ paddingBottom: "max(1rem, var(--sab))" }}
       >
         {controls}
+        {active && allowActiveInput ? (
+          <p data-steering-hint className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]">
+            Still replying. What you send now steers this reply; Stop ends it.
+          </p>
+        ) : null}
         <div
           data-composer-input
           onDragEnter={(event) => {
@@ -710,6 +794,16 @@ function DraftedChatComposer({
               : Array.from(event.clipboardData.items)
                   .map((item) => item.getAsFile())
                   .filter((file): file is File => Boolean(file));
+            // A wall of text is attached as a file and referenced at the caret.
+            if (onLongText && !files.length && !locked && !disabled && !sending) {
+              const pastedText = event.clipboardData.getData("text/plain");
+              const handle = isLongPaste(pastedText) ? onLongText(pastedText) : undefined;
+              if (handle) {
+                event.preventDefault();
+                insertAtCaret(`@${handle} `);
+                return;
+              }
+            }
             if (onFiles && files.length) {
               event.preventDefault();
               if (!locked && !disabled && !sending) {
@@ -739,7 +833,7 @@ function DraftedChatComposer({
             <ul
               id={mentionListId}
               role="listbox"
-              aria-label="Mention an agent"
+              aria-label={attachmentMentions?.length ? "Mention an agent or attachment" : "Mention an agent"}
               className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
             >
               {mentionOptions.map((option) => {
@@ -758,16 +852,32 @@ function DraftedChatComposer({
                       selected ? "bg-overlay-strong" : "hover:bg-overlay",
                     )}
                   >
-                    <AgentAvatar agent={option} size="sm" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {option.display_name?.trim() || option.name}
-                      {option.display_name?.trim() ? (
-                        <span className="ml-1.5 text-11 text-text-tertiary">@{option.name}</span>
-                      ) : null}
-                    </span>
-                    <span className="shrink-0 text-10 text-text-tertiary">
-                      {option.kind === "nyxbot" ? "Personal agent" : "Specialist"}
-                    </span>
+                    {option.type === "agent" ? (
+                      <>
+                        <AgentAvatar agent={option.agent} size="sm" />
+                        <span className="min-w-0 flex-1 truncate">
+                          {option.agent.display_name?.trim() || option.name}
+                          {option.agent.display_name?.trim() ? (
+                            <span className="ml-1.5 text-11 text-text-tertiary">@{option.name}</span>
+                          ) : null}
+                        </span>
+                        <span className="shrink-0 text-10 text-text-tertiary">
+                          {option.agent.kind === "nyxbot" ? "Personal agent" : "Specialist"}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        {option.attachment.kind === "image" ? (
+                          <ImageIcon aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        ) : (
+                          <FileText aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="min-w-0 flex-1 truncate">
+                          <span className="font-mono">@{option.name}</span>
+                          <span className="ml-1.5 text-11 text-text-tertiary">{option.attachment.label}</span>
+                        </span>
+                      </>
+                    )}
                   </li>
                 );
               })}
@@ -844,11 +954,11 @@ function DraftedChatComposer({
           </div>
           <div
             ref={controlsRef}
-            className={`flex shrink-0 items-center ${multiline ? "self-end" : ""}`}
+            className={`flex shrink-0 items-center gap-1.5 ${multiline ? "self-end" : ""}`}
           >
             {active && allowActiveInput && (
               <Button type="button" variant="outline" size="icon" onClick={() => void onStop()}
-                disabled={stopDisabled} aria-label="Stop assistant turn">
+                disabled={stopDisabled} aria-label="Stop assistant turn" title="Stop this reply">
                 <Square className="fill-current" />
               </Button>
             )}
@@ -870,7 +980,10 @@ function DraftedChatComposer({
               <Button
                 type="button"
                 variant="primary"
-                size="icon"
+                // While a reply runs, sending steers it: say so on the button.
+                size={active && allowActiveInput ? "default" : "icon"}
+                className={active && allowActiveInput ? "gap-1.5" : undefined}
+                title={active && allowActiveInput ? "Steer this reply" : undefined}
                 disabled={(!content.trim() && !hasAttachments) || uploadBlocked || sending || disabled}
                 onClick={() => void submit()}
                 aria-label={
@@ -880,6 +993,7 @@ function DraftedChatComposer({
                 }
               >
                 <Send />
+                {active && allowActiveInput ? "Steer" : null}
               </Button>
             )}
           </div>

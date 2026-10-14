@@ -116,7 +116,7 @@ export function NyxAgentAssistantEntry({
   );
 }
 
-export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} />; }
+export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) { return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
 
 export function AssistantChatPage() {
   const navigate = useNavigate();
@@ -836,13 +836,18 @@ function NyxAgentThreadPage() {
                   </ReviewCardTarget>
                 );
               }}
+              // Everything renderMessage reads besides the message itself.
               projectionVersion={[
                 `card:${search.card ?? ""}`,
+                `deciding:${chat.decidingAcknowledgement ?? ""}`,
+                `channel:${channelPlatform ?? ""}`,
                 ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
               bottomInset={composerHeight}
               notice={chat.error}
+              // A linked review card may sit outside the mounted window.
+              focusMessageId={search.card ? `nyxagent-acknowledgement:${search.card}` : undefined}
               emptyDescription={
                 headerAgent?.kind === "specialist"
                   ? `Talk to ${agentName} directly. It remembers across its threads and asks NyxBot for anything outside its grants.`

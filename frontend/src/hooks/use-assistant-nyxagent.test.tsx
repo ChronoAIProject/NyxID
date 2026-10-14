@@ -2,7 +2,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { continuationForAll, continuationText, useNyxAgentAssistantChat } from "./use-assistant-nyxagent";
+import { continuationForAll, continuationText, useNyxAgentAssistantChat, useNyxAgentThreads } from "./use-assistant-nyxagent";
+import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCreditsDenialStore } from "@/stores/credits-denial-store";
@@ -374,7 +375,7 @@ it.each(["specialist", "automation", "voice"])(
     unmount();
   },
 );
-it("polls a thread whose agent NyxID set to work, without a turn of its own", async () => {
+it("does not poll an idle thread while its agent works elsewhere, and re-reads it when the agent settles", async () => {
   const specialist = `nyxa-${"b".repeat(32)}`;
   page.conversation.active_turn = null;
   const specialistPage = {
@@ -401,10 +402,22 @@ it("polls a thread whose agent NyxID set to work, without a turn of its own", as
   }), { wrapper });
   await waitFor(() => expect(result.current.conversation?.agent?.name).toBe("researcher"));
   const reads = () => requests.filter((r) => r.includes(`/conversations/${specialist}?`)).length;
+  // A Telegram chat or another thread keeps the agent busy; this thread has no turn.
   const first = reads();
-  await waitFor(() => expect(reads()).toBeGreaterThan(first), { timeout: 3500 });
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  expect(reads()).toBe(first);
+  // The agent settles (the agents list polls while one runs): NyxID may have
+  // written to this thread, so it is read once more.
+  agents = [
+    agentRow({}),
+    agentRow({
+      id: "agent-researcher", kind: "specialist", name: "researcher", status: "idle",
+      last_reply: { seq: 7, status: "completed", text: "Done", created_at: "2026-09-17T00:01:00Z" },
+    }),
+  ];
+  await waitFor(() => expect(reads()).toBe(first + 1), { timeout: 4500 });
   unmount();
-}, 8000);
+}, 12000);
 
 it("re-reads the open thread when a specialist settles, since NyxBot may have been woken", async () => {
   page.conversation.active_turn = null;
@@ -715,5 +728,54 @@ it("ignores a stale index that still shows an already-failed turn as running", a
   await waitFor(() => expect(nyxAgentTransport.getConversations()[0]?.active_turn?.turn_id).toBe("turn"));
   await new Promise((resolve) => setTimeout(resolve, 50));
   expect(useCreditsDenialStore.getState().current).toBeNull();
+  unmount();
+});
+
+it("switching to another idle thread re-reads neither the thread list nor the agents", async () => {
+  page.conversation.active_turn = null;
+  const second = `nyxa-${"c".repeat(32)}`;
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (request.endpoint.includes(`/conversations/${second}`)) {
+      requests.push(`GET ${request.endpoint}`);
+      return json({ ...page, conversation: { ...page.conversation, id: second } });
+    }
+    return mock(request);
+  };
+  const { result, rerender, unmount } = renderHook(
+    ({ selected }: { selected: string }) => useNyxAgentAssistantChat({
+      selectedConversationId: selected, threadsAgentId: NYXBOT, onConversationAdopted: vi.fn(),
+    }),
+    { wrapper, initialProps: { selected: id } },
+  );
+  await waitFor(() => expect(result.current.conversation?.id).toBe(id));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const lists = () => requests.filter((r) => r.startsWith("GET /assistant/nyxagent/conversations?")).length;
+  const agentReads = () => requests.filter((r) => r.startsWith("GET /assistant/nyxagent/agents")).length;
+  const before = { lists: lists(), agents: agentReads() };
+  rerender({ selected: second });
+  await waitFor(() => expect(result.current.conversation?.id).toBe(second));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect({ lists: lists(), agents: agentReads() }).toEqual(before);
+  unmount();
+});
+
+it("the page and the sidebar refresh the thread list once per agents change", async () => {
+  page.conversation.active_turn = null;
+  const { result, unmount } = renderHook(() => ({
+    page: useNyxAgentAssistantChat({
+      selectedConversationId: id, threadsAgentId: NYXBOT, onConversationAdopted: vi.fn(),
+    }),
+    sidebar: useNyxAgentThreads({ agentId: NYXBOT }),
+  }), { wrapper });
+  await waitFor(() => expect(result.current.sidebar.threadsLoaded).toBe(true));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const lists = () => requests.filter((r) => r.startsWith("GET /assistant/nyxagent/conversations?")).length;
+  const before = lists();
+  agents = [agentRow({ last_reply: { seq: 3, status: "completed", text: "Done", created_at: "2026-09-17T00:01:00Z" } })];
+  await act(() => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents("owner") }));
+  await waitFor(() => expect(lists()).toBe(before + 1));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(lists()).toBe(before + 1);
   unmount();
 });
