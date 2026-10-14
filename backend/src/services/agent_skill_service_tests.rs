@@ -746,3 +746,117 @@ async fn re_enabling_a_disabled_pin_needs_the_owner_card_but_disabling_does_not(
     ));
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn full_access_set_agent_skills_attaches_with_receipt_while_auto_asks() {
+    use crate::models::assistant_settings::AccessMode;
+    use crate::services::{
+        assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+    };
+    for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+        let f = orchestrator_fixture("mode_skills_widen").await;
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let registry = Registry::new();
+        let selection = Selection {
+            expected_revision: 0,
+            skills: vec![registry.reference()],
+        };
+        let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+        let args = json!({"subagent": agent.id, "selection": selection});
+        let result = set_for_chat(
+            &f.state.db,
+            &registry,
+            &f.chat,
+            &agent,
+            &selection,
+            &args,
+            "Attach example 1.0 to NyxBot",
+        )
+        .await
+        .unwrap();
+        let current = team::agent(&f.state.db, &f.owner, &agent.id).await.unwrap();
+        let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        if asks {
+            assert_eq!(result.err().unwrap()["error"], "acknowledgement_required");
+            assert!(current.skills.is_empty());
+            assert_eq!(rows[0].status, "pending");
+            assert!(registry.calls.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(result.unwrap().revision, 1);
+            assert_eq!(current.skills, selection.skills);
+            assert_eq!(rows[0].status, "allowed");
+            assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+            assert_eq!(
+                rows[0].tool_name.as_deref(),
+                Some("nyxid__set_agent_skills")
+            );
+            assert_eq!(rows[0].summary, "Attach example 1.0 to NyxBot");
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().risk, "sensitive");
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn full_access_failed_skill_attach_writes_no_receipt() {
+    use crate::services::{
+        assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+    };
+    let f = orchestrator_fixture("mode_skills_failure").await;
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let registry = Registry {
+        deny: true,
+        ..Registry::new()
+    };
+    let selection = Selection {
+        expected_revision: 0,
+        skills: vec![registry.reference()],
+    };
+    let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    let args = json!({"subagent": agent.id, "selection": selection});
+    assert!(
+        set_for_chat(
+            &f.state.db,
+            &registry,
+            &f.chat,
+            &agent,
+            &selection,
+            &args,
+            "Attach example 1.0"
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    f.state.db.drop().await.unwrap();
+}

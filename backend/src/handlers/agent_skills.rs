@@ -106,6 +106,23 @@ impl skills::OrnnReader for Reader<'_> {
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
         self.classified_request(method, path, body).await
     }
+
+    async fn classified_as_owner(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> OrnnOutcome {
+        Reader {
+            state: self.state,
+            person: self.person,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        }
+        .classified_request(method, path, body)
+        .await
+    }
 }
 
 impl Reader<'_> {
@@ -559,13 +576,12 @@ pub(crate) async fn dispatch(
         };
         // The pre-review format check is the agent's own Ornn request, so it
         // keeps the thread key's approval policy, turn fence and attribution.
-        return Ok((
-            Box::pin(crate::services::assistant_skill_authoring::create(
-                state, chat, input, &reader, &reader,
-            ))
-            .await?,
-            true,
-        ));
+        let result = Box::pin(crate::services::assistant_skill_authoring::create(
+            state, chat, input, &reader, &reader,
+        ))
+        .await?;
+        let asks = result["error"] == "acknowledgement_required";
+        return Ok((result, asks));
     }
     // Ornn reads run as the thread key, so they keep its agent's operation scopes.
     let thread_scopes = team::agent(&state.db, &chat.user_id, &chat.agent_id)
@@ -690,7 +706,7 @@ pub(crate) async fn dispatch(
                     return Ok((result, false));
                 }
                 let summary = format!(
-                    "Skill {} version {} for agent {}. NyxBot must resolve and preview exact pins before requesting the owner's attachment card.",
+                    "Skill {} version {} for agent {}. NyxBot must resolve and preview exact pins before attaching under the governing permission mode.",
                     arg(args, "skill"),
                     args["version"]
                         .as_str()
@@ -780,38 +796,14 @@ pub(crate) async fn dispatch(
                 }
                 return Ok((acks::refusal(&card), true));
             }
-            let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
-                if !acks::consume_action(db, chat, id, "nyxid__set_agent_skills", args).await? {
-                    return Ok((json!({"error":"acknowledgement_invalid"}), true));
-                }
-                true
-            } else {
-                false
-            };
-            if !confirmed
-                && (skills::needs_confirmation(&agent, &selection)
-                    || acks::webhook_confirmation_required(chat, false, false))
+            match Box::pin(skills::set_for_chat(
+                db, &reader, chat, &agent, &selection, args, &summary,
+            ))
+            .await?
             {
-                return super::assistant_team::operation_owner_card(
-                    db,
-                    chat,
-                    "nyxid__set_agent_skills",
-                    args,
-                    &summary,
-                )
-                .await;
+                Ok(updated) => json!(updated),
+                Err(refusal) => return Ok((refusal, true)),
             }
-            json!(
-                Box::pin(skills::set(
-                    db,
-                    &reader,
-                    &chat.user_id,
-                    &agent.id,
-                    &selection,
-                    confirmed
-                ))
-                .await?
-            )
         }
     };
     Ok((value, false))

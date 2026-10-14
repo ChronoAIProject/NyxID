@@ -329,9 +329,29 @@ pub async fn pair_tool(
     canonical["code"] = json!(setup::normalize_code(code)?);
     canonical["pairing_id"] = json!(row.id);
     canonical["automatic_updates"] = json!(true);
-    if let Some(id) = args["acknowledgement_id"].as_str()
-        && acks::consume_action(&state.db, chat, id, "nyxid__machine_pair", &canonical).await?
-    {
+    let details = format!(
+        "Pair machine {} ({}, IP {}) with capabilities {}. Pair only a setup the owner started. Commands have the machine user's full access; prefer a VM or container. Enable automatic updates when idle (recommended); they wait for work and desktop sessions to end and notify you. Change this in Machines settings.",
+        row.hostname.as_deref().unwrap_or_default(),
+        row.os.as_deref().unwrap_or_default(),
+        row.ip.as_deref().unwrap_or_default(),
+        row.choices.capabilities.join(", ")
+    );
+    let gate = acks::confirmation_needed(
+        &state.db,
+        chat,
+        acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+        false,
+    )
+    .await?;
+    let automatic = gate.auto_allowed();
+    let confirmed = if automatic.is_some() {
+        true
+    } else if let Some(id) = args["acknowledgement_id"].as_str() {
+        acks::consume_action(&state.db, chat, id, "nyxid__machine_pair", &canonical).await?
+    } else {
+        false
+    };
+    if confirmed {
         setup::decide_with_updates(
             &state.db,
             &chat.user_id,
@@ -341,18 +361,22 @@ pub async fn pair_tool(
             Some(true),
         )
         .await?;
+        if let Some(auto) = automatic {
+            acks::record_auto_allowed(
+                &state.db,
+                chat,
+                "nyxid__machine_pair",
+                &canonical,
+                &auto,
+                &details,
+            )
+            .await;
+        }
         return Ok((
             json!({"status":"approved","note":"Pairing approved. End your turn; NyxID wakes this thread when connected. Verify with machine_list and a harmless command."}),
             false,
         ));
     }
-    let details = format!(
-        "Pair machine {} ({}, IP {}) with capabilities {}. Confirm only if you started this setup. Commands have the machine user's full access; prefer a VM or container. Enable automatic updates when idle (recommended); they wait for work and desktop sessions to end and notify you. Change this in Machines settings.",
-        row.hostname.as_deref().unwrap_or_default(),
-        row.os.as_deref().unwrap_or_default(),
-        row.ip.as_deref().unwrap_or_default(),
-        row.choices.capabilities.join(", ")
-    );
     let card = acks::request(
         &state.db,
         chat,

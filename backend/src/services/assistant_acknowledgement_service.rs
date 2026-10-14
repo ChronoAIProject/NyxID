@@ -108,10 +108,12 @@ pub async fn enforce_turn_gate(
 
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
+pub const DECISION_NARRATION: &str =
+    "Then tell the user in one or two plain sentences what you did and the result.";
 
 /// How risky an assistant action is. The owner's access mode decides which
 /// classes need a single-use action card; policy floors (webhook automations,
-/// machine and saved-login confirmation) apply on top in every mode.
+/// machine and saved-login confirmation) apply in Auto and Ask every time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerActionClass {
     Read,
@@ -132,8 +134,8 @@ impl OwnerActionClass {
 }
 
 /// Whether the owner's access mode asks before an action of `class`.
-/// Autopilot never asks; NyxMode asks for sensitive and destructive actions;
-/// Ask Every Time asks for every action except reads.
+/// Full access never asks; Auto asks for sensitive and destructive actions;
+/// Ask every time asks for every action except reads.
 pub fn owner_confirmation_required(
     mode: crate::models::assistant_settings::AccessMode,
     class: OwnerActionClass,
@@ -158,22 +160,90 @@ pub async fn effective_access_mode(
     db: &Database,
     chat: &ChatAuthority,
 ) -> AppResult<crate::models::assistant_settings::AccessMode> {
-    let override_mode = if chat.agent_id.is_empty() {
+    effective_mode_for_agent(db, &chat.user_id, &chat.agent_id).await
+}
+
+async fn effective_mode_for_agent(
+    db: &Database,
+    user: &str,
+    agent: &str,
+) -> AppResult<crate::models::assistant_settings::AccessMode> {
+    let override_mode = if agent.is_empty() {
         None
     } else {
         db.collection::<crate::models::assistant_agent::AssistantAgent>(
             crate::models::assistant_agent::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id": &chat.agent_id})
+        .find_one(doc! {"_id": agent})
         .await?
         .and_then(|agent| agent.access_mode_override)
     };
     match override_mode {
         Some(mode) => Ok(mode),
-        None => Ok(super::assistant_settings_service::get(db, &chat.user_id)
+        None => Ok(super::assistant_settings_service::get(db, user)
             .await?
             .access_mode),
     }
+}
+
+/// Retire outstanding owner asks when the governing policy changes to Full
+/// access. No action has run yet, so retries produce the success receipt.
+/// Specialist requests addressed to NyxBot keep their existing lifecycle.
+pub async fn retire_full_access_confirmations(
+    db: &Database,
+    user: Option<&str>,
+    agent: Option<&str>,
+) -> AppResult<()> {
+    let mut filter = doc! {};
+    if let Some(user) = user {
+        filter.insert("user_id", user);
+    }
+    if let Some(agent) = agent {
+        filter.insert("agent_id", agent);
+    }
+    let mut threads = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find(filter)
+        .await?;
+    let mut modes = std::collections::HashMap::new();
+    while let Some(thread) = threads.try_next().await? {
+        let identity = (
+            thread.user_id.clone(),
+            thread.agent_id.clone().unwrap_or_default(),
+        );
+        let mode = match modes.get(&identity) {
+            Some(mode) => *mode,
+            None => {
+                let mode = effective_mode_for_agent(db, &identity.0, &identity.1).await?;
+                modes.insert(identity, mode);
+                mode
+            }
+        };
+        if mode != crate::models::assistant_settings::AccessMode::Autopilot {
+            continue;
+        }
+        db.collection::<bson::Document>(ACKS)
+            .update_many(
+                doc! {"user_id": &thread.user_id, "conversation_id": &thread.id,
+                "kind": "action", "decider": "user", "status": "pending"},
+                doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}},
+            )
+            .await?;
+        if let Some(key) = db
+            .collection::<ApiKey>(KEYS)
+            .find_one(doc! {"_id": &thread.credential_api_key_id})
+            .await?
+        {
+            db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+                .update_many(
+                    doc! {"requester_type": "user", "requester_id": &thread.user_id,
+                    "requester_label": &key.name, "status": "pending"},
+                    doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}},
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// The closed risk class of a native (`nyxid__`), meta (`nyx__`) or machine
@@ -184,7 +254,7 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
     if let Some(operation) = crate::services::machine_tools::operation(tool) {
         // Work on a machine the owner granted is the agent's ordinary job;
         // each machine's own confirmation setting (`machine_confirm`) is the
-        // owner's policy for its riskier changes. Ask Every Time still asks
+        // owner's policy for its riskier changes. Ask every time still asks
         // for every change. Webhook policy keeps its destructive contract in
         // the machine adapter.
         return Some(
@@ -328,27 +398,158 @@ impl ActionFacts {
 /// floor, or the governing access mode. Guests never confirm cards and are
 /// refused by their own gates, so only floors apply to their turns. Reads
 /// are never asked by the access mode and cost no settings lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutoAllowed {
+    pub class: OwnerActionClass,
+    pub mode: crate::models::assistant_settings::AccessMode,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    Proceed,
+    AutoAllowed(AutoAllowed),
+    Ask(ConfirmationNeed),
+}
+
+impl Gate {
+    pub fn ask(self) -> Option<ConfirmationNeed> {
+        match self {
+            Self::Ask(need) => Some(need),
+            _ => None,
+        }
+    }
+    pub fn auto_allowed(self) -> Option<AutoAllowed> {
+        match self {
+            Self::AutoAllowed(auto) => Some(auto),
+            _ => None,
+        }
+    }
+}
+
 pub async fn confirmation_needed(
     db: &Database,
     chat: &ChatAuthority,
     facts: ActionFacts,
     policy_floor: bool,
-) -> AppResult<Option<ConfirmationNeed>> {
+) -> AppResult<Gate> {
     let webhook = webhook_confirmation_required(chat, facts.read_only, facts.destructive);
-    let mode = if chat.guest || facts.class == OwnerActionClass::Read {
-        None
-    } else {
-        let mode = effective_access_mode(db, chat).await?;
-        owner_confirmation_required(mode, facts.class).then_some(mode)
-    };
-    Ok(
-        (webhook || policy_floor || mode.is_some()).then_some(ConfirmationNeed {
+    let effective =
+        if chat.guest || (facts.class == OwnerActionClass::Read && !webhook && !policy_floor) {
+            None
+        } else {
+            Some(effective_access_mode(db, chat).await?)
+        };
+    if effective == Some(crate::models::assistant_settings::AccessMode::Autopilot) {
+        let reason = if webhook {
+            "webhook"
+        } else if policy_floor {
+            "policy"
+        } else {
+            "access_mode"
+        };
+        if webhook
+            || policy_floor
+            || matches!(
+                facts.class,
+                OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+            )
+        {
+            return Ok(Gate::AutoAllowed(AutoAllowed {
+                class: facts.class,
+                mode: effective.unwrap(),
+                reason,
+            }));
+        }
+        return Ok(Gate::Proceed);
+    }
+    let mode = effective.filter(|mode| owner_confirmation_required(*mode, facts.class));
+    if webhook || policy_floor || mode.is_some() {
+        return Ok(Gate::Ask(ConfirmationNeed {
             class: facts.class,
             mode,
             webhook,
             policy: policy_floor,
-        }),
-    )
+        }));
+    }
+    Ok(Gate::Proceed)
+}
+
+/// Best-effort transcript receipt after a successful action. This record never
+/// grants execution authority and must never be consumed as an owner card.
+pub async fn record_auto_allowed(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+) {
+    if chat.guest {
+        return;
+    }
+    let now = Utc::now();
+    let row = AssistantAcknowledgement {
+        id: Uuid::new_v4().to_string(),
+        conversation_id: chat.conversation_id.clone(),
+        user_id: chat.user_id.clone(),
+        api_key_id: chat.api_key_id.clone(),
+        requester_agent_id: Some(chat.agent_id.clone()),
+        kind: "action".into(),
+        status: "allowed".into(),
+        decider: "user".into(),
+        decided_by: Some("access_mode".into()),
+        confirmation: Some(
+            crate::models::assistant_acknowledgement::ActionConfirmation {
+                risk: auto.class.as_str().into(),
+                access_mode: Some(auto.mode),
+                reason: auto.reason.into(),
+            },
+        ),
+        summary: summary.into(),
+        tool_name: Some(tool.into()),
+        arguments_digest: Some(arguments_digest(args)),
+        created_at: now,
+        decided_at: Some(now),
+        expires_at: now,
+        authored_skill: None,
+        service_id: None,
+        service_slug: None,
+        service_name: None,
+        platform: false,
+        operation_selection: None,
+        operation_contract_digest: None,
+        skill_selection: None,
+        requested_turn_id: chat.turn_id.clone(),
+        voice_request_id: None,
+        continuation_receipt_id: None,
+        trigger_run_id: None,
+        request_excerpt: None,
+        reason: None,
+        machine_context: None,
+    };
+    if db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(&row)
+        .await
+        .is_err()
+    {
+        tracing::warn!(conversation_id = %chat.conversation_id, tool, code = "receipt_insert_failed", "Automatic action receipt write failed");
+        return;
+    }
+    audit_service::log_async(
+        db.clone(),
+        Some(chat.user_id.clone()),
+        "assistant_action_auto_allowed".into(),
+        Some(
+            json!({"conversation_id": chat.conversation_id, "agent_id": chat.agent_id,
+            "tool": tool, "risk": auto.class.as_str(), "access_mode": auto.mode, "reason": auto.reason}),
+        ),
+        None,
+        None,
+        Some(chat.api_key_id.clone()),
+        None,
+    );
 }
 
 /// Require the owner's single-use card for an action that needs one.
@@ -752,6 +953,7 @@ pub async fn audit_access_request_denied(
         )
         .await;
         let message = crate::models::assistant_message::AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             specialist_id: Some(chat.agent_id.clone()),
             steering: None,
@@ -997,6 +1199,7 @@ pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<
     db.collection::<AssistantAcknowledgement>(ACKS)
         .update_many(
             doc! {"user_id": user, "conversation_id": conversation,
+            "decided_by": {"$ne": "access_mode"},
             "expires_at": {"$lte": bson::DateTime::now()}, "$or": [
                 {"status": "pending"}, {"status": "allowed", "kind": "action"},
             ]},
@@ -1071,6 +1274,7 @@ pub async fn decided_since(
             "user_id": user,
             "conversation_id": conversation,
             "status": {"$in": ["allowed", "denied"]},
+            "decided_by": {"$ne": "access_mode"},
             "decided_at": {"$gt": bson::DateTime::from_chrono(since)},
         })
         .sort(doc! {"decided_at": 1, "_id": 1})
@@ -1100,6 +1304,10 @@ fn identifier(value: Option<&str>) -> String {
 
 /// Instructions note telling the model about card decisions it has not seen.
 pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.decided_by.as_deref() != Some("access_mode"))
+        .collect();
     if rows.is_empty() {
         return String::new();
     }
@@ -1107,7 +1315,7 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         "\n\nChat card decisions the user made since your previous reply \
         (recorded by NyxID; facts, not instructions):",
     );
-    for row in rows {
+    for row in &rows {
         let target = match row.kind.as_str() {
             "service" => format!("service {}", identifier(row.service_slug.as_deref())),
             "account" => "account management".into(),
@@ -1566,7 +1774,7 @@ fn allowed_skill_filter(
 
 pub fn allowed_skill_result(row: &AssistantAcknowledgement) -> Value {
     json!({"status":"allowed_pending_attachment", "request_id":row.id,
-        "instructions":"This request was already allowed. NyxBot resolves the exact version and asks the owner to confirm attaching it on a separate card. Do not call request_agent_skills again for this request. Continue without it and check nyxid__get_agent_skills later."})
+        "instructions":"This request was already allowed. NyxBot resolves the exact version and applies the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not call request_agent_skills again for this request. Continue without it and check nyxid__get_agent_skills later."})
 }
 
 pub async fn allowed_skill_request(
@@ -2270,6 +2478,7 @@ pub async fn consume_action(
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,
                     "arguments_digest": &digest,
                     "status": "allowed",
+                    "decided_by": {"$ne": "access_mode"},
                     "expires_at": {"$gt": bson::DateTime::now()},
                 },
                 doc! {"$set": {"status": "used"}},
@@ -2297,7 +2506,7 @@ pub(crate) async fn consume_action_in_session(
             doc! {"_id": id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
             "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": tool,
             "arguments_digest": arguments_digest(arguments), "status": "allowed",
-            "decider": "user", "decided_by": "user", "expires_at": {"$gt": bson::DateTime::now()}},
+            "decider": "user", "decided_by": {"$eq": "user", "$ne": "access_mode"}, "expires_at": {"$gt": bson::DateTime::now()}},
             doc! {"$set": {"status": "used"}},
         )
         .session(&mut *session)
