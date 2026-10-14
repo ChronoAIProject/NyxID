@@ -33,6 +33,16 @@ use super::services_helpers::fetch_service;
 const JSONRPC_VERSION: &str = "2.0";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
+fn negotiated_protocol_version(params: Option<&serde_json::Value>) -> &'static str {
+    match params
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("2025-06-18") => "2025-06-18",
+        _ => MCP_PROTOCOL_VERSION,
+    }
+}
+
 #[derive(Deserialize)]
 struct JsonRpcRequest {
     #[allow(dead_code)]
@@ -1681,7 +1691,7 @@ async fn handle_initialize(
     );
 
     let result = serde_json::json!({
-        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "protocolVersion": negotiated_protocol_version(request.params.as_ref()),
         "capabilities": {
             "tools": { "listChanged": true },
         },
@@ -7071,9 +7081,41 @@ mod tests {
         assert_eq!(JSONRPC_VERSION, "2.0");
     }
 
-    #[test]
-    fn mcp_protocol_version_is_set() {
-        assert!(!MCP_PROTOCOL_VERSION.is_empty());
+    #[tokio::test]
+    async fn initialize_negotiates_supported_protocol_versions() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        for (requested, expected) in [
+            ("2025-06-18", "2025-06-18"),
+            ("2025-11-25", "2025-11-25"),
+            ("2099-01-01", MCP_PROTOCOL_VERSION),
+            ("2024-11-05", MCP_PROTOCOL_VERSION),
+        ] {
+            let request = JsonRpcRequest {
+                jsonrpc: JSONRPC_VERSION.into(),
+                id: Some(serde_json::json!(1)),
+                method: "initialize".into(),
+                params: Some(serde_json::json!({"protocolVersion": requested})),
+            };
+            let response = handle_initialize(
+                &state,
+                "user-1",
+                &request,
+                true,
+                false,
+                None,
+                None,
+                None,
+                None,
+                &TelemetryContext::default(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["result"]["protocolVersion"], expected);
+        }
     }
     #[test]
     fn oracle_result_lists_artifacts_instead_of_claiming_empty_response() {

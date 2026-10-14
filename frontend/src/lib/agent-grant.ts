@@ -1,8 +1,5 @@
 /** What an agent app may do in one service. */
-export type AccessLevel = "off" | "read" | "write";
-
-/** How the write half of a grant is submitted to the decision endpoint. */
-export type WriteAccessMode = "none" | "all" | "selected";
+export type AccessLevel = "off" | "allow";
 
 export interface AccessServiceRow {
   readonly id: string;
@@ -14,27 +11,19 @@ export interface AccessServiceRow {
 }
 
 export interface AgentGrant {
-  /** Read access to every service, including ones connected later. */
+  /** Access to every service, including ones connected later. */
   readonly allowAll: boolean;
-  readonly readIds: readonly string[];
-  readonly writeMode: WriteAccessMode;
-  readonly writeIds: readonly string[];
+  readonly serviceIds: readonly string[];
 }
 
-const RANK: Readonly<Record<AccessLevel, number>> = {
-  off: 0,
-  read: 1,
-  write: 2,
-};
-
-/** A row's level: its override, else the default; app-requested rows stay readable. */
+/** A row's level: its override, else the default; app-requested rows stay allowed. */
 export function rowLevel(
   row: AccessServiceRow,
   defaultLevel: AccessLevel,
   overrides: Readonly<Record<string, AccessLevel>>,
 ): AccessLevel {
   const level = overrides[row.id] ?? defaultLevel;
-  return row.requiredByApp && level === "off" ? "read" : level;
+  return row.requiredByApp && level === "off" ? "allow" : level;
 }
 
 /**
@@ -51,20 +40,13 @@ export function agentGrant(
     id: row.id,
     level: rowLevel(row, defaultLevel, overrides),
   }));
-  const readIds = levels
-    .filter((item) => RANK[item.level] >= RANK.read)
+  const serviceIds = levels
+    .filter((item) => item.level === "allow")
     .map((item) => item.id);
-  const writeIds = levels
-    .filter((item) => item.level === "write")
-    .map((item) => item.id);
-  const allowAll =
-    defaultLevel !== "off" && levels.every((item) => item.level !== "off");
-  const writeAll =
-    defaultLevel === "write" && levels.every((item) => item.level === "write");
   return {
-    allowAll,
-    readIds,
-    writeMode: writeAll ? "all" : writeIds.length > 0 ? "selected" : "none",
-    writeIds,
+    allowAll:
+      defaultLevel === "allow" &&
+      levels.every((item) => item.level === "allow"),
+    serviceIds,
   };
 }
