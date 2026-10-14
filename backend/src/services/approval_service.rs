@@ -314,21 +314,22 @@ pub async fn evaluate_for_chat(
         && acks::effective_access_mode(db, chat).await?
             == crate::models::assistant_settings::AccessMode::Autopilot
     {
-        let outcome = ApprovalOutcome::Allowed { required: pending.resolution.required };
-        let receipt =
-            matches!(outcome, ApprovalOutcome::Allowed { .. }).then_some(acks::AutoAllowed {
-                class: match descriptor.verb {
-                    crate::models::service_approval_config::ApprovalVerb::Read => {
-                        acks::OwnerActionClass::Read
-                    }
-                    crate::models::service_approval_config::ApprovalVerb::Destructive => {
-                        acks::OwnerActionClass::Destructive
-                    }
-                    _ => acks::OwnerActionClass::Change,
-                },
-                mode: crate::models::assistant_settings::AccessMode::Autopilot,
-                reason: "approval",
-            });
+        let outcome = ApprovalOutcome::Allowed {
+            required: pending.resolution.required,
+        };
+        let receipt = Some(acks::AutoAllowed {
+            class: match descriptor.verb {
+                crate::models::service_approval_config::ApprovalVerb::Read => {
+                    acks::OwnerActionClass::Read
+                }
+                crate::models::service_approval_config::ApprovalVerb::Destructive => {
+                    acks::OwnerActionClass::Destructive
+                }
+                _ => acks::OwnerActionClass::Change,
+            },
+            mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            reason: "approval",
+        });
         return Ok((outcome, receipt));
     }
     Ok((outcome, None))
@@ -3015,6 +3016,148 @@ mod tests {
             get_request(&f.state.db, "general").await.unwrap().status,
             "pending"
         );
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_access_chat_bypass_evaluates_policy_and_grants_once() {
+        use crate::models::assistant_settings::AccessMode;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "approval_single_evaluation",
+        )
+        .await;
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let service = uuid::Uuid::new_v4().to_string();
+        insert_config(
+            &f.state.db,
+            &make_service_config(&f.owner, &service, true, ApprovalMode::Grant),
+        )
+        .await;
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let record = queries.clone();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let monitor = enabled.clone();
+        let handler = EventHandler::callback(move |event| {
+            if monitor.load(Ordering::SeqCst)
+                && let CommandEvent::Started(event) = event
+                && let Ok(collection) = event.command.get_str("find")
+            {
+                record.lock().unwrap().push(collection.to_owned());
+            }
+        });
+        let mut options = mongodb::options::ClientOptions::parse(
+            std::env::var("NYXID_TEST_DATABASE_URL").unwrap(),
+        )
+        .await
+        .unwrap();
+        options.command_event_handler = Some(handler);
+        let db = mongodb::Client::with_options(options)
+            .unwrap()
+            .database(f.state.db.name());
+        let descriptor =
+            crate::services::operation_descriptor::build_http_descriptor("POST", "/things", None);
+        let (outcome, receipt) = evaluate_for_chat(
+            &db,
+            &f.owner,
+            &f.owner,
+            &service,
+            &descriptor,
+            Some("user"),
+            &f.owner,
+            false,
+            false,
+            Some(&f.chat),
+        )
+        .await
+        .unwrap();
+        enabled.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            outcome,
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        assert_eq!(receipt.unwrap().reason, "approval");
+        let queries = queries.lock().unwrap().clone();
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|q| q.as_str() == SERVICE_APPROVAL_CONFIGS)
+                .count(),
+            1
+        );
+        assert_eq!(queries.iter().filter(|q| q.as_str() == GRANTS).count(), 1);
+        crate::services::assistant_settings_service::update(
+            &db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(AccessMode::Nyxmode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (outcome, receipt) = evaluate_for_chat(
+            &db,
+            &f.owner,
+            &f.owner,
+            &service,
+            &descriptor,
+            Some("user"),
+            &f.owner,
+            false,
+            false,
+            Some(&f.chat),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::NeedsApproval(_)));
+        assert!(receipt.is_none());
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! {"service_id": &service},
+                doc! {"$set": {"default_effect": "deny"}},
+            )
+            .await
+            .unwrap();
+        crate::services::assistant_settings_service::update(
+            &db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (outcome, receipt) = evaluate_for_chat(
+            &db,
+            &f.owner,
+            &f.owner,
+            &service,
+            &descriptor,
+            Some("user"),
+            &f.owner,
+            false,
+            false,
+            Some(&f.chat),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::Denied));
+        assert!(receipt.is_none());
         f.state.db.drop().await.unwrap();
     }
 
