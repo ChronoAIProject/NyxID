@@ -701,7 +701,7 @@ pub async fn set_for_chat(
         &chat.user_id,
         &agent.id,
         selection,
-        confirmed || gate.auto_allowed().is_some() || gate.ask().is_some(),
+        confirmed || gate.auto_allowed().is_some(),
     ))
     .await?;
     if let Some(auto) = gate.auto_allowed() {
