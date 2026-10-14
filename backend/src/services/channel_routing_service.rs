@@ -431,11 +431,10 @@ pub async fn update_conversation(
             .and_run2(async move |session| {
                 let result: AppResult<ChannelConversation> = async {
                     fence_route_key(&db, &key, session).await?;
+                    let mut filter = doc! { "_id": &conversation_id, "user_id": &user_id, "retired_by_transfer": { "$ne": true } };
+                    pin_fenced_key(&mut filter, &set_doc, &key);
                     db.collection::<ChannelConversation>(COLLECTION_NAME)
-                        .find_one_and_update(
-                            doc! { "_id": &conversation_id, "user_id": &user_id, "retired_by_transfer": { "$ne": true } },
-                            doc! { "$set": set_doc.clone() },
-                        )
+                        .find_one_and_update(filter, doc! { "$set": set_doc.clone() })
                         .return_document(mongodb::options::ReturnDocument::After)
                         .session(&mut *session)
                         .await?
@@ -526,6 +525,14 @@ pub async fn delete_conversation(
 }
 
 /// The key a route update binds or re-enables; reductions need no key fence.
+/// Re-enabling keeps the route's key, so require the route to still hold the
+/// key that was fenced; a concurrent rebind must not be re-enabled unfenced.
+fn pin_fenced_key(filter: &mut bson::Document, set: &bson::Document, key: &str) {
+    if !set.contains_key("agent_api_key_id") {
+        filter.insert("agent_api_key_id", key);
+    }
+}
+
 fn widened_route_key<'a>(
     set: &'a bson::Document,
     current: &'a ChannelConversation,
@@ -551,8 +558,10 @@ async fn mutate_bot_conversation(
         let result: AppResult<_> = async {
             let bot = current.channel_bot_id.as_deref().expect("bot conversation");
             super::platform_bot_authority::fence_personal_routes(&db, bot, &current.user_id, session).await?;
+            let mut filter = doc! {"_id": &current.id, "user_id": &current.user_id, "channel_bot_id": bot, "retired_by_transfer": {"$ne": true}};
             if let Some(key) = widened_route_key(&set, &current) {
                 fence_route_key(&db, key, session).await?;
+                pin_fenced_key(&mut filter, &set, key);
             }
             if default {
                 db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
@@ -561,7 +570,7 @@ async fn mutate_bot_conversation(
                 ).session(&mut *session).await?;
             }
             db.collection::<ChannelConversation>(COLLECTION_NAME).find_one_and_update(
-                doc! {"_id": &current.id, "user_id": &current.user_id, "channel_bot_id": bot, "retired_by_transfer": {"$ne": true}},
+                filter,
                 doc! {"$set": set.clone()}
             ).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Conversation changed before update".into()))
@@ -888,6 +897,70 @@ mod tests {
                 .unwrap(),
             0
         );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn platform_onboarding_stale_reactivation_cannot_enable_a_rebound_revoked_key() {
+        let db = connect_transaction_test_database("platform_route_stale_reactivation").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let bot = uuid::Uuid::new_v4().to_string();
+        seed_bot(&db, &bot, &owner, "telegram").await;
+        let first = make_api_key(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            Some("https://agent.test/callback"),
+        );
+        let mut second = make_api_key(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            Some("https://agent.test/callback"),
+        );
+        second.is_active = false;
+        let keys = db.collection::<ApiKey>(API_KEYS);
+        keys.insert_one(&first).await.unwrap();
+        keys.insert_one(&second).await.unwrap();
+        let route = create_conversation(
+            &db,
+            &owner,
+            Some(&bot),
+            "telegram",
+            "chat",
+            "private",
+            None,
+            &first.id,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let mut stale = route.clone();
+        stale.is_active = false;
+        // Meanwhile the route was paused, rebound to a key that was then revoked.
+        db.collection::<ChannelConversation>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &route.id},
+                doc! {"$set": {"is_active": false, "agent_api_key_id": &second.id}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            mutate_bot_conversation(
+                &db,
+                &stale,
+                doc! {"is_active": true, "updated_at": bson::DateTime::now()},
+                false,
+            )
+            .await
+            .is_err()
+        );
+        let persisted = db
+            .collection::<ChannelConversation>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &route.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!persisted.is_active);
         db.drop().await.unwrap();
     }
 

@@ -866,3 +866,7 @@ retention gaps, now closed:
 - The first-party requirement for a converted manager is enforced inside the
   manager operation (`configure_manager_for`), closing the race with the first
   conversion.
+- Re-enabling a route without rebinding pins the fenced key in the update
+  predicate, so a stale reactivation cannot enable a route that was concurrently
+  rebound to a revoked key
+  (`platform_onboarding_stale_reactivation_cannot_enable_a_rebound_revoked_key`).
