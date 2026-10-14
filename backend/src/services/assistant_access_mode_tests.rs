@@ -657,7 +657,10 @@ async fn full_access_account_success_records_one_non_consumable_receipt_and_no_u
     let key = ordinary_key(&f).await;
     let args = json!({"api_key_id": key, "name": "receipt-key"});
     let done = account(&f, "update_agent_key", &args).await;
-    assert!(!done.is_error, "{}", done.value);
+    assert!(
+        !done.is_error,
+        "update_agent_key was refused in Full access"
+    );
     assert_eq!(done.value["name"], "receipt-key");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -818,7 +821,10 @@ async fn full_access_webhook_change_executes_with_receipt_while_auto_asks() {
             assert_eq!(rows[0].status, "pending");
             assert!(stored.is_active);
         } else {
-            assert!(!result.is_error, "{}", result.value);
+            assert!(
+                !result.is_error,
+                "set_service_enabled was refused in Full access"
+            );
             assert_eq!(rows[0].status, "allowed");
             assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
             assert_eq!(rows[0].confirmation.as_ref().unwrap().risk, "change");
@@ -974,7 +980,10 @@ async fn full_access_transition_retires_old_owner_cards_but_preserves_auto_overr
     .unwrap();
     assert_eq!(cards(&f).await[0].status, "expired");
     let done = account(&f, "update_agent_key", &args).await;
-    assert!(!done.is_error, "{}", done.value);
+    assert!(
+        !done.is_error,
+        "update_agent_key was refused after switching to Full access"
+    );
     assert_eq!(done.value["name"], "after-switch");
     let rows = cards(&f).await;
     assert!(

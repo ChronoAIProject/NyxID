@@ -606,7 +606,7 @@ mod tests {
                 assert_eq!(rows[0].status, "pending");
                 assert!(requests.try_recv().is_err());
             } else {
-                assert!(!error, "{result}");
+                assert!(!error, "machine_update was refused in Full access");
                 assert_eq!(requests.recv().await.unwrap().operation, Operation::Upgrade);
                 assert_eq!(
                     updates::get(&f.state.db, &machine).await.unwrap().phase,
