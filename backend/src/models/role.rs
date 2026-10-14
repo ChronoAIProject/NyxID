@@ -6,6 +6,10 @@ pub const COLLECTION_NAME: &str = "roles";
 pub const PLATFORM_ADMIN_ROLE_SLUG: &str = "admin";
 pub const PLATFORM_OPERATOR_ROLE_SLUG: &str = "operator";
 pub const PLATFORM_USER_ROLE_SLUG: &str = "user";
+pub const FEATURE_FLAG_OPERATOR_ROLE_SLUG: &str = "feature-flag-operator";
+pub const FEATURE_FLAG_ADMIN_ROLE_SLUG: &str = "feature-flag-admin";
+pub const FEATURE_FLAGS_OWN_WRITE_PERMISSION: &str = "nyxid:feature_flags:own:write";
+pub const FEATURE_FLAGS_ADMIN_PERMISSION: &str = "nyxid:feature_flags:admin";
 pub const CREDITS_MANAGER_ROLE_SLUG: &str = "credits_manager";
 
 /// Lets an Operator issue and revoke one-off credit grants. Ignored for

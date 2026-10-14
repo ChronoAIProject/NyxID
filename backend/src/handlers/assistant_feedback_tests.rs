@@ -559,6 +559,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
     let override_doc = crate::models::feature_flag_override::FeatureFlagOverride {
+        definition_id: None,
         id: "s5-off".into(),
         org_user_id: None,
         flag_key: crate::services::feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY.into(),

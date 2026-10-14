@@ -71,6 +71,11 @@ vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role rea
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
 
+Feature flag access can be delegated to any user or group with
+`feature-flag-operator` (create flags and manage their own) or
+`feature-flag-admin` (manage all flags, including built-ins). Both roles use
+Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-roles-and-management).
+
 ## What NyxID Does
 
 - **Connect Stripe to agents** — [Stripe Apps OAuth](docs/STRIPE_OAUTH.md) supports a managed account connection and read-only customer, invoice, payment, and subscription tools.

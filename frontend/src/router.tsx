@@ -41,6 +41,7 @@ import {
   canManageCatalog,
   canManageTools,
   canReadAdminUsage,
+  canReadFeatureFlags,
   hasAdminRead,
 } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
@@ -990,20 +991,20 @@ const adminLayout = createRoute({
     if (!isAuthenticated && !isLoading) {
       throw redirect({ to: "/login" });
     }
-    // Admin layout is reachable by both `admin` (read+write) and `operator`
-    // (read-only). Per-action write controls inside admin pages are gated
-    // separately so operators see admin data but cannot mutate it. Holders of
-    // the usage-read role permission reach only the Usage page.
     if (isLoading || hasAdminRead(user)) return;
     const usagePath =
       location.pathname === "/admin/usage" ||
       location.pathname === "/admin/analytics";
-    if (!canReadAdminUsage(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
-    if (!usagePath) {
-      throw redirect({ to: "/admin/usage" });
-    }
+    const flagsPath = location.pathname === "/admin/feature-flags";
+    if (
+      (usagePath && canReadAdminUsage(user)) ||
+      (flagsPath && canReadFeatureFlags(user))
+    )
+      return;
+    if (canReadFeatureFlags(user))
+      throw redirect({ to: "/admin/feature-flags" });
+    if (canReadAdminUsage(user)) throw redirect({ to: "/admin/usage" });
+    throw redirect({ to: "/dashboard" });
   },
   component: () => <Outlet />,
 });

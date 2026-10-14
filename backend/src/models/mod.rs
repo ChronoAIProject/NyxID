@@ -44,6 +44,7 @@ pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
+pub mod feature_flag_definition;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
