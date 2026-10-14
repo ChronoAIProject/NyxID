@@ -1,3 +1,9 @@
+#![allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_if,
+    clippy::needless_borrow
+)]
+
 use super::api_key_mutation_service::{map_transaction_error, transaction_result};
 use crate::{
     errors::{AppError, AppResult},

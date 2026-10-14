@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Channel bot lifecycle management service.
 //!
 //! Handles bot registration, webhook setup, token encryption/decryption,

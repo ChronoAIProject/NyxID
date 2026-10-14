@@ -1,3 +1,9 @@
+#![allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_if,
+    clippy::needless_borrow
+)]
+
 use crate::services::{
     platform_binding_service as bindings, platform_inference_service as inference,
 };

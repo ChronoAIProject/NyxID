@@ -1,3 +1,10 @@
+#![allow(
+    clippy::collapsible_if,
+    clippy::too_many_arguments,
+    clippy::needless_borrow,
+    clippy::items_after_test_module
+)]
+
 use chrono::Utc;
 use mongodb::options::ReturnDocument;
 use mongodb::{
@@ -619,6 +626,7 @@ pub(crate) async fn complete_cleanup(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
@@ -795,7 +803,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(stored.get_bool("is_active").unwrap(), false);
+        assert!(!stored.get_bool("is_active").unwrap());
         assert_eq!(stored.get_str("platform_profile_id").unwrap(), profile.id);
         assert!(
             !super::super::platform_bot_authority::permits_personal_routes(&state.db, &bot)

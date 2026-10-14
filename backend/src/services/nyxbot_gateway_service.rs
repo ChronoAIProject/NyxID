@@ -1,3 +1,9 @@
+#![allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_if,
+    clippy::needless_borrow
+)]
+
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -243,6 +249,7 @@ pub(crate) async fn inspect_cleanup(
 
 /// Recovery never substitutes an observed version into a deletion request.
 /// Changed bindings can only be explicitly preserved; missing bindings can close.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_cleanup(
     state: &AppState,
     actor: &str,

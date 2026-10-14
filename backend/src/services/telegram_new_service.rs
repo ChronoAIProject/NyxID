@@ -1,3 +1,9 @@
+#![allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_if,
+    clippy::needless_borrow
+)]
+
 use bson::doc;
 use chrono::{Duration, Utc};
 use mongodb::{

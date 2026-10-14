@@ -1,3 +1,10 @@
+#![allow(
+    clippy::collapsible_if,
+    clippy::too_many_arguments,
+    clippy::needless_borrow,
+    clippy::items_after_test_module
+)]
+
 use super::api_key_mutation_service::{map_transaction_error, transaction_result};
 use crate::{
     errors::{AppError, AppResult},
@@ -514,6 +521,7 @@ pub(crate) async fn unlink_sender(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::test_utils::connect_transaction_test_database;

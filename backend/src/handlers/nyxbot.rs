@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! NyxBot as the agent behind the owner's channel bots.
 //!
 //! Telegram bots go through the Agent Event Gateway (catalog slug `cmaeg`):

@@ -1,3 +1,11 @@
+#![allow(
+    clippy::large_enum_variant,
+    clippy::collapsible_if,
+    clippy::too_many_arguments,
+    clippy::needless_borrow,
+    clippy::items_after_test_module
+)]
+
 //! Purpose-confined native public inference. This does not change ordinary
 //! platform-key payer resolution or consult a person's connections or agents.
 use super::{
@@ -1103,6 +1111,7 @@ pub(crate) async fn funded_test_fixture() -> super::platform_onboarding_test_sup
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
