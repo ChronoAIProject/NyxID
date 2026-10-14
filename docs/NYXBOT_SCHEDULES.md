@@ -359,6 +359,16 @@ metadata and outcome only. The complete answer lives in the assistant transcript
 and delivery, through the existing post-to-chat path. Long replies respect the
 destination platform limit and explicitly say they were shortened, with a full
 thread link. Push has a concise preview and thread ID.
+Successful `deliver_to: {"type":"chat"}` results send retained tool images,
+one per message, before the result text. Images use the same prepared target and
+live agent, org, bot and `allow_posts` checks. The text consumes one initiate
+limiter token for the logical result; its at most eight images consume none.
+Image claims are inside the single `result_claimed` attempt and never resend an
+ambiguous send. A partial image failure appends a count to the text; only an
+owner-private chat mentions the automation's thread in the NyxID app. Failed
+runs and confirmation notices send text only. Thread results retain their web
+attachments; notification delivery remains text-only.
+
 Final delivery is claimed once. If a replica dies around a remote send, recovery
 reports `result_delivery_interrupted` rather than duplicating an ambiguous send.
 Schedule-to-webhook delivery retains the existing signed delivery record and

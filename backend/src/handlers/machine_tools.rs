@@ -754,7 +754,7 @@ async fn signed_request(
     Ok(request)
 }
 
-async fn attach_computer_images(
+pub(super) async fn attach_computer_images(
     state: &AppState,
     chat: &ChatAuthority,
     result: &mut Value,
@@ -779,7 +779,7 @@ async fn attach_computer_images(
                     .ok_or_else(|| {
                         AppError::ValidationError("Invalid machine image type or size".into())
                     })?;
-            let attached = engine::attach_image(
+            let attached = engine::attach_routed_image(
                 &state.db,
                 &state.encryption_keys,
                 &chat.user_id,
@@ -787,22 +787,40 @@ async fn attach_computer_images(
                 "Machine screenshot",
                 &media.content_type,
                 &media.bytes,
+                false,
             )
             .await?;
-            screenshot_id = attached.as_ref().map(|meta| meta.id.clone());
+            screenshot_id = attached.as_ref().map(|image| image.attachment.id.clone());
+            let note = match attached {
+                Some(image) => {
+                    let (destination, _) = super::mcp_transport::resolved_image_destination(
+                        state, &chat.user_id, &image.routing,
+                    ).await;
+                    screenshot_note(&destination)
+                }
+                None => "The image could not be attached: no live turn, stopped turn or attachment limit reached.".into(),
+            };
             *item = json!({
                 "type":"text",
-                "text":if attached.is_some(){
-                    "Image displayed to the owner in this conversation. NyxID shows the image to you \
-                    after this response when this agent can view images. Do not describe its \
-                    contents before you have seen it."
-                }else{
-                    "The image could not be attached: no live turn or attachment limit reached."
-                }
+                "text":note,
             });
         }
     }
     Ok(screenshot_id)
+}
+
+fn screenshot_note(destination: &super::mcp_transport::ImageNoteDestination) -> String {
+    use super::mcp_transport::ImageNoteDestination;
+    let mut note = match destination {
+        ImageNoteDestination::Chat { platform, .. }
+        | ImageNoteDestination::TriggerChat { platform } => format!(
+            "This screenshot is shown to the owner in the NyxID app only; it is not sent to the {} chat.",
+            crate::services::channel_platform::platform_name(platform)
+        ),
+        _ => "Image displayed to the owner in this conversation.".into(),
+    };
+    note.push_str(" NyxID shows the image to you after this response when this agent can view images. Do not describe its contents before you have seen it.");
+    note
 }
 
 async fn save_attachment(
@@ -889,20 +907,39 @@ async fn share_file(
         .ok_or_else(|| {
             AppError::ValidationError("Only PNG, JPEG, GIF and WebP images may be shared".into())
         })?;
-    let attached = engine::attach_image(
+    attach_shared_image(state, chat, kind, &bytes).await
+}
+
+pub(super) async fn attach_shared_image(
+    state: &AppState,
+    chat: &ChatAuthority,
+    kind: &str,
+    bytes: &[u8],
+) -> AppResult<Value> {
+    let attached = engine::attach_routed_image(
         &state.db,
         &state.encryption_keys,
         &chat.user_id,
         &chat.conversation_id,
         "Machine image",
         kind,
-        &bytes,
+        bytes,
+        true,
     )
     .await?;
+    let message = match &attached {
+        Some(image) => {
+            let (destination, supported) = super::mcp_transport::resolved_image_destination(
+                state, &chat.user_id, &image.routing,
+            ).await;
+            super::mcp_transport::image_note(&destination, image.guest, supported, image.routing.also.len()).trim().to_owned()
+        }
+        None => "The image could not be attached: no live turn, stopped turn or attachment limit reached.".into(),
+    };
     Ok(json!({
         "attached":attached.is_some(),
         "bytes":bytes.len(),
-        "message":"The image is shown only to the owner in this conversation."
+        "message":message
     }))
 }
 

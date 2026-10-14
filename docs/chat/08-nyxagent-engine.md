@@ -726,11 +726,67 @@ the image is also envelope-encrypted with `EncryptionKeys` into
 `assistant_attachments` and its metadata `{id,content_type,size,label}` is pushed
 onto `active_turn.attachments` (label = the tool identifier, at most 8 per turn;
 the slot is claimed before anything is encrypted or stored). Settlement copies
-the list onto the assistant reply. The note then tells the model the image is
-already displayed under its reply. NyxID can show it to the model after this
-response when image input is supported; the model must not describe its contents
-before viewing it.
+the list onto the assistant reply. The note describes the destination: the app,
+a web group, a channel chat, or a chat-delivered automation. It never claims
+“Delivered” or “shown below”. App/group notes explain where the attachment will
+appear; chat notes say NyxID will attempt delivery and require no tool resend.
+Unsupported chats receive an accurate capability note. A User-origin turn on a
+channel-linked conversation remains app-only unless another delivery rule applies.
+NyxID can show the image to the model after this response when image input is
+supported; the model must not describe its contents before viewing it. A stopped
+turn cannot claim another attachment slot.
 Attachments are deleted with their conversation and in the admin user purge.
+
+### Channel delivery of tool images
+
+NyxID reads the exact settled assistant message by conversation and turn ID and
+sends retained tool images before its text, one image per message, without tool
+labels or captions. Direct replies, gateway streams and late replies, native
+followed threads, event replies, duplicate-question chats and chat-delivered
+automations all use NyxID's existing relay adapters. Gateway image rendering in
+CMA is not required. Failed or cancelled turns with useful text retain their
+images and the Incomplete suffix; failures without text send no images.
+
+Machine computer-use screenshots are observations for the agent and stay in
+the app; they never accompany channel replies. Their tool note explicitly names
+the chat that will not receive the screenshot. Explicit machine `share_file`
+images use the same destination-aware note and channel delivery as service tool
+images. New tool attachment metadata always writes `chat_delivery`: `false` for
+screenshots and `true` for service images and explicit shares. All channel paths
+use one filter. For legacy metadata without this field, only the exact label
+`Machine screenshot` is excluded. This rolling-upgrade shim can be deleted one
+release after every replica runs this version. Web and group display is unchanged.
+
+Each destination has a durable `nyxbot_image_deliveries` claim with a seven-day
+TTL, fixed item states/codes and identifiers only. `sending`, `unknown` and
+completed claims are never retried. A transport failure or ambiguous receipt
+marks an image unknown and skips the rest; a definite refusal permits the next
+image, except a billing refusal stops the batch. Telegram group sends are spaced
+one second apart. Image calls have a 35-second maximum and share a bounded
+per-destination budget; gateway stream keepalives continue during delivery.
+When fewer than ten seconds remain in the image budget, the next image is
+skipped with `deadline` instead of starting a request. Unsupported destinations
+and missing reply anchors record per-image failures without decrypting bytes.
+
+The final text gets a bounded NyxID-authored line when any image failed, was
+unknown or was skipped. Only the owner's private chat mentions the app; guests
+and shared chats receive counts without that reference. Telegram's safe photo
+fallback counts as sent and records `as_document` under the
+[relay fallback rules](../CHANNEL_BOT_RELAY.md#image-outcomes-and-telegram-document-fallback).
+Outbound messages and audits retain only kinds, identifiers and counts; image
+bytes remain in the encrypted assistant attachment store and are zeroized after
+use.
+
+Successful member replies also copy tool attachment metadata into web-group
+messages. The group endpoint requires first-party human group-read access, a
+transcript attachment reference, a member conversation belonging to that group,
+and matching attachment/conversation owners. Personal groups additionally require
+the conversation owner to be the group owner. Organization groups allow other
+participants with group-read access to read an initiating participant's retained
+image; organization ownership is not substituted for conversation ownership.
+Forged or cross-group references are not found. Authorized readers receive
+`410 attachment_expired` for expired tool images, including after the retention
+sweep, matching upload and conversation attachment reads.
 
 After a successful upstream response, NyxID reads unseen tool images from the
 live turn and checks `nyxagent-input-image-v1`. Text-only turns make no extra

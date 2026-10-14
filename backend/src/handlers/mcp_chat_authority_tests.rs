@@ -1201,7 +1201,11 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
         "{note}"
     );
     assert!(
-        note.contains("already displays this image to the user"),
+        note.contains("shows this image to the user under your reply in the NyxID app"),
+        "{note}"
+    );
+    assert!(
+        !note.contains("Delivered") && !note.contains("shown below"),
         "{note}"
     );
     assert!(

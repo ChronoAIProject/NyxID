@@ -219,6 +219,124 @@ fn content_result(
 /// response at 2 MiB and base64 adds a third; larger images get a note only.
 const MAX_INLINE_TOOL_IMAGE_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImageNoteDestination {
+    App,
+    Group { group_id: String },
+    Chat { platform: String, threads: usize },
+    Trigger { run_id: String },
+    TriggerChat { platform: String },
+    AppViaTrigger,
+}
+
+pub(crate) fn image_destination(
+    routing: &crate::services::assistant_nyxagent::AnswerRouting,
+) -> ImageNoteDestination {
+    use crate::services::assistant_nyxagent::PrimaryDestination;
+    match &routing.primary {
+        PrimaryDestination::App => ImageNoteDestination::App,
+        PrimaryDestination::Group { group_id } => ImageNoteDestination::Group {
+            group_id: group_id.clone(),
+        },
+        PrimaryDestination::ChannelEvent { origin } => ImageNoteDestination::Chat {
+            platform: origin.platform.clone(),
+            threads: 1,
+        },
+        PrimaryDestination::ChatUpdate { origins } => {
+            origins.first().map_or(ImageNoteDestination::App, |origin| {
+                ImageNoteDestination::Chat {
+                    platform: origin.platform.clone(),
+                    threads: origins.len(),
+                }
+            })
+        }
+        PrimaryDestination::Trigger { run_id } => ImageNoteDestination::Trigger {
+            run_id: run_id.clone(),
+        },
+    }
+}
+
+pub(crate) fn image_note(
+    destination: &ImageNoteDestination,
+    guest: bool,
+    supported: bool,
+    extra_chats: usize,
+) -> String {
+    const TAIL: &str = " NyxID shows the image to you after this response when this agent can view images; do not describe its contents before you have seen it.";
+    let mut note = match destination {
+        ImageNoteDestination::App | ImageNoteDestination::Group { .. }
+        | ImageNoteDestination::AppViaTrigger | ImageNoteDestination::Trigger { .. } =>
+            " NyxID shows this image to the user under your reply in the NyxID app. Do not say it could not be displayed, was sent as base64, or was truncated.".to_owned(),
+        ImageNoteDestination::Chat { platform, threads } => {
+            let name = crate::services::channel_platform::platform_name(platform);
+            let mut note = if supported {
+                format!(" The user is reading this reply in their {name} chat: NyxID will send this image to that chat as a separate image message before your reply text (it is also kept under the reply in the NyxID app). You do not need to send, describe its location, or link it yourself. If an image cannot be sent to the chat, NyxID appends a note to your reply saying so; do not promise delivery yourself. Do not say it could not be displayed, was sent as base64, or was truncated.")
+            } else {
+                format!(" The user is reading this reply in their {name} chat, which cannot receive images from NyxID. Tell the user the image cannot be shown in {name}{}", if guest { "." } else { " and is available under this reply in the NyxID app." })
+            };
+            if *threads > 1 {
+                note.push_str(&format!(" This reply and its images answer {threads} threads."));
+            }
+            if supported && extra_chats > 0 {
+                note.push_str(&format!(" The same reply and images also go to {extra_chats} other chat(s) that asked this question."));
+            }
+            note
+        }
+        ImageNoteDestination::TriggerChat { platform } => {
+            let name = crate::services::channel_platform::platform_name(platform);
+            if supported {
+                format!(" This automation's result is posted to the owner's {name} chat: NyxID will post this image there as a separate image message before the result text (it is also kept with the result in the automation's thread in the NyxID app). You do not need to send or link it. If an image cannot be posted, NyxID appends a note to the result saying so.")
+            } else {
+                format!(" This automation's result is posted to a {name} chat, which cannot receive images from NyxID; say the image is available in the automation's thread in the NyxID app.")
+            }
+        }
+    };
+    note.push_str(TAIL);
+    if guest && matches!(destination, ImageNoteDestination::Chat { .. }) {
+        note.push_str(" This turn answers a chat member who is not the owner; the image goes only to that chat and never to anyone else.");
+    }
+    note
+}
+
+pub(crate) async fn resolved_image_destination(
+    state: &AppState,
+    owner: &str,
+    routing: &crate::services::assistant_nyxagent::AnswerRouting,
+) -> (ImageNoteDestination, bool) {
+    let mut destination = image_destination(routing);
+    let chat =
+        crate::services::assistant_nyxagent::image_chat(&state.db, owner, &routing.primary).await;
+    let (platform, public) = match chat {
+        Ok(Some((platform, public))) => {
+            if matches!(destination, ImageNoteDestination::Trigger { .. }) {
+                destination = ImageNoteDestination::TriggerChat {
+                    platform: platform.clone(),
+                };
+            }
+            (Some(platform), public)
+        }
+        _ => match &destination {
+            ImageNoteDestination::Chat { platform, .. } => (Some(platform.clone()), false),
+            ImageNoteDestination::Trigger { .. } => {
+                destination = ImageNoteDestination::AppViaTrigger;
+                (None, false)
+            }
+            _ => (None, false),
+        },
+    };
+    let supported = !public
+        && platform.is_some_and(|platform| {
+            crate::services::channel_adapters::outbound_capabilities(
+                &platform,
+                &state.token_exchange_cache,
+            )
+            .media
+            .outbound
+            .contains(&crate::services::channel_platform::MediaKind::Image)
+        });
+    (destination, supported)
+}
+
 /// MCP content for a service tool response. The text note always comes first,
 /// because some clients (NyxAgent) hand the whole result to the model as one
 /// truncated string. Assistant chat keys get the image attached to the live
@@ -266,7 +384,7 @@ async fn service_tool_content(
         return (content, false);
     };
     {
-        match crate::services::assistant_nyxagent::attach_image(
+        match crate::services::assistant_nyxagent::attach_routed_image(
             &state.db,
             &state.encryption_keys,
             &chat.user_id,
@@ -274,19 +392,22 @@ async fn service_tool_content(
             tool_name,
             &media.content_type,
             &media.bytes,
+            true,
         )
         .await
         {
-            Ok(Some(_)) => note.push_str(
-                " Delivered: NyxID already displays this image to the user in the chat \
-                under your reply. Tell the user it is shown below. Do not say it could not \
-                be displayed, was sent as base64, or was truncated. NyxID shows the image to you \
-                after this response when this agent can view images. Do not describe its contents \
-                before you have seen it.",
-            ),
+            Ok(Some(attached)) => {
+                let (destination, supported) =
+                    resolved_image_destination(state, &chat.user_id, &attached.routing).await;
+                note.push_str(&image_note(
+                    &destination,
+                    attached.guest,
+                    supported,
+                    attached.routing.also.len(),
+                ));
+            }
             Ok(None) => note.push_str(
-                " It could not be attached to the chat: no turn is running or this turn \
-                already holds the maximum number of images.",
+                " It could not be attached to the chat: no turn is running, the turn was stopped, or it already holds the maximum number of images.",
             ),
             Err(error) => {
                 tracing::warn!(%error, "Failed to store assistant tool image");
@@ -7426,3 +7547,267 @@ mod skill_authoring_discovery_tests {
 #[cfg(test)]
 #[path = "mcp_delegation_tests.rs"]
 mod delegation_tests;
+
+#[cfg(test)]
+mod image_note_tests {
+    use super::*;
+    #[test]
+    fn image_notes_cover_destinations_audiences_capabilities_and_names() {
+        for destination in [
+            ImageNoteDestination::App,
+            ImageNoteDestination::Group {
+                group_id: "group".into(),
+            },
+            ImageNoteDestination::AppViaTrigger,
+            ImageNoteDestination::Chat {
+                platform: "telegram-new".into(),
+                threads: 2,
+            },
+            ImageNoteDestination::Chat {
+                platform: "feishu".into(),
+                threads: 1,
+            },
+            ImageNoteDestination::TriggerChat {
+                platform: "lark".into(),
+            },
+        ] {
+            for guest in [false, true] {
+                for supported in [false, true] {
+                    let note = image_note(&destination, guest, supported, 2);
+                    assert!(!note.contains("Delivered"));
+                    assert!(!note.contains("shown below"));
+                    assert!(note.contains("do not describe its contents before you have seen it"));
+                    match &destination {
+                        ImageNoteDestination::Chat { platform, .. } => {
+                            assert!(note.contains(
+                                &crate::services::channel_platform::platform_name(platform)
+                            ));
+                            assert_eq!(note.contains("never to anyone else"), guest);
+                            if supported {
+                                assert!(note.contains("before your reply text"));
+                                assert!(note.contains("do not promise delivery yourself"));
+                                assert!(note.contains("2 other chat(s)"));
+                            } else if guest {
+                                assert!(
+                                    !note.contains("available under this reply in the NyxID app")
+                                );
+                            }
+                        }
+                        ImageNoteDestination::TriggerChat { .. } => {
+                            assert!(note.contains("automation's thread"));
+                            assert!(!note.contains("never to anyone else"));
+                        }
+                        _ => assert!(note.contains("under your reply in the NyxID app")),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod image_handler_tests {
+    use super::*;
+    use crate::services::assistant_nyxagent as engine;
+    use bson::doc;
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    #[tokio::test]
+    async fn mcp_tool_image_handler_uses_live_channel_group_trigger_and_stop_notes() {
+        for destination in ["channel", "guest", "group", "trigger", "stopped"] {
+            let f = if destination == "guest" {
+                crate::services::assistant_authority_tests::fixture("mcp_image_note_guest").await
+            } else {
+                crate::services::assistant_authority_tests::orchestrator_fixture(
+                    "mcp_image_note_handler",
+                )
+                .await
+            };
+            let server = MockServer::start().await;
+            let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = dispatched.clone();
+            Mock::given(path("/image"))
+                .respond_with(move |_request: &wiremock::Request| {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ResponseTemplate::new(200)
+                        .set_delay(std::time::Duration::from_millis(250))
+                        .insert_header("content-type", "image/png")
+                        .set_body_bytes(b"\x89PNG\r\n\x1a\npixels".to_vec())
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = "image-fixture".into();
+            service.base_url = server.uri();
+            service.service_category = "internal".into();
+            service.requires_user_credential = false;
+            service.auth_method = "none".into();
+            service.credential_encrypted.clear();
+            service.forward_access_token = false;
+            service.inject_delegation_token = false;
+            f.state
+                .db
+                .collection::<crate::models::downstream_service::DownstreamService>(
+                    crate::models::downstream_service::COLLECTION_NAME,
+                )
+                .insert_one(&service)
+                .await
+                .unwrap();
+            let date = bson::DateTime::now();
+            f.state.db.collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME).insert_one(doc! {
+                "_id":uuid::Uuid::new_v4().to_string(),"service_id":&service.id,"name":"snapshot","method":"GET","path":"/image",
+                "is_active":true,"request_body_required":false,"supports_idempotency_key":false,"operation_generation":1,"created_at":date,"updated_at":date,
+            }).await.unwrap();
+            let mut fields = doc! {};
+            match destination {
+                "channel" | "guest" => {
+                    fields.insert("active_turn.origin", "channel");
+                    fields.insert(
+                        "active_turn.asked_from",
+                        doc! {"nyxbot_channel_id":"channel","partition":"chat","platform":"feishu"},
+                    );
+                    fields.insert(
+                        "channel",
+                        doc! {"nyxbot_channel_id":"channel","partition":"chat","platform":"feishu"},
+                    );
+                }
+                "group" => {
+                    fields.insert("group_id", "group");
+                }
+                "trigger" => {
+                    fields.insert("active_turn.origin", "trigger");
+                    fields.insert("active_turn.trigger_run_id", "run");
+                    f.state.db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc! {
+                        "_id":"channel","user_id":&f.owner,"channel_bot_id":"bot","platform":"telegram-new","bot_label":"bot","transport":"direct",
+                        "status":"active","route_api_key_id":"route","created_at":date,"updated_at":date,
+                    }).await.unwrap();
+                    f.state.db.collection::<bson::Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME).insert_one(doc! {
+                        "_id":"chat","channel_id":"channel","user_id":&f.owner,"partition":"chat","platform_chat_id":"123","created_at":date,"updated_at":date,
+                    }).await.unwrap();
+                    f.state.db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).insert_one(doc! {
+                        "_id":"run","trigger_id":"trigger","user_id":&f.owner,"scheduled_at":date,"deadline":date,"outcome":"started","fence":"test",
+                        "lease_until":date,"expires_at":date,"deliver_to":{"type":"chat","chat_id":"chat"},
+                    }).await.unwrap();
+                }
+                "stopped" => {}
+                _ => unreachable!(),
+            }
+            if destination == "guest" {
+                crate::services::assistant_team_service::set_grants(
+                    &f.state.db,
+                    &f.owner,
+                    &f.chat.agent_id,
+                    crate::services::assistant_team_service::GrantChange::Add(
+                        crate::models::assistant_agent::AgentGrants {
+                            platform_service_ids: vec![service.id.clone()],
+                            ..Default::default()
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+                f.state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(doc! {"_id":&f.row.id}, doc! {"$set":{"guest_turn":true}})
+                    .await
+                    .unwrap();
+            }
+            // Authenticate before changing the destination to keep the same
+            // conversation key and dispatch authority throughout the call.
+            let mut auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+            auth.allow_all_services = true;
+            f.state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .update_one(doc! {"_id":&f.row.id}, doc! {"$set":fields})
+                .await
+                .unwrap();
+            let stopper = if destination == "stopped" {
+                let db = f.state.db.clone();
+                let conversation = f.row.id.clone();
+                // Stop races an already dispatched tool, so the handler reaches
+                // attach_image with its originally authenticated live authority.
+                Some(tokio::spawn(async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        while !dispatched.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("tool request dispatched before Stop");
+                    db.collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! {"_id":&conversation},
+                        doc! {"$set":{"active_turn.stop_requested":true}},
+                    )
+                    .await
+                    .unwrap();
+                }))
+            } else {
+                None
+            };
+            let response = Box::pin(handle_tools_call(
+                &f.state,
+                &auth,
+                None,
+                &JsonRpcRequest {
+                    jsonrpc: JSONRPC_VERSION.into(),
+                    id: Some(json!(1)),
+                    method: "tools/call".into(),
+                    params: Some(json!({"name":"image-fixture__snapshot","arguments":{}})),
+                },
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            ))
+            .await;
+            if let Some(stopper) = stopper {
+                stopper.await.unwrap();
+            }
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["result"]["isError"], false, "{destination}: {body}");
+            let content = body["result"]["content"].as_array().unwrap();
+            assert_eq!(content.len(), 1);
+            let note = content[0]["text"].as_str().unwrap();
+            assert!(!note.contains("Delivered"));
+            assert!(!note.contains("shown below"));
+            match destination {
+                "channel" => {
+                    assert!(note.contains("Feishu"));
+                    assert!(note.contains("before your reply text"));
+                }
+                "guest" => {
+                    assert!(note.contains("Feishu"));
+                    assert!(note.contains("before your reply text"));
+                    assert!(note.contains("only to that chat and never to anyone else"));
+                }
+                "group" => assert!(note.contains("under your reply in the NyxID app")),
+                "trigger" => {
+                    assert!(note.contains("automation's result"));
+                    assert!(note.contains("Telegram"));
+                }
+                "stopped" => assert!(note.contains("turn was stopped")),
+                _ => unreachable!(),
+            }
+            let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+            assert_eq!(
+                row.active_turn.unwrap().attachments.len(),
+                usize::from(destination != "stopped")
+            );
+            server.verify().await;
+            f.state.db.drop().await.unwrap();
+        }
+    }
+}

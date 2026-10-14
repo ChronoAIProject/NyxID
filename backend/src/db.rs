@@ -213,6 +213,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::assistant_agent_learning::ensure_indexes(db).await?;
     crate::services::assistant_voice::ensure_indexes(db).await?;
+    crate::services::channel_turn_delivery::ensure_image_indexes(db).await?;
     crate::services::voice::session::ensure_indexes(db).await?;
     Box::pin(crate::services::machine_access_service::ensure_indexes(db))
         .await

@@ -482,6 +482,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            chat_delivery: None,
             image_input: None,
             origin: "tool".into(),
             pages: None,
@@ -531,6 +532,7 @@ fn guest_recap_omits_owner_tool_metadata() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            chat_delivery: None,
             image_input: None,
             origin: "tool".into(),
             pages: None,
@@ -1819,14 +1821,15 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
     let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
     // No live turn: nothing is stored.
     assert!(
-        attach_image(
+        attach_routed_image(
             &db,
             keys,
             &owner,
             "nyxa-00000000000000000000000000000000",
             "t",
             "image/png",
-            &png
+            &png,
+            true
         )
         .await
         .unwrap()
@@ -1840,7 +1843,7 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
         .unwrap()
         .unwrap();
     for i in 0..MAX_TURN_ATTACHMENTS {
-        attach_image(
+        attach_routed_image(
             &db,
             keys,
             &owner,
@@ -1848,20 +1851,22 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
             &format!("cam__snapshot_{i}"),
             "image/png",
             &png,
+            true,
         )
         .await
         .unwrap()
         .unwrap();
     }
     assert!(
-        attach_image(
+        attach_routed_image(
             &db,
             keys,
             &owner,
             &row.id,
             "cam__overflow",
             "image/png",
-            &png
+            &png,
+            true
         )
         .await
         .unwrap()
@@ -1869,10 +1874,19 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
         "per-turn limit"
     );
     assert!(
-        attach_image(&db, keys, "someone-else", &row.id, "cam", "image/png", &png)
-            .await
-            .unwrap()
-            .is_none()
+        attach_routed_image(
+            &db,
+            keys,
+            "someone-else",
+            &row.id,
+            "cam",
+            "image/png",
+            &png,
+            true
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     let count = || async {
         db.collection::<bson::Document>(ATTACHMENTS)
@@ -1915,7 +1929,7 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
     ));
     // Settled: a late tool response cannot attach to a finished turn.
     assert!(
-        attach_image(&db, keys, &owner, &row.id, "late", "image/png", &png)
+        attach_routed_image(&db, keys, &owner, &row.id, "late", "image/png", &png, true)
             .await
             .unwrap()
             .is_none()
@@ -2571,6 +2585,7 @@ fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
         partition: "chat".into(),
         thread: None,
     });
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::Event;
     let note = channel_note(&row);
     assert!(note.contains("review_url as a full URL"));
     assert!(note.contains("chat replies cannot approve"));
@@ -2602,4 +2617,269 @@ fn upstream_model_rejections_report_model_unavailable_with_guidance() {
             .message
             .contains("model selector")
     );
+}
+
+#[test]
+fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
+    use crate::handlers::mcp_transport::{ImageNoteDestination as Note, image_destination};
+    use crate::models::channel_thread_follow::ThreadTurnBinding;
+    fn origin(partition: &str, bound: bool) -> ChannelOrigin {
+        ChannelOrigin {
+            nyxbot_channel_id: "channel".into(),
+            platform: "telegram-new".into(),
+            partition: partition.into(),
+            thread: bound.then(|| {
+                Box::new(ThreadTurnBinding {
+                    child_id: partition.into(),
+                    source_message_id: "source".into(),
+                    sender_id: "sender".into(),
+                    guest: false,
+                    revision: 1,
+                    generation: 1,
+                    channel_generation: 1,
+                    agent_id: "agent".into(),
+                    queued: true,
+                })
+            }),
+        }
+    }
+    // Independent oracle for the destination that settlement must use.
+    fn expected_destination(
+        row: &AssistantConversation,
+        turn: &ActiveTurn,
+    ) -> (PrimaryDestination, Note) {
+        if let Some(group_id) = &row.group_id {
+            return (
+                PrimaryDestination::Group {
+                    group_id: group_id.clone(),
+                },
+                Note::Group {
+                    group_id: group_id.clone(),
+                },
+            );
+        }
+        if let Some(run_id) = &turn.trigger_run_id {
+            return (
+                PrimaryDestination::Trigger {
+                    run_id: run_id.clone(),
+                },
+                Note::Trigger {
+                    run_id: run_id.clone(),
+                },
+            );
+        }
+        if turn.origin == TurnOrigin::Channel
+            && let Some(origin) = &turn.asked_from
+        {
+            // start_chat_turn and prepare persist this exact admitted origin.
+            return (
+                PrimaryDestination::ChannelEvent {
+                    origin: origin.clone(),
+                },
+                Note::Chat {
+                    platform: origin.platform.clone(),
+                    threads: 1,
+                },
+            );
+        }
+        if turn.origin == TurnOrigin::Event {
+            let mut targets: Vec<ChannelOrigin> = Vec::new();
+            for target in turn.events.iter().flat_map(|event| &event.reply_to) {
+                if let Some(binding) = &target.thread
+                    && !targets.iter().any(|prior| {
+                        prior.thread.as_ref().unwrap().source_message_id
+                            == binding.source_message_id
+                    })
+                {
+                    targets.push(target.clone());
+                }
+            }
+            if targets.is_empty()
+                && let Some(target) = row.channel.as_ref().or(row.reply_channel.as_ref())
+            {
+                targets.push(target.clone());
+            }
+            if let Some(first) = targets.first() {
+                let note = Note::Chat {
+                    platform: first.platform.clone(),
+                    threads: targets.len(),
+                };
+                return (PrimaryDestination::ChatUpdate { origins: targets }, note);
+            }
+        }
+        (PrimaryDestination::App, Note::App)
+    }
+    let mut count = 0;
+    for turn_origin in [
+        TurnOrigin::User,
+        TurnOrigin::Orchestrator,
+        TurnOrigin::Event,
+        TurnOrigin::Channel,
+        TurnOrigin::Group,
+        TurnOrigin::Trigger,
+    ] {
+        for flags in 0..128 {
+            let has = |bit| flags & (1 << bit) != 0;
+            let mut row = stale_test_row(Utc::now());
+            row.channel = has(0).then(|| origin("channel", false));
+            row.reply_channel = has(1).then(|| origin("reply-channel", false));
+            row.group_id = has(4).then(|| "group".into());
+            let turn = row.active_turn.as_mut().unwrap();
+            turn.origin = turn_origin;
+            turn.asked_from = has(2).then(|| origin("asked-from", false));
+            turn.also_deliver = if has(3) {
+                vec![origin("also-1", false), origin("also-2", false)]
+            } else {
+                vec![]
+            };
+            turn.trigger_run_id = has(5).then(|| "run".into());
+            if has(6) {
+                let mut event =
+                    crate::services::assistant_team_service::event("message", "wake".into(), None);
+                event.reply_to = vec![
+                    origin("bound", true),
+                    origin("duplicate", true),
+                    origin("unbound", false),
+                ];
+                turn.events = vec![event];
+            }
+            let turn = row.active_turn.as_ref().unwrap();
+            let (expected, note) = expected_destination(&row, turn);
+            let routing = answer_routing(&row, turn);
+            assert_eq!(
+                routing.primary, expected,
+                "origin={turn_origin:?}, flags={flags}"
+            );
+            assert_eq!(routing.also, turn.also_deliver);
+            assert_eq!(
+                image_destination(&routing),
+                note,
+                "origin={turn_origin:?}, flags={flags}"
+            );
+            count += 1;
+        }
+    }
+    assert_eq!(count, 768);
+}
+
+#[test]
+fn channel_note_follows_the_turn_destination_and_keeps_image_ordering_explicit() {
+    let mut row = stale_test_row(Utc::now());
+    row.channel = Some(ChannelOrigin {
+        nyxbot_channel_id: "channel".into(),
+        platform: "lark".into(),
+        partition: "chat".into(),
+        thread: None,
+    });
+    for origin in [TurnOrigin::User, TurnOrigin::Orchestrator] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        let note = channel_note(&row);
+        assert!(note.contains("this reply is shown in the app only"));
+        assert!(note.contains("Lark channel bot"));
+        assert!(!note.contains("Replies are delivered"));
+    }
+    for origin in [TurnOrigin::Event, TurnOrigin::Channel] {
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.origin = origin;
+        turn.asked_from = row.channel.clone();
+        let note = channel_note(&row);
+        assert!(note.contains("Replies are delivered as plain text messages"));
+        assert!(note.contains("Images your tools return are sent to this chat by NyxID as image messages before your reply"));
+    }
+}
+
+#[tokio::test]
+async fn tool_image_chat_resolves_x_public_dm_and_trigger_destinations() {
+    use crate::models::nyxbot_channel::{
+        COLLECTION_NAME as CHANNELS, THREADS_COLLECTION_NAME as THREADS,
+    };
+    use crate::models::trigger_run::COLLECTION_NAME as RUNS;
+    let db = connect_transaction_test_database("image_note_destinations").await;
+    let date = bson::DateTime::now();
+    db.collection::<bson::Document>(CHANNELS).insert_one(doc! {
+        "_id":"channel", "user_id":"owner", "channel_bot_id":"bot", "platform":"x", "bot_label":"bot",
+        "transport":"direct", "status":"active", "route_api_key_id":"key", "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    let origin = ChannelOrigin {
+        nyxbot_channel_id: "channel".into(),
+        platform: "x".into(),
+        partition: "chat".into(),
+        thread: None,
+    };
+    let primary = PrimaryDestination::ChannelEvent { origin };
+    assert_eq!(
+        image_chat(&db, "owner", &primary).await.unwrap(),
+        Some(("x".into(), false))
+    );
+    db.collection::<bson::Document>(THREADS).insert_one(doc! {
+        "_id":"chat", "channel_id":"channel", "user_id":"owner", "partition":"chat", "platform_chat_id":"123-456",
+        "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    assert_eq!(
+        image_chat(&db, "owner", &primary).await.unwrap(),
+        Some(("x".into(), false))
+    );
+    db.collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id":"chat"},
+            doc! {"$set":{"platform_chat_id":"post:123"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        image_chat(&db, "owner", &primary).await.unwrap(),
+        Some(("x".into(), true))
+    );
+    db.collection::<bson::Document>(RUNS).insert_one(doc! {
+        "_id":"run", "trigger_id":"trigger", "user_id":"owner", "scheduled_at":date, "deadline":date,
+        "outcome":"started", "fence":"fence", "lease_until":date, "expires_at":date,
+        "deliver_to":{"type":"chat", "chat_id":"chat"},
+    }).await.unwrap();
+    let primary = PrimaryDestination::Trigger {
+        run_id: "run".into(),
+    };
+    assert_eq!(
+        image_chat(&db, "owner", &primary).await.unwrap(),
+        Some(("x".into(), true))
+    );
+    assert_eq!(image_chat(&db, "other", &primary).await.unwrap(), None);
+    for target in ["thread", "notification"] {
+        db.collection::<bson::Document>(RUNS)
+            .update_one(
+                doc! {"_id":"run"},
+                doc! {"$set":{"deliver_to":{"type":target}}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(image_chat(&db, "owner", &primary).await.unwrap(), None);
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn channel_tool_image_filter_honors_explicit_policy_and_narrow_legacy_shim() {
+    use crate::models::assistant_conversation::TurnAttachment;
+    let mut attachment: TurnAttachment = serde_json::from_value(serde_json::json!({
+        "id":"image","origin":"tool","content_type":"image/png","size":10,"label":"Machine screenshot"
+    })).unwrap();
+    assert!(!chat_tool_image(&attachment));
+    attachment.chat_delivery = Some(true);
+    assert!(
+        chat_tool_image(&attachment),
+        "explicit metadata supersedes the legacy label shim"
+    );
+    attachment.label = "Machine screenshot copy".into();
+    attachment.chat_delivery = None;
+    assert!(
+        chat_tool_image(&attachment),
+        "only the exact legacy label is excluded"
+    );
+    attachment.chat_delivery = Some(false);
+    assert!(!chat_tool_image(&attachment));
+    attachment.chat_delivery = Some(true);
+    attachment.origin = "user_upload".into();
+    assert!(!chat_tool_image(&attachment));
+    attachment.origin = "tool".into();
+    attachment.content_type = "application/pdf".into();
+    assert!(!chat_tool_image(&attachment));
 }

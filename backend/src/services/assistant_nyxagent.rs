@@ -43,6 +43,151 @@ pub const ACTIVE_TURN_HEARTBEAT_STALE_SECS: i64 = 75;
 /// Stop gives a live worker a few seconds to observe the stop flag and settle.
 pub const STOP_SETTLEMENT_GRACE_SECS: u64 = 5;
 
+/// Where the settled answer is visible.  This is deliberately pure so the
+/// model note, settlement delivery, and image delivery cannot drift apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimaryDestination {
+    App,
+    Group { group_id: String },
+    ChannelEvent { origin: ChannelOrigin },
+    ChatUpdate { origins: Vec<ChannelOrigin> },
+    Trigger { run_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerRouting {
+    pub primary: PrimaryDestination,
+    pub also: Vec<ChannelOrigin>,
+}
+
+pub fn answer_routing(row: &AssistantConversation, turn: &ActiveTurn) -> AnswerRouting {
+    answer_routing_parts(
+        row.group_id.as_deref(),
+        row.channel.as_ref(),
+        row.reply_channel.as_ref(),
+        turn,
+    )
+}
+
+fn answer_routing_parts(
+    group_id: Option<&str>,
+    channel: Option<&ChannelOrigin>,
+    reply_channel: Option<&ChannelOrigin>,
+    turn: &ActiveTurn,
+) -> AnswerRouting {
+    let primary = if let Some(group_id) = group_id {
+        PrimaryDestination::Group {
+            group_id: group_id.to_owned(),
+        }
+    } else if let Some(run_id) = turn.trigger_run_id.clone() {
+        PrimaryDestination::Trigger { run_id }
+    } else if matches!(turn.origin, TurnOrigin::Channel) {
+        turn.asked_from
+            .clone()
+            .map_or(PrimaryDestination::App, |origin| {
+                PrimaryDestination::ChannelEvent { origin }
+            })
+    } else if matches!(turn.origin, TurnOrigin::Event) {
+        let mut origins = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for origin in turn.events.iter().flat_map(|event| &event.reply_to) {
+            if origin.thread.is_some()
+                && seen.insert(
+                    origin
+                        .thread
+                        .as_ref()
+                        .map(|binding| binding.source_message_id.clone()),
+                )
+            {
+                origins.push(origin.clone());
+            }
+        }
+        if origins.is_empty() {
+            channel
+                .or(reply_channel)
+                .cloned()
+                .map_or(PrimaryDestination::App, |origin| {
+                    PrimaryDestination::ChatUpdate {
+                        origins: vec![origin],
+                    }
+                })
+        } else {
+            PrimaryDestination::ChatUpdate { origins }
+        }
+    } else {
+        PrimaryDestination::App
+    };
+    AnswerRouting {
+        primary,
+        also: turn.also_deliver.clone(),
+    }
+}
+
+/// Resolve only the extra metadata needed by a tool-image note. Ordinary
+/// app/channel notes need no database reads; X checks its public-post target.
+pub async fn image_chat(
+    db: &Database,
+    owner: &str,
+    primary: &PrimaryDestination,
+) -> AppResult<Option<(String, bool)>> {
+    use crate::models::{
+        nyxbot_channel::{
+            COLLECTION_NAME as CHANNELS, NyxbotChannel, NyxbotThread,
+            THREADS_COLLECTION_NAME as THREADS,
+        },
+        trigger_run::{COLLECTION_NAME as RUNS, TriggerRun},
+        trigger_schedule::DeliverTo,
+    };
+    let origin = match primary {
+        PrimaryDestination::ChannelEvent { origin } => Some(origin),
+        PrimaryDestination::ChatUpdate { origins } => origins.first(),
+        _ => None,
+    };
+    let (platform, thread) = if let Some(origin) = origin {
+        if origin.platform != "x" {
+            return Ok(Some((origin.platform.clone(), false)));
+        }
+        let thread = db.collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"channel_id": &origin.nyxbot_channel_id, "partition": &origin.partition, "user_id": owner})
+            .await?;
+        (origin.platform.clone(), thread)
+    } else if let PrimaryDestination::Trigger { run_id } = primary {
+        let Some(run) = db
+            .collection::<TriggerRun>(RUNS)
+            .find_one(doc! {"_id": run_id, "user_id": owner})
+            .await?
+        else {
+            return Ok(None);
+        };
+        let DeliverTo::Chat { chat_id } = run.deliver_to else {
+            return Ok(None);
+        };
+        let Some(thread) = db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"_id": chat_id, "user_id": owner})
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(channel) = db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"_id": &thread.channel_id, "user_id": owner})
+            .await?
+        else {
+            return Ok(None);
+        };
+        (channel.platform, Some(thread))
+    } else {
+        return Ok(None);
+    };
+    let public = platform == "x"
+        && thread
+            .as_ref()
+            .and_then(|thread| thread.platform_chat_id.as_deref())
+            .is_some_and(super::channel_adapters::x::is_public_conversation);
+    Ok(Some((platform, public)))
+}
+
 /// A crashed worker cannot hold a conversation beyond execution and settlement.
 pub fn live_turn(row: &AssistantConversation, now: DateTime<Utc>) -> Option<&ActiveTurn> {
     row.active_turn.as_ref().filter(|turn| {
@@ -255,32 +400,30 @@ fn guest_note(specialist: bool) -> &'static str {
 /// and several chat apps. It must never participate in the stable fingerprint.
 pub fn channel_note(row: &AssistantConversation) -> String {
     let mut prompt = String::new();
-    // Where this turn's reply is read: the channel thread's chat, or for the
-    // owner's own thread the chat app that asked (or, for an asynchronous
-    // reply, the one they last wrote from).
-    let chat_app = row
-        .channel
-        .as_ref()
-        .map(|channel| (channel, true))
-        .or_else(|| {
-            let turn = row.active_turn.as_ref()?;
-            match turn.origin {
-                TurnOrigin::Channel => turn.asked_from.as_ref(),
-                TurnOrigin::Event => row.reply_channel.as_ref(),
-                _ => None,
-            }
-            .map(|channel| (channel, false))
-        });
+    let Some(turn) = row.active_turn.as_ref() else {
+        return prompt;
+    };
+    let routing = answer_routing(row, turn);
+    let chat_app = match &routing.primary {
+        PrimaryDestination::ChannelEvent { origin } => {
+            Some((origin.clone(), row.channel.is_some()))
+        }
+        PrimaryDestination::ChatUpdate { origins } => origins
+            .first()
+            .cloned()
+            .map(|origin| (origin, row.channel.is_some())),
+        _ => None,
+    };
     if let Some((channel, thread)) = chat_app {
         let place = if thread {
             format!(
                 "This thread answers the user's {} channel bot.",
-                identifier(&channel.platform)
+                super::channel_platform::platform_name(&channel.platform)
             )
         } else {
             format!(
                 "The user is reading this reply in their {} chat app.",
-                identifier(&channel.platform)
+                super::channel_platform::platform_name(&channel.platform)
             )
         };
         prompt.push_str(&format!(
@@ -291,7 +434,14 @@ pub fn channel_note(row: &AssistantConversation) -> String {
             includes acknowledgement_required and confirm_phrase ask them to reply with its \
             confirm_phrase (for example \"yes 4821\") or \"no\" with the same code; NyxID \
             applies their answer. When a result has review_url instead of confirm_phrase, send \
-            review_url as a full URL so the owner can review all files in NyxID; chat replies cannot approve it."
+            review_url as a full URL so the owner can review all files in NyxID; chat replies cannot approve it. Images your tools return are sent to this chat by NyxID as image messages before your reply when the platform supports them (the tool result says so); never paste base64 and never claim an image is visible unless the tool result says NyxID sends it."
+        ));
+    } else if let Some(channel) = row.channel.as_ref()
+        && matches!(routing.primary, PrimaryDestination::App)
+    {
+        prompt.push_str(&format!(
+            "\n\nThis thread answers the user's {} channel bot, but this message was sent from the NyxID app, so this reply is shown in the app only.",
+            super::channel_platform::platform_name(&channel.platform),
         ));
     }
     prompt
@@ -2806,9 +2956,128 @@ pub async fn pending_approvals(
 
 pub const MAX_TURN_ATTACHMENTS: usize = 8;
 
-/// Store an image a chat-key tool call returned and link it to the live turn.
-/// Returns `None` when no turn is live or the turn already holds the maximum.
-pub async fn attach_image(
+pub fn chat_tool_image(attachment: &crate::models::assistant_conversation::TurnAttachment) -> bool {
+    attachment.origin == "tool"
+        && attachment.content_type.starts_with("image/")
+        && attachment.chat_delivery != Some(false)
+        // Rolling-upgrade shim for screenshots attached by old replicas.
+        // Remove one release after all replicas write chat_delivery.
+        && !(attachment.chat_delivery.is_none() && attachment.label == "Machine screenshot")
+}
+
+/// Read the durable reply, rather than the pre-turn snapshot passed to hooks.
+pub async fn turn_tool_attachments(
+    db: &Database,
+    owner: &str,
+    conversation_id: &str,
+    turn_id: &str,
+) -> AppResult<Vec<crate::models::assistant_conversation::TurnAttachment>> {
+    let message = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
+        "user_id": owner, "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
+    }).await?;
+    Ok(message.map_or_else(Vec::new, |message| {
+        message
+            .attachments
+            .into_iter()
+            .filter(|attachment| {
+                attachment.origin == "tool" && attachment.content_type.starts_with("image/")
+            })
+            .take(MAX_TURN_ATTACHMENTS)
+            .collect()
+    }))
+}
+
+/// Optional image metadata must never prevent a settled text result or group
+/// transcript from being written. Log identifiers and error codes only.
+pub async fn settled_tool_attachments(
+    db: &Database,
+    owner: &str,
+    conversation_id: &str,
+    turn_id: &str,
+) -> Vec<crate::models::assistant_conversation::TurnAttachment> {
+    match turn_tool_attachments(db, owner, conversation_id, turn_id).await {
+        Ok(attachments) => attachments,
+        Err(error) => {
+            tracing::warn!(
+                conversation_id,
+                turn_id,
+                code = error.error_code(),
+                "Settled image metadata unavailable; continuing with text"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Load settled tool images in their durable attachment order. Each image is
+/// independent: a missing or expired row is reported as unavailable while
+/// other images remain deliverable. Decrypted bytes are zeroized by callers.
+pub async fn turn_tool_images(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    attachments: &[crate::models::assistant_conversation::TurnAttachment],
+) -> AppResult<
+    Vec<(
+        crate::models::assistant_conversation::TurnAttachment,
+        Result<zeroize::Zeroizing<Vec<u8>>, &'static str>,
+    )>,
+> {
+    use crate::models::assistant_attachment::{
+        AssistantAttachment, COLLECTION_NAME as ATTACHMENTS,
+    };
+    let mut out = Vec::new();
+    for attachment in attachments
+        .iter()
+        .filter(|attachment| chat_tool_image(attachment))
+    {
+        let filter = doc! {"_id": &attachment.id, "user_id": user_id, "conversation_id": conversation_id, "turn_id": turn_id, "origin": "tool"};
+        let row = db
+            .collection::<AssistantAttachment>(ATTACHMENTS)
+            .find_one(filter.clone())
+            .await?;
+        let result = match row {
+            None => Err("unavailable"),
+            Some(row) => {
+                if super::assistant_upload_retention::require_available(db, filter)
+                    .await
+                    .is_err()
+                {
+                    Err("unavailable")
+                } else {
+                    keys.decrypt(&row.data_encrypted)
+                        .await
+                        .map(zeroize::Zeroizing::new)
+                        .map_err(|_| "unavailable")
+                }
+            }
+        };
+        out.push((attachment.clone(), result));
+    }
+    Ok(out)
+}
+
+pub struct AttachedImage {
+    pub attachment: crate::models::assistant_conversation::TurnAttachment,
+    pub routing: AnswerRouting,
+    pub guest: bool,
+}
+
+#[derive(Deserialize)]
+struct ImageRouteSnapshot {
+    active_turn: ActiveTurn,
+    group_id: Option<String>,
+    channel: Option<ChannelOrigin>,
+    reply_channel: Option<ChannelOrigin>,
+    #[serde(default)]
+    guest_turn: bool,
+}
+
+/// Capture the destination in the same atomic operation that accepts the image.
+#[allow(clippy::too_many_arguments)]
+pub async fn attach_routed_image(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
     user_id: &str,
@@ -2816,12 +3085,14 @@ pub async fn attach_image(
     label: &str,
     content_type: &str,
     bytes: &[u8],
-) -> AppResult<Option<crate::models::assistant_conversation::TurnAttachment>> {
+    chat_delivery: bool,
+) -> AppResult<Option<AttachedImage>> {
     use crate::models::{
         assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
         assistant_conversation::TurnAttachment,
     };
     let meta = TurnAttachment {
+        chat_delivery: Some(chat_delivery),
         image_input: None,
         origin: "tool".into(),
         pages: None,
@@ -2836,6 +3107,7 @@ pub async fn attach_image(
         "_id": conversation_id,
         "user_id": user_id,
         "active_turn.turn_id": {"$exists": true},
+        "active_turn.stop_requested": false,
     };
     // The last permitted index must still be free.
     filter.insert(
@@ -2844,18 +3116,22 @@ pub async fn attach_image(
     );
     // Claim a slot first so nothing is encrypted or stored without a live turn.
     let claimed = db
-        .collection::<bson::Document>(CONVERSATIONS)
+        .collection::<ImageRouteSnapshot>(CONVERSATIONS)
         .find_one_and_update(filter, doc! {"$push": {"active_turn.attachments": entry}})
-        .projection(doc! {"active_turn.turn_id": 1})
+        .projection(
+            doc! {"active_turn":1,"group_id":1,"channel":1,"reply_channel":1,"guest_turn":1},
+        )
         .await?;
-    let Some(turn_id) = claimed.as_ref().and_then(|row| {
-        row.get_document("active_turn")
-            .ok()
-            .and_then(|turn| turn.get_str("turn_id").ok())
-            .map(str::to_owned)
-    }) else {
+    let Some(claimed) = claimed else {
         return Ok(None);
     };
+    let turn_id = claimed.active_turn.turn_id.clone();
+    let routing = answer_routing_parts(
+        claimed.group_id.as_deref(),
+        claimed.channel.as_ref(),
+        claimed.reply_channel.as_ref(),
+        &claimed.active_turn,
+    );
     let stored = async {
         let data_encrypted = keys.encrypt(bytes).await?;
         db.collection::<AssistantAttachment>(ATTACHMENTS)
@@ -2884,7 +3160,89 @@ pub async fn attach_image(
             .await;
         return Err(error);
     }
-    Ok(Some(meta))
+    Ok(Some(AttachedImage {
+        attachment: meta,
+        routing,
+        guest: claimed.guest_turn,
+    }))
+}
+
+/// Read a tool image referenced by the authorized group's transcript.
+pub async fn read_group_tool_attachment(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user: &str,
+    group_id: &str,
+    id: &str,
+) -> AppResult<(String, Vec<u8>)> {
+    use crate::models::{
+        assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
+        assistant_group::MESSAGES_COLLECTION_NAME as GROUP_MESSAGES,
+    };
+    let missing = || AppError::NotFound("Attachment not found".into());
+    let access = super::assistant_upload_service::owner_scope(db, user, group_id)
+        .await?
+        .ok_or_else(missing)?;
+    if db
+        .collection::<bson::Document>(GROUP_MESSAGES)
+        .find_one(doc! {"group_id": &access.group.id, "attachments.id": id})
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_none()
+    {
+        return Err(missing());
+    }
+    let metadata_filter = doc! {"_id": id, "origin": "tool"};
+    let metadata = db
+        .collection::<bson::Document>(ATTACHMENTS)
+        .find_one(metadata_filter.clone())
+        .projection(doc! {"user_id":1,"conversation_id":1})
+        .await?;
+    let metadata = match metadata {
+        Some(metadata) => metadata,
+        None => db
+            .collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
+            .find_one(metadata_filter)
+            .await?
+            .ok_or_else(missing)?,
+    };
+    let conversation_id = metadata.get_str("conversation_id").map_err(|_| missing())?;
+    let conversation = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": conversation_id, "group_id": &access.group.id})
+        .await?
+        .ok_or_else(missing)?;
+    if metadata.get_str("user_id").ok() != Some(conversation.user_id.as_str())
+        || (access.org.is_none() && conversation.user_id != access.group.user_id)
+    {
+        return Err(missing());
+    }
+    let filter = doc! {"_id": id, "origin": "tool", "conversation_id": &conversation.id, "user_id": &conversation.user_id};
+    Box::pin(super::assistant_upload_retention::require_available(
+        db,
+        filter.clone(),
+    ))
+    .await?;
+    let attachment = db
+        .collection::<AssistantAttachment>(ATTACHMENTS)
+        .find_one(filter.clone())
+        .await?;
+    let Some(attachment) = attachment else {
+        Box::pin(super::assistant_upload_retention::require_available(
+            db, filter,
+        ))
+        .await?;
+        return Err(missing());
+    };
+    if !attachment.content_type.starts_with("image/") {
+        return Err(missing());
+    }
+    let bytes = keys.decrypt(&attachment.data_encrypted).await?;
+    Box::pin(super::assistant_upload_retention::require_available(
+        db, filter,
+    ))
+    .await?;
+    Ok((attachment.content_type, bytes))
 }
 
 /// Decrypt an attachment for its owner. Other owners and conversations are not found.

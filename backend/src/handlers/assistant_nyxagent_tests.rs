@@ -213,8 +213,8 @@ async fn setup_options_with_tool_gate(
                     if attempt < tool_rounds {
                         let row = image_state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
                             .find_one(doc! {"user_id":OWNER,"active_turn.turn_id":{"$exists":true}}).await.unwrap().unwrap();
-                        engine::attach_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
-                            "camera__snapshot", "image/png", b"fixture pixels").await.unwrap();
+                        engine::attach_routed_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
+                            "camera__snapshot", "image/png", b"fixture pixels", true).await.unwrap();
                     }
                     if failure == Some("invalid_stream") {
                         return (StatusCode::OK, "not an event stream").into_response();

@@ -56,6 +56,7 @@ pub fn validate_ids(ids: &[String]) -> AppResult<()> {
 
 pub fn metadata(row: &AssistantUpload) -> TurnAttachment {
     TurnAttachment {
+        chat_delivery: None,
         image_input: None,
         id: row.id.clone(),
         label: row.label.clone(),
@@ -1278,12 +1279,13 @@ mod integration_tests {
             .await
             .unwrap()
             .unwrap();
-        let image = engine::attach_image(db, keys, &user, &id, "tool", "image/png", &png)
-            .await
-            .unwrap()
-            .unwrap();
+        let image =
+            engine::attach_routed_image(db, keys, &user, &id, "tool", "image/png", &png, true)
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(
-            chat_bytes(db, keys, &chat, &image.id, true)
+            chat_bytes(db, keys, &chat, &image.attachment.id, true)
                 .await
                 .unwrap()
                 .1,
@@ -1405,6 +1407,7 @@ mod integration_tests {
             origin: "user_upload".into(),
             size: 20,
             pages: Some(0),
+            chat_delivery: None,
             image_input: None,
         };
         assert_eq!(
@@ -1446,7 +1449,7 @@ mod integration_tests {
             .await
             .unwrap()
             .unwrap();
-        let image = engine::attach_image(
+        let image = engine::attach_routed_image(
             db,
             &state.encryption_keys,
             &user,
@@ -1454,6 +1457,7 @@ mod integration_tests {
             "snapshot",
             "image/png",
             b"pixels",
+            true,
         )
         .await
         .unwrap()
@@ -1474,7 +1478,7 @@ mod integration_tests {
                 Request::builder()
                     .uri(format!(
                         "/api/v1/assistant-attachments/{}/content",
-                        image.id
+                        image.attachment.id
                     ))
                     .header("x-api-key", credential.raw_key.as_str())
                     .body(Body::empty())
@@ -1499,7 +1503,14 @@ mod integration_tests {
             }
             assert!(
                 matches!(
-                    chat_bytes(db, &state.encryption_keys, &wrong, &image.id, true).await,
+                    chat_bytes(
+                        db,
+                        &state.encryption_keys,
+                        &wrong,
+                        &image.attachment.id,
+                        true
+                    )
+                    .await,
                     Err(AppError::NotFound(_))
                 ),
                 "{field}"
@@ -1514,10 +1525,16 @@ mod integration_tests {
         let mut guest = chat.clone();
         guest.guest = true;
         assert_eq!(
-            chat_bytes(db, &state.encryption_keys, &guest, &image.id, true)
-                .await
-                .unwrap()
-                .1,
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &guest,
+                &image.attachment.id,
+                true
+            )
+            .await
+            .unwrap()
+            .1,
             b"pixels"
         );
         threads
@@ -1528,7 +1545,14 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(matches!(
-            chat_bytes(db, &state.encryption_keys, &guest, &image.id, true).await,
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &guest,
+                &image.attachment.id,
+                true
+            )
+            .await,
             Err(AppError::NotFound(_))
         ));
         threads
@@ -1540,16 +1564,23 @@ mod integration_tests {
             .unwrap();
         db.collection::<bson::Document>(COLLECTION_NAME)
             .update_one(
-                doc! {"_id":&image.id},
+                doc! {"_id":&image.attachment.id},
                 doc! {"$set":{"content_type":"text/plain"}},
             )
             .await
             .unwrap();
         assert!(matches!(
-            chat_bytes(db, &state.encryption_keys, &chat, &image.id, true).await,
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &chat,
+                &image.attachment.id,
+                true
+            )
+            .await,
             Err(AppError::NotFound(_))
         ));
-        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&image.id}, doc! {"$set":{"content_type":"image/png","created_at":bson::DateTime::from_chrono(Utc::now()-Duration::days(400))}}).await.unwrap();
+        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&image.attachment.id}, doc! {"$set":{"content_type":"image/png","created_at":bson::DateTime::from_chrono(Utc::now()-Duration::days(400))}}).await.unwrap();
         let settings = crate::models::assistant_upload_retention::Settings {
             policy: Some(crate::models::assistant_upload_retention::Policy {
                 tool_image_days: Some(1),
@@ -1562,9 +1593,15 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(
-            chat_bytes(db, &state.encryption_keys, &chat, &image.id, true)
-                .await
-                .is_err()
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &chat,
+                &image.attachment.id,
+                true
+            )
+            .await
+            .is_err()
         );
         db.drop().await.unwrap();
     }
@@ -1578,6 +1615,7 @@ mod integration_tests {
             size: 10,
             label: "camera".into(),
             pages: None,
+            chat_delivery: None,
             image_input: None,
         };
         let cap = json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":1,"max_image_bytes":10,"max_total_bytes":10,"content_types":["image/png"]}});

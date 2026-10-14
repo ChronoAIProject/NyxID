@@ -2709,20 +2709,6 @@ async fn reply_decision(
 }
 
 /// The platform's name as people write it.
-fn platform_name(platform: &str) -> String {
-    match canonical_platform(platform) {
-        "whatsapp" => "WhatsApp".into(),
-        "x" => "X".into(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect())
-                .unwrap_or_default()
-        }
-    }
-}
-
 /// The agent's own thread (its home in NyxID) that the owner's private chats
 /// continue: one context across the app and every chat app. Returns the
 /// thread and whether it exists yet (a new one becomes the agent's home).
@@ -2909,7 +2895,12 @@ async fn start_chat_turn(
             None if !exists => chats::look_up_title(state, row, chat).await,
             None => None,
         };
-        Some(looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform))))
+        Some(looked_up.unwrap_or_else(|| {
+            format!(
+                "{} group",
+                crate::services::channel_platform::platform_name(&row.platform)
+            )
+        }))
     };
     late_delivery::prepare(state, event_key, row, &origin, sender.id, guest, addressed).await?;
     let start = TurnStart {
@@ -3554,6 +3545,8 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         user_id: row.user_id.clone(),
         partition: partition.clone(),
         event_id: event_id.clone(),
+        relay_message_id: (activity["source"]["type"] == json!("nyxid_relay"))
+            .then(|| event_id.clone()),
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: None,
@@ -3691,7 +3684,9 @@ async fn gateway_inbound(
     } else {
         chats::group_partition(chat_id, thread_id)
     };
-    let chat = chats::record_chat(
+    let relay_message_id = (activity["source"]["type"] == json!("nyxid_relay"))
+        .then(|| activity["event_id"].as_str().unwrap_or_default().to_owned());
+    let chat = chats::record_chat_with_relay(
         state,
         row,
         &chat_partition,
@@ -3704,6 +3699,7 @@ async fn gateway_inbound(
                 .then(|| chats::private_title(row, sender.id, sender.display_name)),
         },
         None,
+        relay_message_id.as_deref(),
     )
     .await?;
     chats::spawn_title_lookup(state, row, &chat);
@@ -3814,13 +3810,14 @@ pub async fn deliver_update(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
     text: &str,
+    images: Option<&images::ImageSendPlan>,
 ) {
     // A channel thread answers its chat; the owner's own thread answers the
     // chat they last wrote from.
     let Some(origin) = row.channel.as_ref().or(row.reply_channel.as_ref()) else {
         return;
     };
-    deliver_to(state, row, origin, text).await;
+    deliver_to(state, row, origin, text, images).await;
 }
 
 /// The chat a conversation may deliver to: its own channel thread's chat,
@@ -3864,15 +3861,52 @@ pub async fn deliver_to(
     row: &crate::models::assistant_conversation::AssistantConversation,
     origin: &ChannelOrigin,
     text: &str,
+    images: Option<&images::ImageSendPlan>,
 ) {
     let result: AppResult<()> = async {
         if origin.thread.is_some() {
-            return thread_follow::send(state, &row.user_id, origin, &row.id, text).await;
+            let image_turn = images.and_then(|plan| {
+                row.active_turn.as_ref().map(|turn| images::ImageTurn {
+                    plan,
+                    turn_id: &turn.turn_id,
+                    app_visible: !row.guest_turn && row.channel.is_none(),
+                })
+            });
+            return thread_follow::send(state, &row.user_id, origin, &row.id, text, image_turn)
+                .await;
         }
         let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
             return Ok(());
         };
-        let reply = bounded_reply(text);
+        let mut reply = bounded_reply(text);
+        if let Some(plan) = images
+            && let Some(turn) = row.active_turn.as_ref()
+        {
+            let claim_key = format!("chat:{}", thread.id);
+            let report = images::report_or_failure(
+                state,
+                images::ImageSendContext {
+                    owner: &row.user_id,
+                    conversation_id: &row.id,
+                    turn_id: &turn.turn_id,
+                    channel: &channel,
+                    thread: &thread,
+                    anchor: images::thread_anchor(&channel, &thread),
+                    audience: images::ImageAudience {
+                        owner_private: !row.guest_turn
+                            && (row.channel.is_none()
+                                || (thread.kind.as_deref() == Some("private")
+                                    && thread.owner_chat)),
+                    },
+                    deadline: None,
+                    claim_key: &claim_key,
+                    initiated: None,
+                },
+                plan,
+            )
+            .await;
+            reply = images::append_failure(&reply, &report);
+        }
         // A chat from before its bot moved to the gateway has no gateway
         // reference yet: it is answered through NyxID's relay, as before.
         let relay_era = thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
@@ -3917,6 +3951,26 @@ pub async fn deliver_to(
 // Direct relay (platforms the gateway relay does not support yet)
 // ---------------------------------------------------------------------------
 
+/// Internal sends act as the live route key, preserving org revocation.
+pub(crate) async fn route_key_auth(
+    state: &AppState,
+    channel: &NyxbotChannel,
+) -> AppResult<crate::mw::auth::AuthUser> {
+    if !org_access_holds(state, channel).await? {
+        release_org_channel(state, channel).await?;
+        return Err(AppError::Forbidden("org_access_lost".into()));
+    }
+    let key_owner = bot_owner(channel);
+    let key = key_service::get_api_key(&state.db, key_owner, &channel.route_api_key_id).await?;
+    let mut auth = super::assistant_team::owner_auth(key_owner)?;
+    auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    auth.api_key_id = Some(key.id.clone());
+    auth.api_key_name = Some(key.name.clone());
+    auth.scope = key.scopes.clone();
+    auth.allow_all_services = false;
+    Ok(auth)
+}
+
 /// Reply through NyxID's own relay: with the message's single-use reply token
 /// when present, otherwise as the route key.
 async fn direct_reply(
@@ -3937,24 +3991,7 @@ async fn direct_reply(
             );
             None
         }
-        None => {
-            // The route key acts as the bot's owner: the org for an org bot,
-            // and only while the channel's owner still administers it.
-            if !org_access_holds(state, channel).await? {
-                release_org_channel(state, channel).await?;
-                return Err(AppError::Forbidden("org_access_lost".into()));
-            }
-            let key_owner = bot_owner(channel);
-            let key =
-                key_service::get_api_key(&state.db, key_owner, &channel.route_api_key_id).await?;
-            let mut auth = super::assistant_team::owner_auth(key_owner)?;
-            auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
-            auth.api_key_id = Some(key.id.clone());
-            auth.api_key_name = Some(key.name.clone());
-            auth.scope = key.scopes.clone();
-            auth.allow_all_services = false;
-            Some(auth)
-        }
+        None => Some(route_key_auth(state, channel).await?),
     };
     super::channel_relay::async_reply(
         State(state.clone()),
@@ -4079,6 +4116,7 @@ pub async fn relay_callback(
         user_id: row.user_id.clone(),
         partition: partition.clone(),
         event_id: claims.message_id.clone(),
+        relay_message_id: Some(claims.message_id.clone()),
         event_context_ciphertext: None,
         status: "running".into(),
         conversation_id: None,
@@ -4139,7 +4177,7 @@ pub async fn relay_callback(
             {
                 return Ok(());
             }
-            let chat = chats::record_chat(
+            let chat = chats::record_chat_with_relay(
                 &state,
                 &row,
                 &partition,
@@ -4154,6 +4192,7 @@ pub async fn relay_callback(
                         raw_title
                     },
                 },
+                Some(&message_id),
                 Some(&message_id),
             )
             .await?;
@@ -4249,6 +4288,8 @@ pub use chats::{list_channel_chats, update_channel_chat};
 #[path = "nyxbot_tests.rs"]
 mod tests;
 
+#[path = "nyxbot_images.rs"]
+pub(crate) mod images;
 #[path = "nyxbot_status.rs"]
 mod status;
 pub(crate) use status::{WaitingItem, check_deliveries, waiting};

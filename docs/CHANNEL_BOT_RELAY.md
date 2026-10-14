@@ -892,7 +892,7 @@ The service materializes every source before dispatch. At the adapter boundary, 
 
 | Adapter | Native upload/send path |
 |---|---|
-| Telegram / telegram-new | Multipart `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`; captions, reply anchor and topic ID preserved. Text goes first. |
+| Telegram / telegram-new | Multipart `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`; captions, reply anchor and topic ID preserved. A photo-specific parsed 400 can fall back once to `sendDocument` (see below). Text goes first for mixed public requests. |
 | Discord | One multipart message with `files[n]` and `payload_json`; text/captions joined into message content. Deferred interaction follow-ups retain their existing routing. |
 | Slack | `files.getUploadURLExternal` → PUT bytes → `files.completeUploadExternal` with channel/thread and initial comment; `files.info` resolves the share timestamp. Text goes first. |
 | Lark / Feishu | `im/v1/images` or `im/v1/files`, then an image/file message. Audio/video use file upload (`file_type=stream`). Text/captions are preceding text messages. |
@@ -904,6 +904,46 @@ Editing a media send targets the returned media message ID. Telegram uses `editM
 The result is the last platform message ID; Slack may omit it if no share timestamp is available. Lark/Feishu need `im:resource`; Slack needs file read/write scopes; existing X OAuth connections need fresh consent to `media.write`. Platform size/type restrictions can be stricter than NyxID's cap.
 
 Send idempotency fingerprints include attachment kind, source URL or SHA-256 of decoded bytes, filename, MIME type and caption. Changing any of them with the same key returns 409. The source URL identifies URL-based content; changing bytes behind the same URL cannot be detected on an already-completed replay. A multi-message send can partially succeed before a later upload fails; NyxID cannot roll back a platform send. Existing claim/retry semantics apply.
+
+### Image outcomes and Telegram document fallback
+
+Media senders distinguish definite refusals from uncertain delivery. A completed
+HTTP non-2xx response, including **408 and 5xx**, or a parsed platform error is
+definite. A missing/unreadable response, malformed successful JSON or missing
+successful receipt is uncertain (`Media upload or delivery failed`). Definite
+failures are never automatically retried. NyxBot records failed images and may
+continue to the next image; an uncertain image stops the remaining batch and is
+never resent. Shared WhatsApp Graph calls retain their specific timeout,
+response-size, invalid-JSON and unknown-acceptance diagnostics. NyxBot's image
+path recognizes those exact locally authored errors as uncertain without
+changing text-send, verification or credential-check diagnostics. X limits
+media-specific refusal parsing to upload/status responses without usable data;
+partial `errors` alongside a successful `data` result remain usable.
+
+The only retry is Telegram/telegram-new's image fallback: a parsed `ok:false`,
+`error_code:400` photo response with HTTP 400 or 2xx and a photo-specific marker
+(`PHOTO_INVALID_DIMENSIONS`, `PHOTO_SAVE_FILE_INVALID`, `PHOTO_EXT_INVALID`,
+`PHOTO_CROP_SIZE_SMALL`, or `IMAGE_PROCESS_FAILED`) sends the same bytes
+once with `sendDocument`. The caption, chat, reply anchor and forum topic are
+preserved, and the document outcome is final. Chat/thread/reply-target and rights
+errors, 403, 429, 5xx and transport failures never trigger fallback. Deny markers
+take precedence when a description also contains a photo marker. NyxID always
+materializes URL sources and uploads multipart bytes, so file-ID/URL-source
+errors, padding errors and empty-file errors never trigger this fallback.
+
+`/channel-relay/reply`, `/thread-reply` and `/send` can return additive
+`delivered_as: ["file"]` for that substitution. The outbound row and audit record
+`file`; NyxBot's image claim records `sent` with `as_document`, without a failure
+line. Older adapters omit `delivered_as`.
+
+NyxBot uses the existing route-key reply, bound-thread and initiated-send paths
+to send tool images before text, one per message. It sends images itself on
+gateway channels; no CMA attachment-block renderer is required. Chat-delivered
+automations consume one initiate limiter token for their result text, with none
+for its bounded image batch; public `/send` still consumes one per request.
+Each X DM image is a separately billed request using the ordinary channel
+billing context. A billing refusal suspends the channel through the existing
+path and skips the remaining images; X public replies do not support images.
 
 ### ADR-013 metadata boundary
 

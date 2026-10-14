@@ -837,16 +837,47 @@ async fn settle_result(
             )
             .await
         }
-        DeliverTo::Chat { chat_id } => Box::pin(super::nyxbot::chats::post_automation(
-            state,
-            &run.user_id,
-            chat_id,
-            final_text,
-            run.agent_id.as_deref().filter(|_| row.is_subagent()),
-            &row.id,
-        ))
-        .await
-        .map(|_| ()),
+        DeliverTo::Chat { chat_id } => {
+            let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
+            if error.is_none()
+                && let Some(turn_id) = run.turn_id.as_deref()
+            {
+                let plan = super::nyxbot::images::ImageSendPlan {
+                    attachments: engine::settled_tool_attachments(
+                        &state.db,
+                        &run.user_id,
+                        &row.id,
+                        turn_id,
+                    )
+                    .await,
+                };
+                Box::pin(super::nyxbot::chats::post_automation_images(
+                    state,
+                    &run.user_id,
+                    chat_id,
+                    super::nyxbot::chats::AutomationImages {
+                        turn_id,
+                        plan: &plan,
+                    },
+                    agent_id,
+                    &row.id,
+                    final_text,
+                ))
+                .await
+                .map(|_| ())
+            } else {
+                Box::pin(super::nyxbot::chats::post_automation(
+                    state,
+                    &run.user_id,
+                    chat_id,
+                    final_text,
+                    agent_id,
+                    &row.id,
+                ))
+                .await
+                .map(|_| ())
+            }
+        }
     };
     schedules::finish(
         &state.db,

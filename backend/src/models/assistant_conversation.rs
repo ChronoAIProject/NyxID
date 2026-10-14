@@ -102,6 +102,9 @@ pub struct TurnActivity {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    /// Whether this tool image may accompany a reply sent to a channel chat.
+    #[serde(default)]
+    pub chat_delivery: Option<bool>,
     #[serde(default)]
     pub image_input: Option<String>,
     #[serde(default)]

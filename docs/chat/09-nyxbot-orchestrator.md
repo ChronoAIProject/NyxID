@@ -396,8 +396,9 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   change transport. A new bot on a listed platform the gateway refuses is
   connected through NyxID's relay with a fresh route key the gateway never saw;
   Telegram failures are still reported as errors. Through the gateway, Lark and
-  Feishu carry plain text only (images, files and rich posts are refused there,
-  while NyxID's relay passes them on). A message whose route the relay looked up
+  Feishu accept plain text input only (incoming images, files and rich posts are
+  refused there, while NyxID's relay passes them on). NyxID sends tool-returned
+  images directly through its adapters on both transports, before the reply text. A message whose route the relay looked up
   just before the swap committed reaches NyxID's relay endpoint after it and is
   refused and reported like any lost message. A move whose replica stopped
   midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
@@ -432,8 +433,8 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   behaviour, removes the org route, releases the gateway channel, and deletes
   active and pending keys under their respective owners. No event reaches the
   linking person's agent after that check fails. Telegram org bots always use
-  the gateway. Lark/Feishu org bots have the same text-only gateway limitation
-  as personal bots; media handling is unchanged.
+  the gateway. Lark/Feishu org bots have the same gateway input limitation
+  as personal bots; outbound tool images use NyxID's adapters.
 - **Right user.** The owner is verified through NyxID's Telegram notification
   link, a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram), or,
   for a Telegram bot created inside Telegram through NyxID, as the account that
@@ -478,6 +479,29 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   while the agent is busy are queued and answered next instead of bounced.
 
 ### Channel turn delivery after the provider stream closes
+
+Tool images precede text on every channel reply path. The settled message is the
+source of image metadata; stale conversation snapshots do not decide the list.
+Per-destination MongoDB image claims are taken inside the existing text claim for
+direct/late replies, gateway streams and automation results. Event-turn sends
+remain best-effort: images have durable claims, while their text keeps its prior
+best-effort semantics. A crash after event-turn images and before text can leave
+images without text, and neither is automatically resent. Direct/late replies,
+streams and automations retain their existing text barriers.
+
+Gateway events persist the original NyxID relay message ID separately from the
+gateway event reference. Chat threads keep `last_relay_message_id` separately
+from `last_message_id`, preserving existing text routing. Direct legacy events
+may use `event_id`; direct-era threads may use `last_message_id`. Gateway records
+without a relay anchor report image failure instead of guessing another target.
+Native followed threads retain their original source binding. Every image uses
+the same live audience, owner/guest, org and route checks as its text.
+
+No caption or tool label is forwarded. Failed, unknown or skipped images add a
+bounded count to the reply. Only owner-private destinations mention the NyxID
+app. Web groups copy successful member-turn tool attachments into the shared
+transcript and serve them through the human group attachment endpoint, applying
+group access, transcript references, member-thread ownership and retention.
 
 New channel turns bind their `nyxbot_events` delivery record and conversation/turn
 IDs in the same transaction as `begin_turn`. Only records carrying delivery
@@ -1066,7 +1090,7 @@ admission; NyxID filters admitted events with the same sender, mention, live org
 and follow policies as relay events. An other-person-only mention is context,
 not a new turn; broadcasts never activate follow. Native replies explicitly bind
 to the original event and root, including delayed replies. Legacy gateways keep
-follow unavailable. Lark/Feishu on the gateway remain text-only, including org
+follow unavailable. Lark/Feishu input on the gateway remains text-only, including org
 bots; media and edit parity are separate work.
 
 ## Asynchronous service results
