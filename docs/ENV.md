@@ -398,6 +398,7 @@ Requires all four values. Create a Services ID and key at the [Apple Developer p
 | `APPLE_TEAM_ID` | Apple Developer Team ID |
 | `APPLE_KEY_ID` | Apple Sign In key ID |
 | `APPLE_PRIVATE_KEY_PATH` | Path to Apple `.p8` private key file |
+| `APPLE_NATIVE_CLIENT_IDS` | Optional, comma-separated. Extra Apple ID token audiences accepted by the `/oauth/token` social token exchange, typically the iOS app bundle ID used by native Sign in with Apple. Native tokens carry the bundle ID as `aud`, while `APPLE_CLIENT_ID` must remain the web Services ID (it signs the web client secret and verifies the web callback). Not a secret. Unset = the exchange accepts only `APPLE_CLIENT_ID`. |
 
 ## Telegram / Approval System (Optional)
 

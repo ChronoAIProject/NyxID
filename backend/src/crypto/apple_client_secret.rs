@@ -149,6 +149,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             apple_team_id: Some("TEAM123".to_string()),
             apple_key_id: Some("KEY123".to_string()),
             apple_private_key_path: private_key_path,
+            apple_native_client_ids: vec![],
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,

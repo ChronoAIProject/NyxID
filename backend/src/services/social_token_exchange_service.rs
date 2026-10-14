@@ -262,15 +262,17 @@ async fn verify_apple_token(
     config: &AppConfig,
     token: &str,
 ) -> AppResult<SocialProfile> {
-    let apple_client_id = config.apple_client_id.as_deref().ok_or_else(|| {
-        AppError::ExternalProviderNotConfigured(
-            "Apple provider not configured (missing APPLE_CLIENT_ID)".to_string(),
-        )
-    })?;
+    // Native Sign in with Apple issues tokens for the app's bundle ID, while
+    // the web flow uses the Services ID, so the exchange accepts both.
+    let audiences = config.apple_exchange_audiences();
+    if audiences.is_empty() {
+        return Err(AppError::ExternalProviderNotConfigured(
+            "Apple provider not configured (missing APPLE_CLIENT_ID or APPLE_NATIVE_CLIENT_IDS)"
+                .to_string(),
+        ));
+    }
 
-    let claims = jwks_cache
-        .verify_apple_id_token(token, apple_client_id)
-        .await?;
+    let claims = jwks_cache.verify_apple_id_token(token, &audiences).await?;
 
     social_auth_service::profile_from_apple_id_token(&claims)
 }
@@ -498,8 +500,23 @@ mod tests {
         assert!(matches!(
             err,
             AppError::ExternalProviderNotConfigured(message)
-                if message == "Apple provider not configured (missing APPLE_CLIENT_ID)"
+                if message == "Apple provider not configured (missing APPLE_CLIENT_ID or APPLE_NATIVE_CLIENT_IDS)"
         ));
+    }
+
+    #[tokio::test]
+    async fn apple_token_verification_accepts_native_client_ids_alone() {
+        let mut config = test_app_config();
+        config.apple_native_client_ids = vec!["dev.nyxid.app".to_string()];
+        let jwks_cache = JwksCache::new(reqwest::Client::new());
+
+        // The config gate passes; the malformed token then fails header parsing
+        // before any JWKS fetch.
+        let err = match verify_apple_token(&jwks_cache, &config, "not-a-jwt").await {
+            Ok(_) => panic!("malformed token rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::ExternalTokenInvalid(_)));
     }
 
     #[tokio::test]

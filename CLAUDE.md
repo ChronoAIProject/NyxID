@@ -545,6 +545,7 @@ AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on regis
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
+APPLE_NATIVE_CLIENT_IDS=            # iOS bundle IDs accepted as Apple ID token aud by the /oauth/token social exchange; APPLE_CLIENT_ID stays the web Services ID
 SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS
 ```
 
