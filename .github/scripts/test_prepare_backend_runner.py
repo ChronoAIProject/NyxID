@@ -40,7 +40,7 @@ sudo() {
 }
 ''')
 
-    def invoke(self, initial=3 * 1024**2, disk=80 * 1024**2, fail="", result=8 * 1024**2):
+    def invoke(self, initial=3 * 1024**2, disk=80 * 1024**2, fail="", result=16 * 1024**2):
         (self.root / "swap-state").write_text(str(initial))
         return subprocess.run(
             ["bash", str(SCRIPT)], env={**os.environ, "BASH_ENV": str(self.harness),
@@ -50,7 +50,7 @@ sudo() {
         )
 
     def test_existing_capacity_needs_no_privileged_commands(self):
-        result = self.invoke(initial=8 * 1024**2)
+        result = self.invoke(initial=16 * 1024**2)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / "calls").exists())
 
@@ -77,7 +77,7 @@ sudo() {
                 self.assertEqual(list(self.root.glob("nyxid-ci-swap.*")), [])
 
     def test_successful_swapon_with_insufficient_actual_capacity_fails(self):
-        result = self.invoke(result=3 * 1024**2)
+        result = self.invoke(result=8 * 1024**2)
         self.assertNotEqual(result.returncode, 0)
         # Do not remove a potentially active file after a verification failure.
         self.assertEqual(len(list(self.root.glob("nyxid-ci-swap.*"))), 1)
