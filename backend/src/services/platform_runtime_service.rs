@@ -31,7 +31,20 @@ pub(crate) async fn managed(db: &Database, bot_id: &str) -> AppResult<bool> {
     {
         return Ok(true);
     }
-    Ok(db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"$or": [{"channel_bot_id": bot_id}, {"telegram_bot_id": bot.as_ref().and_then(|bot| bot.get_str("platform_bot_id").ok()).unwrap_or("")}]}).await?.is_some())
+    let platform = bot
+        .as_ref()
+        .and_then(|bot| bot.get_str("platform").ok())
+        .unwrap_or("");
+    let remote = bot
+        .as_ref()
+        .and_then(|bot| bot.get_str("platform_bot_id").ok())
+        .unwrap_or("");
+    let filter = super::platform_bot_authority::installation_filter(bot_id, platform, remote);
+    Ok(db
+        .collection::<Document>(COLLECTION_NAME)
+        .find_one(filter)
+        .await?
+        .is_some())
 }
 
 pub(crate) async fn capture(

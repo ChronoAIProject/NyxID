@@ -206,6 +206,15 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         .insert_one(&row)
         .await
         .unwrap();
+    // A link always points at a real bot row; routing fails closed without one.
+    let mut bot = bot_doc(&row.platform, &row.bot_label);
+    bot.insert("_id", &row.channel_bot_id);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
     (row, agent.full_key)
 }
 
@@ -1694,7 +1703,10 @@ async fn a_second_bot_for_the_same_app_is_named_with_the_url_to_use() {
     let mut linked = bot_doc("lark", "Office new");
     linked.insert("_id", &row.channel_bot_id);
     linked.insert("app_id", "cli_same_app");
-    bots.insert_one(linked).await.unwrap();
+    bots.replace_one(doc! {"_id": &row.channel_bot_id}, linked)
+        .upsert(true)
+        .await
+        .unwrap();
     let mut older = bot_doc("lark", "Office old");
     let older_id = older.get_str("_id").unwrap().to_owned();
     older.insert("app_id", "cli_same_app");
@@ -2022,7 +2034,8 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     state
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .insert_one(bot)
+        .replace_one(doc! {"_id": &row.channel_bot_id}, bot)
+        .upsert(true)
         .await
         .unwrap();
     state
@@ -2492,7 +2505,8 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
     state
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .insert_one(bot)
+        .replace_one(doc! {"_id": &row.channel_bot_id}, bot)
+        .upsert(true)
         .await
         .unwrap();
     state
@@ -2928,7 +2942,8 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
     state
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .insert_one(bot)
+        .replace_one(doc! {"_id": &row.channel_bot_id}, bot)
+        .upsert(true)
         .await
         .unwrap();
     state

@@ -415,6 +415,12 @@ impl TelegramNewService<'_> {
             .collection::<TelegramBotRequest>(REQUESTS)
             .find_one(doc! {"actor_user_id": actor, "active": true})
             .await?;
+        if let Some(authority) = request.as_ref().and_then(|r| r.setup_authority.as_ref())
+            && super::platform_setup_service::release_terminal_request(self.db, &authority.setup_id)
+                .await?
+        {
+            return Ok(None);
+        }
         if let Some(request) = &request
             && !self.owner_still_authorized(request).await?
             && request.status != Status::Provisioning

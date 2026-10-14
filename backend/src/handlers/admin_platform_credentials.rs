@@ -142,11 +142,25 @@ fn no_store() -> HeaderMap {
     )])
 }
 
+/// A converted platform manager is changed only by a first-party human; other
+/// providers keep their existing admin authentication.
+async fn require_manager_authority(
+    state: &AppState,
+    auth: &AuthUser,
+    provider: &str,
+) -> AppResult<()> {
+    if provider == "telegram-new"
+        && crate::services::platform_bot_config_service::any_profile(&state.db).await?
+    {
+        super::login_client_context::require_first_party_human(auth)?;
+    }
+    Ok(())
+}
+
 pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<(HeaderMap, Json<Vec<PlatformCredentialsResponse>>)> {
-    super::login_client_context::require_first_party_human(&auth)?;
     require_admin(&state, &auth).await?;
     let mut responses = Vec::new();
     for (platform, descriptor) in service::descriptors(&state.token_exchange_cache) {
@@ -161,8 +175,8 @@ pub async fn update(
     Path(provider): Path<String>,
     Json(body): Json<UpdatePlatformCredentialsRequest>,
 ) -> AppResult<(HeaderMap, Json<PlatformCredentialsResponse>)> {
-    super::login_client_context::require_first_party_human(&auth)?;
     require_admin(&state, &auth).await?;
+    require_manager_authority(&state, &auth, &provider).await?;
     let (platform, descriptor) = service::descriptor(&state.token_exchange_cache, &provider)?;
     if provider == "telegram-new" {
         super::telegram_new::service(&state)
@@ -202,8 +216,8 @@ pub async fn delete(
     auth: AuthUser,
     Path(provider): Path<String>,
 ) -> AppResult<StatusCode> {
-    super::login_client_context::require_first_party_human(&auth)?;
     require_admin(&state, &auth).await?;
+    require_manager_authority(&state, &auth, &provider).await?;
     let (_, descriptor) = service::descriptor(&state.token_exchange_cache, &provider)?;
     if provider == "telegram-new" {
         super::telegram_new::service(&state).clear_manager().await?;

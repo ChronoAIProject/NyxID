@@ -2214,8 +2214,27 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn platform_onboarding_distinct_customer_test_activation_and_personal_payer() {
+    #[test]
+    fn platform_onboarding_distinct_customer_test_activation_and_personal_payer() {
+        // The full journey's debug-build futures exceed the default test stack.
+        std::thread::Builder::new()
+            .name("platform-distinct-customer".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(Box::pin(
+                        distinct_customer_test_activation_and_personal_payer(),
+                    ));
+            })
+            .expect("distinct customer journey thread")
+            .join()
+            .expect("distinct customer journey");
+    }
+
+    async fn distinct_customer_test_activation_and_personal_payer() {
         use super::super::{
             platform_provisioning_service as p, platform_runtime_service as r,
             platform_setup_service as setups, telegram_new_tests as telegram,

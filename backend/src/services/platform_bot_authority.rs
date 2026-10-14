@@ -4,6 +4,16 @@ use mongodb::bson::{Document, doc};
 
 use crate::errors::{AppError, AppResult};
 
+/// Installations match a bot by channel ID, and by remote ID only for Telegram,
+/// since other platforms can reuse the same numeric identifier.
+pub(crate) fn installation_filter(bot_id: &str, platform: &str, platform_bot_id: &str) -> Document {
+    if matches!(platform, "telegram" | "telegram-new") {
+        doc! {"$or": [{"channel_bot_id": bot_id}, {"telegram_bot_id": platform_bot_id}]}
+    } else {
+        doc! {"channel_bot_id": bot_id}
+    }
+}
+
 /// Read persisted authority rather than trusting a cached channel/link snapshot.
 /// This checks profile authority; callers retain their normal bot-liveness checks.
 pub(crate) async fn permits_personal_routes(
@@ -26,8 +36,16 @@ pub(crate) async fn permits_personal_routes(
     ) {
         return Ok(true);
     }
-    if db.collection::<Document>(crate::models::platform_installation::COLLECTION_NAME)
-        .find_one(doc! {"$or": [{"channel_bot_id": bot_id}, {"telegram_bot_id": bot.get_str("platform_bot_id").unwrap_or("")}]}).await?.is_some() {
+    if db
+        .collection::<Document>(crate::models::platform_installation::COLLECTION_NAME)
+        .find_one(installation_filter(
+            bot_id,
+            bot.get_str("platform").unwrap_or(""),
+            bot.get_str("platform_bot_id").unwrap_or(""),
+        ))
+        .await?
+        .is_some()
+    {
         return Ok(false);
     }
     // A paused or tombstoned profile must never restore personal routing.
@@ -50,6 +68,21 @@ pub(crate) async fn require_personal_routes(db: &mongodb::Database, bot_id: &str
     Ok(())
 }
 
+/// Refuse only bots that exist and are under platform control, so callers keep
+/// their own not-found handling for missing bots.
+pub(crate) async fn refuse_platform_bot(db: &mongodb::Database, bot_id: &str) -> AppResult<()> {
+    let exists = db
+        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id": bot_id})
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some();
+    if exists {
+        require_personal_routes(db, bot_id).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn fence_personal_routes(
     db: &mongodb::Database,
     bot_id: &str,
@@ -65,9 +98,20 @@ pub(crate) async fn fence_personal_routes(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Forbidden("Personal route authority is unavailable".into()))?;
-    if db.collection::<Document>(crate::models::platform_installation::COLLECTION_NAME)
-        .find_one(doc! {"$or": [{"channel_bot_id": bot_id}, {"telegram_bot_id": bot.get_str("platform_bot_id").unwrap_or("")}]}).session(&mut *session).await?.is_some() {
-        return Err(AppError::Forbidden("This installation requires its reviewed setup authority".into()));
+    if db
+        .collection::<Document>(crate::models::platform_installation::COLLECTION_NAME)
+        .find_one(installation_filter(
+            bot_id,
+            bot.get_str("platform").unwrap_or(""),
+            bot.get_str("platform_bot_id").unwrap_or(""),
+        ))
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Forbidden(
+            "This installation requires its reviewed setup authority".into(),
+        ));
     }
     if matches!(bot.get_str("platform").ok(), Some("telegram" | "telegram-new"))
         && db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)

@@ -21,6 +21,16 @@ use crate::{
 
 /// Canonical live platform RBAC plus a write conflict fence on the acting person.
 /// The handler separately verifies the first-party human session.
+/// Whether any manager has been converted into a platform manager profile.
+pub(crate) async fn any_profile(db: &Database) -> AppResult<bool> {
+    Ok(db
+        .collection::<Document>(COLLECTION_NAME)
+        .find_one(doc! {})
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some())
+}
+
 pub(crate) async fn admit_manager_admin(
     db: &Database,
     actor: &str,
@@ -263,9 +273,18 @@ async fn convert_locked(
             }
             let mut routes = db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME)
                 .find(doc! {"channel_bot_id": &bot_id}).session(&mut *session).await?;
+            let mut route_keys = Vec::<String>::new();
             while let Some(route) = routes.next(&mut *session).await.transpose()? {
-                if let Ok(key) = route.get_str("agent_api_key_id") { key_ids.push(key.into()); }
+                if let Ok(key) = route.get_str("agent_api_key_id") { route_keys.push(key.into()); }
             }
+            // Route callback keys may be shared with the owner's other bots;
+            // revoking one would silently break those unrelated routes.
+            if db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME)
+                .find_one(doc! {"agent_api_key_id": {"$in": &route_keys}, "channel_bot_id": {"$ne": &bot_id}, "is_active": true})
+                .session(&mut *session).await?.is_some() {
+                return Err(AppError::Conflict("A manager route key is shared with another bot. Give the manager routes a dedicated key before platform conversion".into()));
+            }
+            key_ids.extend(route_keys);
             let conversations = db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME);
             let filter = doc! {"$or": [
                 {"channel.nyxbot_channel_id": {"$in": &channel_ids}},
@@ -841,6 +860,21 @@ mod tests {
             .await
             .unwrap();
         state.db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME).insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "channel_bot_id": &bot, "agent_api_key_id": &standalone_key, "is_active": true}).await.unwrap();
+        let shared_route = uuid::Uuid::new_v4().to_string();
+        state.db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME).insert_one(doc! {"_id": &shared_route, "channel_bot_id": "unrelated-bot", "agent_api_key_id": &standalone_key, "is_active": true}).await.unwrap();
+        assert!(matches!(
+            convert(&state.db, &actor, &bot, &funding).await,
+            Err(AppError::Conflict(_))
+        ));
+        state
+            .db
+            .collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &shared_route},
+                doc! {"$set": {"is_active": false}},
+            )
+            .await
+            .unwrap();
         let profile = convert(&state.db, &actor, &bot, &funding).await.unwrap();
         let stopped = engine::get(&state.db, &actor, &row.id).await.unwrap();
         assert_eq!(

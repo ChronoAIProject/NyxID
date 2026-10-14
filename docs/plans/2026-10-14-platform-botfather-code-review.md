@@ -826,3 +826,30 @@ notice only after actual provisioning setup transition, with installation
 transition mismatch aborting transaction. Both acceptance modules are registered.
 Source review agrees with intended semantics; runtime remains pending. Main
 worker notified to include both regression paths in frozen combined run.
+
+## Compatibility pass before merge (2026-10-14)
+
+CI first completed with 23 failures once the backend swap reserve was raised.
+An independent breaking-change review and a GPT-6-Astra sign-off review found
+the following; each is fixed with a regression or an existing test:
+
+- Channel-bot ownership transfer always returned 409: the route fence bumped
+  `route_revision` before `inspect()` hashed the bot. The fence now follows the
+  version check; a missing bot keeps its 404 (`refuse_platform_bot`).
+- Route deletion refused orphaned, transferred and already inactive routes,
+  breaking account deletion and NyxBot disconnect. Deleting an inactive route is
+  a no-op; orphaned/transferred routes keep main's soft-delete; only active
+  routes on platform bots stay refused.
+- Narrowing `private_chats` to `owner` keeps main's behaviour; only widening is
+  fenced.
+- Route creation validates its key before platform checks, restoring main's
+  error precedence.
+- Manager conversion refuses route keys shared with other bots instead of
+  revoking them.
+- Admin Platform Credentials require a first-party human only for a converted
+  Telegram manager; other providers keep existing admin authentication.
+- Remote Telegram IDs match installations only for Telegram bots.
+- Cancelling a setup releases its native creation request (also on read).
+- Test fixes: NyxBot fixture seeds the linked bot row (R11 fails closed),
+  signup test uses the kebab-case template, the distinct-customer journey runs on
+  a 16 MiB stack, and the signup password is generated at runtime (CodeQL).

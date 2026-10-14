@@ -1208,16 +1208,21 @@ pub(crate) async fn set_private_chats(
         ));
     }
     let row = load_channel(state, owner, channel_id).await?;
-    crate::services::platform_bot_authority::require_personal_routes(
-        &state.db,
-        &row.channel_bot_id,
-    )
-    .await?;
+    // Narrowing to the owner stays available on any channel; only widening is fenced.
+    let mut filter = doc! {"_id": &row.id, "user_id": owner};
+    if private_chats == "everyone" {
+        crate::services::platform_bot_authority::require_personal_routes(
+            &state.db,
+            &row.channel_bot_id,
+        )
+        .await?;
+        filter.insert("status", doc! {"$in": ["pending", "active"]});
+    }
     let updated = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
-            doc! {"_id": &row.id, "user_id": owner, "status": {"$in": ["pending", "active"]}},
+            filter,
             doc! {"$set": {"private_chats": private_chats, "updated_at": bson::DateTime::now()}},
         )
         .await?;

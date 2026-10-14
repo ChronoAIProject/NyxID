@@ -190,9 +190,6 @@ pub async fn create_conversation(
     default_agent: bool,
     allow_agent_initiated: bool,
 ) -> AppResult<ChannelConversation> {
-    if let Some(bot_id) = channel_bot_id {
-        super::platform_bot_authority::require_personal_routes(db, bot_id).await?;
-    }
     // Verify the API key exists and belongs to the user
     let api_key = db
         .collection::<ApiKey>(API_KEYS)
@@ -201,6 +198,9 @@ pub async fn create_conversation(
         .ok_or_else(|| AppError::NotFound(format!("API key not found: {agent_api_key_id}")))?;
 
     ensure_route_agent(&api_key, user_id)?;
+    if let Some(bot_id) = channel_bot_id {
+        super::platform_bot_authority::refuse_platform_bot(db, bot_id).await?;
+    }
 
     let now = Utc::now();
     let conversation = ChannelConversation {
@@ -246,13 +246,6 @@ async fn insert_bot_conversation(
             let result: AppResult<()> =
                 async {
                     let bot_id = conversation.channel_bot_id.as_deref().expect("bot route");
-                    super::platform_bot_authority::fence_personal_routes(
-                        &db,
-                        bot_id,
-                        &conversation.user_id,
-                        session,
-                    )
-                    .await?;
                     // Serialize route creation against ownership transfer on the bot row.
                     let bot = db
                         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
@@ -269,6 +262,13 @@ async fn insert_bot_conversation(
                             "Channel bot changed owner or is no longer active".into(),
                         ));
                     }
+                    super::platform_bot_authority::fence_personal_routes(
+                        &db,
+                        bot_id,
+                        &conversation.user_id,
+                        session,
+                    )
+                    .await?;
                     if conversation.default_agent {
                         db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
                     doc! { "channel_bot_id": bot_id, "user_id": &conversation.user_id,
@@ -396,18 +396,37 @@ pub async fn delete_conversation(
         .find_one(doc! {"_id": conversation_id, "user_id": user_id})
         .await?
         .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
-    if let Some(bot_id) = current.channel_bot_id.as_deref() {
-        super::platform_bot_authority::require_personal_routes(db, bot_id).await?;
-    }
-    if current.channel_bot_id.is_some() {
-        mutate_bot_conversation(
-            db,
-            &current,
-            doc! {"is_active": false, "updated_at": bson::DateTime::now()},
-            false,
-        )
-        .await?;
+    // Deleting an already inactive route changes nothing, so account and
+    // channel cleanup succeed even after the bot came under platform control.
+    if !current.is_active {
         return Ok(());
+    }
+    if let Some(bot_id) = current.channel_bot_id.as_deref() {
+        // Removing a route only narrows access: orphaned and transferred routes
+        // keep the unconditional soft-delete; platform bots stay fenced.
+        let fenced = db
+            .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .find_one(doc! {"_id": bot_id, "user_id": user_id})
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some()
+            && db
+                .collection::<bson::Document>(COLLECTION_NAME)
+                .find_one(doc! {"_id": conversation_id, "retired_by_transfer": {"$ne": true}})
+                .projection(doc! {"_id": 1})
+                .await?
+                .is_some();
+        if fenced {
+            super::platform_bot_authority::require_personal_routes(db, bot_id).await?;
+            mutate_bot_conversation(
+                db,
+                &current,
+                doc! {"is_active": false, "updated_at": bson::DateTime::now()},
+                false,
+            )
+            .await?;
+            return Ok(());
+        }
     }
     let now = bson::DateTime::from_chrono(Utc::now());
     let result = db
@@ -728,6 +747,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn platform_onboarding_inactive_route_on_converted_bot_can_still_be_deleted() {
+        let db = connect_transaction_test_database("platform_inactive_route_delete").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let bot = uuid::Uuid::new_v4().to_string();
+        seed_bot(&db, &bot, &owner, "telegram").await;
+        let key = make_api_key(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            Some("https://agent.test/callback"),
+        );
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        let conversation = create_conversation(
+            &db,
+            &owner,
+            Some(&bot),
+            "telegram",
+            "chat",
+            "private",
+            None,
+            &key.id,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        // Conversion marks the bot and deactivates its routes; account and
+        // channel cleanup must still be able to remove them.
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &bot},
+                doc! {"$set": {"platform_profile_id": "profile"}},
+            )
+            .await
+            .unwrap();
+        db.collection::<ChannelConversation>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &conversation.id},
+                doc! {"$set": {"is_active": false}},
+            )
+            .await
+            .unwrap();
+        delete_conversation(&db, &conversation.id, &owner)
+            .await
+            .unwrap();
+        let persisted = db
+            .collection::<ChannelConversation>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &conversation.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!persisted.is_active);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn platform_onboarding_deleted_bot_rejects_orphan_routes_and_cached_callback() {
         let db = connect_transaction_test_database("platform_orphan_route").await;
         let owner = uuid::Uuid::new_v4().to_string();
@@ -776,11 +853,16 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(
-            delete_conversation(&db, &conversation.id, &owner)
-                .await
-                .is_err()
-        );
+        delete_conversation(&db, &conversation.id, &owner)
+            .await
+            .unwrap();
+        let persisted = db
+            .collection::<ChannelConversation>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &conversation.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!persisted.is_active);
         db.drop().await.unwrap();
     }
 

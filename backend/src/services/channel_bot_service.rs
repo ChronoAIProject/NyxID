@@ -739,7 +739,7 @@ async fn insert_registered_bot_inner(
                 super::platform_provisioning_service::fence_request(&db, request, true, session).await?
             } else {
                 if db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
-                    .find_one(doc! {"$or": [{"channel_bot_id": &bot.id}, {"telegram_bot_id": &bot.platform_bot_id}]}).session(&mut *session).await?.is_some() {
+                    .find_one(super::platform_bot_authority::installation_filter(&bot.id, &bot.platform, &bot.platform_bot_id)).session(&mut *session).await?.is_some() {
                     return Err(AppError::Forbidden("This bot requires its reviewed setup authority".into()));
                 }
                 None

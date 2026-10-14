@@ -143,10 +143,29 @@ async fn assert_closed(
         .await,
         Err(AppError::Forbidden(_))
     ));
-    assert!(matches!(
-        routes::delete_conversation(&f.state.db, &route.conversation.id, owner).await,
-        Err(AppError::Forbidden(_))
-    ));
+    let routes_collection = f
+        .state
+        .db
+        .collection::<ChannelConversation>(crate::models::channel_conversation::COLLECTION_NAME);
+    let was_active = routes_collection
+        .find_one(doc! {"_id": &route.conversation.id})
+        .await
+        .unwrap()
+        .is_some_and(|row| row.is_active);
+    let deleted = routes::delete_conversation(&f.state.db, &route.conversation.id, owner).await;
+    if was_active {
+        assert!(matches!(deleted, Err(AppError::Forbidden(_))));
+    } else {
+        // Removing an inactive route is a no-op and never restores routing.
+        deleted.unwrap();
+        assert!(
+            !routes_collection
+                .find_one(doc! {"_id": &route.conversation.id})
+                .await
+                .unwrap()
+                .is_some_and(|row| row.is_active)
+        );
+    }
     assert!(matches!(
         nyxbot::chats::set_private_chats(&f.state, owner, &channel.id, "everyone").await,
         Err(AppError::Forbidden(_))

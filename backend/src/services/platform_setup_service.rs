@@ -513,10 +513,39 @@ pub async fn pause_or_cancel(
     cancel: bool,
 ) -> AppResult<PlatformSetup> {
     get_owned(db, owner, id).await?;
-    mutate_owned(db, owner, id, revision, doc! {"$set": {"state": if cancel {"cancelled"} else {"paused"},
+    let row = mutate_owned(db, owner, id, revision, doc! {"$set": {"state": if cancel {"cancelled"} else {"paused"},
         "approved_digest": bson::Bson::Null, "approved_revision": bson::Bson::Null, "delivery_tested": false,
         "updated_at": bson::DateTime::now(), "purge_after": if cancel { bson::Bson::DateTime(bson::DateTime::from_chrono(Utc::now() + Duration::days(30))) } else { bson::Bson::Null }},
-        "$inc": {"revision": 1_i64, "authority_generation": 1_i64}}).await
+        "$inc": {"revision": 1_i64, "authority_generation": 1_i64}}).await?;
+    if cancel {
+        release_terminal_request(db, id).await?;
+    }
+    Ok(row)
+}
+
+/// Retire the native Telegram creation request of a cancelled or expired
+/// setup so it no longer occupies the client's creation slot. Started effects
+/// keep their provenance; the generation bump fences in-flight connection work.
+pub(crate) async fn release_terminal_request(db: &Database, setup_id: &str) -> AppResult<bool> {
+    let terminal = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id": setup_id, "state": {"$in": ["cancelled", "expired"]}})
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some();
+    if !terminal {
+        return Ok(false);
+    }
+    let released = db
+        .collection::<bson::Document>(crate::models::telegram_bot_request::COLLECTION_NAME)
+        .update_many(
+            doc! {"setup_authority.setup_id": setup_id, "active": true,
+                "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent", "ready", "provisioning"]}},
+            doc! {"$set": {"active": false, "status": "cancelled", "auto_connect": false},
+                "$inc": {"revision": 1_i64, "connection_generation": 1_i64}, "$unset": {"consent_hash": ""}},
+        )
+        .await?;
+    Ok(released.modified_count > 0)
 }
 
 pub fn approval_digest(row: &PlatformSetup, facts: &SetupFacts) -> AppResult<String> {
@@ -791,6 +820,42 @@ pub async fn attach_binding(
 mod tests {
     use super::*;
     use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
+
+    #[tokio::test]
+    async fn platform_onboarding_cancelled_setup_releases_provisioning_request() {
+        let db = connect_transaction_test_database("platform_cancel_releases_request").await;
+        let requests =
+            db.collection::<bson::Document>(crate::models::telegram_bot_request::COLLECTION_NAME);
+        let setups = db.collection::<bson::Document>(COLLECTION_NAME);
+        setups
+            .insert_one(doc! {"_id": "setup", "state": "provisioning"})
+            .await
+            .unwrap();
+        requests
+            .insert_one(
+                doc! {"_id": "request", "active": true, "status": "provisioning",
+                "auto_connect": true, "revision": 3_i64, "connection_generation": 2_i64,
+                "setup_authority": {"setup_id": "setup"}},
+            )
+            .await
+            .unwrap();
+        // A live setup keeps its request.
+        assert!(!release_terminal_request(&db, "setup").await.unwrap());
+        setups
+            .update_one(doc! {"_id": "setup"}, doc! {"$set": {"state": "cancelled"}})
+            .await
+            .unwrap();
+        assert!(release_terminal_request(&db, "setup").await.unwrap());
+        let request = requests
+            .find_one(doc! {"_id": "request"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!request.get_bool("active").unwrap());
+        assert_eq!(request.get_str("status").unwrap(), "cancelled");
+        assert_eq!(request.get_i64("connection_generation").unwrap(), 3);
+        db.drop().await.unwrap();
+    }
 
     fn restaurant() -> SetupFacts {
         SetupFacts {
@@ -1557,7 +1622,7 @@ mod signup_journey_tests {
         let mut f = super::super::platform_onboarding_test_support::distinct_fixture().await;
         let peer = ConnectInfo("127.0.0.1:45678".parse().unwrap());
         let email = format!("{}@signup.test", uuid::Uuid::new_v4());
-        let password = "Local-test-password-123!";
+        let password = format!("Test-1!{}", uuid::Uuid::new_v4());
         f.state.config.email_auth_enabled = false;
         assert!(matches!(
             auth::register(
@@ -1566,7 +1631,7 @@ mod signup_journey_tests {
                 HeaderMap::new(),
                 Json(RegisterRequest {
                     email: email.clone(),
-                    password: password.into(),
+                    password: password.clone(),
                     invite_code: None,
                     display_name: None,
                 })
@@ -1588,7 +1653,7 @@ mod signup_journey_tests {
                 HeaderMap::new(),
                 Json(RegisterRequest {
                     email: email.clone(),
-                    password: password.into(),
+                    password: password.clone(),
                     invite_code: None,
                     display_name: None,
                 })
@@ -1619,7 +1684,7 @@ mod signup_journey_tests {
             HeaderMap::new(),
             Json(RegisterRequest {
                 email: email.clone(),
-                password: password.into(),
+                password: password.clone(),
                 invite_code: Some(invite.code),
                 display_name: Some("Registered client".into()),
             }),
@@ -1632,7 +1697,7 @@ mod signup_journey_tests {
             HeaderMap::new(),
             Json(LoginRequest {
                 email: email.clone(),
-                password: password.into(),
+                password: password.clone(),
                 mfa_code: None,
                 client: Some("token".into()),
             }),
@@ -1644,7 +1709,7 @@ mod signup_journey_tests {
         let (_, private) = crate::routes::build_router_with_state(f.state.clone());
         let app = private.with_state(f.state.clone());
         let facts = serde_json::json!({"name": "Registered client bot", "timezone": "UTC", "assistant_instructions": "Public help"});
-        let body = serde_json::json!({"request_id": uuid::Uuid::new_v4().to_string(), "template": "telegram_assistant", "facts": facts});
+        let body = serde_json::json!({"request_id": uuid::Uuid::new_v4().to_string(), "template": "telegram-assistant", "facts": facts});
         let denied = app
             .clone()
             .oneshot(
@@ -1696,7 +1761,7 @@ mod signup_journey_tests {
             HeaderMap::new(),
             Json(LoginRequest {
                 email,
-                password: password.into(),
+                password: password.clone(),
                 mfa_code: None,
                 client: Some("token".into()),
             }),
