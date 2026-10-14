@@ -2042,10 +2042,25 @@ mod tests {
             billing_wallet::BillingWallet,
             usage_meter::UsageMeterRow,
         };
-        drain_settlements(db).await;
+        let funded = doc! {"billing_owner_id": owner, "forwarded": true, "funding.wallet_charge_credits": {"$gt": Credits::ZERO.decimal()}};
+        // A reply can reach Telegram before its turn writes the usage row, so
+        // wait (bounded) for the expected settled charges before inspecting them.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            drain_settlements(db).await;
+            let settled = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .count_documents(funded.clone())
+                .await
+                .unwrap();
+            if settled as usize >= count || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         let rows = db
             .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
-            .find(doc! {"billing_owner_id": owner, "forwarded": true, "funding.wallet_charge_credits": {"$gt": Credits::ZERO.decimal()}})
+            .find(funded)
             .await
             .unwrap()
             .collect::<Vec<_>>()
