@@ -4515,8 +4515,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].status, "allowed");
             assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "approval");
-            assert!(rows[0].summary.contains("mode-approval"));
-            assert!(rows[0].summary.contains("/work"));
+            assert_eq!(rows[0].summary, "GET /work on GitHub");
             let value = result(
                 call(
                     &f,
