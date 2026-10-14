@@ -982,3 +982,43 @@ async fn full_access_transition_retires_old_owner_cards_but_preserves_auto_overr
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn full_access_history_retires_pre_upgrade_floor_cards_without_claiming_success() {
+    let f = orchestrator_fixture("mode_retires_upgrade_floor_cards").await;
+    set_mode(&f, AccessMode::Autopilot).await;
+    // A card persisted by the old Full-access webhook floor before this release.
+    let card = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id":"old"})),
+            summary: "Delete old node",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let history = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, card.id);
+    assert_eq!(history[0].status, "expired");
+    assert!(history[0].decided_by.is_none());
+    assert!(
+        acks::decided_since(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            chrono::Utc::now() - chrono::Duration::hours(1)
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    f.state.db.drop().await.unwrap();
+}

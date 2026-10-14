@@ -222,26 +222,54 @@ pub async fn retire_full_access_confirmations(
         if mode != crate::models::assistant_settings::AccessMode::Autopilot {
             continue;
         }
-        db.collection::<bson::Document>(ACKS)
+        retire_thread_confirmations(db, &thread).await?;
+    }
+    Ok(())
+}
+
+/// Used only when an existing ask is read; ordinary history and execution
+/// paths incur no additional settings lookup.
+pub async fn retire_thread_if_full_access(
+    db: &Database,
+    thread: &AssistantConversation,
+) -> AppResult<bool> {
+    if effective_mode_for_agent(
+        db,
+        &thread.user_id,
+        thread.agent_id.as_deref().unwrap_or_default(),
+    )
+    .await?
+        != crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        return Ok(false);
+    }
+    retire_thread_confirmations(db, thread).await?;
+    Ok(true)
+}
+
+async fn retire_thread_confirmations(
+    db: &Database,
+    thread: &AssistantConversation,
+) -> AppResult<()> {
+    db.collection::<bson::Document>(ACKS)
+        .update_many(
+            doc! {"user_id": &thread.user_id, "conversation_id": &thread.id,
+            "kind": "action", "decider": "user", "status": "pending"},
+            doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}},
+        )
+        .await?;
+    if let Some(key) = db
+        .collection::<ApiKey>(KEYS)
+        .find_one(doc! {"_id": &thread.credential_api_key_id})
+        .await?
+    {
+        db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
             .update_many(
-                doc! {"user_id": &thread.user_id, "conversation_id": &thread.id,
-                "kind": "action", "decider": "user", "status": "pending"},
+                doc! {"requester_type": "user", "requester_id": &thread.user_id,
+                "requester_label": &key.name, "status": "pending"},
                 doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}},
             )
             .await?;
-        if let Some(key) = db
-            .collection::<ApiKey>(KEYS)
-            .find_one(doc! {"_id": &thread.credential_api_key_id})
-            .await?
-        {
-            db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
-                .update_many(
-                    doc! {"requester_type": "user", "requester_id": &thread.user_id,
-                    "requester_label": &key.name, "status": "pending"},
-                    doc! {"$set": {"status": "expired", "expires_at": bson::DateTime::now()}},
-                )
-                .await?;
-        }
     }
     Ok(())
 }
@@ -1214,7 +1242,7 @@ pub async fn history(
     user: &str,
     conversation: &str,
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
-    super::assistant_nyxagent::get(db, user, conversation).await?;
+    let thread = super::assistant_nyxagent::get(db, user, conversation).await?;
     expire(db, user, conversation).await?;
     let collection = db.collection::<AssistantAcknowledgement>(ACKS);
     let mut rows: Vec<_> = collection
@@ -1224,6 +1252,13 @@ pub async fn history(
         .await?
         .try_collect()
         .await?;
+    if rows
+        .iter()
+        .any(|r| r.kind == "action" && r.decider == "user")
+        && retire_thread_if_full_access(db, &thread).await?
+    {
+        rows.retain(|r| r.kind != "action" || r.decider != "user");
+    }
     let decided: Vec<_> = collection
         .find(doc! {
             "user_id": user, "conversation_id": conversation, "status": {"$ne": "pending"},
@@ -1980,7 +2015,7 @@ pub async fn decide_reply(
         .map(Some)
 }
 
-/// Gate a subagent's service call. Orchestrators run with Full access and are
+/// Gate a subagent's service call. Orchestrators have full account authority and are
 /// never gated. `platform` targets are catalog entries reached through NyxID's
 /// platform credential; they are granted on `allowed_platform_service_ids`.
 /// Returns the refusal and, when a new request was created, its row so the

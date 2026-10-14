@@ -756,6 +756,9 @@ pub(crate) async fn org_pending_actions(
         else {
             continue;
         };
+        if acks::retire_thread_if_full_access(&state.db, thread).await? {
+            continue;
+        }
         let name = people
             .iter()
             .find(|p| p.id == thread.user_id)
@@ -781,6 +784,11 @@ pub(crate) async fn org_pending_actions(
         let Some(binding) = &approval.assistant_group else {
             continue;
         };
+        if let Some(thread) = threads.get(&binding.conversation_id)
+            && acks::retire_thread_if_full_access(&state.db, thread).await?
+        {
+            continue;
+        }
         let name = people
             .iter()
             .find(|p| p.id == binding.actor_user_id)

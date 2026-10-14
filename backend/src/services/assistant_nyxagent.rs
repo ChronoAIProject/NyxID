@@ -2773,6 +2773,16 @@ pub async fn pending_approvals(
         .await?
         .try_collect()
         .await?;
+    if !rows.is_empty()
+        && let Some(thread) = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"user_id": user_id, "credential_api_key_id": credential_api_key_id})
+            .await?
+        && super::assistant_acknowledgement_service::retire_thread_if_full_access(db, &thread)
+            .await?
+    {
+        return Ok(Vec::new());
+    }
     Ok(rows
         .into_iter()
         .map(|row| ChatApproval {
