@@ -14,6 +14,8 @@ describe("DecisionReceipt", () => {
   it.each([
     ["allowed", "user", "You allowed"], ["denied", "user", "You denied"],
     ["allowed", "orchestrator", "NyxBot allowed"], ["denied", "orchestrator", "NyxBot denied"],
+    ["allowed", "future_decider", "Allowed"], ["denied", "future_decider", "Denied"],
+    ["allowed", null, "Allowed"],
     ["used", "user", "Used"], ["expired", "user", "Expired"],
   ] as const)("renders %s by %s as a durable status", (status, decided_by, label) => {
     render(<DecisionReceipt acknowledgement={{ ...row, status, decided_by }} />);
@@ -36,6 +38,12 @@ describe("DecisionReceipt", () => {
     expect(screen.getByRole("status")).toHaveTextContent("2m ago");
     expect(screen.getByText("· 2m ago")).toHaveAttribute("dateTime", row.decided_at);
     expect(screen.getByRole("link", { name: "Inspect or discard proposal" })).toHaveAttribute("href", "https://nyxid.test/assistant?agent=a&proposal=p");
+  });
+  it("explains client retirement without claiming expiry or success", () => {
+    render(<DecisionReceipt acknowledgement={{ ...row, status: "pending", decided_by: null }} retired />);
+    expect(screen.getByRole("status")).toHaveTextContent("No longer needed · Full access");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Expired");
+    expect(screen.getByRole("status")).not.toHaveTextContent("You allowed");
   });
   it("leaves legacy receipt prose unchanged when no structured link exists", () => {
     render(<DecisionReceipt acknowledgement={{ ...row, summary: "Inspect or discard: https://nyxid.test/legacy" }} />);

@@ -23,7 +23,7 @@ afterEach(cleanup);
 it("hides a stale owner ask in Full access while keeping specialist requests routed to NyxBot", () => {
   const decide = vi.fn();
   const view = render(<NyxAgentAcknowledgementCard acknowledgement={acknowledgement} accessMode="autopilot" deciding={false} onDecision={decide} />);
-  expect(screen.getByRole("status")).toHaveTextContent("Expired · Delete agent key ci-bot");
+  expect(screen.getByRole("status")).toHaveTextContent("No longer needed · Full access · Delete agent key ci-bot");
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
   expect(decide).not.toHaveBeenCalled();
   view.rerender(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, decider: "orchestrator" }} accessMode="autopilot" deciding={false} onDecision={decide} />);

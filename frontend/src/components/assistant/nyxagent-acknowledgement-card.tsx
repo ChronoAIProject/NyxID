@@ -42,8 +42,8 @@ export function NyxAgentAcknowledgementCard({
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
   if (acknowledgement.status !== "pending" || confirmationsBypassed) {
-    return <DecisionReceipt acknowledgement={confirmationsBypassed && acknowledgement.status === "pending"
-      ? { ...acknowledgement, status: "expired" } : acknowledgement} />;
+    return <DecisionReceipt acknowledgement={acknowledgement}
+      retired={confirmationsBypassed && acknowledgement.status === "pending"} />;
   }
 
   async function decide(choice: "allow" | "deny") {

@@ -93,7 +93,7 @@ it.each([
   if (asks) expect(screen.getByRole("button", { name: "Allow" })).toBeVisible();
   else {
     expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
-    expect(screen.getByText("Expired · Publish legacy draft")).toBeVisible();
+    expect(screen.getByText("No longer needed · Full access · Publish legacy draft")).toBeVisible();
   }
 });
 

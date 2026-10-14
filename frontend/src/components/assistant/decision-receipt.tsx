@@ -17,9 +17,11 @@ function relativeTime(value: string): string {
 export function DecisionReceipt({
   acknowledgement: row,
   summary,
+  retired = false,
 }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly summary?: string;
+  readonly retired?: boolean;
 }) {
   const automatic = row.decided_by === "access_mode";
   const bypass = automatic
@@ -32,18 +34,20 @@ export function DecisionReceipt({
         } as const
       )[row.confirmation?.reason ?? "access_mode"]
     : "";
-  const by = row.decided_by === "orchestrator" ? "NyxBot" : "You";
-  const label = automatic
+  const by = row.decided_by === "orchestrator" ? "NyxBot" : row.decided_by === "user" ? "You" : undefined;
+  const label = retired
+    ? "No longer needed · Full access"
+    : automatic
     ? "Allowed automatically · Full access"
     : row.status === "allowed"
-      ? `${by} allowed`
+      ? by ? `${by} allowed` : "Allowed"
       : row.status === "denied"
-        ? `${by} denied`
+        ? by ? `${by} denied` : "Denied"
         : row.status === "used"
           ? "Used"
           : "Expired";
   const Glyph =
-    row.status === "denied" ? X : row.status === "expired" ? Clock : Check;
+    row.status === "denied" ? X : retired || row.status === "expired" ? Clock : Check;
   const text = summary ?? row.summary;
   const time = row.decided_at ?? row.created_at;
   return (

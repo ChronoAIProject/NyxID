@@ -107,7 +107,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
   </div> : null;
   if (confirmationsBypassed) {
-    return <DecisionReceipt acknowledgement={card.status === "pending" ? { ...card, status: "expired" } : card}
+    return <DecisionReceipt acknowledgement={card} retired={card.status === "pending"}
       summary={data?.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}` : undefined} />;
   }
   if (data?.state && data.state !== "active") {

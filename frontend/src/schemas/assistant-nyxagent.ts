@@ -182,7 +182,7 @@ export const nyxAgentAcknowledgementSchema = z.object({
   link: z.string().nullish(),
   /** `orchestrator`: a specialist's request that NyxBot decides (the user may too). */
   decider: z.enum(["user", "orchestrator"]).default("user"),
-  decided_by: z.enum(["user", "orchestrator", "access_mode"]).catch("user").nullable().default(null),
+  decided_by: z.string().nullable().default(null),
   reason: z.string().nullable().default(null),
   confirmation: nyxAgentActionConfirmationSchema.nullish(),
   service_slug: z.string().nullable(),
