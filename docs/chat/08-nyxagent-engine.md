@@ -690,8 +690,17 @@ both cookie and bearer-JWT callers, including mixed-case collisions.
 The bounded constant prompt identifies the signed-in NyxID web assistant,
 directs it to inspect/use connected services, discover/connect via hosted links,
 help with bots/keys/nodes/approvals, never solicit raw credentials, and use the
-user's language. Recaps contain the most recent 20 stored messages with at most
-8 KiB including recap delimiters, UTF-8 safe, explicitly labeled as prior history. Failed partial
+user's language. Recaps have separate bounded sections: owner-provenance requirements (newest
+40 plus the earliest, oldest first, excluding tail duplicates), the most recent
+20 stored messages, and this conversation's message-bound upload manifest.
+Their byte budgets are approximately 5 KiB, 5 KiB and 2 KiB; the framed result
+is below 12 KiB and truncation never splits UTF-8. Guest turns omit the owner
+section and manifest. When owner requirements are omitted or truncated, the recap
+points to the bounded `nyx__conversation_history` tool, which pages complete
+owner-provenance messages from this conversation only, newest first. Its
+`before_seq` exclusive bound and `offset` character cursor continue a split
+message before older messages; follow the returned cursor until `complete`.
+Failed partial
 messages are labeled. The current user message is excluded from the recap.
 
 ## Session instructions and per-turn context
@@ -785,6 +794,23 @@ clear it with the binding. Old replicas ignore the additive field safely, but
 only upgraded replicas refresh prompts or deliver per-turn envelopes.
 
 ## Stream and recovery
+
+### Streaming redaction and turn status
+
+NyxAgent emits ordinary text as soon as it is safe to do so. The relay retains
+only the longest UTF-8 character suffix that is a proper prefix of a live
+credential or context marker; it does not use a fixed byte window. Retry and
+credential recovery emit a `turn.notice` with code `retrying`. Clients derive
+the visible phase from persisted approvals, activities, continuations, and the
+live stream, and clear it when the turn settles. A failed live stream
+adds an interruption notice while polling reports the turn active. Only the
+status dot animates (with motion-safe); a running tool shows elapsed time.
+Action summaries follow the turn status, retain recovered failures with warning
+copy, and show the total count separately from the retained latest 40 entries.
+Activity labels come from compiled native definitions or an authorized published
+operation resolved immediately before dispatch; stale-turn writes are no-ops.
+At a continuation boundary, the held tail is flushed with the same two-newline
+separator used in persisted text, preventing a contiguous cross-response secret.
 
 First-byte deadline is 30 seconds including request setup. Idle timeout is
 120 seconds (upstream keepalive is 15 seconds). Turn execution is capped at

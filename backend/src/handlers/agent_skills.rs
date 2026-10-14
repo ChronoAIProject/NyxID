@@ -223,17 +223,26 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         let status = response.status().as_u16();
         // The status is complete once headers arrive. The problem body is
         // bounded in size and time; a slow or oversized body yields `Unknown`.
-        let code = tokio::time::timeout(
+        let body = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             to_bytes(response.into_body(), 16 * 1024),
         )
         .await
         .ok()
-        .and_then(Result::ok)
-        .map_or(OrnnCode::Unknown, |bytes| {
-            OrnnCode::from_problem_body(&bytes)
-        });
-        return OrnnOutcome::Response { status, code };
+        .and_then(Result::ok);
+        let (code, rules) = body
+            .as_deref()
+            .map_or((OrnnCode::Unknown, Vec::new()), |bytes| {
+                (
+                    OrnnCode::from_problem_body(bytes),
+                    skills::parse_validation_rules(bytes),
+                )
+            });
+        return OrnnOutcome::Response {
+            status,
+            code,
+            rules,
+        };
     }
     match to_bytes(response.into_body(), skills::MAX_ARCHIVE).await {
         Ok(bytes) => OrnnOutcome::Ok(bytes.to_vec()),
@@ -389,7 +398,9 @@ pub(crate) async fn dispatch(
         ));
     }
     if name == "draft_agent_skill" {
-        let input = crate::services::assistant_skill_authoring::parse_input(args)?;
+        use crate::services::assistant_skill_authoring as authoring;
+        authoring::require_author(&state.db, chat).await?;
+        authoring::require_repair_budget(&state.db, chat).await?;
         let reader = Reader {
             state,
             person: &chat.user_id,
@@ -397,13 +408,25 @@ pub(crate) async fn dispatch(
             scopes: None,
             chat: Some(std::sync::Arc::new(chat.clone())),
         };
-        return Ok((
-            Box::pin(crate::services::assistant_skill_authoring::create(
-                state, chat, input, &reader,
-            ))
-            .await?,
-            true,
-        ));
+        let result = async {
+            let input = authoring::parse_input(args)?;
+            Box::pin(authoring::create(state, chat, input, &reader)).await
+        }
+        .await;
+        if let Err(AppError::SkillDraftValidation(diagnostic)) = &result
+            && authoring::is_format_rejection(diagnostic)
+        {
+            let count = authoring::record_format_rejection(&state.db, chat).await?;
+            if count >= 3 {
+                let mut capped = crate::errors::skill_draft::SkillDraftValidation::at(
+                    "repair_cap_report_remaining_rules_to_owner",
+                    "draft",
+                );
+                capped.rules = diagnostic.rules.clone();
+                return Err(capped.into());
+            }
+        }
+        return Ok((result?, true));
     }
     // Ornn reads run as the thread key, so they keep its agent's operation scopes.
     let thread_scopes = team::agent(&state.db, &chat.user_id, &chat.agent_id)
@@ -823,7 +846,8 @@ mod tests {
                 reader.classified(http::Method::GET, version, vec![]).await,
                 OrnnOutcome::Response {
                     status: 400 | 500,
-                    code: OrnnCode::Unknown
+                    code: OrnnCode::Unknown,
+                    ..
                 }
             ));
             assert!(not_visible(reader.get(version).await));

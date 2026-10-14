@@ -82,6 +82,34 @@ fn tool_succeeded(response: &Response) -> bool {
 #[derive(Clone)]
 struct ToolResultDigest(String);
 
+#[derive(Clone, Copy)]
+struct RpcFailureCode(i32);
+
+fn tool_failure(response: &Response) -> Option<crate::models::assistant_conversation::ToolFailure> {
+    use crate::models::assistant_conversation::ToolFailure;
+    if tool_succeeded(response) {
+        return None;
+    }
+    if let Some(failure) = response.extensions().get::<ToolFailure>() {
+        return Some(failure.clone());
+    }
+    Some(ToolFailure {
+        kind: if let Some(code) = response.extensions().get::<RpcFailureCode>() {
+            if code.0 == -32603 {
+                "internal"
+            } else {
+                "refused"
+            }
+        } else if !response.status().is_success() {
+            "internal"
+        } else {
+            "tool_error"
+        }
+        .into(),
+        status: None,
+    })
+}
+
 fn result_digest(value: &serde_json::Value) -> ToolResultDigest {
     ToolResultDigest(crate::services::assistant_continuation::canonical_digest(
         value,
@@ -104,6 +132,14 @@ fn rpc_success(id: Option<serde_json::Value>, result: serde_json::Value) -> Resp
     .into_response();
     response.extensions_mut().insert(digest);
     response.extensions_mut().insert(outcome);
+    if matches!(outcome, ToolOutcome::Error) {
+        response
+            .extensions_mut()
+            .insert(crate::models::assistant_conversation::ToolFailure {
+                kind: "tool_error".into(),
+                status: None,
+            });
+    }
     response
 }
 
@@ -122,6 +158,18 @@ fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Respons
     .into_response();
     response.extensions_mut().insert(digest);
     response.extensions_mut().insert(ToolOutcome::Error);
+    response.extensions_mut().insert(RpcFailureCode(code));
+    response
+        .extensions_mut()
+        .insert(crate::models::assistant_conversation::ToolFailure {
+            kind: if code == -32603 {
+                "internal"
+            } else {
+                "refused"
+            }
+            .into(),
+            status: None,
+        });
     response
 }
 
@@ -212,7 +260,11 @@ async fn service_tool_content(
     auth: &McpAuthContext,
     tool_name: &str,
     response: mcp_service::ToolResponse,
-) -> (Vec<serde_json::Value>, bool) {
+) -> (
+    Vec<serde_json::Value>,
+    bool,
+    Option<crate::models::assistant_conversation::ToolFailure>,
+) {
     let status = response.status;
     let is_error = !(200..300).contains(&status);
     let Some(media) = response.media.filter(|_| !is_error) else {
@@ -224,6 +276,10 @@ async fn service_tool_content(
         return (
             vec![serde_json::json!({ "type": "text", "text": text })],
             is_error,
+            is_error.then(|| crate::models::assistant_conversation::ToolFailure {
+                kind: "service_status".into(),
+                status: Some(status),
+            }),
         );
     };
     let mut note = format!(
@@ -245,7 +301,7 @@ async fn service_tool_content(
                 "mimeType": media.content_type,
             }));
         }
-        return (content, false);
+        return (content, false, None);
     };
     {
         match crate::services::assistant_nyxagent::attach_image(
@@ -278,6 +334,7 @@ async fn service_tool_content(
     (
         vec![serde_json::json!({ "type": "text", "text": note })],
         false,
+        None,
     )
 }
 
@@ -1644,6 +1701,8 @@ async fn handle_tools_list(
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
         tool_defs.push(crate::services::assistant_upload_service::definition());
+        tool_defs.push(crate::services::assistant_upload_service::list_definition());
+        tool_defs.push(crate::services::assistant_nyxagent::conversation_history_definition());
     }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
@@ -1676,22 +1735,60 @@ fn audit_chat_tool(name: &str) -> bool {
         || name.starts_with("nyxid__")
 }
 
+fn native_activity_names() -> &'static std::collections::HashSet<String> {
+    static NAMES: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(|| {
+            let mut definitions = mcp_service::generate_tool_definitions(&[], None);
+            definitions.extend(crate::services::machine_tools::definitions());
+            definitions.push(crate::services::assistant_upload_service::definition());
+            definitions.push(crate::services::assistant_upload_service::list_definition());
+            definitions
+                .push(crate::services::assistant_nyxagent::conversation_history_definition());
+            let mut names: std::collections::HashSet<String> =
+                definitions.into_iter().map(|tool| tool.name).collect();
+            for name in crate::services::assistant_account_tools::TOOL_NAMES
+                .iter()
+                .chain(crate::services::assistant_team_tools::TOOL_NAMES)
+                .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES)
+            {
+                names.insert(format!("nyxid__{name}"));
+            }
+            names
+        });
+    &NAMES
+}
+
+async fn update_activity_label(state: &AppState, auth: &McpAuthContext, canonical: &str) {
+    if let Some(chat) = auth.chat.as_ref()
+        && let Some(activity_id) = crate::services::machine_activity_service::ACTIVITY_ID
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()
+    {
+        let _ = crate::services::assistant_nyxagent::activity_label_for_turn(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            chat.turn_id.as_deref().unwrap_or_default(),
+            &activity_id,
+            canonical,
+        )
+        .await;
+    }
+}
+
 /// The identifier shown to the chat owner for a tool call. Never arguments.
 fn chat_activity_label(params: &serde_json::Value) -> String {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
         .unwrap_or("tool");
-    if name == "nyx__call_tool"
-        && let Some(inner) = params
-            .get("arguments")
-            .and_then(|a| a.get("tool_name"))
-            .and_then(|t| t.as_str())
-            .filter(|t| !t.is_empty())
-    {
-        return inner.to_owned();
+    let native = name != "nyx__call_tool" && native_activity_names().contains(name);
+    if native {
+        name.to_owned()
+    } else {
+        "tool".into()
     }
-    name.to_owned()
 }
 
 /// Chat-key tool calls are recorded on the live turn as metadata-only activity
@@ -1748,10 +1845,11 @@ async fn handle_tools_call(
     };
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
-            match crate::services::assistant_nyxagent::activity_started(
+            match crate::services::assistant_nyxagent::activity_started_for_turn(
                 &state.db,
                 &chat.user_id,
                 &chat.conversation_id,
+                chat.turn_id.as_deref().unwrap_or_default(),
                 &chat_activity_label(params),
             )
             .await
@@ -1826,12 +1924,15 @@ async fn handle_tools_call(
         }
     }
     if let Some((chat, id)) = activity {
-        let _ = crate::services::assistant_nyxagent::activity_finished(
+        let failure = tool_failure(&response);
+        let _ = crate::services::assistant_nyxagent::activity_finished_for_turn(
             &state.db,
             &chat.user_id,
             &chat.conversation_id,
+            chat.turn_id.as_deref().unwrap_or_default(),
             &id,
             tool_succeeded(&response),
+            failure,
         )
         .await;
     }
@@ -1937,7 +2038,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_pools"
                 | "nyx__oracle_result"
                 | "nyx__oracle_session"
-                | "nyx__attachment_read"
+                | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
                 | "nyx__machine_list"
                 | "nyx__saved_logins"
                 | "nyx__machine_list_files"
@@ -1981,6 +2082,24 @@ async fn dispatch_tools_call(
     }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(
+            state,
+            auth,
+            &arguments,
+            request.id.clone(),
+        ))
+        .await;
+    }
+    if tool_name == "nyx__attachment_list" {
+        return Box::pin(handle_attachment_list(
+            state,
+            auth,
+            &arguments,
+            request.id.clone(),
+        ))
+        .await;
+    }
+    if tool_name == "nyx__conversation_history" {
+        return Box::pin(handle_conversation_history(
             state,
             auth,
             &arguments,
@@ -2305,6 +2424,13 @@ async fn dispatch_service_tool(
         None
     };
     let exec_ctx = mcp_exec_context(auth);
+    update_activity_label(
+        state,
+        auth,
+        &format!("{}__{}", service.service_slug, endpoint.name),
+    )
+    .await;
+
     let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
@@ -2377,8 +2503,11 @@ async fn dispatch_service_tool(
     );
 
     let concurrency = response.concurrency.take();
-    let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
-    let result = content_result(request.id.clone(), content, is_error);
+    let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
+    let mut result = content_result(request.id.clone(), content, is_error);
+    if let Some(failure) = failure {
+        result.extensions_mut().insert(failure);
+    }
     match concurrency {
         Some(lease) => lease.hold_response(result),
         None => result,
@@ -2948,6 +3077,74 @@ async fn handle_account_tool(
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }
 
+async fn handle_attachment_list(
+    state: &AppState,
+    auth: &McpAuthContext,
+    args: &serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> Response {
+    let Some(chat) = auth.chat.as_ref() else {
+        return tool_result(id, "Uploads require an assistant chat key", true);
+    };
+    match crate::services::assistant_upload_service::list_for_chat(
+        &state.db,
+        chat,
+        args["cursor"].as_str(),
+        args["limit"].as_u64().unwrap_or(50) as usize,
+    )
+    .await
+    {
+        Ok(value) => tool_result(id, &value.to_string(), false),
+        Err(error) => tool_result(
+            id,
+            &crate::services::assistant_account_tools::error_result(error)
+                .value
+                .to_string(),
+            true,
+        ),
+    }
+}
+
+async fn handle_conversation_history(
+    state: &AppState,
+    auth: &McpAuthContext,
+    args: &serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> Response {
+    let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
+        return tool_result(id, "Conversation history requires an owner chat key", true);
+    };
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let history = if offset == 0 {
+        crate::services::assistant_nyxagent::conversation_history(
+            &state.db,
+            chat,
+            args["before_seq"].as_i64(),
+            args["limit"].as_u64().unwrap_or(20) as usize,
+        )
+        .await
+    } else {
+        crate::services::assistant_nyxagent::conversation_history_page(
+            &state.db,
+            chat,
+            args["before_seq"].as_i64(),
+            offset,
+            args["limit"].as_u64().unwrap_or(20) as usize,
+        )
+        .await
+    };
+    match history {
+        Ok(value) => tool_result(id, &value.to_string(), false),
+        Err(error) => tool_result(
+            id,
+            &crate::services::assistant_account_tools::error_result(error)
+                .value
+                .to_string(),
+            true,
+        ),
+    }
+}
+
 async fn handle_attachment_read(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3076,12 +3273,28 @@ async fn handle_meta_call_tool(
             serde_json::Value::Object(flat)
         };
 
+    if native_activity_names().contains(tool_name) && tool_name != "nyx__call_tool" {
+        update_activity_label(state, auth, tool_name).await;
+    }
+
     if crate::services::machine_tools::is_tool(tool_name) {
         return handle_machine_tool(state, auth, tool_name, inner_args, request_id).await;
     }
 
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(state, auth, &inner_args, request_id)).await;
+    }
+    if tool_name == "nyx__attachment_list" {
+        return Box::pin(handle_attachment_list(state, auth, &inner_args, request_id)).await;
+    }
+    if tool_name == "nyx__conversation_history" {
+        return Box::pin(handle_conversation_history(
+            state,
+            auth,
+            &inner_args,
+            request_id,
+        ))
+        .await;
     }
     if tool_name.starts_with("nyxid__") {
         return Box::pin(handle_account_tool(
@@ -3237,6 +3450,13 @@ async fn handle_meta_call_tool(
         None
     };
     let exec_ctx = mcp_exec_context(auth);
+    update_activity_label(
+        state,
+        auth,
+        &format!("{}__{}", service.service_slug, endpoint.name),
+    )
+    .await;
+
     let execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
@@ -3306,10 +3526,10 @@ async fn handle_meta_call_tool(
     );
 
     let concurrency = response.concurrency.take();
-    let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
+    let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
 
     // Embed tools/list_changed inline for SSE-capable clients
-    let result = if changed && client_accepts_sse {
+    let mut result = if changed && client_accepts_sse {
         content_result_with_notifications(
             request_id,
             content,
@@ -3322,6 +3542,9 @@ async fn handle_meta_call_tool(
     } else {
         content_result(request_id, content, is_error)
     };
+    if let Some(failure) = failure {
+        result.extensions_mut().insert(failure);
+    }
     match concurrency {
         Some(lease) => lease.hold_response(result),
         None => result,
@@ -5186,6 +5409,234 @@ mod tests {
             );
         }
         db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn downstream_http_failure_survives_mcp_success_envelope() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("mcp_downstream_activity_shape")
+                .await;
+        let state = test_app_state(db.clone());
+        let auth = api_key_auth(Vec::new());
+        for status in [404, 429, 500] {
+            let (content, is_error, failure) = service_tool_content(
+                &state,
+                &auth,
+                "catalog__operation",
+                mcp_service::ToolResponse {
+                    concurrency: None,
+                    status,
+                    text: "Downstream error".into(),
+                    media: None,
+                },
+            )
+            .await;
+            assert!(is_error);
+            let mut response = content_result(None, content, is_error);
+            response.extensions_mut().insert(failure.unwrap());
+            assert_eq!(response.status(), StatusCode::OK);
+            let failure = tool_failure(&response).unwrap();
+            assert_eq!(failure.kind, "service_status");
+            assert_eq!(failure.status, Some(status));
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn activity_failures_classify_rpc_capacity_downstream_and_tool_shapes() {
+        assert_eq!(
+            tool_failure(&rpc_error(None, -32603, "Internal error"))
+                .unwrap()
+                .kind,
+            "internal"
+        );
+        assert_eq!(
+            tool_failure(&rpc_error(None, -32602, "Invalid arguments"))
+                .unwrap()
+                .kind,
+            "refused"
+        );
+        assert_eq!(
+            tool_failure(&concurrency_limited_response(None))
+                .unwrap()
+                .kind,
+            "refused"
+        );
+        assert_eq!(
+            tool_failure(&tool_result(None, "error", true))
+                .unwrap()
+                .kind,
+            "tool_error"
+        );
+        let mut legacy_error = tool_result(None, "error", true);
+        legacy_error
+            .extensions_mut()
+            .remove::<crate::models::assistant_conversation::ToolFailure>();
+        assert_eq!(tool_failure(&legacy_error).unwrap().kind, "tool_error");
+        let mut downstream = tool_result(None, "Error (404)", true);
+        downstream
+            .extensions_mut()
+            .insert(crate::models::assistant_conversation::ToolFailure {
+                kind: "service_status".into(),
+                status: Some(404),
+            });
+        assert_eq!(tool_failure(&downstream).unwrap().status, Some(404));
+        let internal = StatusCode::BAD_GATEWAY.into_response();
+        assert_eq!(tool_failure(&internal).unwrap().kind, "internal");
+        assert!(tool_failure(&tool_result(None, "ok", false)).is_none());
+    }
+
+    #[tokio::test]
+    async fn activity_labels_do_not_persist_untrusted_names_and_stop_blocks_resolution() {
+        use crate::services::assistant_nyxagent as engine;
+        let db = crate::test_utils::connect_transaction_test_database("mcp_activity_label_privacy")
+            .await;
+        let state = test_app_state(db.clone());
+        let request = engine::parse_turn(br#"{"text":"Check services"}"#).unwrap();
+        let row = engine::begin_turn(&db, "owner", &request, &state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = &row.active_turn.as_ref().unwrap().turn_id;
+        for params in [
+            serde_json::json!({"name":"ghp_private_name"}),
+            serde_json::json!({"name":"unknown__operation"}),
+            serde_json::json!({"name":"nyx__call_tool","arguments":{"tool":"github_pat_private_nested"}}),
+            serde_json::json!({"name":"nyx__call_tool","arguments":{"tool":"unknown__operation"}}),
+        ] {
+            let label = chat_activity_label(&params);
+            let id = engine::activity_started_for_turn(&db, "owner", &row.id, turn, &label)
+                .await
+                .unwrap()
+                .unwrap();
+            engine::activity_label_for_turn(
+                &db,
+                "owner",
+                &row.id,
+                turn,
+                &id,
+                "catalog__ghp_private_nested",
+            )
+            .await
+            .unwrap();
+        }
+        let last = engine::activity_started_for_turn(&db, "owner", &row.id, turn, "tool")
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            mongodb::bson::doc! {"_id":&row.id},
+            mongodb::bson::doc! {"$set":{"active_turn.stop_requested":true}},
+        )
+        .await
+        .unwrap();
+        engine::activity_label_for_turn(&db, "owner", &row.id, turn, &last, "catalog__published")
+            .await
+            .unwrap();
+        let live = engine::get(&db, "owner", &row.id).await.unwrap();
+        let activities = live.active_turn.unwrap().activities;
+        assert!(activities.iter().all(|entry| entry.label == "tool"));
+        let dtos: Vec<crate::handlers::assistant_nyxagent::ActivityResponse> =
+            activities.into_iter().map(Into::into).collect();
+        let serialized = serde_json::to_string(&dtos).unwrap();
+        assert!(
+            !serialized.contains("private")
+                && !serialized.contains("unknown")
+                && !serialized.contains("published")
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn universal_native_calls_use_compiled_activity_labels() {
+        use crate::services::{
+            assistant_acknowledgement_service as acks, assistant_nyxagent as engine,
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("mcp_meta_native_label").await;
+        let state = test_app_state(db.clone());
+        let row = engine::begin_turn(
+            &db,
+            "owner",
+            &engine::parse_turn(br#"{"text":"Check tools"}"#).unwrap(),
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let chat = acks::for_key(&db, "owner", Some(&row.credential_api_key_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut auth = McpAuthContext::user("owner".into(), AuthMethod::ApiKey);
+        auth.chat = Some(chat);
+        let turn = &row.active_turn.as_ref().unwrap().turn_id;
+        for name in ["nyx__attachment_read", "nyxid__draft_agent_skill"] {
+            assert!(native_activity_names().contains(name));
+            let activity = engine::activity_started_for_turn(&db, "owner", &row.id, turn, "tool")
+                .await
+                .unwrap()
+                .unwrap();
+            crate::services::machine_activity_service::ACTIVITY_ID
+                .scope(
+                    Some(activity.clone()),
+                    Box::pin(handle_meta_call_tool(
+                        &state,
+                        &auth,
+                        None,
+                        &serde_json::json!({"tool_name":name,"arguments":{}}),
+                        None,
+                        false,
+                        crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+                    )),
+                )
+                .await;
+            let live = engine::get(&db, "owner", &row.id).await.unwrap();
+            assert_eq!(
+                live.active_turn
+                    .unwrap()
+                    .activities
+                    .iter()
+                    .find(|entry| entry.id == activity)
+                    .unwrap()
+                    .label,
+                name
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn activity_labels_use_only_compiled_native_registry() {
+        for name in native_activity_names()
+            .iter()
+            .filter(|name| name.as_str() != "nyx__call_tool")
+        {
+            assert_eq!(
+                chat_activity_label(&serde_json::json!({"name":name})),
+                *name
+            );
+        }
+        for name in [
+            "github__private_text",
+            "nyx__oracle_private_text",
+            "nyxid__unknown_private_text",
+            "nyxid_ag_secret",
+            "sk-0123456789abcdefghijklmnop",
+            "nyx_0123456789abcdef",
+        ] {
+            assert_eq!(
+                chat_activity_label(&serde_json::json!({"name":name})),
+                "tool"
+            );
+            assert_eq!(
+                chat_activity_label(
+                    &serde_json::json!({"name":"nyx__call_tool","arguments":{"name":name}})
+                ),
+                "tool"
+            );
+        }
     }
 
     #[test]

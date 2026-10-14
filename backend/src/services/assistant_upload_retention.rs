@@ -322,6 +322,8 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
         .get_str("_id")
         .map_err(|_| AppError::Internal("Attachment metadata".into()))?;
     if bound(row) || !user_upload(row) {
+        // Tombstones retain scope and expiry identity only. Display metadata
+        // lives on the scoped message attachment and is never copied here.
         let mut tombstone = doc! {"_id":id, "expired_at":bson::DateTime::now()};
         for key in [
             "user_id",
@@ -329,6 +331,8 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
             "group_id",
             "origin",
             "message_id",
+            "created_at",
+            "bound_at",
         ] {
             if let Some(value) = row.get(key) {
                 tombstone.insert(key, value.clone());

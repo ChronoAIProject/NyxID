@@ -3,8 +3,17 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "assistant_messages";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageAuthor {
+    Owner,
+    Guest,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default)]
+    pub author: Option<MessageAuthor>,
     /// Guidance delivered to an existing response, never a new instruction turn.
     #[serde(default)]
     pub steering: Option<Box<Steering>>,
@@ -28,6 +37,8 @@ pub struct AssistantMessage {
     /// Tool calls observed during the turn that produced this reply (assistant rows only).
     #[serde(default)]
     pub activities: Vec<super::assistant_conversation::TurnActivity>,
+    #[serde(default)]
+    pub activity_total: i64,
     /// Images tools returned during the turn that produced this reply.
     #[serde(default)]
     pub attachments: Vec<super::assistant_conversation::TurnAttachment>,

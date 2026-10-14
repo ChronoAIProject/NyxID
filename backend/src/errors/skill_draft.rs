@@ -5,6 +5,8 @@ use serde::Serialize;
 #[derive(Debug, Serialize, thiserror::Error)]
 #[error("Skill draft failed validation ({rule})")]
 pub struct SkillDraftValidation {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<&'static str>,
     pub rule: &'static str,
     pub field: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,6 +28,7 @@ impl From<SkillDraftValidation> for super::AppError {
 impl SkillDraftValidation {
     pub(crate) fn at(rule: &'static str, field: &str) -> Self {
         Self {
+            rules: Vec::new(),
             rule,
             field: field.into(),
             line: None,

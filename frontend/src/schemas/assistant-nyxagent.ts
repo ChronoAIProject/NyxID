@@ -14,6 +14,7 @@ export const nyxAgentTurnActivitySchema = z.object({
   status: z.enum(["running", "completed", "error"]),
   started_at: z.string(),
   ended_at: z.string().nullable().default(null),
+  failure: z.object({ kind: z.enum(["service_status", "tool_error", "refused", "internal"]), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
@@ -90,6 +91,7 @@ export const nyxAgentConversationSchema = z.object({
       steering_allowed: z.boolean().optional(),
       stop_requested: z.boolean().optional(),
       continuations: z.number().int().nonnegative().optional(),
+      activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -132,6 +134,7 @@ export const nyxAgentMessageSchema = z.object({
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
+  activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
@@ -209,7 +212,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
   base.extend({ event: z.literal("turn.continuing"), turn_id: z.string(), continuation: z.number().int().positive() }),
   base.extend({
     event: z.literal("turn.notice"),
-    code: z.enum(["context_reset", "image_input_unavailable"]),
+    code: z.enum(["context_reset", "image_input_unavailable", "retrying"]),
     message: z.string(),
   }),
   base.extend({

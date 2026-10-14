@@ -112,6 +112,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             steering: None,
+            author: None,
             id: id.clone(),
             conversation_id: call.conversation_id.clone(),
             user_id: call.user_id.clone(),
@@ -123,6 +124,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
             error_code: None,
             created_at: call.closed_at.unwrap_or_else(Utc::now),
             activities: vec![],
+            activity_total: 0,
             attachments: vec![],
             origin: None,
             via: Some("voice".into()),
@@ -264,6 +266,7 @@ mod tests {
             "m1".into(),
             AssistantMessage {
                 steering: None,
+                author: None,
                 voice: None,
                 execution_pending: true,
                 id: "m1".into(),
@@ -277,6 +280,7 @@ mod tests {
                 error_code: None,
                 created_at: Utc::now(),
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: None,
                 via: Some("voice".into()),

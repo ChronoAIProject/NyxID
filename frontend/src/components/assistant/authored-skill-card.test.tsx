@@ -132,12 +132,23 @@ it.each(["rejected", "invalidated"])('renders %s as terminal rather than a failu
   expect(screen.queryByText(/Publication could not finish/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
-it("directs a conclusive package refusal to discard and request a revision", async () => {
+it("reports that NyxBot was asked for a corrected package after a refusal", async () => {
   mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["discard"], failure_code: "ornn_validation_failed" });
   show({ ...card, status: "used" });
-  expect(await screen.findByText(/Deny or discard this draft and ask NyxBot for a revised one/)).toBeVisible();
+  expect(await screen.findByText(/NyxBot was asked for a corrected draft/)).toBeVisible();
   expect(screen.getByRole("button", { name: "Discard" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Retry publication" })).not.toBeInTheDocument();
+});
+it("shows unavailable format details only when the backend marks them unavailable", async () => {
+  mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["discard"], failure_code: "ornn_validation_failed", failure_details_unavailable: true });
+  show({ ...card, status: "used" });
+  expect(await screen.findByText("Format details unavailable.")).toBeVisible();
+});
+it("does not call base or registry failures format-detail failures", async () => {
+  mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["discard"], failure_code: "base_changed", failure_details_unavailable: false });
+  show({ ...card, status: "used" });
+  await screen.findByText(/The source skill changed/);
+  expect(screen.queryByText("Format details unavailable.")).not.toBeInTheDocument();
 });
 it("shows a sanitized unresolved-publication message and prevents discard", async () => {
   mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["check"], failure_code: "publish_uncertain" });
@@ -239,4 +250,79 @@ it("offers a write retry after an operator released an uncertain attempt", async
   expect(await screen.findByText(/operator confirmed the earlier attempt had no effect/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Retry publication" }));
   await waitFor(() => expect(decide).toHaveBeenCalledExactlyOnceWith("allow"));
+});
+
+it("shows plain omissions and observed coverage and requires reduced-scope consent", async () => {
+  mocks.json.mockResolvedValue({ ...preview, scope: { status: "reduced", omissions: ["<script>untrusted omission</script>"] }, coverage: [
+    { id: "upload", name: "source.txt", reads: 5, percent: 100, lower_bound: false, expired: false, since_reset_percent: 20 },
+    { id: "partial", name: "partial.txt", reads: 513, percent: 12, lower_bound: true, expired: false },
+    { id: "unread", name: "unread.txt", reads: 0, percent: 0, lower_bound: false, expired: false },
+    { id: "expired", name: "expired.txt", reads: 0, percent: 0, lower_bound: false, expired: true },
+  ] });
+  const decide = show();
+  const button = await screen.findByRole("button", { name: "Allow and publish" });
+  expect(button).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: /I accept this reduced scope/ })).toHaveAttribute("data-state", "unchecked");
+  expect(screen.getByText("<script>untrusted omission</script>")).toBeVisible();
+  expect(document.querySelector("script")).toBeNull();
+  expect(screen.getByText(/source.txt: read completely; read 20% since/)).toBeVisible();
+  expect(screen.getByText("partial.txt: at least 12%")).toBeVisible();
+  expect(screen.getByText("unread.txt: not read")).toBeVisible();
+  expect(screen.getByText("expired.txt: expired")).toBeVisible();
+  fireEvent.click(screen.getByRole("checkbox"));
+  expect(button).toBeEnabled();
+  fireEvent.click(button);
+  await waitFor(() => expect(decide).toHaveBeenCalledWith("allow", true));
+});
+
+it.each([
+  ["publish", "Allow and publish"],
+  ["retry", "Retry publication"],
+])("blocks %s when scope is unavailable", async (action, label) => {
+  mocks.json.mockResolvedValue({ ...preview, scope_unavailable: true, scope: null, actions: [action] });
+  const decide = show();
+  expect(await screen.findByText(/Scope unavailable/)).toBeVisible();
+  const button = screen.getByRole("button", { name: label });
+  expect(button).toBeDisabled();
+  fireEvent.click(button);
+  expect(decide).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Scope not declared/)).toBeNull();
+});
+
+it("explains complete scope and bounded coverage in plain language", async () => {
+  mocks.json.mockResolvedValue({ ...preview, scope: { status: "complete", omissions: [] }, coverage_omitted: 11, coverage: [{ id: "upload", name: "source.txt", reads: 0, percent: 0, lower_bound: false, expired: false }] });
+  show();
+  expect(await screen.findByText("NyxBot says this draft covers everything requested. The read coverage shown here is what NyxID observed.")).toBeVisible();
+  expect(screen.getByText("What NyxBot read")).toBeVisible();
+  expect(screen.getByText("11 earlier uploads are not shown.")).toBeVisible();
+});
+
+it("keeps a draft available when an upload's legacy coverage is unknown", async () => {
+  mocks.json.mockResolvedValue({ ...preview, coverage: [{ id: "upload", name: "legacy.txt", reads: 1, percent: 0, lower_bound: false, expired: false, unknown: true, since_reset_percent: null }] });
+  show();
+  expect(await screen.findByText("legacy.txt: read coverage unavailable")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Allow and publish" })).toBeEnabled();
+  expect(screen.queryByText(/legacy.txt: not read/)).toBeNull();
+});
+
+it("hides leftover rules when the corrected draft has no current failure", async () => {
+  mocks.json.mockResolvedValue({ ...preview, failure_code: null, failure_rules: ["allowed_root_items"], failure_details_unavailable: true });
+  show();
+  await screen.findByText("Verify every date");
+  expect(screen.queryByText("Format details unavailable.")).not.toBeInTheDocument();
+  expect(screen.queryByRole("list")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Allow and publish" })).toBeEnabled();
+});
+
+it("accepts backend nulls for scope, failure stage and optional coverage timestamps", () => {
+  const parsed = authoredSkillPreviewSchema.parse({
+    ...preview,
+    failure_code: null,
+    failure_stage: null,
+    scope: null,
+    coverage: [{ id: "upload", name: "source.txt", expired: false, reads: 1, percent: 50, lower_bound: false, since_reset_percent: null }],
+  });
+  expect(parsed.scope).toBeNull();
+  expect(parsed.failure_stage).toBeNull();
+  expect(parsed.coverage[0]?.since_reset_percent).toBeNull();
 });

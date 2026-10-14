@@ -13,7 +13,6 @@ import {
   CircleAlert,
   MessageSquare,
   Sparkles,
-  Wrench,
   X,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
@@ -37,7 +36,7 @@ function PulseDot({ className }: { readonly className?: string }) {
     <span
       aria-hidden
       className={cn(
-        "inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-nyx-secondary-400",
+        "inline-block h-1.5 w-1.5 motion-safe:animate-pulse rounded-full bg-nyx-secondary-400",
         className,
       )}
     />
@@ -77,15 +76,43 @@ function ThinkingBlock({
   );
 }
 
+function toolFailureCopy(failure: { kind: string; status?: number } | null | undefined): string {
+  switch (failure?.kind) {
+    case "service_status": return `The service responded with HTTP ${failure.status}.`;
+    case "refused": return "NyxID refused this call.";
+    case "internal": return "NyxID could not complete this call.";
+    case "tool_error": return "The tool reported an error.";
+    default: return "This step did not complete. No additional error details are available.";
+  }
+}
+
+function ToolElapsed({ startedAt }: { readonly startedAt: string }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1000));
+  return <span>{seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`}</span>;
+}
+
 function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const count = steps.length + tools.length;
+  const total = Math.max(count, message.activityTotal ?? 0);
   const [open, setOpen] = useState(false);
   if (!count) return null;
-  const running =
-    steps.some((step) => step.status === "running") ||
-    tools.some((tool) => tool.status === "running");
+  const failed = steps.filter((step) => step.status === "error").length + tools.filter((tool) => tool.status === "error").length;
+  const active = message.status === "streaming";
+  const summary = active
+    ? message.turnStatus?.label ?? "Working…"
+    : message.status === "error"
+      ? "Turn failed"
+      : message.status === "stopped"
+        ? "Stopped"
+        : "Completed";
+  const summaryIcon = active ? <PulseDot /> : message.status === "error" ? <X className="h-3 w-3 text-destructive" aria-label="Turn failed" /> : message.status === "stopped" ? <CircleAlert className="h-3 w-3 text-muted-foreground" aria-label="Stopped" /> : <Check className="h-3 w-3 text-success" aria-label="Completed" />;
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
       <button
@@ -97,8 +124,8 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
         />
-        {running ? <PulseDot /> : tools.some((tool) => tool.status === "error") || steps.some((step) => step.status === "error") ? <X className="h-3 w-3 text-destructive" /> : <Check className="h-3 w-3 text-success" />}
-        <span>{count} {count === 1 ? "action" : "actions"}</span>
+        {summaryIcon}
+        <span>{summary} · {total} {total === 1 ? "action" : "actions"}{message.activityTotal && message.activityTotal > count ? <span className="ml-1">· latest {count} of {message.activityTotal} shown</span> : null}{!active && failed ? <span className="ml-1 text-warning">· {failed} failed</span> : null}</span>
       </button>
       {open ? (
         <div className="space-y-1 border-t border-hairline px-2.5 py-2">
@@ -114,6 +141,7 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
               <span className="min-w-0 flex-1 break-words text-muted-foreground">
                 {step.name || "Processing"}
               </span>
+              {step.status === "error" ? <span className="text-text-tertiary">Step failed. The assistant can continue after a failed step.</span> : null}
               {step.stepType ? (
                 <span className="shrink-0 font-mono text-9 text-text-tertiary">
                   {step.stepType}
@@ -123,13 +151,14 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
           ))}
           {tools.map((tool) => (
             <details key={tool.id} className="text-11 text-muted-foreground">
-              <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5">
+              <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5" {...(tool.status === "running" && message.status === "streaming" && !message.content ? { "data-running-tool": tool.name || tool.id } : {})}>
                 {tool.status === "running" ? (
                   <PulseDot />
                 ) : (
-                  <Wrench className="h-3 w-3 text-text-tertiary" />
+                  tool.status === "error" ? <X className="h-3 w-3 text-warning" aria-label="Failed tool" /> : <Check className="h-3 w-3 text-success" aria-label="Succeeded tool" />
                 )}
-                <span className="font-mono">{tool.name || tool.id}</span>
+                <span className="font-mono" {...(tool.status === "running" ? { "data-running-tool": tool.name || tool.id } : {})}>{tool.name || tool.id}</span>
+                {tool.status === "error" ? <span className="text-text-tertiary">{toolFailureCopy(tool.failure)} The assistant can continue after a failed step.</span> : null}
               </summary>
               {tool.result ? (
                 <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
@@ -180,9 +209,7 @@ export function ChatMessageBubble({
       message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
-  const runningTool = streaming
-    ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
-    : undefined;
+  const runningTool = message.toolCalls?.find((tool) => tool.status === "running");
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -222,25 +249,21 @@ export function ChatMessageBubble({
             <ArtifactBlock block={artifact} />
           </div>
         ))}
-        {streaming && !content ? (
+        {streaming ? (
           <div
-            data-streaming-dots
-            role="status"
-            aria-label="Assistant is answering"
-            className="flex h-5 items-center gap-1"
+            data-turn-status
+            className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
           >
-            <PulseDot />
-            <PulseDot className="[animation-delay:120ms]" />
-            <PulseDot className="[animation-delay:240ms]" />
-            {runningTool ? (
-              <span
-                data-running-tool
-                className="ml-1.5 truncate font-mono text-11 text-muted-foreground"
-              >
-                {runningTool.name}
-              </span>
-            ) : null}
+            {!content ? <span data-streaming-dots><PulseDot /></span> : null}
+            <span role="status" aria-live="polite" {...(!content && runningTool ? { "data-running-tool": runningTool.name } : {})}>{message.turnStatus?.label ?? (runningTool ? `Running ${runningTool.name}` : "Working…")}{message.turnStatus?.interrupted ? <span> Connection interrupted; checking every few seconds</span> : null}</span>
+            {message.turnStatus?.toolStartedAt ? <ToolElapsed startedAt={message.turnStatus.toolStartedAt} /> : null}
           </div>
+        ) : null}
+        {message.status === "stopped" ? (
+          <p role="status" aria-label="Turn stopped" className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground">
+            <CircleAlert aria-hidden="true" className="h-3 w-3" />
+            Stopped
+          </p>
         ) : null}
         {message.status === "error" && message.error ? (
           <div className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-11 text-destructive">
@@ -360,6 +383,7 @@ export function ChatMessageList({
       session.status !== "draft" &&
       session.status !== "stopped" &&
       terminalAssistant?.role === "assistant" &&
+      terminalAssistant.status !== "stopped" &&
       !terminalAssistant.content.trim() &&
       !terminalAssistant.error &&
       !(

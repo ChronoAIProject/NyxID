@@ -46,6 +46,161 @@ pub enum OrnnCode {
     Unknown,
 }
 
+/// Fixed, caller-safe subset of Ornn validation diagnostics. Provider prose
+/// and supplied values are intentionally discarded at this adapter boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrnnValidationRule {
+    AllowedRootItems,
+    NoReadmeMd,
+    SkillMdExists,
+    NoXmlBrackets,
+    DescriptionNoXml,
+    NameMatchesFolder,
+    NameNoForbiddenTerms,
+    UnexpectedError,
+    FrontmatterName,
+    FrontmatterDescription,
+    FrontmatterVersion,
+    FrontmatterCategory,
+    FrontmatterOutputType,
+    FrontmatterRuntime,
+    FrontmatterToolList,
+    FrontmatterTag,
+    FrontmatterRuntimeEnvVar,
+    FrontmatterDependsOn,
+    Other,
+}
+
+impl OrnnValidationRule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowedRootItems => "allowed_root_items",
+            Self::NoReadmeMd => "no_readme_md",
+            Self::SkillMdExists => "skill_md_exists",
+            Self::NoXmlBrackets => "no_xml_brackets",
+            Self::DescriptionNoXml => "description_no_xml",
+            Self::NameMatchesFolder => "name_matches_folder",
+            Self::NameNoForbiddenTerms => "name_no_forbidden_terms",
+            Self::UnexpectedError => "unexpected_error",
+            Self::FrontmatterName => "frontmatter_name",
+            Self::FrontmatterDescription => "frontmatter_description",
+            Self::FrontmatterVersion => "frontmatter_version",
+            Self::FrontmatterCategory => "frontmatter_category",
+            Self::FrontmatterOutputType => "frontmatter_output_type",
+            Self::FrontmatterRuntime => "frontmatter_runtime",
+            Self::FrontmatterToolList => "frontmatter_tool_list",
+            Self::FrontmatterTag => "frontmatter_tag",
+            Self::FrontmatterRuntimeEnvVar => "frontmatter_runtime_env_var",
+            Self::FrontmatterDependsOn => "frontmatter_depends_on",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn copy(self) -> &'static str {
+        match self {
+            Self::AllowedRootItems => "Use SKILL.md and files under references/ or assets/ only.",
+            Self::NoReadmeMd => "Remove README.md from the package.",
+            Self::SkillMdExists => "Include SKILL.md at the package root.",
+            Self::NoXmlBrackets => "Remove angle brackets from skill text.",
+            Self::DescriptionNoXml => "Remove angle brackets from the description.",
+            Self::NameMatchesFolder => "Make the declared name match the package name.",
+            Self::NameNoForbiddenTerms => "Use a skill name without reserved terms.",
+            Self::FrontmatterName => "Correct the frontmatter name.",
+            Self::FrontmatterDescription => "Correct the frontmatter description.",
+            Self::FrontmatterVersion => "Correct the frontmatter version.",
+            Self::FrontmatterCategory => "Correct the frontmatter category.",
+            Self::FrontmatterOutputType => "Correct the frontmatter output type.",
+            Self::FrontmatterRuntime => "Correct the frontmatter runtime.",
+            Self::FrontmatterToolList => "Correct the frontmatter tool list.",
+            Self::FrontmatterTag => "Correct the frontmatter tags.",
+            Self::FrontmatterRuntimeEnvVar => {
+                "Correct the frontmatter runtime environment declarations."
+            }
+            Self::FrontmatterDependsOn => "Correct the frontmatter dependencies.",
+            Self::UnexpectedError | Self::Other => {
+                "Ornn could not validate this package; review its format."
+            }
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "allowed-root-items" | "allowed_root_items" => Self::AllowedRootItems,
+            "no-readme-md" | "no_readme_md" => Self::NoReadmeMd,
+            "skill-md-exists" | "skill_md_exists" => Self::SkillMdExists,
+            "no-xml-brackets" | "no_xml_brackets" => Self::NoXmlBrackets,
+            "description-no-xml" | "description_no_xml" => Self::DescriptionNoXml,
+            "name-matches-folder" | "name_matches_folder" => Self::NameMatchesFolder,
+            "name-no-forbidden-terms" | "name_no_forbidden_terms" => Self::NameNoForbiddenTerms,
+            "unexpected-error" | "unexpected_error" => Self::UnexpectedError,
+            "frontmatter_name" => Self::FrontmatterName,
+            "frontmatter_description" => Self::FrontmatterDescription,
+            "frontmatter_version" => Self::FrontmatterVersion,
+            "frontmatter_category" => Self::FrontmatterCategory,
+            "frontmatter_output_type" => Self::FrontmatterOutputType,
+            "frontmatter_runtime" => Self::FrontmatterRuntime,
+            "frontmatter_tool_list" => Self::FrontmatterToolList,
+            "frontmatter_tag" => Self::FrontmatterTag,
+            "frontmatter_runtime_env_var" => Self::FrontmatterRuntimeEnvVar,
+            "frontmatter_depends_on" => Self::FrontmatterDependsOn,
+            _ => {
+                let path = value.strip_prefix("frontmatter.").unwrap_or("");
+                let path = path
+                    .split('.')
+                    .filter(|part| !part.bytes().all(|b| b.is_ascii_digit()))
+                    .collect::<Vec<_>>()
+                    .join(".");
+                match path.as_str() {
+                    "name" => Self::FrontmatterName,
+                    "description" => Self::FrontmatterDescription,
+                    "version" => Self::FrontmatterVersion,
+                    "metadata.category" => Self::FrontmatterCategory,
+                    "metadata.output-type" => Self::FrontmatterOutputType,
+                    "metadata.runtime" => Self::FrontmatterRuntime,
+                    "metadata.tool-list" => Self::FrontmatterToolList,
+                    "metadata.tag" => Self::FrontmatterTag,
+                    "metadata.runtime-env-var" => Self::FrontmatterRuntimeEnvVar,
+                    "metadata.depends-on" => Self::FrontmatterDependsOn,
+                    _ => Self::Other,
+                }
+            }
+        }
+    }
+}
+
+pub fn parse_validation_rules(bytes: &[u8]) -> Vec<OrnnValidationRule> {
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return vec![];
+    };
+    validation_rules(&value)
+}
+
+pub fn validation_rules(value: &Value) -> Vec<OrnnValidationRule> {
+    let mut rules = Vec::new();
+    if let Some(items) = value
+        .get("data")
+        .and_then(|v| v.get("violations"))
+        .and_then(Value::as_array)
+        .or_else(|| value.get("errors").and_then(Value::as_array))
+    {
+        for item in items.iter().take(10) {
+            if let Some(rule) = item
+                .get("rule")
+                .or_else(|| item.get("code"))
+                .and_then(Value::as_str)
+            {
+                let path = item.get("path").and_then(Value::as_str);
+                rules.push(OrnnValidationRule::parse(
+                    path.filter(|p| p.starts_with("frontmatter."))
+                        .unwrap_or(rule),
+                ));
+            }
+        }
+    }
+    rules
+}
+
 impl OrnnCode {
     pub fn parse(code: &str) -> Self {
         match code {
@@ -57,7 +212,7 @@ impl OrnnCode {
             "invalid_zip" => Self::InvalidZip,
             "too_many_files" => Self::TooManyFiles,
             "uncompressed_too_large" => Self::UncompressedTooLarge,
-            "validation_failed" => Self::ValidationFailed,
+            "validation_failed" | "frontmatter_validation_failed" => Self::ValidationFailed,
             "BREAKING_CHANGE_WITHOUT_MAJOR_BUMP" => Self::BreakingChangeWithoutMajorBump,
             "VERSION_NOT_INCREMENTED" => Self::VersionNotIncremented,
             "SKILL_VERSION_EXISTS" => Self::SkillVersionExists,
@@ -95,6 +250,9 @@ pub enum OrnnOutcome {
     Response {
         status: u16,
         code: OrnnCode,
+        /// Fixed rule identifiers extracted at the adapter boundary. Values
+        /// and provider prose are never retained.
+        rules: Vec<OrnnValidationRule>,
     },
     /// The proxy returned an error; the request may already have been sent.
     ProxyError,
@@ -571,7 +729,8 @@ fn page(content: &str, id: &str, version: &str, path: &str, offset: usize) -> Ap
         while !content.is_char_boundary(end) {
             end -= 1;
         }
-        let result = json!({"skill_id":id,"version":version,"path":path,"offset":offset,"next_offset":if end < content.len() {Some(end)} else {None},"total_bytes":content.len(),"untrusted_guidance":true,"content":&content[offset..end]});
+        let complete = end >= content.len();
+        let result = json!({"skill_id":id,"version":version,"path":path,"offset":offset,"next_offset":(!complete).then_some(end),"total_bytes":content.len(),"untrusted_guidance":true,"content":&content[offset..end],"complete":complete,"continuation_hint":(!complete).then_some("Read again with next_offset to continue.")});
         // Include the second JSON escape layer used by MCP text results. Leave
         // room for the JSON-RPC envelope and NyxAgent's own result decoration.
         let wire = json!({"content":[{"type":"text","text":result.to_string()}],"isError":false});

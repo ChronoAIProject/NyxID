@@ -130,6 +130,9 @@ function firstSentence(text: string): string {
  */
 export function describeEventNotice(text: string): EventNotice {
   const notice = text.trim();
+  if (notice.startsWith("Skill ") && (notice.includes("published and attached") || notice.includes("requires a corrected package"))) {
+    return { kind: "notice", tone: notice.includes("published and attached") ? "success" : "warning", summary: "Skill publication", detail: notice };
+  }
   // The server swaps double quotes in quoted text for single ones.
   let match = /^Specialist (\S+) (replied|was stopped|failed \(([^)]*)\))\. Reply excerpt: "([^"]*)"/.exec(
     notice,

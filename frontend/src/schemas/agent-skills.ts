@@ -57,6 +57,13 @@ export const authoredSkillPreviewSchema = z.object({
   version: z.string(),
   files: z.array(z.object({ path: z.string(), content: z.string() })),
   failure_code: z.string().nullish(),
+  failure_rules: z.array(z.string()).default([]),
+  failure_details_unavailable: z.boolean().default(false),
+  failure_stage: z.string().nullish(),
+  coverage: z.array(z.object({ id: z.string(), name: z.string(), expired: z.boolean(), unknown: z.boolean().default(false), reads: z.number(), percent: z.number(), lower_bound: z.boolean(), since_reset_percent: z.number().nullish() })).default([]),
+  coverage_omitted: z.number().default(0),
+  scope_unavailable: z.boolean().default(false),
+  scope: z.object({ status: z.enum(["complete", "reduced"]), omissions: z.array(z.string()) }).nullish(),
   lease_live: z.boolean().nullish(),
   base_scripts_not_copied: z.boolean().nullish(),
 });
@@ -74,6 +81,8 @@ export const learningProposalSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   failure_code: z.string().nullish(),
+  failure_rules: z.array(z.string()).default([]),
+  failure_stage: z.string().nullish(),
   // Older servers omit it; their listed proposals always had current evidence.
   evidence_available: z.boolean().default(true),
   card_conversation_id: z.string().nullish(),

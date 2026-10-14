@@ -69,7 +69,7 @@ static URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)[a-z][a-z0-9+.-]*://[^\s<>"`]+"#).expect("static authored URL rule")
 });
 
-fn credential_position(text: &str) -> Option<usize> {
+pub(super) fn credential_position(text: &str) -> Option<usize> {
     let shape = CREDENTIALS
         .iter()
         .filter_map(|rule| rule.find(text).map(|m| m.start()));
@@ -103,7 +103,7 @@ fn credential_position(text: &str) -> Option<usize> {
     shape.chain(urls).min()
 }
 
-fn text(field: &str, value: &str, maximum: usize, required: bool) -> AppResult<()> {
+pub(super) fn text(field: &str, value: &str, maximum: usize, required: bool) -> AppResult<()> {
     limit(field, "characters", value.chars().count(), maximum)?;
     if required && value.trim().is_empty() {
         return Err(invalid("required", field));

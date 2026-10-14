@@ -24,6 +24,53 @@ fn problem_body_reads_only_the_root_code_and_never_detail() {
     assert_eq!(OrnnCode::from_problem_body(b"not json"), OrnnCode::Unknown);
 }
 
+#[test]
+fn validation_rules_keep_only_fixed_ids_and_drop_provider_prose() {
+    let body = br#"{"data":{"valid":false,"violations":[{"rule":"allowed-root-items","value":"SECRET"},{"rule":"frontmatter.name","message":"PRIVATE"},{"rule":"unknown-rule","detail":"TOKEN"}]},"detail":"DO NOT RETURN"}"#;
+    assert_eq!(
+        parse_validation_rules(body),
+        vec![
+            OrnnValidationRule::AllowedRootItems,
+            OrnnValidationRule::FrontmatterName,
+            OrnnValidationRule::Other
+        ]
+    );
+    assert!(
+        !serde_json::to_string(&parse_validation_rules(body))
+            .unwrap()
+            .contains("SECRET")
+    );
+    for (path, expected) in [
+        (
+            "frontmatter.metadata.tool-list.0",
+            OrnnValidationRule::FrontmatterToolList,
+        ),
+        (
+            "frontmatter.metadata.runtime-env-var.1",
+            OrnnValidationRule::FrontmatterRuntimeEnvVar,
+        ),
+        (
+            "frontmatter.description",
+            OrnnValidationRule::FrontmatterDescription,
+        ),
+        ("frontmatter.PRIVATE_SENTINEL", OrnnValidationRule::Other),
+    ] {
+        let value =
+            serde_json::json!({"errors":[{"code":"frontmatter","path":path,"detail":"SECRET"}]});
+        assert_eq!(validation_rules(&value), vec![expected]);
+        assert!(
+            !serde_json::to_string(&validation_rules(&value))
+                .unwrap()
+                .contains("SENTINEL")
+        );
+    }
+    let problem = br#"{"errors":[{"code":"no-readme-md","path":"README.md","title":"SECRET"}]}"#;
+    assert_eq!(
+        parse_validation_rules(problem),
+        vec![OrnnValidationRule::NoReadmeMd]
+    );
+}
+
 /// Non-publication readers keep the pre-classification contract exactly:
 /// each row is the error the unclassified fetch returned for that case.
 #[test]
@@ -65,6 +112,7 @@ fn classified_outcomes_keep_native_read_error_contract() {
             OrnnOutcome::Response {
                 status: 404,
                 code: OrnnCode::SkillNotFound,
+                rules: vec![],
             },
             forbidden(NOT_VISIBLE),
         ),
@@ -72,6 +120,7 @@ fn classified_outcomes_keep_native_read_error_contract() {
             OrnnOutcome::Response {
                 status: 403,
                 code: OrnnCode::Forbidden,
+                rules: vec![],
             },
             forbidden(NOT_VISIBLE),
         ),
@@ -79,6 +128,7 @@ fn classified_outcomes_keep_native_read_error_contract() {
             OrnnOutcome::Response {
                 status: 409,
                 code: OrnnCode::SkillVersionExists,
+                rules: vec![],
             },
             forbidden(NOT_VISIBLE),
         ),
@@ -86,6 +136,7 @@ fn classified_outcomes_keep_native_read_error_contract() {
             OrnnOutcome::Response {
                 status: 503,
                 code: OrnnCode::Unknown,
+                rules: vec![],
             },
             forbidden(NOT_VISIBLE),
         ),
@@ -423,6 +474,7 @@ fn agent_skill_pages_reconstruct_utf8_within_mcp_budget() {
     let text = "\u{0001}é🙂\\\"\n".repeat(1900);
     let mut offset = 0;
     let mut output = String::new();
+    let mut saw_partial = false;
     loop {
         let result = page(&text, ID, "1.0", "SKILL.md", offset).unwrap();
         let wire = json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
@@ -430,13 +482,19 @@ fn agent_skill_pages_reconstruct_utf8_within_mcp_budget() {
         assert!(wire.len() < 10_000, "{}", wire.len());
         output.push_str(result["content"].as_str().unwrap());
         if let Some(next) = result["next_offset"].as_u64() {
+            saw_partial = true;
+            assert_eq!(result["complete"], false);
+            assert!(result["continuation_hint"].as_str().is_some());
             assert!(next as usize > offset);
             offset = next as usize;
         } else {
+            assert_eq!(result["complete"], true);
+            assert!(result["continuation_hint"].is_null());
             break;
         }
     }
     assert_eq!(output, text);
+    assert!(saw_partial);
     assert!(page("é", ID, "1.0", "SKILL.md", 1).is_err());
     assert!(page("x", ID, "1.0", "SKILL.md", 10).is_err());
 }

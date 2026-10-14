@@ -918,6 +918,7 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
         Path((f.row.id.clone(), ack.clone())),
         Json(AcknowledgementDecision {
             decision: Decision::Allow,
+            accept_reduced_scope: false,
         }),
     )
     .await;
@@ -928,6 +929,7 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
         Path((f.row.id.clone(), ack.clone())),
         Json(AcknowledgementDecision {
             decision: Decision::Allow,
+            accept_reduced_scope: false,
         }),
     )
     .await
@@ -940,7 +942,8 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
             test_auth_user(&f.owner),
             Path((f.row.id.clone(), ack)),
             Json(AcknowledgementDecision {
-                decision: Decision::Deny
+                decision: Decision::Deny,
+                accept_reduced_scope: false,
             }),
         )
         .await,
@@ -2106,3 +2109,37 @@ mod upload_matrix;
 
 #[path = "assistant_nyxagent_steering_tests.rs"]
 mod steering_tests;
+
+#[test]
+fn activity_response_failure_contract_omits_absent_http_status() {
+    use crate::models::assistant_conversation::{ToolFailure, TurnActivity};
+    for (kind, status) in [
+        ("service_status", Some(404)),
+        ("tool_error", None),
+        ("refused", None),
+        ("internal", None),
+    ] {
+        let response: ActivityResponse = TurnActivity {
+            machine: None,
+            id: "activity".into(),
+            label: "tool".into(),
+            status: "error".into(),
+            failure: Some(ToolFailure {
+                kind: kind.into(),
+                status,
+            }),
+            started_at: Utc::now(),
+            ended_at: None,
+        }
+        .into();
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["failure"]["kind"], kind);
+        if let Some(status) = status {
+            assert_eq!(value["failure"]["status"], status);
+        } else {
+            assert!(value["failure"].get("status").is_none());
+        }
+        assert!(value["machine"].is_null());
+        assert!(value["ended_at"].is_null());
+    }
+}

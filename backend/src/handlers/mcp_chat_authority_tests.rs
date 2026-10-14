@@ -934,7 +934,7 @@ async fn ask_service_consent_allows_its_node_route_without_a_second_grant() {
 async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let f = fixture("mcp_activity").await;
     let auth = authenticate(&f).await;
-    // One entry per tools/call: the effective tool name, never arguments.
+    // One entry per tools/call; compiled native tools establish label provenance.
     call(
         &f,
         &auth,

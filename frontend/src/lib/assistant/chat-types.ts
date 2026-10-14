@@ -14,7 +14,7 @@ type ExtensibleString<T extends string> = T | (string & Record<never, never>);
 
 export type ChatMessageRole = ExtensibleString<"user" | "assistant">;
 export type ChatMessageStatus = ExtensibleString<
-  "complete" | "streaming" | "error"
+  "complete" | "streaming" | "error" | "stopped"
 >;
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
@@ -41,6 +41,8 @@ export interface ChatMessage {
   readonly images?: readonly ChatImage[];
   /** A user message written in a chat app: its platform. */
   readonly via?: string | null;
+  readonly activityTotal?: number;
+  readonly turnStatus?: import("./turn-status").TurnStatus | null;
 }
 
 export interface ChatImage {

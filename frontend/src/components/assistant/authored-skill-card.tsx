@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 import { authoredSkillPreviewSchema } from "@/schemas/agent-skills";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
-import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
+import { publicationFailureText, publicationRuleText } from "@/lib/assistant/skill-publication-copy";
 
 // A `publishing` row whose lease expired was interrupted (for example the
 // request was cancelled). The server offers publish, retry, deny and discard
@@ -26,13 +28,15 @@ function interruptedCopy(actions: readonly string[]): string {
 export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly deciding: boolean;
-  readonly onDecision: (choice: "allow" | "deny") => Promise<unknown>;
+  readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
   const reference = card.authored_skill!;
   const owner = useAuthStore((s) => s.user?.id);
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [acceptReducedScope, setAcceptReducedScope] = useState(false);
+  const scopeId = useId();
   const preview = useQuery({
     queryKey: ["authored-skill-review", owner, reference.proposal_id, card.id],
     queryFn: async () => authoredSkillPreviewSchema.parse(await assistantJson(
@@ -46,6 +50,8 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
   });
   const data = preview.data;
   const actions = data?.actions ?? [];
+  useEffect(() => { setAcceptReducedScope(false); }, [data?.revision]);
+  const scopePending = data?.scope_unavailable || (data?.scope?.status === "reduced" && !acceptReducedScope);
   const path = `/assistant/nyxagent/agents/${encodeURIComponent(reference.agent_id)}/learning/proposals/${encodeURIComponent(reference.proposal_id)}`;
   async function refresh() {
     await Promise.all([
@@ -55,7 +61,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
   }
   async function decide(choice: "allow" | "deny") {
     setError(undefined);
-    try { await onDecision(choice); }
+    try { await (acceptReducedScope ? onDecision(choice, true) : onDecision(choice)); }
     catch { setError("Publication did not finish. The current state is shown below."); }
     finally { await refresh(); }
   }
@@ -93,14 +99,14 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {actions.includes("dismiss_card") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Dismiss confirmation</Button> : null}
     {actions.includes("discard") ? <Button variant="outline" disabled={deciding} onClick={() => void postAction("reject")}>Discard</Button> : null}
     {actions.includes("renew") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("approve")}>Request a new confirmation</Button> : null}
-    {actions.includes("publish") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Allow and publish</Button> : null}
-    {actions.includes("retry") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Retry publication</Button> : null}
-    {actions.includes("check") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Check again</Button> : null}
+    {actions.includes("publish") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Allow and publish</Button> : null}
+    {actions.includes("retry") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Retry publication</Button> : null}
+    {actions.includes("check") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Check again</Button> : null}
     {actions.includes("reprepare") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Review updated package</Button> : null}
     {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
   </div> : null;
   if (data?.state && data.state !== "active") {
-    const status = <p role="status" className="ml-[30px] text-[11px] text-muted-foreground">
+    const status = <p role="status" className="ml-[30px] text-11 text-muted-foreground">
       {data.state === "pinned" ? "Skill published and attached" : data.state === "discarded" ? "Skill draft discarded" : data.state === "invalidated" ? "Skill draft is no longer available" : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available." : "This confirmation no longer matches the draft."}
     </p>;
     if (!buttons && !error && !notice) return status;
@@ -121,12 +127,20 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {data?.base_scripts_not_copied ? <p className="text-[12px] text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
     {data?.files.map((file) => <div key={file.path}>
       <p className="text-[12px] font-medium">{file.path}</p>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-[11px]">{file.content}</pre>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-11">{file.content}</pre>
     </div>)}
     {data?.status === "publishing" ? <p role="status" className="text-[12px] text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
     {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
     {preview.isError ? <p role="alert" className="text-[12px] text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
-    {data?.failure_code ? <p role="alert" className="text-[12px] text-destructive">{publicationFailureText(data.failure_code, data.status)}</p> : null}
+    {data?.failure_code ? <p role="alert" className="text-[12px] text-destructive">{publicationFailureText(data.failure_code, data.status, "authored")}</p> : null}
+    {data?.failure_code && data.failure_rules?.length ? <ul className="list-disc pl-5 text-11 text-muted-foreground">{data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}</ul> : data?.failure_code && data.failure_details_unavailable ? <p className="text-11 text-muted-foreground">Format details unavailable.</p> : null}
+    {data?.scope?.omissions.length ? <ul aria-label="Declared omissions" className="list-disc pl-5 text-11 text-muted-foreground">{data.scope.omissions.map((text, index) => <li key={index}>{text}</li>)}</ul> : null}
+    {data?.coverage.length ? <div className="space-y-1 text-11 text-muted-foreground"><p>What NyxBot read</p><ul>{data.coverage.map((upload) => {
+      const coverage = upload.expired ? "expired" : upload.unknown ? "read coverage unavailable" : upload.reads === 0 ? "not read" : upload.lower_bound ? `at least ${upload.percent}%` : upload.percent === 100 ? "read completely" : `read ${upload.percent}%`;
+      return <li key={upload.id}>{upload.name}: {coverage}{upload.since_reset_percent != null ? `; ${upload.lower_bound ? "at least " : "read "}${upload.since_reset_percent}% since the last context reset` : ""}</li>;
+    })}</ul></div> : null}
+    {data?.coverage_omitted ? <p className="text-11 text-muted-foreground">{data.coverage_omitted} earlier uploads are not shown.</p> : null}
+    {data?.scope_unavailable ? <p role="alert" className="text-11 text-muted-foreground">Scope unavailable. Reload the draft before allowing publication.</p> : data?.scope?.status === "reduced" ? <div className="flex items-start gap-2"><Checkbox id={scopeId} checked={acceptReducedScope} onCheckedChange={(checked) => setAcceptReducedScope(checked === true)} /><Label htmlFor={scopeId} className="text-11 leading-4">I accept this reduced scope ({data.scope.omissions.length} declared omission{data.scope.omissions.length === 1 ? "" : "s"}).</Label></div> : data?.scope?.status === "complete" ? <p className="text-11 text-muted-foreground">NyxBot says this draft covers everything requested. The read coverage shown here is what NyxID observed.</p> : <p className="text-11 text-muted-foreground">Scope not declared (drafted before this release).</p>}
     {messages}
     {buttons}
   </section>;

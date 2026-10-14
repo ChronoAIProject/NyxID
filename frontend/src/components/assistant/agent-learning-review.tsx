@@ -136,7 +136,7 @@ export function AgentLearningReview({
             </p>
             {proposal.failure_code ? (
               <p role="alert" className="text-11 text-destructive">
-                {publicationFailureText(proposal.failure_code, proposal.status)}
+                {publicationFailureText(proposal.failure_code, proposal.status, proposal.source)}
               </p>
             ) : null}
             {errors[proposal.id] ? (

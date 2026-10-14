@@ -89,16 +89,34 @@ impl Prepared {
         self.binding.marker = Some(hex::encode(rand::random::<[u8; 32]>()));
     }
 
-    pub fn instructions(&self, history: &[AssistantMessage], recap: bool) -> String {
+    pub fn instructions(&self) -> String {
         let mut prompt = self.stable.clone();
         if let Some(marker) = &self.binding.marker {
             prompt.push_str(&format!("\nSession context marker: {marker}"));
         }
-        if recap {
-            // Recap text is untrusted and cannot introduce the current marker.
-            prompt.push_str(&self.redact(&engine::bounded_recap(history)));
-        }
         prompt
+    }
+
+    pub fn instructions_with_recap(&self, recap: &str) -> String {
+        let mut prompt = self.instructions();
+        prompt.push_str(&self.redact(recap));
+        prompt
+    }
+
+    pub async fn session_instructions<F, Fut>(
+        &self,
+        recap: bool,
+        cache: &tokio::sync::OnceCell<String>,
+        load: F,
+    ) -> AppResult<String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = AppResult<String>>,
+    {
+        if !recap {
+            return Ok(self.instructions());
+        }
+        Ok(self.instructions_with_recap(cache.get_or_try_init(load).await?))
     }
 
     pub fn input(&self, notes: &str, text: &str) -> String {
@@ -126,10 +144,6 @@ impl Prepared {
             Some(marker) => text.replace(marker, "[redacted context marker]"),
             None => text.to_owned(),
         }
-    }
-
-    pub fn reflection_window(&self) -> usize {
-        self.binding.marker.as_ref().map_or(0, String::len)
     }
 }
 
@@ -185,6 +199,36 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn ordinary_turn_skips_recap_and_recovery_loads_it_once() {
+        let context = prepared();
+        let cache = tokio::sync::OnceCell::new();
+        let loads = std::cell::Cell::new(0);
+        let load = || async {
+            loads.set(loads.get() + 1);
+            Ok("Prior history".to_owned())
+        };
+        assert_eq!(
+            context
+                .session_instructions(false, &cache, load)
+                .await
+                .unwrap(),
+            context.instructions()
+        );
+        assert_eq!(loads.get(), 0);
+        assert!(cache.get().is_none());
+        for _ in 0..2 {
+            assert!(
+                context
+                    .session_instructions(true, &cache, load)
+                    .await
+                    .unwrap()
+                    .contains("Prior history")
+            );
+        }
+        assert_eq!(loads.get(), 1);
+    }
+
     #[test]
     fn guest_text_and_quoted_notes_cannot_forge_the_current_marker() {
         let mut context = prepared();
@@ -210,7 +254,7 @@ mod tests {
         assert_eq!(context.binding.fingerprint, "test-fingerprint");
         assert!(
             context
-                .instructions(&[], false)
+                .instructions()
                 .contains(context.binding.marker.as_deref().unwrap())
         );
     }

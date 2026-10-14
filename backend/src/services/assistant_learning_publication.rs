@@ -16,6 +16,77 @@ use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
 
+#[derive(Clone, Copy)]
+enum ContractRule {
+    AngleBrackets,
+    ReservedName,
+    RootEntry,
+}
+
+impl ContractRule {
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::AngleBrackets => "angle_brackets_not_allowed",
+            Self::ReservedName => "reserved_name_term",
+            Self::RootEntry => "root_entry_not_allowed",
+        }
+    }
+
+    fn wire_rule(self, field: &str) -> skills::OrnnValidationRule {
+        use skills::OrnnValidationRule as Rule;
+        match self {
+            Self::AngleBrackets if field == "description" => Rule::DescriptionNoXml,
+            Self::AngleBrackets => Rule::NoXmlBrackets,
+            Self::ReservedName => Rule::NameNoForbiddenTerms,
+            Self::RootEntry => Rule::AllowedRootItems,
+        }
+    }
+}
+
+/// Local wire-contract diagnostics and explicit Ornn verdicts consume the repair budget.
+pub(crate) fn is_format_rejection(
+    diagnostic: &crate::errors::skill_draft::SkillDraftValidation,
+) -> bool {
+    // Every local contract diagnostic carries a mapped wire rule. Explicit
+    // preflight verdicts count even when Ornn supplies no individual rules.
+    !diagnostic.rules.is_empty() || diagnostic.rule == "ornn_validation_failed"
+}
+
+fn contract_invalid(rule: ContractRule, field: &str) -> AppError {
+    let mut diagnostic =
+        crate::errors::skill_draft::SkillDraftValidation::at(rule.diagnostic(), field);
+    diagnostic.rules = vec![rule.wire_rule(field).as_str()];
+    diagnostic.into()
+}
+
+/// The package contract enforced by Ornn's wire validator. This is
+/// deliberately narrow and runs after the source-specific content validator so L1's
+/// credential/provenance diagnostics remain unchanged.
+pub(crate) fn validate_ornn_contract(body: &GeneratedProposal) -> AppResult<()> {
+    if body.name.contains(['<', '>']) {
+        return Err(contract_invalid(ContractRule::AngleBrackets, "name"));
+    }
+    if body.description.contains(['<', '>']) {
+        return Err(contract_invalid(ContractRule::AngleBrackets, "description"));
+    }
+    if body.name.to_ascii_lowercase().contains("claude")
+        || body.name.to_ascii_lowercase().contains("anthropic")
+    {
+        return Err(contract_invalid(ContractRule::ReservedName, "name"));
+    }
+    for (index, file) in body.files.iter().enumerate() {
+        let path = &file.path;
+        let allowed = path.starts_with("references/") || path.starts_with("assets/");
+        if !allowed {
+            return Err(contract_invalid(
+                ContractRule::RootEntry,
+                &format!("files[{index}].path"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn invalid() -> AppError {
     AppError::Conflict("publication_integrity_failed".into())
 }
@@ -26,7 +97,10 @@ pub(super) enum PublicationError {
     Ambiguous(Option<u16>),
     BaseChanged,
     BaseInterfaceIncompatible,
-    Validation(Option<u16>),
+    Validation {
+        status: Option<u16>,
+        rules: Vec<skills::OrnnValidationRule>,
+    },
     AuthMissing(u16),
     ReadForbidden(u16),
     SkillNotFound(u16),
@@ -36,11 +110,19 @@ pub(super) enum PublicationError {
 }
 
 impl PublicationError {
+    pub(super) fn rules(&self) -> Vec<String> {
+        match self {
+            Self::Validation { rules, .. } => {
+                rules.iter().map(|rule| rule.as_str().to_owned()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
     pub(super) fn status(&self) -> Option<u16> {
         match self {
-            Self::Ambiguous(status) | Self::Validation(status) | Self::Unavailable(status) => {
-                *status
-            }
+            Self::Ambiguous(status)
+            | Self::Validation { status, .. }
+            | Self::Unavailable(status) => *status,
             Self::AuthMissing(status)
             | Self::ReadForbidden(status)
             | Self::SkillNotFound(status) => Some(*status),
@@ -60,7 +142,7 @@ impl PublicationError {
             (Self::Integrity, _) => Code::OrnnValidationFailed,
             (Self::BaseChanged, _) => Code::BaseChanged,
             (Self::BaseInterfaceIncompatible, _) => Code::BaseInterfaceIncompatible,
-            (Self::Validation(_), _) => Code::OrnnValidationFailed,
+            (Self::Validation { .. }, _) => Code::OrnnValidationFailed,
             (Self::AuthMissing(_), _) => Code::OrnnAuthMissing,
             (Self::ReadForbidden(_), _) => Code::OrnnReadForbidden,
             (
@@ -85,7 +167,14 @@ impl PublicationError {
             Self::BaseInterfaceIncompatible => {
                 AppError::Conflict("base_interface_incompatible".into())
             }
-            Self::Validation(_) => AppError::Conflict("ornn_validation_failed".into()),
+            Self::Validation { rules, .. } => {
+                let mut diagnostic = crate::errors::skill_draft::SkillDraftValidation::at(
+                    "ornn_validation_failed",
+                    "draft",
+                );
+                diagnostic.rules = rules.into_iter().map(|rule| rule.as_str()).collect();
+                diagnostic.into()
+            }
             Self::AuthMissing(_) => AppError::Conflict("ornn_auth_missing".into()),
             Self::ReadForbidden(_) => AppError::Conflict("ornn_read_forbidden".into()),
             Self::SkillNotFound(_) => AppError::Conflict("ornn_skill_not_found".into()),
@@ -586,9 +675,12 @@ pub(super) async fn validate(reader: &impl OrnnReader, bytes: &[u8]) -> Publicat
         OrnnOutcome::Response {
             code: OrnnCode::ValidationFailed,
             status: status @ 400..=499,
-            ..
+            rules,
         } => {
-            return Err(PublicationError::Validation(Some(status)));
+            return Err(PublicationError::Validation {
+                status: Some(status),
+                rules,
+            });
         }
         other => return read_result(other).map(|_| ()),
     };
@@ -601,7 +693,10 @@ pub(super) async fn validate(reader: &impl OrnnReader, bytes: &[u8]) -> Publicat
     };
     // Only an explicit verdict refuses the package.
     if !valid || violations {
-        return Err(PublicationError::Validation(None));
+        return Err(PublicationError::Validation {
+            status: None,
+            rules: skills::validation_rules(&response),
+        });
     }
     Ok(())
 }
@@ -611,6 +706,7 @@ pub(super) enum PublishOutcome {
     Refused {
         code: FailureCode,
         status: Option<u16>,
+        rules: Vec<skills::OrnnValidationRule>,
     },
     VersionConflict {
         status: u16,
@@ -648,11 +744,16 @@ pub(super) async fn publish_classified(
         OrnnOutcome::LocalRefusal(_) | OrnnOutcome::LocalError(_) => PublishOutcome::Refused {
             code: FailureCode::NyxidRefused,
             status: None,
+            rules: vec![],
         },
         OrnnOutcome::Uncertain | OrnnOutcome::ProxyError | OrnnOutcome::Interrupted => {
             PublishOutcome::Uncertain { status: None }
         }
-        OrnnOutcome::Response { status, code } => {
+        OrnnOutcome::Response {
+            status,
+            code,
+            rules,
+        } => {
             if !(400..500).contains(&status) || status == 408 || status == 429 {
                 return PublishOutcome::Uncertain {
                     status: Some(status),
@@ -693,6 +794,7 @@ pub(super) async fn publish_classified(
                 |code| PublishOutcome::Refused {
                     code,
                     status: Some(status),
+                    rules,
                 },
             )
         }
@@ -824,6 +926,7 @@ pub(super) async fn legacy_release_evidence(
         OrnnOutcome::Response {
             status: 404,
             code: OrnnCode::SkillVersionNotFound,
+            ..
         } => {}
         _ => return LegacyReleaseEvidence::Uncertain,
     }
@@ -856,6 +959,9 @@ pub(super) fn binding(
     skills_revision: i64,
 ) -> Value {
     let mut binding = json!({"agent_id":row.agent_id,"proposal_id":row.id,"owner_id":row.owner_id,"config_revision":row.config_revision,"skills_revision":skills_revision,"revision":row.revision,"fingerprint":row.fingerprint,"operation_id":p.operation_id,"package_sha256":p.sha256,"version":p.version});
+    if let Some(scope_digest) = &row.scope_digest {
+        binding["scope_digest"] = json!(scope_digest);
+    }
     if row.source == crate::models::assistant_agent_learning::ProposalSource::Authored {
         binding["authored_skill"] = json!({"agent_id":row.agent_id,"proposal_id":row.id,"revision":row.revision,"skills_revision":skills_revision});
     }
@@ -864,6 +970,39 @@ pub(super) fn binding(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_local_contract_rule_consumes_format_budget_and_maps_to_wire_rule() {
+        for rule in [
+            super::ContractRule::AngleBrackets,
+            super::ContractRule::ReservedName,
+            super::ContractRule::RootEntry,
+        ] {
+            for field in ["name", "description", "files[0].path"] {
+                let crate::errors::AppError::SkillDraftValidation(diagnostic) =
+                    super::contract_invalid(rule, field)
+                else {
+                    panic!("wrong diagnostic type")
+                };
+                assert!(super::is_format_rejection(&diagnostic));
+                assert_eq!(diagnostic.rules, vec![rule.wire_rule(field).as_str()]);
+            }
+        }
+        for (rule, expected) in [
+            ("ornn_validation_failed", true),
+            ("size", false),
+            ("credential_shape", false),
+            ("scope_required", false),
+            ("base_skill_mismatch", false),
+        ] {
+            assert_eq!(
+                super::is_format_rejection(&crate::errors::skill_draft::SkillDraftValidation::at(
+                    rule, "draft"
+                )),
+                expected
+            );
+        }
+    }
+
     use super::*;
     use std::io::Read;
     use uuid::Uuid;
@@ -878,6 +1017,7 @@ mod tests {
             OrnnOutcome::Response {
                 status: self.1,
                 code: self.0,
+                rules: vec![],
             }
         }
     }
@@ -910,7 +1050,8 @@ mod tests {
             .await,
             PublishOutcome::Refused {
                 code: FailureCode::OrnnInterfaceChangeRequiresMajor,
-                status: Some(409)
+                status: Some(409),
+                ..
             }
         ));
         assert!(matches!(
@@ -965,10 +1106,17 @@ mod tests {
             let error = validate(&ClassifiedReader(code, status), b"zip")
                 .await
                 .unwrap_err();
-            assert_eq!(
-                error.into_app_error().to_string(),
-                AppError::Conflict(expected.into()).to_string()
-            );
+            let error = error.into_app_error();
+            if expected == "ornn_validation_failed" {
+                assert!(
+                    matches!(error, AppError::SkillDraftValidation(diagnostic) if diagnostic.rule == expected)
+                );
+            } else {
+                assert_eq!(
+                    error.to_string(),
+                    AppError::Conflict(expected.into()).to_string()
+                );
+            }
         }
         assert!(matches!(
             validate(&ClassifiedReader(OrnnCode::Unknown, 503), b"zip").await,
@@ -977,6 +1125,7 @@ mod tests {
         let anomalous = read_result(OrnnOutcome::Response {
             status: 451,
             code: OrnnCode::Forbidden,
+            rules: vec![],
         })
         .unwrap_err();
         assert_eq!(anomalous.status(), Some(451));
@@ -1114,7 +1263,7 @@ mod tests {
         ));
         assert!(matches!(
             validate(&verdict(br#"{"data":{"valid":false}}"#), b"zip").await,
-            Err(PublicationError::Validation(None))
+            Err(PublicationError::Validation { status: None, .. })
         ));
         assert!(matches!(
             validate(
@@ -1122,7 +1271,7 @@ mod tests {
                 b"zip"
             )
             .await,
-            Err(PublicationError::Validation(None))
+            Err(PublicationError::Validation { status: None, .. })
         ));
     }
 

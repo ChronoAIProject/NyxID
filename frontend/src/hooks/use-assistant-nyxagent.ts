@@ -211,14 +211,14 @@ export function useNyxAgentAssistantChat({
     new Map<string, { owner: string | undefined; acknowledgements: NyxAgentAcknowledgement[] }>(),
   );
   const decision = useMutation({
-    mutationFn: async ({ id, choice }: { id: string; choice: "allow" | "deny" }) => {
+    mutationFn: async ({ id, choice, acceptReducedScope }: { id: string; choice: "allow" | "deny"; acceptReducedScope?: boolean }) => {
       if (!selectedConversationId) throw new Error("Choose a conversation first.");
       const now = Date.now();
       if (now - lastDecision.current < 750) {
         throw new Error("Please wait a moment before deciding again.");
       }
       lastDecision.current = now;
-      return nyxAgentTransport.decide(selectedConversationId, id, choice);
+      return nyxAgentTransport.decide(selectedConversationId, id, choice, acceptReducedScope);
     },
     onSuccess: (acknowledgement, { choice }) => {
       // An allowed card resumes the assistant: the refusal told it to retry after

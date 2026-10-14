@@ -837,6 +837,39 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
     )
     .await
     .unwrap();
+    let (missing, _) = setup_link_tool(
+        &state,
+        OWNER,
+        "nyxa-00000000000000000000000000000000",
+        "lark",
+        None,
+        &team,
+    )
+    .await
+    .unwrap();
+    assert!(!missing["url"].as_str().unwrap().contains("return_to"));
+    let group_id = format!("nyxg-{}", Uuid::new_v4().simple());
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id":&home.id}, doc! {"$set":{"group_id":&group_id}})
+        .await
+        .unwrap();
+    let (group, _) = setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
+        .await
+        .unwrap();
+    assert!(
+        group["url"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("return_to={group_id}"))
+    );
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id":&home.id}, doc! {"$unset":{"group_id":""}})
+        .await
+        .unwrap();
     let unknown = setup_link_tool(&state, OWNER, &home.id, "myspace", None, &team).await;
     assert!(matches!(unknown, Err(AppError::ValidationError(message)) if message.contains("lark")));
     // Without an administrator-configured creation manager, Telegram uses
@@ -845,10 +878,10 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .await
         .unwrap();
     assert!(
-        telegram["url"]
-            .as_str()
-            .unwrap()
-            .ends_with("/channel-bots/connect/telegram?label=Helper"),
+        telegram["url"].as_str().unwrap().contains(&format!(
+            "/channel-bots/connect/telegram?label=Helper&return_to={}",
+            home.id
+        )),
         "{telegram}"
     );
     let (lark, _) = setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
@@ -858,7 +891,7 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         lark["url"]
             .as_str()
             .unwrap()
-            .ends_with("/channel-bots/connect/lark")
+            .ends_with(&format!("/channel-bots/connect/lark?return_to={}", home.id))
     );
     assert!(
         lark["note"]

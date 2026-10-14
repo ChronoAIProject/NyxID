@@ -969,6 +969,7 @@ pub(crate) async fn webhook(
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
                         steering: None,
+                        author: None,
                         voice: None,
                         execution_pending: false,
                         id: message_id,
@@ -982,6 +983,7 @@ pub(crate) async fn webhook(
                         error_code: None,
                         created_at: now,
                         activities: vec![],
+                        activity_total: 0,
                         attachments: vec![],
                         origin: Some(TurnOrigin::Trigger),
                         via: None,

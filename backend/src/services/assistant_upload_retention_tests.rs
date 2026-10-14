@@ -63,6 +63,7 @@ async fn root(
         sections: Vec::new(),
     };
     let row = AssistantUpload {
+        extracted_chars: None,
         id: id.clone(),
         origin: "user_upload".into(),
         user_id: owner.into(),
@@ -82,6 +83,8 @@ async fn root(
         created_at: now,
         expires_at: None,
         bound_at: bound.then_some(now),
+        reads: 0,
+        coverage: Vec::new(),
     };
     state
         .db

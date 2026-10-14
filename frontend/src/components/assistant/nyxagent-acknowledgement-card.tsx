@@ -47,7 +47,7 @@ export function NyxAgentAcknowledgementCard({
 }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly deciding: boolean;
-  readonly onDecision: (choice: "allow" | "deny") => Promise<unknown>;
+  readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
   const [error, setError] = useState<string>();
   if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} deciding={deciding} onDecision={onDecision} />;

@@ -90,10 +90,19 @@ pub struct TurnActivity {
     pub label: String,
     /// `running`, `completed`, or `error`.
     pub status: String,
+    #[serde(default)]
+    pub failure: Option<ToolFailure>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub started_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub ended_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolFailure {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
 }
 
 /// Metadata for an image a tool returned during a turn; the bytes live in
@@ -138,6 +147,8 @@ pub struct ActiveTurn {
     pub machine_node_ids: Vec<String>,
     #[serde(default)]
     pub continuations: u32,
+    #[serde(default)]
+    pub activity_total: i64,
     /// Rolling hashes only; never persist tool arguments or results. Reset per continuation.
     #[serde(default)]
     pub tool_progress: ToolProgress,

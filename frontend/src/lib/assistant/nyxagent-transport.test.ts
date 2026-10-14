@@ -1,3 +1,7 @@
+import { createElement } from "react";
+import { render, screen } from "@testing-library/react";
+import { ChatMessageList } from "@/components/assistant/chat-message";
+import { nyxAgentHistorySchema } from "@/schemas/assistant-nyxagent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NyxAgentTransport, CONTEXT_RESET_NOTICE } from "./nyxagent-transport";
 import { transitionAssistantIdentity } from "./identity";
@@ -424,6 +428,15 @@ describe("NyxAgent server-backed transport", () => {
     const transport = new NyxAgentTransport();
     await transport.history(id);
     expect(transport.session(id).messages.at(-1)?.error).toContain("may have taken effect");
+  });
+
+  it("keeps the idle-timeout warning uncertainty-aware when restoring a transcript", async () => {
+    const page = history();
+    page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "idle_timeout" };
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    expect(transport.session(id).messages.at(-1)?.error).toContain("Check what it already did");
   });
 
   it("detects repeated index cursors", async () => {
@@ -857,4 +870,95 @@ describe("steering transport", () => {
     controller!.close();
     await sending;
   });
+});
+
+it("tracks a failed live stream through polling and clears interruption on settle", async () => {
+  let active = true;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ event: "turn.status", conversation_id: id, turn_id: "turn", status: "running", cursor: 1 })}\n\n`));
+      controller.close();
+    } }));
+    const page = history();
+    if (active) { page.messages.pop(); page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] }; }
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  // send refuses a known active turn, so let admission establish it first.
+  active = false;
+  await transport.history(id);
+  active = true;
+  await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow(/interrupted/);
+  await transport.history(id);
+  expect(transport.session(id).messages.find((message) => message.status === "streaming")?.turnStatus?.interrupted).toBe(true);
+  active = false;
+  await transport.history(id);
+  expect(transport.session(id).messages.some((message) => message.turnStatus?.interrupted)).toBe(false);
+});
+
+it.each([null, undefined])("parses backend failures with status %s through active polling, settlement and reload", async (status) => {
+  let active = true;
+  const attachment = { id: "upload", origin: "user_upload", content_type: "text/plain", size: 5, label: "source.txt", pages: null, image_input: null, expired: false };
+  const activity = { id: "failed", label: "tool", status: "error", started_at: start, ended_at: reset, machine: null, failure: { kind: "tool_error", ...(status === null ? { status: null } : {}) } };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    const wire = {
+      ...page,
+      conversation: { ...page.conversation, active_turn: active ? { turn_id: "turn", started_at: start, activities: [activity], attachments: [attachment], activity_total: null } : null },
+      messages: active ? page.messages.slice(0, 1) : [{ ...page.messages[0] }, { ...page.messages[1], activities: [activity], attachments: [attachment], activity_total: null }],
+    };
+    const parsed = nyxAgentHistorySchema.parse(wire);
+    const failure = active ? parsed.conversation.active_turn?.activities[0]?.failure : parsed.messages[1]?.activities[0]?.failure;
+    expect(failure?.status).toBeUndefined();
+    return json(wire);
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  await transport.history(id);
+  expect(transport.isRunning(id)).toBe(true);
+  expect(transport.session(id).messages.at(-1)?.toolCalls?.[0]?.failure).toEqual({ kind: "tool_error", ...(status === null ? { status: undefined } : {}) });
+  active = false;
+  await transport.history(id);
+  expect(transport.isRunning(id)).toBe(false);
+  expect(transport.session(id).status).toBe("completed_text");
+  expect(transport.session(id).messages.at(-1)?.toolCalls?.[0]?.status).toBe("error");
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.isRunning(id)).toBe(false);
+  expect(reloaded.session(id).messages.at(-1)?.content).toBe("Answer 界");
+  expect(reloaded.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.kind).toBe("tool_error");
+});
+
+it.each(["", "Partial reply"])("keeps stopped replies visible live and after transcript reload: %s", async (text) => {
+  let stopped = false;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (endpoint.endsWith("/stop")) { stopped = true; return new Response(null, { status: 204 }); }
+    const page = history();
+    if (!stopped) {
+      page.messages.pop();
+      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+    } else {
+      page.messages[1] = { ...page.messages[1]!, text, status: "failed", error_code: "cancelled" };
+    }
+    return json(page);
+  };
+  const assertVisible = (transport: NyxAgentTransport) => {
+    const session = transport.session(id);
+    expect(session.status).toBe("stopped");
+    expect(session.messages.at(-1)?.status).toBe("stopped");
+    const view = render(createElement(ChatMessageList, { session, bottomInset: 0 }));
+    expect(screen.getByRole("status", { name: "Turn stopped" })).toHaveTextContent("Stopped");
+    if (text) expect(screen.getByText(text)).toBeVisible();
+    expect(view.container.querySelector("[data-empty-turn-error]")).toBeNull();
+    view.unmount();
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  await transport.stop(id);
+  await transport.history(id);
+  assertVisible(transport);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  assertVisible(reloaded);
 });

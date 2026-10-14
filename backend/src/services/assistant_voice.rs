@@ -238,6 +238,7 @@ pub(crate) async fn enqueue_in_session(
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
                 steering: None,
+                author: Some(crate::models::assistant_message::MessageAuthor::Owner),
                 voice: None,
                 execution_pending: true,
                 id: request.message_id.clone(),
@@ -251,6 +252,7 @@ pub(crate) async fn enqueue_in_session(
                 error_code: None,
                 created_at: request.created_at,
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: Some(TurnOrigin::User),
                 via: Some("voice".into()),
@@ -343,6 +345,7 @@ pub(crate) async fn publish_result(
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
                         steering: None,
+                        author: None,
                         id: id.clone(),
                         conversation_id: current.conversation_id,
                         user_id: current.user_id,
@@ -354,6 +357,7 @@ pub(crate) async fn publish_result(
                         error_code: source.error_code,
                         created_at: Utc::now(),
                         activities: source.activities,
+                        activity_total: source.activity_total,
                         attachments: source.attachments,
                         origin: source.origin,
                         via: Some("voice".into()),
@@ -741,6 +745,7 @@ async fn settle_lost_in_session(
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             steering: None,
+            author: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,
             user_id: row.user_id.clone(),
@@ -752,6 +757,7 @@ async fn settle_lost_in_session(
             error_code: Some("turn_lost".into()),
             created_at: Utc::now(),
             activities: Vec::new(),
+            activity_total: 0,
             attachments: Vec::new(),
             origin: Some(TurnOrigin::Orchestrator),
             via: Some("voice".into()),

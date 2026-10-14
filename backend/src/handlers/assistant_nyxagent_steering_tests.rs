@@ -476,15 +476,13 @@ async fn assistant_steer_excluded_from_anchors_and_only_labelled_in_recap() {
         &history,
     )
     .unwrap();
-    assert!(
-        !prepared
-            .instructions(&history, false)
-            .contains("NEW GUIDANCE")
-    );
+    assert!(!prepared.instructions().contains("NEW GUIDANCE"));
     assert!(!prepared.input("", "Next request").contains("NEW GUIDANCE"));
     assert!(
         prepared
-            .instructions(&history, true)
+            .instructions_with_recap(&crate::services::assistant_nyxagent::bounded_recap(
+                &history
+            ))
             .contains("user (steering, applied): NEW GUIDANCE")
     );
 }

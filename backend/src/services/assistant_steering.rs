@@ -115,6 +115,7 @@ pub async fn reserve(
             let response = row.active_turn.as_ref().unwrap().running_response.as_ref().unwrap();
             let now = Utc::now();
             let message = AssistantMessage {
+                author: Some(crate::models::assistant_message::MessageAuthor::Owner),
                 steering: Some(Box::new(Steering {
                     finalized: false,
                     client_request_id: client_id.clone(), response_id: response.response_id.clone(), session_id: response.session_id.clone(),
@@ -123,7 +124,7 @@ pub async fn reserve(
                 voice: None, execution_pending: false, id: Uuid::new_v4().to_string(),
                 conversation_id: id.clone(), user_id: owner.clone(), seq: row.message_count + 1,
                 turn_id: turn_id.clone(), role: "user".into(), text: text.clone(), status: "completed".into(),
-                error_code: None, created_at: now, activities: vec![], attachments: vec![], origin: row.active_turn.as_ref().map(|turn| turn.origin), via: None,
+                error_code: None, created_at: now, activities: vec![], activity_total: 0, attachments: vec![], origin: row.active_turn.as_ref().map(|turn| turn.origin), via: None,
             };
             row.message_count += 1;
             row.updated_at = now;

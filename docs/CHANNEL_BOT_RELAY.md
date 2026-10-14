@@ -1883,3 +1883,12 @@ Only one setup attempt can hold a link's renewable claim. Bot insertion and its 
 Existing bot creation entry points pass no link claim, and existing frontend callers use their original endpoints outside the hosted context. Existing service callbacks retain their HTTP client, signature contract, timestamp behavior, and `developer_webhook` rate bucket. Bot callbacks opt into public-address validation, DNS pinning, redirects disabled, and the separate `developer_channel_webhook` bucket. Their sweep runs in a separate task while sharing the [configured sweep interval](ENV.md#hosted-connect-links).
 
 Regression coverage lives beside the new service and handlers, in [`telegram_new_tests.rs`](../backend/src/services/telegram_new_tests.rs), and in the [hosted page tests](../frontend/src/pages/channel-connect-link.test.tsx). Existing `connect_link_service`, `connect_links`, `developer_webhook_service`, and CLI `commands::connect` tests cover the shared compatibility boundary.
+
+### Returning to an assistant chat
+
+NyxBot setup links may carry one owner-scoped `return_to` identifier (`nyxa-…`
+or `nyxg-…`). The setup page preserves it through request URL updates and
+offers Back to chat on completion, cancellation, expiry and error. In-chat
+Telegram setup keeps the request in component state and resumes the current
+request on remount, preserving the chat URL and composer. No arbitrary URL is
+accepted or assigned, and the assistant page performs its normal ownership check.

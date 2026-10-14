@@ -245,6 +245,8 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
             .unwrap(),
         );
         definitions.push(crate::services::assistant_upload_service::definition());
+        definitions.push(crate::services::assistant_upload_service::list_definition());
+        definitions.push(crate::services::assistant_nyxagent::conversation_history_definition());
     }
     let expected: Vec<Value> = definitions
         .iter()

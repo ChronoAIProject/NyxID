@@ -372,8 +372,9 @@ API that has no idempotency key.
 
 The review card shows copy for the fixed failure code. NyxID stores and audits
 the durable publication stage for recovery.
-Ornn problem responses contribute only their root `code` and HTTP status;
-NyxID never stores Ornn detail text. Authentication and write permission
+Ornn problem responses contribute their root `code`, HTTP status, and up to
+ten allowlisted package-validation rule identifiers. NyxID never stores raw
+response bodies, messages, or detail text. Authentication and write permission
 refusals are distinct from package validation, interface changes, version
 conflicts, unavailable Ornn, and an uncertain dispatch. A verified Ornn version
 is checkpointed before the agent pin transaction; a failed pin reports
@@ -387,9 +388,11 @@ only if that operation has never had an uncertain dispatch. The same
 transaction releases its reserved target, allowing a revised draft to claim
 that version. A later retry of the first draft can claim it again only if
 the target remains free. Invalid package, dependency, name and interface
-failures require the owner to discard the draft and ask NyxBot for a revised
-one; they do not offer a write retry. A version conflict after dispatch keeps
-the barrier and permits only read-only checks until publication is resolved.
+failures do not offer a write retry. For authored drafts, the fenced failure
+transaction queues a durable repair event and wakes NyxBot to request a corrected
+draft. Learned proposals do not queue that authored repair event; the owner
+should discard the proposal and ask NyxBot for a revised one. A version conflict
+after dispatch keeps the barrier and permits only read-only checks until publication is resolved.
 Once an attempt is uncertain, every later click
 reconciles the exact version read-only. An absent version is not proof that a
 delayed request cannot still land. If the version later appears, NyxID checks
@@ -750,7 +753,8 @@ older card after publication has started dismisses that confirmation and leaves
 the operation available for recovery. After a refusal that the same package
 cannot overcome (an interface, validation, package, dependency or name refusal,
 a changed source skill, or a version conflict before dispatch), the card offers
-**Deny** or **Discard** and no retry; NyxBot can draft a revised package. When
+**Deny** or **Discard** and no retry; NyxBot is notified to draft a revised
+package. When
 another draft's operation holds the target version and is the only blocker, the
 preview reports a computed `target_busy` (not stored) and withholds the write.
 A changed source skill replaces a transient failure code on an operation that
@@ -807,6 +811,34 @@ use `field: "draft"`. Other fixed rules cover required text, slug/path constrain
 duplicates, text-only content, input/schema/kind shape and base matching. Unknown
 JSON keys report their containing object. No matched text or raw parser errors
 enter diagnostics, logs or audit. No new permission or publication path is added.
+
+### Format validation and recovery
+
+Authored publication checks the local Ornn package contract and performs a
+read-only Ornn format preflight before creating a review card. A format refusal
+remains a draft validation diagnostic that the agent can correct in the same turn; the owner is not asked to relay opaque
+provider errors. Publication state and approval remain authoritative.
+
+During a rolling deployment, keep `assistant:agent-learning` disabled for
+affected people until every replica understands the additive learning fields.
+Older replicas fail closed when presented with a newer approval binding.
+
+`draft_agent_skill` requires `scope: {status, omissions}`. Complete declarations
+have no omissions; reduced declarations have 1–8 omissions of at most 200
+characters each, using the authored text/credential rules. Scope is encrypted
+separately and binds both request identity and the owner's approval digest.
+Acceptance stores the revision, digest and omission count, with a metadata-only
+audit entry. It can resume only that same operation; an edit voids acceptance.
+Legacy proposals show undeclared scope and keep their original digest behavior.
+
+Local Ornn package-format and live preflight refusals count toward the durable three-rejection
+budget for a conversation/turn. The startup-created 24-hour TTL index cleans the
+separate `assistant_skill_draft_attempts` collection. Preflight failure returns
+fixed mapped rule IDs so NyxBot can repair within the turn; no card exists for an
+invalid package. Availability failures allow a card for later publication.
+Publication failure requiring new bytes and successful pinning queue a stable
+`skill_publication` event in the fenced state transaction. The handler wakes
+NyxBot after commit; the deferred queue sweep handles interruption after commit.
 
 ## Recovering drafts created before #1828
 

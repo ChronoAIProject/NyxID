@@ -1908,8 +1908,16 @@ pub(crate) async fn setup_link_tool(
         state.config.frontend_url.trim_end_matches('/'),
         urlencode(&platform)
     );
+    // Carry only an owner-scoped NyxID identifier back to the originating chat.
+    // The client performs a second permission check when it opens the target.
+    let return_to = engine::setup_return_target(&state.db, owner, source_conversation_id).await?;
     if let Some(label) = &label {
         url.push_str(&format!("?label={}", urlencode(label)));
+    }
+    if let Some(target) = return_to {
+        url.push(if url.contains('?') { '&' } else { '?' });
+        url.push_str("return_to=");
+        url.push_str(&urlencode(&target));
     }
     let now = Utc::now();
     let family = canonical_platform(&platform).to_owned();

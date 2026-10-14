@@ -1,4 +1,18 @@
 use super::*;
+
+#[test]
+fn secret_prefix_suffix_withholds_only_live_prefixes() {
+    assert_eq!(
+        secret_prefix_suffix("普通の文章", &["secret", "marker"]),
+        ""
+    );
+    assert_eq!(secret_prefix_suffix("hello sec", &["secret"]), "sec");
+    assert_eq!(secret_prefix_suffix("hello secret", &["secret"]), "");
+    assert_eq!(secret_prefix_suffix("你好 mar", &["marker"]), "mar");
+    assert_eq!(secret_prefix_suffix("x", &["x"]), "");
+    assert_eq!(secret_prefix_suffix("你好 m", &["marker"]), "m");
+    assert_eq!(secret_prefix_suffix("hello", &["", "secret"]), "");
+}
 use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 use crate::services::assistant_agent_credential_service as credentials;
 use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
@@ -261,6 +275,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
             steering: None,
+            author: None,
             voice: None,
             execution_pending: false,
             id: Uuid::new_v4().to_string(),
@@ -274,6 +289,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             error_code: None,
             created_at: Utc::now(),
             activities: Vec::new(),
+            activity_total: 0,
             attachments: Vec::new(),
             origin: None,
             via: None,
@@ -284,8 +300,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
         &[2; 32], &row, None, &messages,
     )
     .unwrap();
-    let base = context.instructions(&[], false);
-    let prompt = context.instructions(&messages, true);
+    let base = context.instructions();
+    let prompt = context.instructions_with_recap(&bounded_recap(&messages));
     assert!(prompt.starts_with(SYSTEM_PROMPT));
     assert!(prompt.contains("Prior conversation history"));
     assert!(prompt.contains("marker29"));
@@ -517,6 +533,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             heartbeat_at: None,
             trigger_run_id: None,
             activities: Vec::new(),
+            activity_total: 0,
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
             origin: Default::default(),
@@ -895,9 +912,15 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
     let owner = user.to_string();
     // No live turn: nothing is recorded.
     assert_eq!(
-        activity_started(&db, &owner, "nyxa-00000000000000000000000000000000", "x")
-            .await
-            .unwrap(),
+        activity_started_for_turn(
+            &db,
+            &owner,
+            "nyxa-00000000000000000000000000000000",
+            "stale",
+            "x"
+        )
+        .await
+        .unwrap(),
         None
     );
     let row = begin_turn(
@@ -914,24 +937,56 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
             .unwrap()
             .unwrap();
     let long_label = "l".repeat(500);
-    let first = activity_started(&db, &owner, &row.id, &long_label)
+    let first = activity_started_for_turn(
+        &db,
+        &owner,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        &long_label,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        activity_started_for_turn(
+            &db,
+            "other",
+            &row.id,
+            &row.active_turn.as_ref().unwrap().turn_id,
+            "x"
+        )
+        .await
+        .unwrap(),
+        None
+    );
+    activity_finished_for_turn(
+        &db,
+        &owner,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        &first,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    for i in 0..MAX_TURN_ACTIVITIES {
+        activity_started_for_turn(
+            &db,
+            &owner,
+            &row.id,
+            &row.active_turn.as_ref().unwrap().turn_id,
+            &format!("github__tool_{i}"),
+        )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        activity_started(&db, "other", &row.id, "x").await.unwrap(),
-        None
-    );
-    activity_finished(&db, &owner, &row.id, &first, true)
-        .await
-        .unwrap();
-    for i in 0..MAX_TURN_ACTIVITIES {
-        activity_started(&db, &owner, &row.id, &format!("github__tool_{i}"))
-            .await
-            .unwrap()
-            .unwrap();
     }
     let live = get(&db, &owner, &row.id).await.unwrap();
+    assert_eq!(
+        live.active_turn.as_ref().unwrap().activity_total,
+        MAX_TURN_ACTIVITIES + 1
+    );
     let activities = &live.active_turn.as_ref().unwrap().activities;
     assert_eq!(
         activities.len() as i64,
@@ -949,16 +1004,40 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
             .all(|a| a.status == "running" && a.ended_at.is_none())
     );
     let last = activities.last().unwrap().id.clone();
-    activity_finished(&db, &owner, &row.id, &last, false)
-        .await
-        .unwrap();
+    activity_finished_for_turn(
+        &db,
+        &owner,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        &last,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     // Unknown IDs and wrong owners are no-ops.
-    activity_finished(&db, "other", &row.id, &last, true)
-        .await
-        .unwrap();
-    activity_finished(&db, &owner, &row.id, "missing", true)
-        .await
-        .unwrap();
+    activity_finished_for_turn(
+        &db,
+        "other",
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        &last,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    activity_finished_for_turn(
+        &db,
+        &owner,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        "missing",
+        true,
+        None,
+    )
+    .await
+    .unwrap();
     let live = get(&db, &owner, &row.id).await.unwrap();
     let settled = live
         .active_turn
@@ -1009,6 +1088,8 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
         .find(|m| m.role == "user")
         .unwrap();
     assert!(user_row.activities.is_empty());
+    assert_eq!(reply.activity_total, MAX_TURN_ACTIVITIES + 1);
+    let old_turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
     // Label bound applies at insert.
     let row = begin_turn(
         &db,
@@ -1018,9 +1099,34 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
     )
     .await
     .unwrap();
-    activity_started(&db, &owner, &row.id, &long_label)
+    activity_started_for_turn(
+        &db,
+        &owner,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        &long_label,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        activity_started_for_turn(&db, &owner, &row.id, &old_turn_id, "private stale label")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    activity_label_for_turn(
+        &db,
+        &owner,
+        &row.id,
+        &old_turn_id,
+        &last,
+        "private stale label",
+    )
+    .await
+    .unwrap();
+    activity_finished_for_turn(&db, &owner, &row.id, &old_turn_id, &last, false, None)
         .await
-        .unwrap()
         .unwrap();
     let live = get(&db, &owner, &row.id).await.unwrap();
     assert_eq!(
@@ -1717,4 +1823,481 @@ fn instruction_fingerprint_covers_configuration_and_audience_without_database_ac
         assert!(prepare(&row, &agent).reset);
         row.context_reset_at = None;
     }
+}
+
+#[test]
+fn relay_hold_split_secrets_and_continuation_boundaries() {
+    let secrets = ["nyxid_ag_test_secret", "context-marker-secret"];
+    for secret in secrets {
+        for cuts in [vec![3], vec![3, 9]] {
+            let mut raw = String::new();
+            let mut emitted = 0;
+            let mut stream = String::new();
+            let mut start = 0;
+            for end in cuts.into_iter().chain(std::iter::once(secret.len())) {
+                raw.push_str(&secret[start..end]);
+                let redacted = raw.replace(secret, "[redacted]");
+                stream.push_str(&relay_step(&redacted, &mut emitted, &secrets, false));
+                assert!(!stream.contains(secret));
+                start = end;
+            }
+            assert_eq!(stream, "[redacted]");
+        }
+        for reason in ["tool_budget_exhausted", "turn_timeout"] {
+            let mut emitted = 0;
+            let prefix = &secret[..9];
+            let mut stream = relay_step(prefix, &mut emitted, &secrets, false);
+            stream.push_str(&relay_step(prefix, &mut emitted, &secrets, true));
+            let mut next_emitted = 0;
+            stream.push_str(&relay_step(
+                &secret[9..],
+                &mut next_emitted,
+                &secrets,
+                false,
+            ));
+            assert_eq!(stream, format!("{prefix}\n\n{}", &secret[9..]), "{reason}");
+            assert!(!stream.contains(secret));
+        }
+    }
+    let mut emitted = 0;
+    assert_eq!(
+        relay_step("你好，继续。", &mut emitted, &secrets, false),
+        "你好，继续。"
+    );
+    emitted = 0;
+    assert_eq!(relay_step("nyxid_ag_", &mut emitted, &secrets, false), "");
+    assert_eq!(
+        relay_step("nyxid_ag_near-miss", &mut emitted, &secrets, false),
+        "nyxid_ag_near-miss"
+    );
+    let long = format!("{}n", "界".repeat(100_000));
+    assert_eq!(secret_prefix_suffix(&long, &secrets), "n");
+}
+
+#[test]
+fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
+    let message = |i, text: String| AssistantMessage {
+        author: Some(crate::models::assistant_message::MessageAuthor::Owner),
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: format!("m{i}"),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: i,
+        turn_id: "t".into(),
+        role: "user".into(),
+        text,
+        status: "completed".into(),
+        error_code: None,
+        created_at: Utc::now(),
+        activities: vec![],
+        activity_total: 0,
+        attachments: vec![],
+        origin: Some(TurnOrigin::User),
+        via: None,
+    };
+    let owners = vec![
+        message(0, "Hello".into()),
+        message(12, "Mid-history requirement".into()),
+    ];
+    let history: Vec<_> = (21..=40)
+        .map(|i| message(i, format!("tail{i}:{}", "界".repeat(600))))
+        .collect();
+    let uploads = vec![
+        json!({"id":"upload","name":"old source","type":"text/plain","size":12,"pages":1,"expired":true}),
+    ];
+    let recap = render_recap(&history, &owners, &uploads, 41, 62, false);
+    assert!(recap.find("Hello").unwrap() < recap.find("Mid-history").unwrap());
+    assert!(recap.contains("tail40"));
+    assert!(recap.contains("[expired]"));
+    assert!(recap.contains("[61 older uploads"));
+    assert!(recap.contains("earlier messages omitted"));
+    assert!(recap.len() < 12 * 1024);
+    let guest = render_recap(&history, &owners, &uploads, 41, 62, true);
+    assert!(!guest.contains("Owner requirements"));
+    assert!(!guest.contains("old source"));
+}
+
+#[test]
+fn recap_owner_overflow_points_to_history_tool() {
+    let message = |i: i64| AssistantMessage {
+        author: Some(crate::models::assistant_message::MessageAuthor::Owner),
+        steering: None,
+        voice: None,
+        execution_pending: false,
+        id: format!("owner-{i}"),
+        conversation_id: "c".into(),
+        user_id: "u".into(),
+        seq: i,
+        turn_id: "t".into(),
+        role: "user".into(),
+        text: format!("rule {i} {}", "x".repeat(500)),
+        status: "completed".into(),
+        error_code: None,
+        created_at: Utc::now(),
+        activities: vec![],
+        activity_total: 0,
+        attachments: vec![],
+        origin: Some(TurnOrigin::User),
+        via: None,
+    };
+    let owners: Vec<_> = (0..45).map(message).collect();
+    let text = render_recap_with_owner_total(&[], &owners, &[], 45, 0, false, 45);
+    assert!(text.contains("earlier owner messages"));
+    assert!(text.contains("nyx__conversation_history"));
+}
+
+#[tokio::test]
+async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
+    let db = connect_transaction_test_database("nyxa_recap_independent").await;
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "Hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let mut template = messages(&db, "owner", &row.id, 10, None)
+        .await
+        .unwrap()
+        .remove(0);
+    template.author = Some(crate::models::assistant_message::MessageAuthor::Owner);
+    template.turn_id = "earlier".into();
+    for seq in 1..65 {
+        let mut message = template.clone();
+        message.id = Uuid::new_v4().to_string();
+        message.seq = seq;
+        message.text = match seq {
+            1 => "Greeting of record".into(),
+            30 => "Mid-history owner rule: preserve source detail".into(),
+            _ => format!("Owner line {seq}"),
+        };
+        if seq == 2 {
+            let upload_id = Uuid::new_v4().to_string();
+            message
+                .attachments
+                .push(crate::models::assistant_conversation::TurnAttachment {
+                    id: upload_id.clone(),
+                    label: "Old source.txt".into(),
+                    content_type: "text/plain".into(),
+                    size: 123,
+                    pages: Some(1),
+                    origin: "user_upload".into(),
+                    image_input: None,
+                });
+            db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
+                .insert_one(doc! {"_id":upload_id,"user_id":"owner","conversation_id":&row.id})
+                .await
+                .unwrap();
+        }
+        db.collection::<AssistantMessage>(MESSAGES)
+            .insert_one(message)
+            .await
+            .unwrap();
+    }
+    let history = messages(&db, "owner", &row.id, 20, None).await.unwrap();
+    assert!(!history.iter().any(|message| message.seq == 30));
+    let text = recap(
+        &db,
+        &row,
+        &history,
+        &row.active_turn.as_ref().unwrap().turn_id,
+    )
+    .await
+    .unwrap();
+    assert!(text.contains("Mid-history owner rule"));
+    assert!(
+        text.find("Greeting of record").unwrap() < text.find("Mid-history owner rule").unwrap()
+    );
+    assert!(text.contains("Old source.txt") && text.contains("[expired]"));
+    assert!(text.contains("earlier messages omitted"));
+    let mut guest = row.clone();
+    guest.guest_turn = true;
+    let text = recap(
+        &db,
+        &guest,
+        &history,
+        &row.active_turn.as_ref().unwrap().turn_id,
+    )
+    .await
+    .unwrap();
+    assert!(!text.contains("Mid-history owner rule") && !text.contains("Old source.txt"));
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn relay_step_never_moves_the_emitted_boundary_backwards() {
+    let mut emitted = 3;
+    assert_eq!(relay_step("secr", &mut emitted, &["secret"], false), "");
+    assert_eq!(emitted, 3);
+}
+
+#[test]
+fn recap_omits_unknown_or_zero_page_counts() {
+    let uploads = [
+        json!({"id":"unknown","name":"unknown.txt","size":3,"type":"text/plain","pages":null}),
+        json!({"id":"zero","name":"zero.txt","size":3,"type":"text/plain","pages":0}),
+        json!({"id":"known","name":"known.pdf","size":3,"type":"application/pdf","pages":2}),
+    ];
+    let text = render_recap(&[], &[], &uploads, 0, 3, false);
+    assert!(!text.contains("null pages"));
+    assert!(!text.contains("0 pages"));
+    assert!(text.contains("2 pages"));
+}
+
+#[tokio::test]
+async fn conversation_history_cursor_reconstructs_owner_messages_and_refuses_invalid_authority() {
+    use crate::models::assistant_message::MessageAuthor;
+    use crate::services::assistant_acknowledgement_service as acks;
+
+    let db = connect_transaction_test_database("nyxa_history_cursor").await;
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        &user,
+        &request(None, "greeting"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let credential =
+        credentials::load_for_conversation(&db, &state.encryption_keys, &user, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let chat = acks::for_key(&db, &user, Some(&credential.api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+    let mut template = messages(&db, &user, &row.id, 1, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    // Seed completed historical turns while the credential remains bound to
+    // this tab's live turn; the recap excludes only that live turn's messages.
+    template.turn_id = Uuid::new_v4().to_string();
+    db.collection::<bson::Document>(MESSAGES)
+        .update_one(
+            doc! {"_id": &template.id},
+            doc! {"$set": {"turn_id": &template.turn_id}},
+        )
+        .await
+        .unwrap();
+    let expected = vec![
+        "greeting".to_owned(),
+        "message two contains the original requirements".to_owned(),
+        "later owner note".to_owned(),
+        "split ✨ text with quotes \\\" and slashes \\\\".repeat(800),
+    ];
+    for (index, text) in expected.iter().enumerate().skip(1) {
+        let mut message = template.clone();
+        message.id = Uuid::new_v4().to_string();
+        message.seq = index as i64 + 1;
+        message.turn_id = template.turn_id.clone();
+        message.author = Some(MessageAuthor::Owner);
+        message.origin = Some(TurnOrigin::User);
+        message.text = text.clone();
+        db.collection(MESSAGES).insert_one(message).await.unwrap();
+    }
+
+    let mut before = None;
+    let mut offset = 0;
+    let mut seen: Vec<(i64, String)> = Vec::new();
+    let mut complete = false;
+    let mut page_count = 0;
+    for _ in 0..200 {
+        let page = conversation_history_page(&db, &chat, before, offset, 20)
+            .await
+            .unwrap();
+        page_count += 1;
+        assert!(mcp_history_envelope_size(&page) < 9000);
+        for message in page["messages"].as_array().unwrap() {
+            let seq = message["seq"].as_i64().unwrap();
+            let fragment = message["text"].as_str().unwrap();
+            if seen.last().is_some_and(|(previous, _)| *previous == seq) {
+                let (_, text) = seen.last_mut().unwrap();
+                assert_eq!(message["offset"], text.chars().count());
+                text.push_str(fragment);
+            } else {
+                assert!(seen.last().is_none_or(|(previous, _)| *previous > seq));
+                assert_eq!(message["offset"], 0);
+                seen.push((seq, fragment.to_owned()));
+            }
+        }
+        if page["complete"].as_bool().unwrap() {
+            complete = true;
+            break;
+        }
+        let next = (
+            page["before_seq"].as_i64(),
+            page["offset"].as_u64().unwrap_or(0) as usize,
+        );
+        assert_ne!(next, (before, offset), "cursor must advance");
+        (before, offset) = next;
+    }
+    assert!(complete && page_count > 1);
+    assert_eq!(seen.len(), expected.len());
+    assert_eq!(
+        seen.into_iter()
+            .rev()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    let mut guest = chat.clone();
+    guest.guest = true;
+    assert!(matches!(
+        conversation_history_page(&db, &guest, None, 0, 20).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    let mut stale = chat.clone();
+    stale.turn_stopped = true;
+    assert!(matches!(
+        conversation_history_page(&db, &stale, None, 0, 20).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    let mut wrong_key = chat.clone();
+    wrong_key.api_key_id = Uuid::new_v4().to_string();
+    assert!(matches!(
+        conversation_history_page(&db, &wrong_key, None, 0, 20).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    let mut other_chat = chat.clone();
+    other_chat.conversation_id = format!("nyxa-{}", Uuid::new_v4().simple());
+    assert!(matches!(
+        conversation_history_page(&db, &other_chat, None, 0, 20).await,
+        Err(AppError::NotFound(_))
+    ));
+    let other_thread = begin_turn(
+        &db,
+        &user,
+        &request(None, "Private rules in another conversation"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    other_chat.conversation_id = other_thread.id;
+    assert!(matches!(
+        conversation_history_page(&db, &other_chat, None, 0, 20).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+
+    // A greeting-first thread with many later owner turns must still expose
+    // the second message, and a single envelope-sized message must be
+    // reconstructible through the explicit offset cursor.
+    for seq in 10..55 {
+        let mut message = template.clone();
+        message.id = Uuid::new_v4().to_string();
+        message.seq = seq;
+        message.turn_id = template.turn_id.clone();
+        message.author = Some(MessageAuthor::Owner);
+        message.origin = Some(TurnOrigin::User);
+        message.text = format!("later-{seq}");
+        db.collection(MESSAGES).insert_one(message).await.unwrap();
+    }
+    let tail = messages(&db, &user, &row.id, 20, None).await.unwrap();
+    let recap_text = recap(&db, &row, &tail, &turn_id).await.unwrap();
+    assert!(recap_text.contains("earlier owner messages"));
+    assert!(recap_text.contains("nyx__conversation_history"));
+    assert!(!recap_text.contains("message two contains the original requirements"));
+    let mut before = None;
+    let mut offset = 0;
+    let mut found_requirement = false;
+    for _ in 0..200 {
+        let page = conversation_history_page(&db, &chat, before, offset, 20)
+            .await
+            .unwrap();
+        assert!(mcp_history_envelope_size(&page) < 9000);
+        found_requirement |= page["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["text"] == "message two contains the original requirements");
+        if page["complete"].as_bool().unwrap() {
+            break;
+        }
+        before = page["before_seq"].as_i64();
+        offset = page["offset"].as_u64().unwrap_or(0) as usize;
+    }
+    assert!(found_requirement);
+
+    let long_text = format!(
+        "{}Key rule beyond the recap truncation point.",
+        "\"\\\n\t\u{0001}界".repeat(4_000)
+    );
+    let mut long = template;
+    long.id = Uuid::new_v4().to_string();
+    long.seq = 100;
+
+    long.author = Some(MessageAuthor::Owner);
+    long.origin = Some(TurnOrigin::User);
+    long.text = long_text.clone();
+    db.collection(MESSAGES).insert_one(long).await.unwrap();
+    let mut before = Some(101);
+    let mut offset = 0;
+    let mut reconstructed = String::new();
+    for _ in 0..200 {
+        let page = conversation_history_page(&db, &chat, before, offset, 20)
+            .await
+            .unwrap();
+        assert!(mcp_history_envelope_size(&page) < 9000);
+        for message in page["messages"].as_array().unwrap() {
+            if message["seq"] == 100 {
+                reconstructed.push_str(message["text"].as_str().unwrap());
+            }
+        }
+        if page["complete"].as_bool().unwrap() {
+            break;
+        }
+        before = page["before_seq"].as_i64();
+        offset = page["offset"].as_u64().unwrap_or(0) as usize;
+    }
+    assert_eq!(reconstructed, long_text);
+
+    let mut stale_id = chat.clone();
+    stale_id.turn_id = Some(Uuid::new_v4().to_string());
+    assert!(matches!(
+        conversation_history_page(&db, &stale_id, None, 0, 20).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"active_turn.stop_requested": true}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        conversation_history_page(&db, &chat, None, 0, 20).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    db.collection::<bson::Document>(CONVERSATIONS).update_one(
+        doc! {"_id": &row.id}, doc! {"$set": {"active_turn.stop_requested": false, "active_turn.lease_expires_at": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1))}},
+    ).await.unwrap();
+    assert!(matches!(
+        conversation_history_page(&db, &chat, None, 0, 20).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn conversation_history_definition_exposes_split_cursor() {
+    let definition = conversation_history_definition();
+    assert_eq!(
+        definition.input_schema["properties"]["offset"]["type"],
+        "integer"
+    );
+    assert!(definition.description.contains("offset"));
 }

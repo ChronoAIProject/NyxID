@@ -487,6 +487,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
             steering: None,
+            author: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: task_id,
             user_id: call.user_id.clone(),
@@ -498,6 +499,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             error_code: None,
             created_at: chrono::Utc::now(),
             activities: Vec::new(),
+            activity_total: 0,
             attachments: Vec::new(),
             origin: None,
             via: None,
@@ -573,6 +575,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
                 steering: None,
+                author: None,
                 id: result_id.clone(),
                 conversation_id: thread.id.clone(),
                 user_id: call.user_id.clone(),
@@ -584,6 +587,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 error_code: None,
                 created_at: result_created_at,
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: None,
                 via: Some("voice".into()),

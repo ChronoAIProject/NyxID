@@ -171,3 +171,11 @@ Another registry adapter would implement:
 Legacy recovery (`assistant_learning_recovery.rs`) sits above this boundary: it
 decides eligibility, fences and audits, and calls only the publication module
 for registry reads. No registry response detail reaches an admin.
+
+### Ornn package contract
+
+Authored drafts and L1 learned proposals are checked against Ornn's package wire
+contract after their respective NyxID content and credential validators.
+Supporting files live below `references/` or `assets/`; root README files,
+angle brackets in name or description, and reserved Claude/Anthropic name terms
+are rejected before an owner card exists.

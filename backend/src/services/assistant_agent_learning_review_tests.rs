@@ -57,6 +57,9 @@ fn proposal(started: bool) -> AssistantAgentLearningProposal {
             ..Default::default()
         }),
         failure_code: None,
+        failure_rules: Vec::new(),
+        scope_encrypted: None,
+        scope_digest: None,
         evidence: Vec::new(),
         body_encrypted: Vec::new(),
         body_bytes: 0,
@@ -89,6 +92,24 @@ fn release_predicate_requires_no_dispatch_checkpoint_or_live_lease() {
     p.verified_at = None;
     p.lease_expires_at = Some(Utc::now() + Duration::seconds(30));
     assert!(!non_effective(&p, Utc::now()));
+}
+
+#[test]
+fn format_details_flag_only_marks_empty_format_verdicts() {
+    assert!(failure_details_unavailable(
+        Some("ornn_validation_failed"),
+        &[]
+    ));
+    assert!(failure_details_unavailable(
+        Some("ornn_package_rejected"),
+        &[]
+    ));
+    assert!(!failure_details_unavailable(
+        Some("ornn_validation_failed"),
+        &["allowed_root_items".into()]
+    ));
+    assert!(!failure_details_unavailable(Some("base_changed"), &[]));
+    assert!(!failure_details_unavailable(Some("ornn_name_taken"), &[]));
 }
 
 #[test]
@@ -228,6 +249,7 @@ async fn definitive_refusal_releases_target_for_revised_draft() {
         &row,
         &p,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnInterfaceChangeRequiresMajor,
             stage: PublicationStage::Publish,
             status: Some(409),
@@ -503,6 +525,7 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
         &row,
         &first,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnWriteForbidden,
             stage: PublicationStage::Publish,
             status: Some(403),
@@ -530,6 +553,7 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
             &row,
             &first,
             DeferredFailure {
+                rules: Vec::new(),
                 code: publication::FailureCode::OrnnValidationFailed,
                 stage: PublicationStage::Publish,
                 status: Some(400),
@@ -552,6 +576,7 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
         &row,
         &current,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnWriteForbidden,
             stage: PublicationStage::Publish,
             status: Some(403),
@@ -637,6 +662,7 @@ async fn started_boundary_and_target_state_commit_together_before_egress() {
         &row,
         &p,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnWriteForbidden,
             stage: PublicationStage::Publish,
             status: Some(403),
@@ -1159,7 +1185,11 @@ impl OrnnReader for WireReader {
             .ok()
             .and_then(|v| v["code"].as_str().map(OrnnCode::parse))
             .unwrap_or(OrnnCode::Unknown);
-        OrnnOutcome::Response { status, code }
+        OrnnOutcome::Response {
+            status,
+            code,
+            rules: vec![],
+        }
     }
 }
 
@@ -1428,6 +1458,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
                 steering: None,
+                author: None,
                 voice: None,
                 execution_pending: false,
                 id: Uuid::new_v4().to_string(),
@@ -1441,6 +1472,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
                 error_code: None,
                 created_at: now + chrono::Duration::seconds(seq),
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: Some(crate::models::assistant_conversation::TurnOrigin::User),
                 via: None,
@@ -1542,6 +1574,9 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             model_contract: "agent-learning-v1".into(),
             publication: None,
             failure_code: None,
+            failure_rules: Vec::new(),
+            scope_encrypted: None,
+            scope_digest: None,
             evidence: vec![evidence],
             body_encrypted: encrypted,
             body_bytes: body.len() as i64,
@@ -2126,7 +2161,7 @@ impl OrnnReader for TestReader {
 #[tokio::test]
 async fn authored_org_skill_refuses_personal_fallback() {
     let (f, agent, _, _) = org_review_fixture("authored_org_refusal").await;
-    let input = serde_json::from_value(json!({"agent":agent.id,"name":"team-review","description":"Review team work","skill_md":"# Review"})).unwrap();
+    let input = serde_json::from_value(json!({"agent":agent.id,"name":"team-review","description":"Review team work","skill_md":"# Review","scope":{"status":"complete","omissions":[]}})).unwrap();
     let error = crate::services::assistant_skill_authoring::create(
         &f.state,
         &f.chat,
@@ -2622,4 +2657,158 @@ async fn recovery_stale_release_candidate_queries_use_indexes() {
         assert!(plan.contains("publication.started_1_status_1"), "{plan}");
     }
     fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_failure_event_commits_once_under_concurrent_retry() {
+    let f = orchestrator_fixture("authoring_failure_event").await;
+    migrate_publication_targets(&f.state, false).await.unwrap();
+    super::super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        super::super::assistant_agent_learning::FLAG_KEY,
+        &super::super::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let result = super::super::assistant_skill_authoring::create(&f.state,&f.chat,super::super::assistant_skill_authoring::parse_input(&json!({"agent":f.chat.agent_id,"name":"weekly-review","description":"Public guide","skill_md":"Public guide","scope":{"status":"complete","omissions":[]}})).unwrap(),&UnavailableReader).await.unwrap();
+    let id = result["proposal_id"].as_str().unwrap();
+    let card = result["acknowledgement_id"].as_str().unwrap();
+    let lease = Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(doc! {"_id":id},doc! {"$set":{"status":"publishing","publication.lease_id":&lease,"publication.lease_expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(5)),"publication.attempt":1_i64,"publication.acknowledgement_id":card}}).await.unwrap();
+    let row: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":id})
+        .await
+        .unwrap()
+        .unwrap();
+    let p = row.publication.as_ref().unwrap();
+    let refusal = || DeferredFailure {
+        code: publication::FailureCode::OrnnValidationFailed,
+        stage: publication::PublicationStage::FormatValidate,
+        status: Some(400),
+        definitive: true,
+        rules: vec!["allowed_root_items".into()],
+    };
+    let (a, b) = tokio::join!(
+        defer(&f.state, &f.owner, &row, p, refusal()),
+        defer(&f.state, &f.owner, &row, p, refusal())
+    );
+    assert!(a.is_ok() || b.is_ok());
+    let thread = super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        thread
+            .pending_events
+            .iter()
+            .filter(|event| event.kind == "skill_publication")
+            .count(),
+        1
+    );
+    assert!(
+        thread
+            .pending_events
+            .iter()
+            .any(|event| event.text.contains("allowed_root_items"))
+    );
+    let stored: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.failure_rules, vec!["allowed_root_items"]);
+    assert!(thread.pending_events.iter().any(|event| {
+        event
+            .text
+            .contains("Use SKILL.md and files under references/ or assets/ only.")
+    }));
+    // Simulate delivery after commit. Replaying settlement cannot enqueue another event.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&f.row.id}, doc! {"$set":{"pending_events":[]}})
+        .await
+        .unwrap();
+    assert!(defer(&f.state, &f.owner, &row, p, refusal()).await.is_err());
+    assert!(
+        super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stored_legacy_learned_root_file_still_previews() {
+    let SeededLearned {
+        fixture: f,
+        agent,
+        id,
+        mut generated,
+    } = seed_learned_proposal("learning_legacy_root_preview").await;
+    generated.files.push(learning::GeneratedFile {
+        path: "legacy.md".into(),
+        content: "Safe reusable guidance".into(),
+    });
+    let bytes = serde_json::to_vec(&generated).unwrap();
+    let encrypted = f.state.encryption_keys.encrypt(&bytes).await.unwrap();
+    f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+        doc! {"_id":&id},
+        doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"body_bytes":bytes.len() as i64}},
+    ).await.unwrap();
+    let proposals = list(&f.state, &f.owner, &agent.id, true).await.unwrap();
+    let preview = proposals
+        .iter()
+        .find(|proposal| proposal.id == id)
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap();
+    assert_eq!(preview.files[0].path, "legacy.md");
+    assert_eq!(preview.files[0].content, "Safe reusable guidance");
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn learned_edit_refuses_new_root_file_before_review_card() {
+    let SeededLearned {
+        fixture: f,
+        agent,
+        id,
+        mut generated,
+    } = seed_learned_proposal("learning_edit_wire_contract").await;
+    let cards = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    let before = cards.count_documents(doc! {}).await.unwrap();
+    generated.files.push(learning::GeneratedFile {
+        path: "new-root.md".into(),
+        content: "Safe guidance".into(),
+    });
+    assert!(
+        matches!(edit(&f.state, &f.owner, &agent.id, &id, 0, &serde_json::to_value(&generated).unwrap()).await,
+        Err(AppError::ValidationError(message)) if message == "Learning proposal failed validation")
+    );
+    let stored = f
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.revision, 0);
+    assert!(stored.publication.is_none());
+    assert_eq!(cards.count_documents(doc! {}).await.unwrap(), before);
+    f.state.db.drop().await.unwrap();
 }

@@ -23,6 +23,7 @@ import type {
 import {
   channelBotSetupPrefill,
   channelBotSetupUrlValues,
+  parseRawChannelBotReturnTo,
 } from "@/schemas/channel-bot-setup";
 import { labelIsOptional } from "@/schemas/channels";
 
@@ -115,6 +116,7 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
   const catalog = useChannelPlatformViews();
   const email = useAuthStore((state) => state.user?.email);
   const [complete, setComplete] = useState(false);
+  const [returnTo] = useState(() => parseRawChannelBotReturnTo(window.location.search));
   const descriptor = catalog.data?.platforms.find(
     (entry) => entry.platform === platform,
   );
@@ -136,6 +138,11 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
           : undefined
       }
     >
+      {returnTo && !complete ? (
+        <Button variant="outline" asChild>
+          <Link to="/assistant" search={returnTo.startsWith("nyxg-") ? { g: returnTo } : { c: returnTo }}>Back to chat</Link>
+        </Button>
+      ) : null}
       {catalog.isPending ? (
         <SetupLoading />
       ) : catalog.isError ? (
@@ -161,6 +168,7 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
         >
           <PrefilledChannelBotSetup
             descriptor={descriptor}
+            returnTo={returnTo}
             onComplete={() => setComplete(true)}
           />
         </section>
@@ -171,9 +179,11 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
 
 function PrefilledChannelBotSetup({
   descriptor,
+  returnTo,
   onComplete,
 }: {
   readonly descriptor: ChannelPlatformDescriptor;
+  readonly returnTo?: string;
   readonly onComplete: () => void;
 }) {
   const searchStr = useRouterState({
@@ -204,6 +214,13 @@ function PrefilledChannelBotSetup({
     <ChannelBotSetup
       fullPage
       onComplete={onComplete}
+      returnTo={returnTo}
+      onContinue={returnTo ? () => {
+        if (returnTo.startsWith("nyxg-")) {
+          return navigate({ to: "/assistant", search: { g: returnTo } });
+        }
+        return navigate({ to: "/assistant", search: { c: returnTo } });
+      } : undefined}
       open
       defaultPlatform={descriptor.platform}
       defaultLabel={

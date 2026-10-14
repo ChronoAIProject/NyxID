@@ -157,6 +157,17 @@ describe("AgentLearningReview", () => {
     });
   }
 
+  it.each(["learned", "authored"])("shows truthful correction guidance for %s proposals", (source) => {
+    withProposals([{ ...proposal, source, status: "publication_failed", failure_code: "ornn_validation_failed" }]);
+    render(<AgentLearningReview agentId="agent" />);
+    if (source === "authored") {
+      expect(screen.getByText(/NyxBot was asked for a corrected draft/)).toBeVisible();
+    } else {
+      expect(screen.getByText(/Deny or discard this draft and ask NyxBot for a revised one/)).toBeVisible();
+      expect(screen.queryByText(/NyxBot was asked/)).toBeNull();
+    }
+  });
+
   it("links an authored proposal to its conversation card and shows its state", () => {
     withProposals([{ ...proposal, source: "authored", status: "publication_failed", failure_code: "publish_uncertain", card_conversation_id: "conversation-1" }]);
     render(<AgentLearningReview agentId="agent" />);

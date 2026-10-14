@@ -352,7 +352,10 @@ async fn writes(server: &MockServer) -> usize {
         .await
         .unwrap()
         .iter()
-        .filter(|r| matches!(r.method.as_str(), "PUT" | "POST"))
+        .filter(|r| {
+            matches!(r.method.as_str(), "PUT" | "POST")
+                && r.url.path() != "/api/v1/skill-format/validate"
+        })
         .count()
 }
 
@@ -1376,6 +1379,7 @@ async fn recovery_pre_1828_rows_accept_operator_release_and_pre_claim_records() 
         &card,
         attempt,
         review::PublicationFailureCode::NyxidRefused,
+        &[],
     )
     .await
     .unwrap();

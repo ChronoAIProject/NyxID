@@ -118,6 +118,21 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
+        crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! {"created_at":1})
+            .options(
+                IndexOptions::builder()
+                    .name("assistant_skill_draft_attempts_ttl".to_owned())
+                    .expire_after(Duration::from_secs(86400))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     // Poll index groups and migrations sequentially without retaining the
     // large index-construction frame while a migration calls into MongoDB.
     Box::pin(ensure_core_indexes(db)).await?;

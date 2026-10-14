@@ -106,6 +106,8 @@ pub struct ActivityResponse {
     status: String,
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<crate::models::assistant_conversation::ToolFailure>,
 }
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
@@ -116,6 +118,7 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
             status: row.status,
             started_at: row.started_at,
             ended_at: row.ended_at,
+            failure: row.failure,
         }
     }
 }
@@ -167,6 +170,7 @@ pub struct ActiveTurnResponse {
     steering_allowed: bool,
     stop_requested: bool,
     continuations: u32,
+    activity_total: i64,
     turn_id: String,
     started_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
@@ -268,6 +272,7 @@ impl From<AssistantConversation> for ConversationResponse {
             ),
             stop_requested: turn.stop_requested,
             continuations: turn.continuations,
+            activity_total: turn.activity_total,
             turn_id: turn.turn_id.clone(),
             started_at: turn.started_at,
             activities: turn
@@ -356,6 +361,7 @@ pub struct MessageResponse {
     attachments: Vec<AttachmentResponse>,
     /// A user message written in a chat app: its platform.
     via: Option<String>,
+    activity_total: i64,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -385,6 +391,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .map(AttachmentResponse::from)
                 .collect(),
             via: row.via,
+            activity_total: row.activity_total,
         }
     }
 }
@@ -697,6 +704,8 @@ pub enum Decision {
 #[serde(deny_unknown_fields)]
 pub struct AcknowledgementDecision {
     decision: Decision,
+    #[serde(default)]
+    accept_reduced_scope: bool,
 }
 
 pub async fn decide_acknowledgement(
@@ -710,7 +719,7 @@ pub async fn decide_acknowledgement(
     if let Some(card) = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
         .find_one(doc! {"_id":&ack_id,"user_id":&user,"conversation_id":&id,"authored_skill":{"$ne":bson::Bson::Null}}).await? {
         super::login_client_context::require_first_party_human(&auth)?;
-        let card = Box::pin(super::assistant_agent_learning::decide_authored(&state, &auth, card, matches!(body.decision, Decision::Allow))).await?;
+        let card = Box::pin(super::assistant_agent_learning::decide_authored_with_scope(&state, &auth, card, matches!(body.decision, Decision::Allow), body.accept_reduced_scope)).await?;
         return Ok(Json(card.into()));
     }
     let row = acknowledgements::decide(
@@ -1701,7 +1710,12 @@ async fn execute_turn(
     if recap {
         events.notice();
     }
-    let mut prompt = context.instructions(&history, recap);
+    let saved_recap = tokio::sync::OnceCell::new();
+    let load_recap = || engine::recap(&state.db, row, &history, turn_id);
+    let mut prompt = context
+        .session_instructions(recap, &saved_recap, load_recap)
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
     let mut attachments = crate::services::assistant_upload_service::turn_attachments(
         &state.db,
         &row.user_id,
@@ -1955,6 +1969,10 @@ async fn execute_turn(
             }
             match recovery.decide(status, code, binding.is_some()) {
                 RecoveryAction::Rebind => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     engine::clear_binding(
                         &state.db,
                         &row.user_id,
@@ -1966,10 +1984,17 @@ async fn execute_turn(
                     .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     binding = None;
                     context.fresh_session();
-                    prompt = context.instructions(&history, true);
+                    prompt = context
+                        .session_instructions(true, &saved_recap, load_recap)
+                        .await
+                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     *credential = credentials::replace(
                         &state.db,
                         &state.encryption_keys,
@@ -1981,10 +2006,17 @@ async fn execute_turn(
                     .map_err(|_| TurnError::new("agent_key_required"))?;
                     binding = None;
                     context.fresh_session();
-                    prompt = context.instructions(&history, true);
+                    prompt = context
+                        .session_instructions(true, &saved_recap, load_recap)
+                        .await
+                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     events.notice();
                 }
                 RecoveryAction::Backoff => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     let jitter = u64::from(rand::random::<u16>() % 500);
                     tokio::time::sleep(Duration::from_millis(
                         (1 << recovery.retries) * 1000 + jitter,
@@ -2059,21 +2091,21 @@ async fn execute_turn(
             if decoder.terminal.is_some() {
                 break;
             }
-            // Hold a key-length suffix so a reflected key split across deltas
-            // cannot leak before the next fragment reveals the full match.
+            // Withhold only a suffix that is currently a proper prefix of a
+            // live secret. Ordinary prose, including CJK text, is emitted in
+            // the same upstream response without an artificial byte window.
             if decoder.terminal.is_none() {
-                let mut safe_end = partial
-                    .len()
-                    .saturating_sub(credential.raw_key.len().max(context.reflection_window()));
-                while !partial.is_char_boundary(safe_end) {
-                    safe_end -= 1;
-                }
-                if safe_end > emitted_bytes {
-                    events.emit(
-                        "block.delta",
-                        json!({"block_id": block_id, "text": &partial[emitted_bytes..safe_end]}),
-                    );
-                    emitted_bytes = safe_end;
+                let delta = engine::relay_step(
+                    partial,
+                    &mut emitted_bytes,
+                    &[
+                        credential.raw_key.as_str(),
+                        context.binding.marker.as_deref().unwrap_or(""),
+                    ],
+                    false,
+                );
+                if !delta.is_empty() {
+                    events.emit("block.delta", json!({"block_id": block_id, "text": delta}));
                 }
             }
         }
@@ -2102,14 +2134,9 @@ async fn execute_turn(
             .await
             {
                 Ok(true) => {
-                    if partial.len() > emitted_bytes {
-                        events.emit(
-                            "block.delta",
-                            json!({"block_id":block_id,"text":&partial[emitted_bytes..]}),
-                        );
-                    }
-                    if !partial.is_empty() {
-                        events.emit("block.delta", json!({"block_id":block_id,"text":"\n\n"}));
+                    let delta = engine::relay_step(partial, &mut emitted_bytes, &[], true);
+                    if !delta.is_empty() {
+                        events.emit("block.delta", json!({"block_id":block_id,"text":delta}));
                     }
                     completed = if partial.is_empty() {
                         String::new()

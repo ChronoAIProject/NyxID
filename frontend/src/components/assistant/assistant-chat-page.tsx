@@ -716,7 +716,6 @@ function NyxAgentThreadPage() {
           </div>
         ) : (
           <AssistantLinkModalHost>
-            {chat.isStreaming && chat.continuations > 0 ? <p role="status" className="mx-auto w-full max-w-[758px] px-4 pb-2 text-11 text-muted-foreground">Continuing task…</p> : null}
             {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
             <ChatMessageList
               session={chat.session}
@@ -766,8 +765,8 @@ function NyxAgentThreadPage() {
                   <NyxAgentAcknowledgementCard
                     acknowledgement={acknowledgement}
                     deciding={Boolean(chat.decidingAcknowledgement)}
-                    onDecision={async (choice) => {
-                      await chat.decideAcknowledgement({ id: acknowledgement.id, choice });
+                    onDecision={async (choice, acceptReducedScope) => {
+                      await chat.decideAcknowledgement({ id: acknowledgement.id, choice, acceptReducedScope });
                       setFocusRequest((value) => value + 1);
                     }}
                   />
