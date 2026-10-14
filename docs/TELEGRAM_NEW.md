@@ -273,3 +273,25 @@ npm test --prefix frontend -- channel-platforms
 npm run build --prefix frontend
 npm run lint --prefix frontend
 ```
+
+
+## Opted-in Platform BotFather
+
+An administrator can convert a manager channel in **Admin → Platform BotFather**.
+This durable opt-in replaces personal assistant routing with the closed native
+onboarding guide. Existing manager channels without that opt-in retain the personal
+behavior documented above. Converted or retired managers cannot return to personal
+routing through Channel Bots, NyxBot linking, conversation setters or ownership transfer.
+
+Platform profile controls require a live NyxID admin and first-party human session,
+including reads. Clients use public onboarding, explicit Telegram account linking,
+their own saved setup review, exact observed child review, independent customer
+receipt test and activation. Guide funding uses an explicitly authorized sponsor
+organization; customer runtime bills the approved client's personal execution payer.
+No account credentials or private service inventory enter the guide.
+
+Bare `/start` on an opted-in manager opens the onboarding journey; authorized native
+creation challenges keep their existing workflow. Pausing the guide does not erase
+native creation credentials or replace the shared manager webhook. Profile edits
+advance authority generation and pause existing child replies until client review.
+See [Platform BotFather](PLATFORM_BOTFATHER.md) for lifecycle, recovery and rollout.

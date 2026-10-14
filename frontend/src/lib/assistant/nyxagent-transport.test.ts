@@ -454,6 +454,26 @@ describe("NyxAgent server-backed transport", () => {
     expect(transport.getHistory(id)?.before_seq).toBeNull();
   });
 
+  it("keeps each row's server time through a reload and an earlier page", async () => {
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      const page = history();
+      if (endpoint.includes("before_seq")) {
+        page.messages = [page.messages[0]!];
+      } else {
+        page.messages = [page.messages[1]!];
+        page.before_seq = 2;
+      }
+      return json(page);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    await transport.history(id, 2);
+    expect(transport.session(id).messages.map((m) => [m.id, m.timestamp])).toEqual([
+      ["u", Date.parse(start)],
+      ["a", Date.parse(afterReset)],
+    ]);
+  });
+
   it("reuses unchanged rows across reads and identical refreshes, so only changed rows re-render", async () => {
     let page = history();
     globalThis.__nyxidAssistantHttpMock = () => json(page);

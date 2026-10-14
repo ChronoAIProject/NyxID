@@ -83,3 +83,23 @@ it("uses the same Tools capability rule for desktop and mobile navigation", () =
     }).map((i) => i.to),
   ).toContain("/admin/tools");
 });
+
+it("shows only feature flags to feature flag role holders", () => {
+  expect(
+    getVisibleAdminNav({
+      is_admin: false,
+      role: "user",
+      capabilities: { read_feature_flags: true, create_feature_flags: true },
+    }).map((item) => item.to),
+  ).toEqual(["/admin/feature-flags"]);
+});
+
+it("combines usage and feature flag navigation for scoped role holders", () => {
+  expect(
+    getVisibleAdminNav({
+      is_admin: false,
+      role: "user",
+      capabilities: { read_feature_flags: true, read_admin_usage: true },
+    }).map((item) => item.to),
+  ).toEqual(["/admin/feature-flags", "/admin/usage"]);
+});

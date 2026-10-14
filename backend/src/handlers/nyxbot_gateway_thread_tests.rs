@@ -62,7 +62,11 @@ impl Fixture {
         state
             .db
             .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-            .insert_one(bot)
+            .replace_one(
+                doc! {"_id": bot.get_str("_id").unwrap().to_owned()},
+                bot.clone(),
+            )
+            .upsert(true)
             .await
             .unwrap();
         state

@@ -400,6 +400,7 @@ pub async fn set_user_active(
         )
         .await?;
         super::assistant_agent_credential_service::invalidate_for_owner(db, target_user_id).await?;
+        super::platform_setup_service::retire_owner(db, target_user_id, false).await?;
     }
 
     Ok(())
@@ -513,6 +514,8 @@ async fn delete_user_cascade_internal(
             }},
         )
         .await?;
+
+    super::platform_setup_service::retire_owner(db, target_user_id, true).await?;
 
     // Org bots the user linked to their NyxBot keep an org-owned route and
     // route key; remove them so the org's bot is free for its admins.

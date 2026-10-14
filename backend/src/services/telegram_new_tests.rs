@@ -144,7 +144,7 @@ async fn channel_link_telegram_worker_reserves_callback_without_browser_polling(
     );
 }
 
-async fn fixture() -> (crate::AppState, String, MockServer) {
+pub(crate) async fn fixture() -> (crate::AppState, String, MockServer) {
     let db = connect_transaction_test_database("telegram_new").await;
     telegram_new_service::ensure_indexes(&db).await.unwrap();
     super::coordination_service::ensure_indexes(&db)
@@ -190,7 +190,7 @@ async fn fixture() -> (crate::AppState, String, MockServer) {
     (state, actor, server)
 }
 
-fn service<'a>(state: &'a crate::AppState, base: &'a str) -> TelegramNewService<'a> {
+pub(crate) fn service<'a>(state: &'a crate::AppState, base: &'a str) -> TelegramNewService<'a> {
     TelegramNewService {
         db: &state.db,
         keys: &state.encryption_keys,
@@ -202,7 +202,7 @@ fn service<'a>(state: &'a crate::AppState, base: &'a str) -> TelegramNewService<
     }
 }
 
-async fn headers(state: &crate::AppState) -> HeaderMap {
+pub(crate) async fn headers(state: &crate::AppState) -> HeaderMap {
     let values = credentials::load_decrypted(
         &state.db,
         &state.encryption_keys,
@@ -220,7 +220,7 @@ async fn headers(state: &crate::AppState) -> HeaderMap {
     )])
 }
 
-fn message(body: Value) -> Value {
+pub(crate) fn message(body: Value) -> Value {
     let mut value = json!({"from": {"id": 700, "is_bot": false}, "chat": {"id": 700, "type": "private"}, "message_id": 10, "date": Utc::now().timestamp()});
     for (key, val) in body.as_object().unwrap() {
         value[key] = val.clone();
@@ -300,7 +300,11 @@ async fn approve(
     service.get(actor, id).await.unwrap()
 }
 
-async fn provider_connection(server: &MockServer, request_id: &str, webhook_status: u16) {
+pub(crate) async fn provider_connection(
+    server: &MockServer,
+    request_id: &str,
+    webhook_status: u16,
+) {
     for (endpoint, result) in [("getManagedBotToken", json!(CHILD))] {
         Mock::given(method("POST"))
             .and(path(format!("/bot{MANAGER}/{endpoint}")))
@@ -2400,7 +2404,7 @@ mod claims {
     }
 }
 
-async fn register_manager_channel(
+pub(crate) async fn register_manager_channel(
     state: &crate::AppState,
     actor: &str,
     server: &MockServer,
@@ -2836,3 +2840,115 @@ mod manager_channel;
 
 #[path = "telegram_manager_e2e_tests.rs"]
 mod manager_e2e;
+
+#[tokio::test]
+async fn platform_onboarding_native_command_errors_reply_safely_and_provider_failure_is_acked() {
+    use crate::models::platform_bot_config::{PlatformBotConfig, PlatformExecutionProfile};
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    let now = Utc::now();
+    let profile = PlatformBotConfig {
+        guide: None,
+        id: uuid::Uuid::new_v4().to_string(),
+        channel_bot_id: channel.id.clone(),
+        manager_bot_id: "100".into(),
+        observation_id: "test-observation".into(),
+        execution_profile: PlatformExecutionProfile::PlatformOnboarding,
+        generation: 1,
+        enabled: true,
+        funding_owner_user_id: uuid::Uuid::new_v4().to_string(),
+        configured_by: actor,
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+    };
+    state
+        .db
+        .collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME)
+        .insert_one(&profile)
+        .await
+        .unwrap();
+    let base = server.uri();
+    let service = service(&state, &base);
+    let update = json!({"update_id": 500, "message": {"message_id": 500, "date": Utc::now().timestamp(),
+        "text": "/confirm WRONG", "from": {"id": 123, "is_bot": false}, "chat": {"id": 123, "type": "private"}}});
+    let body = serde_json::to_vec(&update).unwrap();
+    let auth_headers = headers(&state).await;
+    assert_eq!(
+        crate::handlers::telegram_new::webhook_with_service(&state, &service, &auth_headers, &body)
+            .await
+            .unwrap(),
+        axum::http::StatusCode::OK
+    );
+    let requests = server.received_requests().await.unwrap();
+    let reply = requests
+        .iter()
+        .rev()
+        .find(|r| r.url.path().ends_with("/sendMessage"))
+        .unwrap();
+    let reply: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert!(reply["text"].as_str().unwrap().contains("Send /link"));
+    assert_eq!(reply["protect_content"], true);
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{MANAGER}/sendMessage")))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        crate::handlers::telegram_new::webhook_with_service(&state, &service, &auth_headers, &body)
+            .await
+            .unwrap(),
+        axum::http::StatusCode::OK
+    );
+    // A failed durable admission must invite Telegram redelivery, unlike a
+    // provider failure delivering an already-prepared deterministic notice.
+    super::platform_binding_service::ensure_indexes(&state.db)
+        .await
+        .unwrap();
+    state
+        .db
+        .run_command(doc! {"collMod": crate::models::platform_binding::REQUESTS,
+        "validator": {"fault_injection_required": {"$exists": true}}, "validationLevel": "strict"})
+        .await
+        .unwrap();
+    let link = serde_json::to_vec(&json!({"update_id": 501, "message": {"message_id": 501,
+        "date": Utc::now().timestamp(), "text": "/link", "from": {"id": 123, "is_bot": false},
+        "chat": {"id": 123, "type": "private"}}}))
+    .unwrap();
+    assert_eq!(
+        crate::handlers::telegram_new::webhook_with_service(&state, &service, &auth_headers, &link)
+            .await
+            .unwrap(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    state
+        .db
+        .run_command(doc! {"collMod": crate::models::platform_binding::REQUESTS,
+        "validator": {}, "validationLevel": "strict"})
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            crate::handlers::telegram_new::webhook_with_service(
+                &state,
+                &service,
+                &auth_headers,
+                &link
+            )
+            .await
+            .unwrap(),
+            axum::http::StatusCode::OK
+        );
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::platform_binding::REQUESTS)
+            .count_documents(doc! {"platform_config_id": &profile.id, "initiation_ref": 501_i64})
+            .await
+            .unwrap(),
+        1
+    );
+    state.db.drop().await.unwrap();
+}

@@ -96,7 +96,7 @@ export function DashboardLayout() {
   // flash the wrong thing.
   const onboarding = useShouldShowOnboarding();
   // Shared channel onboarding must stay reachable through setup and bot routing.
-  const isChannelBotRoute = pathname === "/channel-bots" || pathname.startsWith("/channel-bots/");
+  const isChannelBotRoute = pathname === "/channel-bots" || pathname.startsWith("/channel-bots/") || pathname === "/onboarding/setups" || pathname.startsWith("/onboarding/setups/");
   if (onboarding.status === "loading") return null;
   if (onboarding.status === "show" && !isChannelBotRoute && !(import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1")) return <OnboardingTakeover />;
 

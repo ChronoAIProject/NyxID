@@ -47,6 +47,8 @@ export const adminFeatureFlagSchema = z.object({
   metadata_updated_at: z.string().nullable(),
   metadata_updated_by: z.string().nullable(),
   default_enabled: z.boolean(),
+  created_by: z.string().nullable().optional(),
+  can_edit: z.boolean().optional(),
   global_override: z.boolean().nullable(),
   org_overrides: z.array(adminOrgFeatureFlagOverrideSchema),
   user_overrides: z.array(adminUserFeatureFlagOverrideSchema),
@@ -86,3 +88,30 @@ export const setAdminFeatureFlagRequestSchema = z.object({
 export type SetAdminFeatureFlagRequest = z.infer<
   typeof setAdminFeatureFlagRequestSchema
 >;
+
+export const createFeatureFlagRequestSchema = z.object({
+  key: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(
+      /^[a-z0-9][a-z0-9:_-]*$/,
+      "Use lowercase letters, digits, colons, underscores or hyphens.",
+    ),
+  description: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_FEATURE_FLAG_DESCRIPTION_LENGTH),
+  default_enabled: z.boolean(),
+});
+export type CreateFeatureFlagRequest = z.infer<
+  typeof createFeatureFlagRequestSchema
+>;
+
+export interface FeatureFlagTarget {
+  id: string;
+  email: string;
+  display_name: string | null;
+  slug: string | null;
+}

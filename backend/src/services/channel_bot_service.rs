@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Channel bot lifecycle management service.
 //!
 //! Handles bot registration, webhook setup, token encryption/decryption,
@@ -273,6 +275,7 @@ async fn persist_verified_bot(
         .await?;
 
     if let Some(existing) = existing {
+        super::platform_bot_authority::require_personal_routes(db, &existing.id).await?;
         if link_claim.is_none()
             && managed.is_none()
             && connection.is_none()
@@ -662,12 +665,48 @@ pub(crate) async fn insert_registered_bot_linked(
         super::telegram_new_service::with_operation(
             db,
             &format!("telegram-manager-identity:{}", bot.platform_bot_id),
-            insert_registered_bot_inner(db, bot, capacity, telegram_request_revision, link_claim),
+            insert_registered_bot_inner(
+                db,
+                bot,
+                capacity,
+                telegram_request_revision,
+                link_claim,
+                None,
+            ),
         )
         .await
     } else {
-        insert_registered_bot_inner(db, bot, capacity, telegram_request_revision, link_claim).await
+        insert_registered_bot_inner(
+            db,
+            bot,
+            capacity,
+            telegram_request_revision,
+            link_claim,
+            None,
+        )
+        .await
     }
+}
+
+pub(crate) async fn insert_approved_telegram_bot(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    capacity: u32,
+    request: &crate::models::telegram_bot_request::TelegramBotRequest,
+) -> AppResult<()> {
+    super::telegram_new_service::with_operation(
+        db,
+        &format!("telegram-manager-identity:{}", bot.platform_bot_id),
+        insert_registered_bot_inner(
+            db,
+            bot,
+            capacity,
+            Some(request.revision),
+            None,
+            Some(request),
+        ),
+    )
+    .await
 }
 
 async fn insert_registered_bot_inner(
@@ -676,6 +715,7 @@ async fn insert_registered_bot_inner(
     capacity: u32,
     telegram_request_revision: Option<i64>,
     link_claim: Option<&super::channel_connect_link_service::Claim>,
+    captured_request: Option<&crate::models::telegram_bot_request::TelegramBotRequest>,
 ) -> AppResult<()> {
     use super::api_key_mutation_service::{map_transaction_error, transaction_result};
     use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
@@ -691,9 +731,19 @@ async fn insert_registered_bot_inner(
     let db = db.clone();
     let mut bot = bot.clone();
     let link_claim = link_claim.cloned();
+    let captured_request = captured_request.cloned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = async {
             db.collection::<bson::Document>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$inc": {"channel_bot_registration_revision": 1_i64}}).session(&mut *session).await?;
+            let approved_setup = if let Some(request) = &captured_request {
+                super::platform_provisioning_service::fence_request(&db, request, true, session).await?
+            } else {
+                if db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
+                    .find_one(super::platform_bot_authority::installation_filter(&bot.id, &bot.platform, &bot.platform_bot_id)).session(&mut *session).await?.is_some() {
+                    return Err(AppError::Forbidden("This bot requires its reviewed setup authority".into()));
+                }
+                None
+            };
             let bots = db.collection::<ChannelBot>(COLLECTION_NAME);
             if let Some(existing) = bots.find_one(doc! {"_id": &bot.id}).session(&mut *session).await? {
                 if telegram_request_revision.is_some() && existing.is_active && existing.user_id == bot.user_id && existing.platform_bot_id == bot.platform_bot_id { return Ok(()); }
@@ -702,6 +752,10 @@ async fn insert_registered_bot_inner(
             let platform = if matches!(bot.platform.as_str(), "telegram" | "telegram-new") { bson::Bson::Document(doc! {"$in": ["telegram", "telegram-new"]}) } else { bson::Bson::String(bot.platform.clone()) };
             if bots.find_one(doc! {"platform": platform, "platform_bot_id": &bot.platform_bot_id, "is_active": true}).session(&mut *session).await?.is_some() {
                 return Err(AppError::Conflict("This bot is already connected. Open its existing connection in Channel Bots to complete setup. Check Personal and organization scopes, or ask the connection owner for access.".into()));
+            }
+            if matches!(bot.platform.as_str(), "telegram" | "telegram-new") && db.collection::<bson::Document>(crate::models::platform_bot_config::COLLECTION_NAME)
+                .find_one(doc! {"manager_bot_id": &bot.platform_bot_id}).session(&mut *session).await?.is_some() {
+                return Err(AppError::Forbidden("Platform manager registration is controlled through platform configuration".into()));
             }
             if matches!(bot.platform.as_str(), "telegram" | "telegram-new") && let Some(manager) = db.collection::<crate::models::platform_credential::PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider": "telegram-new", "fields.manager_bot_id": &bot.platform_bot_id}).session(&mut *session).await? {
                 if bot.platform != "telegram" || manager.fields.get("webhook_ready").map(String::as_str) != Some("true") {
@@ -751,6 +805,13 @@ async fn insert_registered_bot_inner(
                 super::channel_connect_link_service::associate_telegram(&db, &mut *session, &bot).await?;
             }
             bots.insert_one(&bot).session(&mut *session).await?;
+            if let Some(setup) = approved_setup {
+                let installation = db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
+                    .find_one(doc! {"setup_id": &setup.id, "channel_bot_id": &bot.id}).session(&mut *session).await?
+                    .ok_or_else(|| AppError::Conflict("Installation authority disappeared".into()))?;
+                db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id": &bot.id},
+                    doc! {"$set": {"platform_installation_id": installation.get_str("_id").map_err(|_| AppError::Conflict("Installation authority is invalid".into()))?}}).session(&mut *session).await?;
+            }
             Ok(())
         }.await;
         transaction_result(operation)
@@ -1341,6 +1402,7 @@ pub(crate) async fn register_webhook_with_telegram_api(
             &format!("telegram-manager-identity:{}", bot.platform_bot_id),
             async {
                 let bot = get_bot(db, bot_id).await?;
+                super::platform_bot_authority::require_personal_routes(db, bot_id).await?;
                 ensure_telegram_webhook_owner(db, &bot).await?;
                 if bot.credential_source != "telegram_manager" {
                     verify_telegram_token_identity(telegram_api.http, adapter, &bot, bot_token)
@@ -1915,10 +1977,13 @@ pub async fn get_bot_for_user(
     bot_id: &str,
     user_id: &str,
 ) -> AppResult<ChannelBot> {
-    db.collection::<ChannelBot>(COLLECTION_NAME)
+    let bot = db
+        .collection::<ChannelBot>(COLLECTION_NAME)
         .find_one(doc! { "_id": bot_id, "user_id": user_id })
         .await?
-        .ok_or_else(|| AppError::ChannelBotNotFound(bot_id.to_string()))
+        .ok_or_else(|| AppError::ChannelBotNotFound(bot_id.to_string()))?;
+    super::platform_bot_authority::require_personal_routes(db, bot_id).await?;
+    Ok(bot)
 }
 
 /// Decrypt the encrypted bot token.

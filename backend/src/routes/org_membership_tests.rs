@@ -340,6 +340,7 @@ async fn org_owned_keys_read_own_org_as_direct_admin_without_membership() {
         .collection::<FeatureFlagOverride>(FLAGS)
         .insert_many([
             FeatureFlagOverride {
+                definition_id: None,
                 id: Uuid::new_v4().to_string(),
                 org_user_id: Some(f.org.id.clone()),
                 flag_key: "experimental:ai-assistant".into(),
@@ -351,6 +352,7 @@ async fn org_owned_keys_read_own_org_as_direct_admin_without_membership() {
                 updated_by: f.admin.clone(),
             },
             FeatureFlagOverride {
+                definition_id: None,
                 id: Uuid::new_v4().to_string(),
                 org_user_id: Some(f.org.id.clone()),
                 flag_key: "example_ui".into(),

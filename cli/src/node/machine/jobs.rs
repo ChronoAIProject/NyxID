@@ -452,6 +452,50 @@ mod tests {
         assert!(jobs.result("missing", 0, 0, 0).await.is_err());
     }
     #[tokio::test]
+    async fn exact_cleanup_job_ids_do_not_cancel_a_new_turn_in_the_same_conversation() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = Roots::new(&[temp.path().into()], &[]).unwrap();
+        let jobs = Jobs::new(
+            &Default::default(),
+            Arc::new(Mutex::new(Redactor::default())),
+        );
+        let identity = Identity::resolve(None).unwrap();
+        let old = uuid::Uuid::new_v4().to_string();
+        let new = uuid::Uuid::new_v4().to_string();
+        for (id, turn) in [(&old, "old-turn"), (&new, "new-turn")] {
+            jobs.start(
+                Exec {
+                    scope: super::super::cancellation::Scope {
+                        conversation_id: "same-conversation".into(),
+                        turn_id: turn.into(),
+                    },
+                    job_id: id.clone(),
+                    command: "sleep 30".into(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    stdin: None,
+                    timeout_secs: Some(30),
+                    background: true,
+                },
+                &identity,
+                &roots,
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        }
+        jobs.preempt_ids(std::slice::from_ref(&old)).await;
+        assert!(*jobs.jobs.lock().await[&old].cancel.borrow());
+        assert!(!*jobs.jobs.lock().await[&new].cancel.borrow());
+        assert!(jobs.running(&new).await);
+        jobs.preempt_ids(std::slice::from_ref(&old)).await;
+        assert!(!*jobs.jobs.lock().await[&new].cancel.borrow());
+        jobs.preempt_ids(std::slice::from_ref(&new)).await;
+        jobs.result(&old, 5, 0, 0).await.unwrap();
+        jobs.result(&new, 5, 0, 0).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn timeout_and_output_bound_are_enforced() {
         let temp = tempfile::tempdir().unwrap();
         let roots = Roots::new(&[temp.path().into()], &[]).unwrap();

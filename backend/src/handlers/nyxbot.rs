@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! NyxBot as the agent behind the owner's channel bots.
 //!
 //! Telegram bots go through the Agent Event Gateway (catalog slug `cmaeg`):
@@ -55,7 +57,6 @@ pub const PROVIDER_SLUG: &str = "nyxbot";
 pub const LINK_CODE_TTL_HOURS: i64 = 24;
 pub const EVENT_RETENTION_HOURS: i64 = 24;
 pub const MAX_CHANNEL_REPLY_CHARS: usize = 8000;
-const GATEWAY_TIMEOUT_SECS: u64 = 20;
 
 fn canonical_platform(platform: &str) -> &str {
     match platform {
@@ -173,6 +174,14 @@ pub(crate) async fn resolve_bot_ref(
 /// administer the org. Personal channels always may. Database errors are
 /// errors, never a denial.
 pub(crate) async fn org_access_holds(state: &AppState, row: &NyxbotChannel) -> AppResult<bool> {
+    if !crate::services::platform_bot_authority::permits_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
     match row.bot_owner_id.as_deref() {
         // Keep the new provider check small on personal channels, which do
         // not enter the membership resolver or allocate this future.
@@ -263,84 +272,12 @@ fn sha256_hex(value: impl AsRef<[u8]>) -> String {
 // Gateway client (server-to-server, the owner's dedicated agent key as bearer)
 // ---------------------------------------------------------------------------
 
+pub(crate) use crate::services::nyxbot_gateway_service::cleanup_platform_gateway;
 /// The gateway's `/v1` base from the `cmaeg` catalog row: no new environment
 /// variable, and the same origin the NyxID proxy already uses.
-async fn gateway_base(state: &AppState) -> AppResult<String> {
-    let row =
-        crate::services::assistant_service::resolve_admin_service_by_slug(&state.db, GATEWAY_SLUG)
-            .await
-            .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
-    let base = row.base_url.trim_end_matches('/').to_owned();
-    let parsed = url::Url::parse(&base)
-        .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
-    let local = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-    if !(parsed.scheme() == "https" || (local && parsed.scheme() == "http")) {
-        return Err(AppError::ValidationError("gateway_unavailable".into()));
-    }
-    Ok(base)
-}
-
-/// Acting service recorded on creator tokens (`act.sub`).
-const CREATOR_CLIENT_ID: &str = "nyxbot";
-/// A creator token covers one channel-management sequence.
-const CREATOR_TOKEN_TTL_SECS: i64 = 120;
-
-/// The owner's bearer for gateway channel management. The gateway resolves
-/// the creator with `GET /api/v1/users/me`, which refuses API keys, and requires
-/// `profile.metadata.owner.subject` to match. NyxID therefore mints a
-/// short-lived delegated token carrying only `account:read`, the narrowest
-/// credential that endpoint accepts. It is sent only to the gateway and is
-/// never logged or stored.
-fn creator_bearer(state: &AppState, owner: &str) -> AppResult<Zeroizing<String>> {
-    let user_id =
-        Uuid::parse_str(owner).map_err(|_| AppError::Internal("Invalid channel owner".into()))?;
-    crate::crypto::jwt::generate_delegated_access_token(
-        &state.jwt_keys,
-        &state.config,
-        &user_id,
-        crate::mw::auth::ACCOUNT_READ_SCOPE,
-        CREATOR_CLIENT_ID,
-        CREATOR_TOKEN_TTL_SECS,
-        None,
-    )
-    .map(Zeroizing::new)
-}
-
-struct GatewayResponse {
-    status: u16,
-    body: Value,
-}
-
-async fn gateway_call(
-    state: &AppState,
-    method: reqwest::Method,
-    path: &str,
-    bearer: &str,
-    body: Option<&Value>,
-    idempotency_key: Option<&str>,
-) -> AppResult<GatewayResponse> {
-    let base = gateway_base(state).await?;
-    let mut request = state
-        .http_client
-        .request(method, format!("{base}{path}"))
-        .bearer_auth(bearer)
-        .timeout(Duration::from_secs(GATEWAY_TIMEOUT_SECS));
-    if let Some(body) = body {
-        request = request.json(body);
-    }
-    if let Some(key) = idempotency_key {
-        request = request.header("Idempotency-Key", key);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
-    let status = response.status().as_u16();
-    let bytes = response.bytes().await.unwrap_or_default();
-    let body =
-        serde_json::from_slice(&bytes[..bytes.len().min(2 * 1024 * 1024)]).unwrap_or(Value::Null);
-    Ok(GatewayResponse { status, body })
-}
+use crate::services::nyxbot_gateway_service::{
+    GatewayResponse, creator_bearer, gateway_base, gateway_call,
+};
 
 /// Stable, prose-free code for a failed gateway call.
 fn gateway_error_code(response: &GatewayResponse) -> &'static str {
@@ -591,6 +528,7 @@ pub async fn connect(
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
     let bot: ChannelBot = accessible_bot(state, owner, bot_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     // An org bot's route and route key belong to the org.
     let bot_owner_id = bot.user_id.clone();
     if !bot.is_active {
@@ -773,11 +711,38 @@ pub async fn connect(
         created_at: now,
         updated_at: now,
     };
-    state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .insert_one(&row)
-        .await?;
+    let db = state.db.clone();
+    let inserted = row.clone();
+    let mut session = db.client().start_session().await?;
+    let saved = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                crate::services::platform_bot_authority::fence_personal_routes(
+                    &db,
+                    &inserted.channel_bot_id,
+                    bot_owner(&inserted),
+                    session,
+                )
+                .await?;
+                db.collection::<NyxbotChannel>(CHANNELS)
+                    .insert_one(&inserted)
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error);
+    if let Err(error) = saved {
+        let _ = key_service::delete_api_key(&state.db, &bot_owner_id, &route_key.id).await;
+        if let Some(key) = &agent_key_id {
+            let _ = key_service::delete_api_key(&state.db, owner, key).await;
+        }
+        return Err(error);
+    }
     let mut outcome = if gateway {
         connect_gateway(
             state,
@@ -2310,6 +2275,11 @@ pub async fn link(
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
     let row = load_channel(state, owner, channel_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?;
     if row.agent_id.as_deref() == Some(agent.id.as_str())
         || (row.agent_id.is_none() && agent.is_nyxbot())
     {
@@ -2503,6 +2473,11 @@ async fn inbound_message(
     addressed: Option<bool>,
     event_key: &str,
 ) -> AppResult<Inbound> {
+    crate::services::platform_bot_authority::require_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?;
     let private = chat.kind.as_deref() == Some("private");
     if let Some(linked) = link_owner(state, row, sender, text, private).await? {
         return Ok(linked);
@@ -2799,6 +2774,11 @@ async fn start_chat_turn(
     binding: Option<crate::models::channel_thread_follow::ThreadTurnBinding>,
     event_key: &str,
 ) -> AppResult<Inbound> {
+    crate::services::platform_bot_authority::require_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?;
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
     let shared = private && !guest && row.bot_owner_id.is_none();

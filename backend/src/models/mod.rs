@@ -44,6 +44,7 @@ pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
+pub mod feature_flag_definition;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
@@ -77,8 +78,11 @@ pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
 pub mod ownership_transfer;
+pub mod platform_binding;
+pub mod platform_bot_config;
 pub mod platform_credential;
 pub mod platform_settings;
+pub mod platform_setup;
 pub mod provider_config;
 pub mod pushed_authorization_request;
 pub mod refresh_token;
@@ -166,3 +170,5 @@ pub mod service_preference;
 pub mod async_service_operation;
 
 pub mod catalog_icon;
+
+pub mod platform_installation;
