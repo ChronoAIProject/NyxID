@@ -82,6 +82,9 @@ function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): stri
       return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`;
     case "operations":
       return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
+    case "machine":
+    case "saved_login":
+      return `Approved: ${acknowledgement.summary} Continue within the updated machine and saved-login grants.`;
     case "account":
       return "Approved: account management for this chat. Continue.";
     case "action":

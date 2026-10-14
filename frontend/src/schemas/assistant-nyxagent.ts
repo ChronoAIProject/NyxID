@@ -176,7 +176,7 @@ export const nyxAgentAcknowledgementSchema = z.object({
   continuation_receipt_id: z.string().uuid().nullish(),
   trigger_run_id: z.string().nullable().optional(),
   id: z.string().uuid(),
-  kind: z.enum(["service", "account", "action", "operations", "skills"]),
+  kind: z.enum(["service", "account", "action", "operations", "skills", "machine", "saved_login"]),
   status: z.enum(["pending", "allowed", "denied", "expired", "used"]),
   summary: z.string(),
   /** `orchestrator`: a specialist's request that NyxBot decides (the user may too). */

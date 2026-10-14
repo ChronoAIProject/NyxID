@@ -146,3 +146,10 @@ it("shows no risk line on cards from older servers", () => {
   );
   expect(screen.queryByText(/access mode is/)).not.toBeInTheDocument();
 });
+
+it.each(["skills", "operations"] as const)("explains that routed %s widening follows the permission mode", (kind) => {
+  render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, kind, decider: "orchestrator" }} deciding={false} onDecision={vi.fn()} />);
+  expect(screen.getByRole("region")).toHaveTextContent("follows NyxBot's permission mode");
+  expect(screen.getByRole("region")).not.toHaveTextContent("Widening requires your confirmation");
+  expect(screen.getByRole("region")).not.toHaveTextContent("You will get a separate card");
+});

@@ -578,6 +578,11 @@ it("phrases continuation turns per acknowledgement kind", () => {
   expect(continuationText({ ...base, kind: "action", tool_name: "delete_agent_key" })).toBe(
     `Confirmed: Delete agent key ci-bot (acknowledgement_id ${base.id}). Retry it now. Then tell the user in one or two plain sentences what you did and the result.`,
   );
+  for (const kind of ["machine", "saved_login"] as const) {
+    expect(continuationText({ ...base, kind })).toBe(
+      "Approved: Delete agent key ci-bot Continue within the updated machine and saved-login grants. Then tell the user in one or two plain sentences what you did and the result.",
+    );
+  }
 });
 
 function failedReply(turnId: string, code: string, seq = 2) {

@@ -81,9 +81,9 @@ export function NyxAgentAcknowledgementCard({
       ) : null}
       <p className="text-12 text-muted-foreground">
         {acknowledgement.kind === "skills"
-          ? "Allowing this proposal asks NyxBot to resolve the exact version. You will get a separate card to confirm adding or re-pinning the skill."
+          ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
           : acknowledgement.kind === "operations"
-          ? "This changes the specialist's operations on every thread. Widening requires your confirmation."
+          ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
           : routed
           ? "NyxBot decides this specialist's request against what you asked for. " +
             "You can decide it here instead; the agent resumes on its own."

@@ -165,6 +165,16 @@ describe("NyxBot message and card schemas", () => {
     expect(page.messages[0]?.role).toBe("event");
     expect(page.acknowledgements).toEqual([]);
   });
+
+  it.each(["machine", "saved_login"] as const)("keeps routed %s requests in parsed history", (kind) => {
+    const request = { id: "12345678-1234-4123-8123-123456789012", kind, status: "pending",
+      decider: "orchestrator", summary: "Requested machine authority", service_slug: "owner-vm",
+      service_name: "Owner VM", tool_name: null, created_at: at, decided_at: null, expires_at: at };
+    const page = nyxAgentHistorySchema.parse({ conversation: legacyConversation, messages: [],
+      before_seq: null, acknowledgements: [request] });
+    expect(page.acknowledgements).toHaveLength(1);
+    expect(page.acknowledgements[0]).toMatchObject({ kind, decider: "orchestrator", status: "pending" });
+  });
 });
 
 describe("NyxBot team, settings and channel schemas", () => {
