@@ -180,8 +180,9 @@ pub async fn update(
     let (platform, descriptor) = service::descriptor(&state.token_exchange_cache, &provider)?;
     if provider == "telegram-new" {
         super::telegram_new::service(&state)
-            .configure_manager(
+            .configure_manager_for(
                 &auth.user_id.to_string(),
+                super::login_client_context::require_first_party_human(&auth).is_ok(),
                 &body.fields,
                 body.regenerate_verify_token,
             )

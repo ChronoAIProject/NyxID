@@ -853,3 +853,16 @@ the following; each is fixed with a regression or an existing test:
 - Test fixes: NyxBot fixture seeds the linked bot row (R11 fails closed),
   signup test uses the kebab-case template, the distinct-customer journey runs on
   a 16 MiB stack, and the signup password is generated at runtime (CodeQL).
+
+Astra convergence round (same day) found three remaining concurrency and
+retention gaps, now closed:
+
+- Route creation, key rebinding and re-enabling write-fence the agent key in the
+  route transaction (`route_binding_revision`), so they conflict with conversion's
+  key revocation instead of leaving an active route on a revoked key
+  (`platform_onboarding_route_creation_conflicts_with_concurrent_key_revocation`).
+- A purged setup counts as terminal; the setup expiry sweep releases native
+  requests of cancelled, expired or purged setups.
+- The first-party requirement for a converted manager is enforced inside the
+  manager operation (`configure_manager_for`), closing the race with the first
+  conversion.

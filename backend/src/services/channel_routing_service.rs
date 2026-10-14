@@ -224,12 +224,60 @@ pub async fn create_conversation(
     if channel_bot_id.is_some() {
         insert_bot_conversation(db, &conversation).await?;
     } else {
-        db.collection::<ChannelConversation>(COLLECTION_NAME)
-            .insert_one(&conversation)
-            .await?;
+        insert_device_conversation(db, &conversation).await?;
     }
 
     Ok(conversation)
+}
+
+/// Write-fence a route's agent key inside the route transaction, so binding a
+/// key conflicts with a concurrent revocation (for example manager conversion)
+/// instead of leaving an active route on a revoked key.
+async fn fence_route_key(
+    db: &mongodb::Database,
+    key_id: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let fenced = db
+        .collection::<bson::Document>(API_KEYS)
+        .update_one(
+            doc! {"_id": key_id, "is_active": true},
+            doc! {"$inc": {"route_binding_revision": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if fenced.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Route agent key is no longer active".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn insert_device_conversation(
+    db: &mongodb::Database,
+    conversation: &ChannelConversation,
+) -> AppResult<()> {
+    use super::api_key_mutation_service::{map_transaction_error, transaction_result};
+    let db = db.clone();
+    let conversation = conversation.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                fence_route_key(&db, &conversation.agent_api_key_id, session).await?;
+                db.collection::<ChannelConversation>(COLLECTION_NAME)
+                    .insert_one(&conversation)
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            transaction_result(result)
+        })
+        .await
+        .map_err(map_transaction_error)
 }
 
 async fn insert_bot_conversation(
@@ -269,6 +317,7 @@ async fn insert_bot_conversation(
                         session,
                     )
                     .await?;
+                    fence_route_key(&db, &conversation.agent_api_key_id, session).await?;
                     if conversation.default_agent {
                         db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
                     doc! { "channel_bot_id": bot_id, "user_id": &conversation.user_id,
@@ -372,6 +421,33 @@ pub async fn update_conversation(
         return mutate_bot_conversation(db, &current, set_doc, default_agent == Some(true)).await;
     }
 
+    if let Some(key) = widened_route_key(&set_doc, &current).map(str::to_owned) {
+        use super::api_key_mutation_service::{map_transaction_error, transaction_result};
+        let db = db.clone();
+        let (conversation_id, user_id) = (conversation_id.to_owned(), user_id.to_owned());
+        let mut session = db.client().start_session().await?;
+        return session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let result: AppResult<ChannelConversation> = async {
+                    fence_route_key(&db, &key, session).await?;
+                    db.collection::<ChannelConversation>(COLLECTION_NAME)
+                        .find_one_and_update(
+                            doc! { "_id": &conversation_id, "user_id": &user_id, "retired_by_transfer": { "$ne": true } },
+                            doc! { "$set": set_doc.clone() },
+                        )
+                        .return_document(mongodb::options::ReturnDocument::After)
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::NotFound(format!("Conversation not found: {conversation_id}")))
+                }
+                .await;
+                transaction_result(result)
+            })
+            .await
+            .map_err(map_transaction_error);
+    }
+
     let updated = db
         .collection::<ChannelConversation>(COLLECTION_NAME)
         .find_one_and_update(
@@ -449,6 +525,18 @@ pub async fn delete_conversation(
     Ok(())
 }
 
+/// The key a route update binds or re-enables; reductions need no key fence.
+fn widened_route_key<'a>(
+    set: &'a bson::Document,
+    current: &'a ChannelConversation,
+) -> Option<&'a str> {
+    let rebinds = set.get_str("agent_api_key_id").ok();
+    if rebinds.is_some() || set.get_bool("is_active") == Ok(true) {
+        return Some(rebinds.unwrap_or(&current.agent_api_key_id));
+    }
+    None
+}
+
 async fn mutate_bot_conversation(
     db: &mongodb::Database,
     current: &ChannelConversation,
@@ -463,6 +551,9 @@ async fn mutate_bot_conversation(
         let result: AppResult<_> = async {
             let bot = current.channel_bot_id.as_deref().expect("bot conversation");
             super::platform_bot_authority::fence_personal_routes(&db, bot, &current.user_id, session).await?;
+            if let Some(key) = widened_route_key(&set, &current) {
+                fence_route_key(&db, key, session).await?;
+            }
             if default {
                 db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
                     doc! {"channel_bot_id": bot, "user_id": &current.user_id, "default_agent": true, "is_active": true, "_id": {"$ne": &current.id}},
@@ -744,6 +835,60 @@ mod tests {
         delete_conversation(&db, &conversation.id, &owner)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn platform_onboarding_route_creation_conflicts_with_concurrent_key_revocation() {
+        let db = connect_transaction_test_database("platform_route_key_fence").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let bot = uuid::Uuid::new_v4().to_string();
+        seed_bot(&db, &bot, &owner, "telegram").await;
+        let key = make_api_key(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            Some("https://agent.test/callback"),
+        );
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        // Revocation (as in manager conversion) is written but not yet committed.
+        let mut revocation = db.client().start_session().await.unwrap();
+        revocation.start_transaction().await.unwrap();
+        db.collection::<bson::Document>(API_KEYS)
+            .update_one(doc! {"_id": &key.id}, doc! {"$set": {"is_active": false}})
+            .session(&mut revocation)
+            .await
+            .unwrap();
+        let creation = {
+            let (db, owner, bot, key) = (db.clone(), owner.clone(), bot.clone(), key.id.clone());
+            tokio::spawn(async move {
+                create_conversation(
+                    &db,
+                    &owner,
+                    Some(&bot),
+                    "telegram",
+                    "chat",
+                    "private",
+                    None,
+                    &key,
+                    false,
+                    false,
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        revocation.commit_transaction().await.unwrap();
+        assert!(creation.await.unwrap().is_err());
+        assert_eq!(
+            db.collection::<ChannelConversation>(COLLECTION_NAME)
+                .count_documents(doc! {"channel_bot_id": &bot, "is_active": true})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

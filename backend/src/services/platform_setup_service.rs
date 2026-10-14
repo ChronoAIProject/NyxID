@@ -527,13 +527,14 @@ pub async fn pause_or_cancel(
 /// setup so it no longer occupies the client's creation slot. Started effects
 /// keep their provenance; the generation bump fences in-flight connection work.
 pub(crate) async fn release_terminal_request(db: &Database, setup_id: &str) -> AppResult<bool> {
-    let terminal = db
+    // A purged setup is as final as a cancelled or expired one.
+    let live = db
         .collection::<bson::Document>(COLLECTION_NAME)
-        .find_one(doc! {"_id": setup_id, "state": {"$in": ["cancelled", "expired"]}})
+        .find_one(doc! {"_id": setup_id, "state": {"$nin": ["cancelled", "expired"]}})
         .projection(doc! {"_id": 1})
         .await?
         .is_some();
-    if !terminal {
+    if live {
         return Ok(false);
     }
     let released = db
@@ -777,6 +778,32 @@ pub async fn expire(db: &Database) -> AppResult<()> {
         doc! {"$set": {"state": "expired", "approved_digest": bson::Bson::Null, "approved_revision": bson::Bson::Null,
             "purge_after": bson::DateTime::from_chrono(Utc::now() + Duration::days(30))}, "$inc": {"revision": 1_i64, "authority_generation": 1_i64}}
     ).await?;
+    release_terminal_requests(db).await
+}
+
+/// Release native creation requests whose setup ended or was purged while the
+/// customer was away, so the creation slot never stays occupied.
+async fn release_terminal_requests(db: &Database) -> AppResult<()> {
+    let setup_ids: Vec<String> = db
+        .collection::<bson::Document>(crate::models::telegram_bot_request::COLLECTION_NAME)
+        .find(doc! {"active": true, "setup_authority.setup_id": {"$type": "string"},
+            "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent", "ready", "provisioning"]}})
+        .projection(doc! {"setup_authority.setup_id": 1})
+        .limit(100)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .iter()
+        .filter_map(|row| {
+            row.get_document("setup_authority")
+                .ok()
+                .and_then(|a| a.get_str("setup_id").ok())
+                .map(str::to_owned)
+        })
+        .collect();
+    for setup_id in setup_ids {
+        release_terminal_request(db, &setup_id).await?;
+    }
     Ok(())
 }
 
@@ -854,6 +881,23 @@ mod tests {
         assert!(!request.get_bool("active").unwrap());
         assert_eq!(request.get_str("status").unwrap(), "cancelled");
         assert_eq!(request.get_i64("connection_generation").unwrap(), 3);
+        // A setup purged by retention releases its request through the sweep.
+        requests
+            .insert_one(
+                doc! {"_id": "orphan", "active": true, "status": "provisioning",
+                "auto_connect": true, "revision": 1_i64, "connection_generation": 1_i64,
+                "setup_authority": {"setup_id": "purged"}},
+            )
+            .await
+            .unwrap();
+        release_terminal_requests(&db).await.unwrap();
+        let orphan = requests
+            .find_one(doc! {"_id": "orphan"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!orphan.get_bool("active").unwrap());
+        assert_eq!(orphan.get_str("status").unwrap(), "cancelled");
         db.drop().await.unwrap();
     }
 

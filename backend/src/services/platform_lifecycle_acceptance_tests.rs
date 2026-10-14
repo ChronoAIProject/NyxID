@@ -452,6 +452,22 @@ async fn platform_onboarding_manager_rotation_and_retirement_preserve_shared_web
         service.clear_manager().await,
         Err(AppError::Conflict(_))
     ));
+    // An OAuth-app admin token that raced conversion cannot change the manager.
+    assert!(matches!(
+        service
+            .configure_manager_for(
+                &f.operator,
+                false,
+                &[(
+                    "manager_bot_token".into(),
+                    Some(zeroize::Zeroizing::new("100:rotated-test-secret".into())),
+                )]
+                .into(),
+                false,
+            )
+            .await,
+        Err(AppError::Forbidden(_))
+    ));
     service
         .configure_manager(
             &f.operator,

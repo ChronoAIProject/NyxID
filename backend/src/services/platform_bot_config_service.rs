@@ -31,9 +31,19 @@ pub(crate) async fn any_profile(db: &Database) -> AppResult<bool> {
         .is_some())
 }
 
+fn require_first_party(first_party: bool) -> AppResult<()> {
+    if !first_party {
+        return Err(AppError::Forbidden(
+            "A converted platform manager is changed only by a first-party administrator".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn admit_manager_admin(
     db: &Database,
     actor: &str,
+    first_party: bool,
     manager: &str,
 ) -> AppResult<()> {
     if db
@@ -59,6 +69,7 @@ pub(crate) async fn admit_manager_admin(
                     .await?
                     .is_some()
                 {
+                    require_first_party(first_party)?;
                     fence_admin(&db, &actor, session).await?;
                 }
                 Ok(())
@@ -73,6 +84,7 @@ pub(crate) async fn admit_manager_admin(
 pub(crate) async fn finalize_manager_delivery(
     db: &Database,
     actor: &str,
+    first_party: bool,
     manager: &str,
     observation_started_at: String,
 ) -> AppResult<()> {
@@ -95,6 +107,7 @@ pub(crate) async fn finalize_manager_delivery(
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
             if db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"manager_bot_id": &manager}).session(&mut *session).await?.is_some() {
+                require_first_party(first_party)?;
                 fence_admin(&db, &actor, session).await?;
             }
             if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(
