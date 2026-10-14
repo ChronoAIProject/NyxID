@@ -4479,7 +4479,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
         let auth = authenticate(&f).await;
         let args = json!({"method":"GET","path":"/work"});
         if asks {
-            let future = call(&f, &auth, "mode-approval__proxy", args);
+            let future = call(&f, &auth, "mode-approval__request", args);
             tokio::pin!(future);
             tokio::time::timeout(std::time::Duration::from_secs(10),async {
                 loop {
@@ -4495,7 +4495,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
                     .is_empty()
             );
         } else {
-            let value = result(call(&f, &auth, "mode-approval__proxy", args).await, false).await;
+            let value = result(call(&f, &auth, "mode-approval__request", args).await, false).await;
             assert_eq!(value["ok"], true);
             assert_eq!(hits.load(Ordering::SeqCst), 1);
             assert_eq!(
@@ -4521,7 +4521,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
                 call(
                     &f,
                     &auth,
-                    "mode-approval__proxy",
+                    "mode-approval__request",
                     json!({"method":"DELETE","path":"/remove"}),
                 )
                 .await,

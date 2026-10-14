@@ -693,7 +693,10 @@ async fn full_access_account_success_records_one_non_consumable_receipt_and_no_u
         receipt.arguments_digest.as_deref(),
         Some(acks::arguments_digest(&args).as_str())
     );
-    assert_eq!(receipt.summary, "Change agent key 'ci-bot'");
+    assert_eq!(
+        receipt.summary,
+        format!("Change agent key 'ci-bot' ({}): name", &key[..8])
+    );
     assert_eq!(receipt.created_at, receipt.decided_at.unwrap());
     assert_eq!(receipt.expires_at, receipt.created_at);
     let confirmation = receipt.confirmation.as_ref().unwrap();
