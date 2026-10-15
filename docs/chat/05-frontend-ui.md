@@ -301,16 +301,18 @@ Implementation: `frontend/src/components/assistant/assistant-sidebar.tsx`,
 
 ## Loading and fetch failures
 
-NyxBot toasts appear at the top right on desktop and top center on mobile.
-They show a short explanation and next step, without diagnostic IDs. The inline
-chat notice retains the full error and trace ID after the toast disappears;
+All toasts on `/assistant` routes appear at the top right on desktop and top
+center on mobile. NyxBot chat send, stop, retry, and group-action error toasts
+show a short explanation and next step, without diagnostic IDs. The inline
+chat notice retains the error explanation and trace ID after the toast disappears;
 a new send or control attempt clears the previous request notice. Request
 notices stay scoped to their conversation, including new-thread adoption.
 Conversation/group load failures and the latest failed turn appear above the
 chat, outside its scrolling transcript. Historic failures retain their message
 context and retry controls. Inline HTTP failures use short, actionable copy and show
 the server-issued `X-NyxID-Trace-Id` when available; internal and upstream 5xx
-details are never displayed. The ID is searchable as `trace_id` in the
+details are never displayed. The server generates a fresh UUID for each
+assistant HTTP request. The ID is searchable as `trace_id` in the
 `assistant_request` server span, including the detached NyxAgent turn. Persisted
 turn failures use the durable turn ID (searchable as `turn_id` in server logs and
 stored messages). Approval `request_id` values are unrelated and never used as
