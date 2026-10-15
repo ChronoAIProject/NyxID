@@ -54,10 +54,14 @@ requires proven NyxAgent native-tool containment, model-call funding propagation
 and session cleanup. Personal work is independent of that proof. Neither mock
 results nor isolated branch checks satisfy combined acceptance A1–A17.
 
-The current authorization covers local implementation, isolated worktrees and
-local commits. No new production deployment, real-user Telegram messages,
-cross-repository changes or merge is included. Follow-up release decisions use
-the concrete integrated result and actual validation evidence.
+The user subsequently asked the primary to drive this through full completion
+as PM. Continue implementation, integration, independent review, PR preparation
+and CI without asking again at routine handoffs. Prepare any deployment/live
+test request only after the integrated change is concrete and reviewable.
+Production deployment, real-user Telegram messages and cross-repository changes
+still need applicable authorization; prior release approvals are not reused for
+this new feature. Track actual completion in the
+[acceptance evidence](2026-10-15-public-personal-nyxbot-acceptance.md).
 
 ## Evidence
 
