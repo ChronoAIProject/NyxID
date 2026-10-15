@@ -8,26 +8,29 @@ or the external portion of A1/A15.
 
 Current checkpoint: identity, personal execution/settlement/Stop, ingress,
 Telegram transport, account lifecycle recovery and frontend slices are integrated
-through `75fc04d4a` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
+through `5c9dcec9b` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
 Seven integrated journey/regression tests are written, including real local
 consent and personal execution against mocked upstream/Telegram HTTP. They have
-not yet run. Public execution remains unavailable; exact budget/funding primitives
-are integrated, but their runtime consumers, FAQ tools and upstream proof remain
-incomplete. Fresh personal event admission, the durable saved-reply after-turn
+not yet run. Public execution remains unavailable; exact budget/funding,
+restricted FAQ/signup tools, encrypted public turn/reply storage and transport
+consumers are integrated. The execution/model-callback bridge and upstream
+proof remain incomplete. Fresh personal event admission, the durable saved-reply after-turn
 hook, card continuation scheduling and retained original result destinations
-are integrated. Their final Telegram delivery/card rendering and recovery
-consumers remain in progress.
+are integrated. The final Telegram delivery/card rendering and recovery
+consumers are also integrated, with six further regression tests written.
 
-The latest CI run is [38724108706](https://github.com/ChronoAIProject/NyxID/actions/runs/38724108706)
-on `457783115`. Formatting, frontend, CLI tests/coverage and CLI wizard freshness
-passed. The AWS feature build failed on 34 unused-code diagnostics under
-`-D warnings`; the backend test target failed on 19 unused-code diagnostics
-before tests could execute. Clippy also reported a collapsible conditional in
-public budget recovery. Remaining unused paths await public runtime consumers. They
-must be connected or removed, without blanket lint suppression or fabricated
-readiness. Frontend coverage and Rust CodeQL were still running at this
-checkpoint. The preceding `f8f623a42` run passed frontend tests/coverage, CLI
-tests/coverage, wizard freshness and all four CodeQL language checks.
+CI [38728299188](https://github.com/ChronoAIProject/NyxID/actions/runs/38728299188)
+is running on `5c9dcec9b`. The preceding run on `61b202ca6` passed frontend and
+formatting, but AWS feature compilation failed on 43 unused-code diagnostics
+before public dispatcher wiring. Backend test compilation found one missing
+settlement-hook fixture argument, fixed in `db11d3ec0`. Clippy found two large
+enum variants; both payloads are now boxed without changing serialized shapes.
+Remaining unused public paths must be connected or superseded seams removed;
+no blanket lint suppression or fabricated readiness is acceptable. The failed
+superseded CI and CodeQL runs were cancelled so the current revision can run.
+The earlier `457783115` run passed frontend tests/coverage, CLI tests/coverage,
+formatting and wizard freshness. All four CodeQL language checks passed on
+`f8f623a42`.
 
 Earlier missing webhook arguments, transaction callback `Send` diagnostics and
 four merge-related test-target errors have been corrected. Main `828009878` was
@@ -54,10 +57,17 @@ source review found P3-1/P3-2 corrected; it does not replace executed regression
 or real upstream proof. Astra independently reviewed the integrated personal
 event/hook/card and public signup-send changes at `75fc04d4a`, plus budget fixes
 `cdfe61b12` and `457783115`, and found no high-confidence regression in that
-bounded source review. It did not run tests or endorse merging. Final delivery
-and public consumers still need review after integration. Captured delayed-result
+bounded source review. Its subsequent public review found that a failed
+preparation could retain an active session until the 24-hour session expiry;
+`280e86b86` adds exact failed-preparation and expired-turn recovery. Astra checked
+that correction without finding a remaining blocker. Its final transport review
+at `5c9dcec9b` found no confirmed blocker in original destination checks,
+event/reply deduplication, recovery, card rendering or public dispatch consumers.
+None of these reviews ran tests or endorsed merging. The public execution bridge
+still needs review after integration. Captured delayed-result
 destinations currently expire with the original 2,100-second turn lease; later
-results remain in web history. This limit must be exercised by delivery tests.
+results remain in web history. A source regression now exercises that limit,
+but runtime execution is still pending.
 
 Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
 tests across 12 files, focused ESLint, TypeScript checking, production and
