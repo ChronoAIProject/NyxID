@@ -59,9 +59,9 @@ Prototype-only actions cannot claim production success. Public styles stay scope
 
 ## 验证记录 / Verification
 
-首次独立验收发现 A-01～A-03，已按下方复验记录修复；独立复验结论待验收对话给出。最初移动端工具限制已解除，本轮实际测得 390×844。旧原型 QA 不计作正式实现通过证据。
+首次独立验收发现 A-01～A-03，已按下方复验记录修复；独立验收对话已于 2026-10-15 对修复 commit `1ac8a28675603279499fb1205790ca4bd67c4fa0` 复验通过。最初移动端工具限制已解除，本轮实际测得 390×844。旧原型 QA 不计作正式实现通过证据。
 
-The first independent acceptance found A-01–A-03. Fixes and targeted evidence are recorded below; independent re-acceptance is pending. The initial mobile tooling limitation has been resolved with an actual 390×844 viewport. Prior prototype QA is not counted.
+The first independent acceptance found A-01–A-03. Fixes and targeted evidence are recorded below; independent re-acceptance passed on fix commit `1ac8a28675603279499fb1205790ca4bd67c4fa0` on October 15, 2026. The initial mobile tooling limitation has been resolved with an actual 390×844 viewport. Prior prototype QA is not counted.
 
 | Check | Result and evidence |
 | --- | --- |
@@ -77,9 +77,9 @@ The first independent acceptance found A-01–A-03. Fixes and targeted evidence 
 
 ## 首轮验收修复 / First acceptance fixes
 
-首轮独立验收未通过，发现 A-01（窄屏无直接登录）、A-02（自定义方案卡遗漏 CTA/样式）、A-03（NyxBot 侧栏徽标溢出）。本轮仅修复这三项；验证和截图见 `website-a-evidence/fix-1/README.md`。验收结论由指定独立对话给出，不由实现方自行宣布。
+首轮独立验收未通过，发现 A-01（窄屏无直接登录）、A-02（自定义方案卡遗漏 CTA/样式）、A-03（NyxBot 侧栏徽标溢出）。本轮仅修复这三项；验证和截图见 `website-a-evidence/fix-1/README.md`。指定独立验收对话已复验通过三项修复及相关 89 项测试、完整构建、定向 ESLint；既有真实账号/物理设备等限制仍保留。
 
-The first independent acceptance failed on mobile login reachability, the custom solution CTA/styles, and sidebar badge overflow. This follow-up fixes those three findings only. Targeted checks and screenshots are in `website-a-evidence/fix-1/README.md`; the assigned acceptance chat owns the re-acceptance conclusion.
+The first independent acceptance failed on mobile login reachability, the custom solution CTA/styles, and sidebar badge overflow. This follow-up fixes those three findings only. Targeted checks and screenshots are in `website-a-evidence/fix-1/README.md`; the assigned acceptance chat independently passed the three fixes, 89 relevant tests, full build and targeted ESLint on commit `1ac8a2867`; real-account/device limitations remain.
 
 ## 已确认的生产适配 / Explicit production adaptations
 
@@ -139,7 +139,7 @@ No real login, OAuth consent, registration, message, purchase or account mutatio
 - `origin/main` is 12 upstream commits behind the verified base. A non-protected `codex/website-a-base` review branch mirrors that exact base for a delivery-scoped fork comparison. `main` is never pushed directly.
 - 按负责人最新确认，本轮通过实现 commit 并推送 `aelf-hzz780/NyxID` 的 `codex/website-a-delivery` 分支交付；组织仓库 PR 由负责人手动创建，不要求先创建 fork PR。
 - Per the owner's latest instruction, implementation commits pushed to the fork delivery branch are the delivery artifact. The owner will create the organization PR manually; a fork PR is optional.
-- Independent acceptance chat: `01a13edf-2b31-75c1-b1ca-824d707f02ff`. Handoff identifies the exact delivery commit, fork branch and current verification evidence. Independent re-acceptance of the fixes remains pending.
+- Independent acceptance chat: `01a13edf-2b31-75c1-b1ca-824d707f02ff`. Handoff identifies the exact delivery commit, fork branch and current verification evidence. Independent re-acceptance of the fixes passed on `1ac8a2867` (October 15, 2026); remaining coverage limits are listed below.
 
 ### PR 准备与责任 / PR preparation and ownership
 

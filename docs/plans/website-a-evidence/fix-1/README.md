@@ -1,8 +1,8 @@
 # 首轮验收修复证据 / First acceptance fix evidence
 
-日期：2026-10-15。修复基线：`22c5df89fea2876ad7192af1273b3be704e82ba0`。首轮独立验收发现三项缺陷，本记录为实现方定向验证，独立复验结论由指定验收对话给出。
+日期：2026-10-15。修复基线：`22c5df89fea2876ad7192af1273b3be704e82ba0`。首轮独立验收发现三项缺陷，本记录为实现方定向验证，指定验收对话已于 2026-10-15 对修复 commit `1ac8a28675603279499fb1205790ca4bd67c4fa0` 独立复验通过。
 
-Date: October 15, 2026. Fix base: `22c5df89fea2876ad7192af1273b3be704e82ba0`. These are implementation checks for the three independent acceptance findings, not a self-issued acceptance result.
+Date: October 15, 2026. Fix base: `22c5df89fea2876ad7192af1273b3be704e82ba0`. These are implementation checks for the three independent acceptance findings, followed by independent re-acceptance, which passed on commit `1ac8a28675603279499fb1205790ca4bd67c4fa0` on October 15, 2026.
 
 | Finding | Fix and actual verification |
 | --- | --- |
@@ -23,6 +23,6 @@ The four new bilingual generated-contract tests failed before the fix and passed
 
 Use the commands in `website-a-delivery.md`; its test selection includes the new generated-contract file. Preview with `npm run dev -- --host 127.0.0.1 --port 4180 --strictPort`. The initial mobile viewport limitation is resolved. The unrelated full 5625-test suite and 100 route combinations were not rerun for these focused fixes.
 
-剩余范围：未执行真实账号登录/OAuth consent/MFA、物理手机触摸/性能、Firefox/WebKit 或完整离线测试。此前验收报告中的相关限制仍成立。独立复验待新 commit 交接后执行。
+剩余范围：未执行真实账号登录/OAuth consent/MFA、物理手机触摸/性能、Firefox/WebKit 或完整离线测试。此前验收报告中的相关限制仍成立。独立复验已完成并通过，不扩展为上述未覆盖项的通过声明。
 
-Remaining limits: no real-account login/OAuth consent/MFA, physical-device touch/performance, Firefox/WebKit or full offline run. The earlier acceptance report's corresponding limitations still apply. Independent re-acceptance follows the new commit handoff.
+Remaining limits: no real-account login/OAuth consent/MFA, physical-device touch/performance, Firefox/WebKit or full offline run. The earlier acceptance report's corresponding limitations still apply. Independent re-acceptance passed for this delivery scope; it does not certify those untested areas.
