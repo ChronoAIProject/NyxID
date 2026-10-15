@@ -290,9 +290,10 @@ mod tests {
     #[cfg(feature = "decrypt")]
     #[test]
     fn decrypt_rejects_oversized_ciphertext_before_crypto() {
+        use chacha20poly1305::aead::AeadCore;
+
         let recipient = generate_node_keypair();
-        let mut nonce = [0_u8; 24];
-        OsRng.fill_bytes(&mut nonce);
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng).into();
         let envelope = CiphertextEnvelope::new(
             VERSION_V1,
             *recipient.public_key(),

@@ -383,12 +383,6 @@ impl<'a> RciInjectSession<'a> {
     }
 
     #[cfg(test)]
-    fn with_prompt_secret_override(mut self, secret: Zeroizing<String>) -> Self {
-        self.prompt_secret_override = Some(secret);
-        self
-    }
-
-    #[cfg(test)]
     fn with_timeouts(mut self, pubkey_timeout: Duration, terminal_timeout: Duration) -> Self {
         self.pubkey_timeout = pubkey_timeout;
         self.terminal_timeout = terminal_timeout;
@@ -1479,8 +1473,8 @@ mod tests {
             RciSecretSource::Prompt,
             RciFingerprintPolicy::Expect(fingerprint),
             RciInjectMode::Terminal,
-        )
-        .with_prompt_secret_override(Zeroizing::new("Bearer sk-rci".to_string()));
+        );
+        session.prompt_secret_override = Some(Zeroizing::new("Bearer sk-rci".to_string()));
 
         let outcome = session.run().await.expect("inject should complete");
 
@@ -1797,8 +1791,8 @@ mod tests {
             RciSecretSource::Prompt,
             RciFingerprintPolicy::Expect(fingerprint),
             RciInjectMode::Terminal,
-        )
-        .with_prompt_secret_override(Zeroizing::new("Bearer sk-legacy".to_string()));
+        );
+        session.prompt_secret_override = Some(Zeroizing::new("Bearer sk-legacy".to_string()));
 
         let outcome = session
             .run()

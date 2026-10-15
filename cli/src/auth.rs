@@ -920,15 +920,21 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
     let base_url = auth
         .resolved_base_url()
         .unwrap_or_else(|_| DEFAULT_LOGIN_BASE_URL.to_string());
-    run_login(LoginArgs {
-        base_url: Some(base_url),
-        password: false,
-        device: false,
-        agent_key: false,
-        email: None,
-        profile: auth.profile.clone(),
-        ..Default::default()
-    })
+    // Session recovery only offers browser/device login. Keep it separate from
+    // the explicit password mode used by `nyxid login --password`.
+    let strategies = RealLoginStrategies;
+    run_interactive_login_with_strategies(
+        LoginArgs {
+            base_url: Some(base_url),
+            password: false,
+            device: false,
+            agent_key: false,
+            email: None,
+            profile: auth.profile.clone(),
+            ..Default::default()
+        },
+        &strategies,
+    )
     .await?;
 
     // Deliberately do NOT resume the original command: the user re-runs it with
@@ -1014,16 +1020,26 @@ impl LoginStrategies for RealLoginStrategies {
 }
 
 async fn run_login_with_strategies(
+    args: LoginArgs,
+    strategies: &impl LoginStrategies,
+) -> Result<()> {
+    if args.password {
+        let profile = args.profile.as_deref();
+        let base_url = args.base_url.as_deref().unwrap_or(DEFAULT_LOGIN_BASE_URL);
+        return strategies
+            .run_password_login(base_url, args.email.as_deref(), profile)
+            .await;
+    }
+    run_interactive_login_with_strategies(args, strategies).await
+}
+
+/// Browser/device login shared by explicit login and dead-session recovery.
+async fn run_interactive_login_with_strategies(
     mut args: LoginArgs,
     strategies: &impl LoginStrategies,
 ) -> Result<()> {
     let profile = args.profile.as_deref();
     let base_url = args.base_url.as_deref().unwrap_or(DEFAULT_LOGIN_BASE_URL);
-    if args.password {
-        return strategies
-            .run_password_login(base_url, args.email.as_deref(), profile)
-            .await;
-    }
     if args.device {
         return strategies.run_device_code_login(args).await;
     }
@@ -2319,6 +2335,42 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_recovery_login_uses_only_browser_or_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies::default();
+            super::run_interactive_login_with_strategies(login_args(), &strategies)
+                .await
+                .expect("session recovery login");
+            assert!(strategies.password_calls.load(Ordering::SeqCst) == 0);
+            assert_eq!(
+                strategies.browser_calls.load(Ordering::SeqCst),
+                usize::from(environment_alias)
+            );
+            assert_eq!(
+                strategies.device_calls.load(Ordering::SeqCst),
+                usize::from(!environment_alias)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_password_login_skips_browser_and_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, true);
+            let strategies = MockLoginStrategies::default();
+            let mut args = login_args();
+            args.password = true;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("explicit password login");
+            assert!(strategies.password_calls.load(Ordering::SeqCst) == 1);
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
         }
     }
 
