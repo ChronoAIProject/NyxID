@@ -39,6 +39,14 @@ pub fn producer(
 struct PublicProducer;
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    // Draft versions used the deterministic scope identity as _id. Preserve
+    // revocation cutoffs and pending drains before building the unique index.
+    db.collection::<Document>(REVOCATION_SCOPES)
+        .update_many(
+            doc! {"scope_key":{"$exists":false}},
+            vec![doc! {"$set":{"scope_key":"$_id"}}],
+        )
+        .await?;
     db.collection::<PlatformPublicSession>(SESSIONS).create_indexes([
         IndexModel::builder().keys(doc! {"credential_api_key_id":1})
             .options(IndexOptions::builder().unique(true).name("public_key_binding_unique".to_owned()).build()).build(),
@@ -995,6 +1003,50 @@ pub(crate) mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_scope_markers_keep_cutoffs_and_drain_state_after_index_upgrade() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_marker_upgrade").await;
+        let row = fixture(&db, 5, true).await;
+        let manager = ManagerAuthority {
+            profile_id: row.profile_id.clone(),
+            manager_bot_id: row.manager_bot_id.clone(),
+            telegram_bot_id: row.telegram_bot_id,
+            manager_authority_epoch: row.manager_authority_epoch,
+        };
+        let mut ids = Vec::new();
+        for scope in [
+            PublicRevocationScope::Manager { manager },
+            PublicRevocationScope::Sponsor {
+                sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
+            },
+        ] {
+            let (id, filter, epoch) = marker_identity(&scope);
+            ids.push(id.clone());
+            db.collection::<Document>(REVOCATION_SCOPES).insert_one(doc! {"_id":id,"session_filter":filter,"maximum_epoch":epoch,
+                "revoked_before":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(1)),"drain_pending":true,"reason":"manager_retired","effect_revision":2_i64}).await.unwrap();
+        }
+        ensure_indexes(&db).await.unwrap();
+        for id in ids {
+            let marker = db
+                .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+                .find_one(doc! {"scope_key":&id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(marker.id, id);
+            assert!(marker.drain_pending && marker.revoked_before.is_some());
+        }
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            !fence_local_session_in_session(&db, &mut session, &row)
+                .await
+                .unwrap()
+        );
+        session.abort_transaction().await.unwrap();
     }
 
     #[test]

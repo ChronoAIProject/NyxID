@@ -503,7 +503,7 @@ async fn post_cap(
     cost: Credits,
     final_cost: bool,
 ) -> AppResult<()> {
-    if cost < Credits::ZERO || cost > row.maximum {
+    if cost < Credits::ZERO {
         return Err(denied());
     }
     let loop_row = db
@@ -516,7 +516,7 @@ async fn post_cap(
     let delta = cost.checked_sub(previous)?;
     let first = row.state != PublicCallState::Conservative;
     let hold_delta = if first {
-        cost.checked_neg()?
+        cost.min(row.maximum).checked_neg()?
     } else {
         Credits::ZERO
     };
@@ -548,7 +548,8 @@ async fn post_cap(
         .update_one(
             doc! {"_id":&row.id,"state":state_bson(row.state)?},
             doc! {"$set":{
-            "state":if final_cost {"settled"} else {"conservative"},"cap_charge":cost.decimal()}},
+            "state":if final_cost {"settled"} else {"conservative"},"cap_charge":cost.decimal(),
+            "cap_overrun":cost>row.maximum}},
         )
         .session(&mut *session)
         .await?
@@ -563,8 +564,10 @@ async fn post_cap(
 pub(crate) async fn reconcile_call(db: &Database, id: &str) -> AppResult<()> {
     reconcile_call_inner(db, id).await?;
     db.collection::<PublicCallReservation>(CALLS).update_one(doc! {"_id":id,"state":{"$nin":["settled","released"]}},
-        vec![doc! {"$set":{"next_reconcile_at":{"$min":[{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":30}},
-            {"$cond":[{"$gt":["$expires_at","$$NOW"]},"$expires_at",{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":30}}]}]}}}]).await?;
+        vec![doc! {"$set":{"reconcile_rounds":{"$add":[{"$ifNull":["$reconcile_rounds",0_i64]},1_i64]}}},
+        doc! {"$set":{"next_reconcile_at":{"$min":[{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":
+            {"$cond":[{"$eq":["$state","conservative"]},{"$min":[86400_i64,{"$multiply":[30_i64,{"$pow":[2_i64,{"$min":["$reconcile_rounds",12_i64]}]}]}]},30_i64]}}},
+            {"$cond":[{"$gt":["$expires_at","$$NOW"]},"$expires_at",{"$dateAdd":{"startDate":"$$NOW","unit":"day","amount":1}}]}]}}}]).await?;
     Ok(())
 }
 
@@ -674,8 +677,8 @@ pub(crate) async fn close_loop_in_session(
 pub async fn sweep(db: &Database, limit: u32) -> AppResult<RecoveryBatch> {
     let limit = i64::from(limit.clamp(1, 100));
     let mut processed = 0;
-    let calls: Vec<PublicCallReservation> = db
-        .collection::<PublicCallReservation>(CALLS)
+    let calls: Vec<Document> = db
+        .collection::<Document>(CALLS)
         .find(doc! {"state":{"$nin":["settled","released"]},"next_reconcile_at":{"$lte":bson::DateTime::now()}})
         .sort(doc! {"expires_at":1,"_id":1})
         .limit(limit)
@@ -683,34 +686,74 @@ pub async fn sweep(db: &Database, limit: u32) -> AppResult<RecoveryBatch> {
         .try_collect()
         .await?;
     for call in calls {
-        reconcile_call(db, &call.id).await?;
+        if let Ok(id) = call.get_str("_id") {
+            if reconcile_call(db, id).await.is_err() {
+                recovery_backoff(db, CALLS, id).await;
+            }
+        }
         processed += 1;
     }
-    let loops: Vec<PublicBudgetLoop> = db
-        .collection::<PublicBudgetLoop>(LOOPS)
-        .find(doc! {"closed":false,"expires_at":{"$lte":bson::DateTime::now()}})
+    let loops: Vec<Document> = db
+        .collection::<Document>(LOOPS)
+        .find(doc! {"closed":false,"expires_at":{"$lte":bson::DateTime::now()},
+            "$or":[{"next_reconcile_at":{"$exists":false}},{"next_reconcile_at":{"$lte":bson::DateTime::now()}}]})
         .sort(doc! {"expires_at":1,"_id":1})
         .limit(limit)
         .await?
         .try_collect()
         .await?;
     for row in loops {
-        let mut session = db.client().start_session().await?;
-        session
-            .start_transaction()
-            .and_run((db.clone(), row.id), |session, (db, id)| {
-                Box::pin(async move {
-                    tx::transaction_result(close_loop_in_session(db, session, id).await)
+        let Ok(id) = row.get_str("_id") else {
+            continue;
+        };
+        let result: AppResult<bool> = async {
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .and_run((db.clone(), id.to_owned()), |session, (db, id)| {
+                    Box::pin(async move {
+                        tx::transaction_result(close_loop_in_session(db, session, id).await)
+                    })
                 })
-            })
-            .await
-            .map_err(tx::map_transaction_error)?;
+                .await
+                .map_err(tx::map_transaction_error)
+        }
+        .await;
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                defer_recovery(db, LOOPS, id, 30).await;
+            }
+            Err(_) => {
+                recovery_backoff(db, LOOPS, id).await;
+            }
+        }
         processed += 1;
     }
     Ok(RecoveryBatch {
         processed,
         has_more: processed >= limit as u32,
     })
+}
+
+async fn defer_recovery(db: &Database, collection: &str, id: &str, seconds: i64) {
+    if db.collection::<Document>(collection).update_one(doc! {"_id":id},
+        vec![doc! {"$set":{"next_reconcile_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":seconds}}}}]).await.is_err() {
+        tracing::warn!(collection,"Public recovery backoff could not be persisted");
+    }
+}
+async fn recovery_backoff(db: &Database, collection: &str, id: &str) {
+    // No row body, sender, key identifier or database error is logged.
+    tracing::warn!(
+        collection,
+        "Public recovery item failed; continuing bounded batch"
+    );
+    if db.collection::<Document>(collection).update_one(doc! {"_id":id},
+        vec![doc! {"$set":{"recovery_failures":{"$add":[{"$ifNull":["$recovery_failures",0_i64]},1_i64]},
+            "last_recovery_error":"revalidation_or_storage_failed",
+            "next_reconcile_at":{"$dateAdd":{"startDate":"$$NOW","unit":"minute","amount":5_i64}}}}]).await.is_err() {
+        tracing::warn!(collection,"Public recovery diagnostic could not be persisted");
+    }
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
@@ -1000,8 +1043,17 @@ mod tests {
     }
     #[tokio::test]
     async fn dispatch_is_once_only_and_crash_cap_charge_refunds_only_known_exact_difference() {
-        let db =
-            crate::test_utils::connect_transaction_test_database("public_exact_dispatch").await;
+        crash_cap_case(3).await;
+    }
+    #[tokio::test]
+    async fn late_actual_overrun_after_close_posts_once_without_recreating_holds() {
+        crash_cap_case(8).await;
+    }
+    async fn crash_cap_case(actual: i128) {
+        let db = crate::test_utils::connect_transaction_test_database(&format!(
+            "public_exact_dispatch_{actual}"
+        ))
+        .await;
         ensure_indexes(&db).await.unwrap();
         let (ctx, key) = context(&db, 5, None).await;
         let loop_row = reserve(
@@ -1092,7 +1144,7 @@ mod tests {
                 .iter()
                 .all(|b| b.held == Credits::ZERO && b.spent == Credits::from_pico(6).unwrap())
         );
-        db.collection::<UsageMeterRow>(METERS).update_many(doc! {"billing_request_id":&call.billing_request_id},doc! {"$set":{"funding.settled":true,"funding.total_charge":Credits::from_pico(3).unwrap().decimal()}}).await.unwrap();
+        db.collection::<UsageMeterRow>(METERS).update_many(doc! {"billing_request_id":&call.billing_request_id},doc! {"$set":{"funding.settled":true,"funding.total_charge":Credits::from_pico(actual).unwrap().decimal()}}).await.unwrap();
         reconcile_call(&db, &call.id).await.unwrap();
         reconcile_call(&db, &call.id).await.unwrap();
         let buckets: Vec<PublicBudgetBucket> = db
@@ -1106,7 +1158,91 @@ mod tests {
         assert!(
             buckets
                 .iter()
-                .all(|b| b.held == Credits::ZERO && b.spent == Credits::from_pico(3).unwrap())
+                .all(|b| b.held == Credits::ZERO && b.spent == Credits::from_pico(actual).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_recovery_item_does_not_starve_overrun_or_expired_loop() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_recovery_batch").await;
+        ensure_indexes(&db).await.unwrap();
+        let (ctx, key) = context(&db, 5, None).await;
+        let loop_row = reserve(
+            db.clone(),
+            ctx.clone(),
+            key.clone(),
+            Credits::from_pico(10).unwrap(),
+        )
+        .await
+        .unwrap();
+        let quote = quote(&ctx, &key, Credits::from_pico(6).unwrap());
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let call = prepare_call_in_session(&db, &mut session, &ctx, &loop_row.id, &quote)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        billing::meter::open(&db, &quote.route, None).await.unwrap();
+        let meters: Vec<UsageMeterRow> = db
+            .collection::<UsageMeterRow>(METERS)
+            .find(doc! {"billing_request_id":&call.billing_request_id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let ids: Vec<_> = meters.iter().map(|m| m.id.clone()).collect();
+        let past = bson::DateTime::from_chrono(Utc::now() - Duration::minutes(1));
+        db.collection::<Document>(CALLS).update_one(doc! {"_id":&call.id},doc! {"$set":{"state":"dispatch_admitted","meter_row_ids":ids,"expires_at":past,"next_reconcile_at":past}}).await.unwrap();
+        db.collection::<Document>(METERS).update_many(doc! {"billing_request_id":&call.billing_request_id},doc! {"$set":{"funding.settled":true,"funding.total_charge":Credits::from_pico(8).unwrap().decimal()}}).await.unwrap();
+        db.collection::<Document>(LOOPS)
+            .update_one(doc! {"_id":&loop_row.id}, doc! {"$set":{"expires_at":past}})
+            .await
+            .unwrap();
+        let malformed = uuid::Uuid::new_v4().to_string();
+        db.collection::<Document>(CALLS).insert_one(doc! {"_id":&malformed,"state":"dispatch_admitted","expires_at":bson::DateTime::from_millis(0),"next_reconcile_at":past}).await.unwrap();
+        assert!(sweep(&db, 100).await.unwrap().processed >= 3);
+        let error = db
+            .collection::<Document>(CALLS)
+            .find_one(doc! {"_id":&malformed})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            error.get_str("last_recovery_error").unwrap(),
+            "revalidation_or_storage_failed"
+        );
+        assert!(error.get_datetime("next_reconcile_at").unwrap().to_chrono() > Utc::now());
+        let done = db
+            .collection::<Document>(CALLS)
+            .find_one(doc! {"_id":&call.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.get_str("state").unwrap(), "settled");
+        assert!(done.get_bool("cap_overrun").unwrap());
+        assert!(
+            db.collection::<PublicBudgetLoop>(LOOPS)
+                .find_one(doc! {"_id":&loop_row.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .closed
+        );
+        assert_eq!(sweep(&db, 100).await.unwrap().processed, 0);
+        let buckets: Vec<PublicBudgetBucket> = db
+            .collection::<PublicBudgetBucket>(BUCKETS)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(
+            buckets
+                .iter()
+                .all(|b| b.held == Credits::ZERO && b.spent == Credits::from_pico(8).unwrap())
         );
     }
 }
