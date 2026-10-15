@@ -1083,3 +1083,38 @@ They cannot prove NyxAgent native-tool isolation, provider credential propagatio
 or remote deletion. A13 real account/Telegram acceptance remains with Part 5
 under separate authorization. Personal implementation does not wait for these
 public proof gaps.
+
+## Implementation slice: typed personal transport
+
+`services/assistant_nyxagent_egress.rs::producer(state, identity)` implements
+the frozen `NyxAgentEgress` interface for an already admitted personal turn.
+It requires `Owner.platform_origin = Some`, validates the exact raw primary
+credential and live turn, and invokes Part 2’s transaction-owned
+`platform_personal_turn_service::fence_execution_in_session` before dispatch.
+Only the known NyxAgent paths are accepted; queries, absolute URLs, path
+traversal, body/header overrides, and redirects are unavailable. Public
+requests return `503 {"error":"public_not_ready"}` before any owner, key,
+credential, target, or billing lookup.
+
+Ordinary owner HTTP execution retains its original proxy wrapper and real
+`AuthUser` approval provenance. An HTTP-layer implementation of the same
+egress trait can capture that verified caller for the common loop. The typed
+personal service does not approximate ordinary nonhuman approval behavior;
+`Owner.platform_origin = None` is rejected. Personal outer transport retains
+explicit deny policy, configured identity propagation, per-person service
+concurrency, ordinary NoAuth outer-hop billing classification, existing exact
+usage settlement and metadata-only audit. Inner model/tool calls retain their
+own live gates and meters.
+
+`services/proxy_http_response.rs` extracts existing HTTP response streaming,
+cancellation, usage capture and deferred settlement unchanged except that
+the resale metric is supplied directly. The existing proxy calls this same
+core. Its old response/header tests remain in `handlers/proxy.rs`. New pure
+operation tests cover the typed transport’s closed operation set. Targeted
+Rust formatting and `git diff --check` passed; Cargo checks/tests were not
+run because the primary owns the host build slot.
+
+Registration manifest for Part 5: `services/mod.rs` must register
+`assistant_nyxagent_egress` and `proxy_http_response`; the adapter also
+requires Part 2’s `platform_personal_turn_service` module. No route, model,
+index, or background-task registration is added by this slice.
