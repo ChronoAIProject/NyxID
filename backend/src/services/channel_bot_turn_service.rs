@@ -87,6 +87,7 @@ pub async fn relay_event_key(
 /// event fences retries; settings-row budget and the owner's hourly handoff
 /// window commit together. Claimed attempts, including uncertain/busy work,
 /// are never refunded. Human messages alone refill the per-chat budget.
+#[cfg(test)]
 pub async fn admit(
     db: &Database,
     channel: &NyxbotChannel,
