@@ -23,6 +23,7 @@ use std::{
 };
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -1475,20 +1476,23 @@ pub(crate) async fn start_turn_with_voice(
             .await?
             .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))?;
     let (sender, receiver) = broadcast::channel(256);
-    tokio::spawn(run_turn(
-        state.clone(),
-        auth,
-        row.clone(),
-        text,
-        credential,
-        policy,
-        permit,
-        Events {
-            sender,
-            cursor: 0,
-            reset_notified: false,
-        },
-    ));
+    tokio::spawn(
+        run_turn(
+            state.clone(),
+            auth,
+            row.clone(),
+            text,
+            credential,
+            policy,
+            permit,
+            Events {
+                sender,
+                cursor: 0,
+                reset_notified: false,
+            },
+        )
+        .in_current_span(),
+    );
     Ok((row, receiver))
 }
 
@@ -1627,6 +1631,7 @@ async fn run_turn(
         .clone();
     let message_id = Uuid::new_v4().to_string();
     let block_id = format!("{message_id}-text");
+    tracing::info!(turn_id = %turn_id, "Assistant turn started");
     let (heartbeat_stop, mut heartbeat_stop_rx) = oneshot::channel();
     let heartbeat_db = state.db.clone();
     let heartbeat_user = row.user_id.clone();
