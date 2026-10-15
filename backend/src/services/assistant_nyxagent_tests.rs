@@ -266,6 +266,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
         .map(|i| AssistantMessage {
             author: None,
             activity_total: 0,
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,
@@ -393,6 +394,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
         AssistantMessage {
             author: None,
             activity_total: 0,
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,
@@ -421,6 +423,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
         AssistantMessage {
             author: None,
             activity_total: 0,
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,
@@ -460,6 +463,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        report_to: None,
         continuation_of: None,
         retry_of: None,
         retry_claimed_by: None,
@@ -529,6 +533,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        report_to: None,
         continuation_of: None,
         retry_of: None,
         retry_claimed_by: None,
@@ -584,6 +589,7 @@ fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        report_to: None,
         continuation_of: None,
         retry_of: None,
         retry_claimed_by: None,
@@ -639,6 +645,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
         author: None,
         activity_total: 0,
+        report_to: None,
         continuation_of: None,
         retry_of: None,
         retry_claimed_by: None,
@@ -922,6 +929,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             lease_expires_at: None,
             heartbeat_at: None,
             trigger_run_id: None,
+            report_to: None,
+            with_nyxbot: false,
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
@@ -2596,6 +2605,7 @@ fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
         author: None,
         activity_total: 0,
+        report_to: None,
         continuation_of: None,
         retry_of: None,
         retry_claimed_by: None,
@@ -3614,6 +3624,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
         retry_claimed_by: None,
         activity_count: None,
+        report_to: None,
         continuation_of: None,
         specialist_id: None,
         retry_of: None,
@@ -3666,6 +3677,7 @@ fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
         retry_claimed_by: None,
         activity_count: None,
+        report_to: None,
         continuation_of: None,
         specialist_id: None,
         retry_of: None,
@@ -4346,4 +4358,622 @@ fn channel_tool_image_filter_honors_explicit_policy_and_narrow_legacy_shim() {
     attachment.origin = "tool".into();
     attachment.content_type = "application/pdf".into();
     assert!(!chat_tool_image(&attachment));
+}
+
+/// Plan v7 §2.2: the reducer never creates NyxBot involvement from
+/// ambiguity, legacy data or owner-started work; carriers prove a target only
+/// with the first validated provenance version.
+#[test]
+fn report_target_reducer_never_creates_involvement_from_ambiguity() {
+    use crate::models::assistant_conversation::{REPORT_PROVENANCE_V1, carried_report_to};
+    use crate::services::assistant_team_service::{bound_event, event};
+    let bound = |target: Option<&str>| bound_event("permission_decided", "x".into(), None, target);
+    let legacy = || event("message", "x".into(), None);
+    let nb = "nyxa-nyxbot";
+    // An assignment keeps its exact assigning thread only while every drained
+    // event agrees with it.
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Orchestrator, Some(nb), &[]).as_deref(),
+        Some(nb)
+    );
+    assert_eq!(
+        reduce_report_target(
+            TurnOrigin::Orchestrator,
+            Some(nb),
+            &[bound(Some(nb)), bound(Some(nb))]
+        )
+        .as_deref(),
+        Some(nb)
+    );
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Orchestrator, Some(nb), &[bound(None)]),
+        None
+    );
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Orchestrator, Some(nb), &[bound(Some("other"))]),
+        None
+    );
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Orchestrator, Some(nb), &[legacy()]),
+        None
+    );
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Orchestrator, None, &[bound(Some(nb))]),
+        None
+    );
+    // An event turn reports only when every drained event is bound to one target.
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Event, None, &[bound(Some(nb)), bound(Some(nb))])
+            .as_deref(),
+        Some(nb)
+    );
+    assert_eq!(
+        reduce_report_target(
+            TurnOrigin::Event,
+            Some(nb),
+            &[bound(Some(nb)), bound(Some("other"))]
+        ),
+        None
+    );
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Event, Some(nb), &[bound(Some(nb)), bound(None)]),
+        None
+    );
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Event, Some(nb), &[legacy()]),
+        None
+    );
+    assert_eq!(
+        reduce_report_target(TurnOrigin::Event, Some(nb), &[legacy(), bound(Some(nb))]),
+        None
+    );
+    assert_eq!(reduce_report_target(TurnOrigin::Event, Some(nb), &[]), None);
+    // Owner, channel, group and trigger turns never report, whatever was drained.
+    for origin in [
+        TurnOrigin::User,
+        TurnOrigin::Channel,
+        TurnOrigin::Group,
+        TurnOrigin::Trigger,
+    ] {
+        assert_eq!(
+            reduce_report_target(origin, Some(nb), &[bound(Some(nb))]),
+            None,
+            "{origin:?}"
+        );
+    }
+    // Delayed carriers: only the validated version proves a target.
+    assert_eq!(
+        carried_report_to(Some(nb), REPORT_PROVENANCE_V1).as_deref(),
+        Some(nb)
+    );
+    assert_eq!(carried_report_to(Some(nb), 0), None);
+    assert_eq!(carried_report_to(Some(nb), 2), None);
+    assert_eq!(carried_report_to(None, REPORT_PROVENANCE_V1), None);
+    // Constructors: `event` proves nothing; `bound_to` proves what it is given.
+    assert!(!legacy().bound && legacy().report_to.is_none());
+    let proven = legacy().bound_to(Some(nb));
+    assert!(proven.bound && proven.report_to.as_deref() == Some(nb));
+    let owner_work = legacy().bound_to(None);
+    assert!(owner_work.bound && owner_work.report_to.is_none());
+}
+
+async fn newest_reply(db: &Database, owner: &str, id: &str) -> AssistantMessage {
+    messages(db, owner, id, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .expect("a settled reply")
+}
+
+/// Plan v7 §2.7 entry-path matrix and lifecycle: the turn snapshot is decided
+/// once at admission from proven sources, agrees with the chat key and the
+/// settled reply, and the legacy conversation marker is never read.
+#[tokio::test]
+async fn turn_snapshot_is_decided_at_admission_and_copied_to_the_settled_reply() {
+    use crate::services::{
+        assistant_acknowledgement_service as acks, assistant_team_service as team,
+    };
+    let db = connect_transaction_test_database("nyxa_report_snapshot").await;
+    ensure_indexes(&db).await.unwrap();
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    // NyxBot's thread, and a specialist with a home thread.
+    let nyxbot_thread = begin_turn(&db, &owner, &request(None, "Coordinate my work"), keys)
+        .await
+        .unwrap();
+    settle(&db, keys, &owner, &nyxbot_thread, "ok", None).await;
+    let (_, home) = team::create_specialist(
+        &db,
+        keys,
+        &owner,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "worker".into(),
+            description: "Helps with notes".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let nb = nyxbot_thread.id.as_str();
+    let assigned = |text: &str| {
+        let mut start = TurnStart::from(&request(Some(&home.id), text));
+        start.origin = TurnOrigin::Orchestrator;
+        start.report_to = Some(nb.to_owned());
+        start
+    };
+    let event_turn = || {
+        let mut start = TurnStart::from(&request(Some(&home.id), ""));
+        start.origin = TurnOrigin::Event;
+        start
+    };
+    let bound = |target: Option<&str>| {
+        team::bound_event("permission_decided", "decided".into(), None, target)
+    };
+    let legacy = || team::event("message", "legacy".into(), None);
+    let turn_target =
+        |row: &AssistantConversation| row.active_turn.as_ref().unwrap().report_to.clone();
+
+    // 1. Assignment: the snapshot is the exact assigning thread; the legacy
+    // marker is written for old readers; the chat key sees the snapshot; the
+    // settled reply copies it.
+    let row = begin_turn(&db, &owner, assigned("Summarize the notes"), keys)
+        .await
+        .unwrap();
+    assert_eq!(turn_target(&row).as_deref(), Some(nb));
+    assert!(!row.active_turn.as_ref().unwrap().with_nyxbot);
+    assert_eq!(row.report_to.as_deref(), Some(nb));
+    let chat = acks::for_key(&db, &owner, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(chat.report_to.as_deref(), Some(nb));
+    assert!(chat.involved());
+    settle(&db, keys, &owner, &row, "done", None).await;
+    assert_eq!(
+        newest_reply(&db, &owner, &home.id)
+            .await
+            .report_to
+            .as_deref(),
+        Some(nb)
+    );
+
+    // 2. A direct owner message is owner work: no snapshot, the legacy marker
+    // is cleared, the chat key is not involved, the reply carries no target.
+    let row = begin_turn(
+        &db,
+        &owner,
+        &request(Some(&home.id), "Also add a summary line"),
+        keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(turn_target(&row), None);
+    assert_eq!(row.report_to, None);
+    let chat = acks::for_key(&db, &owner, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!chat.involved() && chat.report_to.is_none());
+    settle(&db, keys, &owner, &row, "done", None).await;
+    assert_eq!(newest_reply(&db, &owner, &home.id).await.report_to, None);
+
+    // 3. A stale legacy marker is never read: a legacy (unbound) event drains
+    // into an event turn with no target.
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &home.id}, doc! {"$set": {"report_to": nb}})
+        .await
+        .unwrap();
+    push_events(&db, &owner, &home.id, vec![legacy()])
+        .await
+        .unwrap();
+    let row = begin_turn(&db, &owner, event_turn(), keys).await.unwrap();
+    assert_eq!(turn_target(&row), None);
+    settle(&db, keys, &owner, &row, "done", None).await;
+    assert_eq!(newest_reply(&db, &owner, &home.id).await.report_to, None);
+
+    // 4. Event batches: all bound to one target report there; mixed targets, a
+    // bound None, or a legacy event beside a bound one resolve to None.
+    for (events, expected) in [
+        (vec![bound(Some(nb)), bound(Some(nb))], Some(nb.to_owned())),
+        (vec![bound(Some(nb)), bound(Some("nyxa-other"))], None),
+        (vec![bound(Some(nb)), bound(None)], None),
+        (vec![legacy(), bound(Some(nb))], None),
+    ] {
+        push_events(&db, &owner, &home.id, events).await.unwrap();
+        let row = begin_turn(&db, &owner, event_turn(), keys).await.unwrap();
+        assert_eq!(turn_target(&row), expected);
+        settle(&db, keys, &owner, &row, "done", None).await;
+        assert_eq!(
+            newest_reply(&db, &owner, &home.id).await.report_to,
+            expected
+        );
+    }
+
+    // 5. An assignment drained with a queued owner message (bound None), an
+    // event bound elsewhere or a legacy event is not NyxBot's work (R4-1);
+    // with an event bound to the same thread it is.
+    for (events, expected) in [
+        (
+            vec![team::bound_event("message", "owner".into(), None, None)],
+            None,
+        ),
+        (vec![bound(Some("nyxa-other"))], None),
+        (vec![legacy()], None),
+        (vec![bound(Some(nb))], Some(nb.to_owned())),
+    ] {
+        push_events(&db, &owner, &home.id, events).await.unwrap();
+        let row = begin_turn(&db, &owner, assigned("Continue"), keys)
+            .await
+            .unwrap();
+        assert_eq!(turn_target(&row), expected);
+        settle(&db, keys, &owner, &row, "done", None).await;
+    }
+
+    // 6. A browser card continuation is not a new owner message: it keeps the
+    // legacy marker for old readers but still snapshots None.
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &home.id}, doc! {"$set": {"report_to": nb}})
+        .await
+        .unwrap();
+    let card_id = Uuid::new_v4().to_string();
+    db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &card_id, "conversation_id": &home.id, "user_id": &owner,
+            "api_key_id": &row.credential_api_key_id, "kind": "action",
+            "summary": "Send the mail", "status": "allowed", "decided_by": "user",
+            "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(1)),
+        })
+        .await
+        .unwrap();
+    let mut continuation = TurnStart::from(&request(Some(&home.id), "Retry it"));
+    continuation.acknowledgement_id = Some(card_id);
+    let row = begin_turn(&db, &owner, continuation, keys).await.unwrap();
+    assert_eq!(turn_target(&row), None);
+    assert_eq!(row.report_to.as_deref(), Some(nb));
+    settle(&db, keys, &owner, &row, "done", None).await;
+
+    // 7. A retry has no report snapshot, but preserves the compatibility
+    // marker because it continues an earlier owner request (only owner
+    // turns can be retried).
+    let row = begin_turn(&db, &owner, &request(Some(&home.id), "Fragile work"), keys)
+        .await
+        .unwrap();
+    settle(&db, keys, &owner, &row, "", Some("upstream")).await;
+    let failed_turn = row.active_turn.as_ref().unwrap().turn_id.clone();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &home.id}, doc! {"$set": {"report_to": nb}})
+        .await
+        .unwrap();
+    let retried = begin_turn(
+        &db,
+        &owner,
+        &retry(&home.id, "Fragile work", &failed_turn),
+        keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(turn_target(&retried), None);
+    assert_eq!(retried.report_to.as_deref(), Some(nb));
+    settle(&db, keys, &owner, &retried, "done", None).await;
+
+    // 8. A lost assigned turn is reclaimed with its snapshot on the failed
+    // reply; the owner message that reclaimed it is new owner work.
+    let row = begin_turn(&db, &owner, assigned("Long work"), keys)
+        .await
+        .unwrap();
+    expire_turn(&db, &row).await;
+    let reclaimed = begin_turn(&db, &owner, &request(Some(&home.id), "Hello again"), keys)
+        .await
+        .unwrap();
+    let lost = messages(&db, &owner, &home.id, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.error_code.as_deref() == Some("turn_lost"))
+        .expect("the lost reply");
+    assert_eq!(lost.report_to.as_deref(), Some(nb));
+    assert_eq!(turn_target(&reclaimed), None);
+    assert_eq!(reclaimed.report_to, None);
+    settle(&db, keys, &owner, &reclaimed, "done", None).await;
+    // The persisted conversation agrees with the turn snapshot every time.
+    let persisted = get(&db, &owner, &home.id).await.unwrap();
+    assert!(persisted.active_turn.is_none());
+}
+
+/// Plan v7 §4 (R4-6/R5-4): queued allowed-skill notifications are admitted
+/// into a NyxBot thread only while eligible. An all-ineligible batch commits a
+/// "drained; no turn started" outcome in the admission transaction (queue
+/// entries removed, outbox markers terminal, no streak, no message); a mixed
+/// batch continues with the eligible items; a transaction that aborts after
+/// the cleanup rolls every marker and queue entry back.
+#[tokio::test]
+async fn ineligible_skill_events_are_drained_transactionally_without_a_turn() {
+    use crate::services::assistant_team_service as team;
+    let db = connect_transaction_test_database("nyxa_drained_skill_events").await;
+    ensure_indexes(&db).await.unwrap();
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    let nyxbot = begin_turn(&db, &owner, &request(None, "Coordinate my work"), keys)
+        .await
+        .unwrap();
+    settle(&db, keys, &owner, &nyxbot, "ok", None).await;
+    let (_, worker_home) = team::create_specialist(
+        &db,
+        keys,
+        &owner,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "worker".into(),
+            description: "Helps".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let acks =
+        db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    // An owner-allowed skill card with its durable outbox marker and the
+    // queued notification for NyxBot's thread.
+    let card = |routing: bson::Document| {
+        let acks = acks.clone();
+        let owner = owner.clone();
+        let home = worker_home.id.clone();
+        async move {
+            let id = Uuid::new_v4().to_string();
+            acks.insert_one(doc! {
+                "_id": &id, "conversation_id": &home, "user_id": &owner,
+                "api_key_id": "key", "kind": "skills", "summary": "Attach the skill",
+                "status": "allowed", "decided_by": "user", "routing": routing,
+                "skill_notification_pending": true, "skill_notification_fence": 0_i64,
+                "created_at": bson::DateTime::now(),
+                "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(1)),
+            })
+            .await
+            .unwrap();
+            let mut event = team::event(
+                "skill_request_allowed",
+                "The user allowed a skill".into(),
+                None,
+            );
+            event.id = id.clone();
+            event
+        }
+    };
+    let assigned = |target: &str| doc! {"kind": "assigned", "report_to": target};
+    let not_involved = || doc! {"kind": "not_involved"};
+    let marker = |id: &str| {
+        let acks = acks.clone();
+        let id = id.to_owned();
+        async move {
+            let row = acks.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+            (
+                row.get_bool("skill_notification_pending").unwrap_or(false),
+                row.get_document("skill_notification_terminal")
+                    .ok()
+                    .and_then(|t| t.get_str("reason").ok().map(str::to_owned)),
+            )
+        }
+    };
+    let event_turn = || {
+        let mut start = TurnStart::from(&request(Some(&nyxbot.id), ""));
+        start.origin = TurnOrigin::Event;
+        start
+    };
+    let thread = |db: &Database| {
+        let db = db.clone();
+        let owner = owner.clone();
+        let id = nyxbot.id.clone();
+        async move { get(&db, &owner, &id).await.unwrap() }
+    };
+    let before = thread(&db).await;
+
+    // All ineligible: drained without a turn.
+    let dropped_a = card(not_involved()).await;
+    let dropped_b = card(not_involved()).await;
+    push_events(
+        &db,
+        &owner,
+        &nyxbot.id,
+        vec![dropped_a.clone(), dropped_b.clone()],
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        begin_turn(&db, &owner, event_turn(), keys).await,
+        Err(AppError::Conflict(message)) if message == "No eligible pending events"
+    ));
+    let after = thread(&db).await;
+    assert!(after.pending_events.is_empty());
+    assert!(after.active_turn.is_none());
+    assert_eq!(after.event_streak, before.event_streak);
+    assert_eq!(after.message_count, before.message_count);
+    assert_eq!(
+        messages(&db, &owner, &nyxbot.id, 100, None)
+            .await
+            .unwrap()
+            .len(),
+        before.message_count as usize
+    );
+    for id in [&dropped_a.id, &dropped_b.id] {
+        assert_eq!(marker(id).await, (false, Some("not_involved".into())));
+    }
+    // No eligible items left means no wake-up either.
+    assert!(matches!(
+        begin_turn(&db, &owner, event_turn(), keys).await,
+        Err(AppError::Conflict(message)) if message == "No pending events"
+    ));
+
+    // Mixed: the eligible item starts the turn, the other is terminalized
+    // and gone from the queue.
+    let kept = card(assigned(&nyxbot.id)).await;
+    let dropped = card(not_involved()).await;
+    let plain = team::bound_event(
+        "subagent_settled",
+        "Specialist worker replied.".into(),
+        None,
+        None,
+    );
+    push_events(
+        &db,
+        &owner,
+        &nyxbot.id,
+        vec![dropped.clone(), kept.clone(), plain.clone()],
+    )
+    .await
+    .unwrap();
+    let row = begin_turn(&db, &owner, event_turn(), keys).await.unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    assert_eq!(
+        turn.events
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![kept.id.as_str(), plain.id.as_str()]
+    );
+    assert!(!turn_input(&row, &event_turn()).contains(&dropped.id));
+    assert!(row.pending_events.is_empty());
+    assert_eq!(row.event_streak, before.event_streak + 1);
+    assert_eq!(marker(&kept.id).await, (false, None));
+    assert_eq!(
+        marker(&dropped.id).await,
+        (false, Some("not_involved".into()))
+    );
+    settle(&db, keys, &owner, &row, "attached", None).await;
+
+    // A transaction that fails after the cleanup rolls it back: the markers
+    // stay pending and the queue keeps every entry, so the next admission
+    // drains them again (transient failures never count as ineligibility).
+    let dropped = card(not_involved()).await;
+    let kept = card(assigned(&nyxbot.id)).await;
+    push_events(&db, &owner, &nyxbot.id, vec![dropped.clone(), kept.clone()])
+        .await
+        .unwrap();
+    let mut aborted = event_turn();
+    aborted.attachment_ids = vec!["not-an-upload-id".into()];
+    assert!(matches!(
+        begin_turn(&db, &owner, aborted, keys).await,
+        Err(AppError::BadRequest(_))
+    ));
+    let rolled_back = thread(&db).await;
+    assert_eq!(rolled_back.pending_events.len(), 2);
+    assert!(rolled_back.active_turn.is_none());
+    assert_eq!(marker(&dropped.id).await, (true, None));
+    assert_eq!(marker(&kept.id).await, (true, None));
+    let row = begin_turn(&db, &owner, event_turn(), keys).await.unwrap();
+    assert_eq!(row.active_turn.as_ref().unwrap().events.len(), 1);
+    assert_eq!(
+        marker(&dropped.id).await,
+        (false, Some("not_involved".into()))
+    );
+    assert_eq!(marker(&kept.id).await, (false, None));
+    settle(&db, keys, &owner, &row, "attached", None).await;
+
+    // Regression: the report target is reduced over every DRAINED event, not
+    // only the eligible ones. An assignment that drains an ineligible (or
+    // any unbound) skill notification is no longer proven NyxBot's work, even
+    // though the filtered item never reaches the model context.
+    let assigned_start = |text: &str| {
+        let mut start = TurnStart::from(&request(Some(&worker_home.id), text));
+        start.origin = TurnOrigin::Orchestrator;
+        start.report_to = Some(nyxbot.id.clone());
+        start
+    };
+    for routing in [not_involved(), assigned(&nyxbot.id)] {
+        let eligible = routing.get_str("kind").unwrap() == "assigned";
+        let skill = card(routing).await;
+        push_events(&db, &owner, &worker_home.id, vec![skill.clone()])
+            .await
+            .unwrap();
+        let row = begin_turn(&db, &owner, assigned_start("Attach and continue"), keys)
+            .await
+            .unwrap();
+        let turn = row.active_turn.as_ref().unwrap();
+        assert_eq!(turn.report_to, None);
+        assert_eq!(
+            turn.events.iter().any(|event| event.id == skill.id),
+            eligible
+        );
+        assert!(row.pending_events.is_empty());
+        settle(&db, keys, &owner, &row, "done", None).await;
+    }
+    // A clean assignment on the same thread still proves its target.
+    let row = begin_turn(&db, &owner, assigned_start("Clean assignment"), keys)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().report_to.as_deref(),
+        Some(nyxbot.id.as_str())
+    );
+    settle(&db, keys, &owner, &row, "done", None).await;
+    // An event batch that drains a removed ineligible item beside an event
+    // bound to the assigning thread resolves to None too; only the bound
+    // event reaches the turn.
+    let dropped = card(not_involved()).await;
+    let bound = team::bound_event(
+        "permission_decided",
+        "allowed".into(),
+        None,
+        Some(&nyxbot.id),
+    );
+    push_events(
+        &db,
+        &owner,
+        &nyxbot.id,
+        vec![dropped.clone(), bound.clone()],
+    )
+    .await
+    .unwrap();
+    let row = begin_turn(&db, &owner, event_turn(), keys).await.unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    assert_eq!(turn.report_to, None);
+    assert_eq!(
+        turn.events
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![bound.id.as_str()]
+    );
+    assert_eq!(
+        marker(&dropped.id).await,
+        (false, Some("not_involved".into()))
+    );
+    settle(&db, keys, &owner, &row, "done", None).await;
+    // Without the removed item, the same bound event proves the target.
+    push_events(&db, &owner, &nyxbot.id, vec![bound.clone()])
+        .await
+        .unwrap();
+    let row = begin_turn(&db, &owner, event_turn(), keys).await.unwrap();
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().report_to.as_deref(),
+        Some(nyxbot.id.as_str())
+    );
+    settle(&db, keys, &owner, &row, "done", None).await;
 }

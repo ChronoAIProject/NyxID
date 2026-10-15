@@ -583,6 +583,15 @@ it("phrases continuation turns per acknowledgement kind", () => {
       "Approved: Delete agent key ci-bot Continue within the updated machine and saved-login grants. Then tell the user in one or two plain sentences what you did and the result.",
     );
   }
+  // Only a routed skills card (NyxBot decides) wakes NyxBot after an allow.
+  expect(continuationText({ ...base, kind: "skills", decider: "orchestrator" })).toBe(
+    "Skill proposal reviewed: Delete agent key ci-bot NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again. Then tell the user in one or two plain sentences what you did and the result.",
+  );
+  const unrouted = continuationText({ ...base, kind: "skills" });
+  expect(unrouted).toBe(
+    "Skill proposal reviewed: Delete agent key ci-bot Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again. Then tell the user in one or two plain sentences what you did and the result.",
+  );
+  expect(unrouted).not.toMatch(/NyxBot/);
 });
 
 function failedReply(turnId: string, code: string, seq = 2) {

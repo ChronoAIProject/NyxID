@@ -1210,6 +1210,8 @@ async fn push_pinned_event(
         ),
         Some(&row.agent_id),
     );
+    event =
+        crate::models::assistant_acknowledgement::bind_continuation(ack.routing.as_ref(), event);
     event.id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!("skill-publication:{}:{}:pinned", row.id, row.revision).as_bytes(),
@@ -1245,8 +1247,8 @@ async fn push_failure_event(
         .sort(doc! {"created_at":-1})
         .session(&mut *session)
         .await?;
-    let conversation = if let Some(ack) = ack {
-        ack.conversation_id
+    let (conversation, routing) = if let Some(ack) = ack {
+        (ack.conversation_id, ack.routing)
     } else if let Some(claim) = db
         .collection::<DraftOrigin>(
             crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
@@ -1255,7 +1257,7 @@ async fn push_failure_event(
         .session(&mut *session)
         .await?
     {
-        claim.claim.conversation_id
+        (claim.claim.conversation_id, claim.claim.routing)
     } else {
         return Ok(());
     };
@@ -1298,6 +1300,7 @@ async fn push_failure_event(
         ),
         Some(&row.agent_id),
     );
+    event = crate::models::assistant_acknowledgement::bind_continuation(routing.as_ref(), event);
     event.id = event_id;
     push_publication_event(db, session, &conversation, &row.owner_id, &event).await
 }

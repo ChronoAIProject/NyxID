@@ -436,6 +436,39 @@ pub(crate) struct ReplyRequestContext {
     validated_bot: Option<ChannelBot>,
 }
 
+pub(crate) fn image_reply_audience(
+    context: &ReplyRequestContext,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<String> {
+    let original = &context.original;
+    let bot_id = context
+        .validated_bot
+        .as_ref()
+        .map(|bot| bot.id.as_str())
+        .or(original.channel_bot_id.as_deref())
+        .ok_or_else(|| AppError::NotFound("Image bot unavailable".into()))?;
+    let mut reply = OutboundReply {
+        text: None,
+        metadata: None,
+        attachments: Vec::new(),
+        reply_to_platform_message_id: original.platform_message_id.clone(),
+    };
+    adapter.reply_context(
+        crate::services::channel_image_audience::message_thread(original),
+        original.created_at,
+        &mut reply.metadata,
+    );
+    Ok(crate::services::channel_image_audience::resolve(
+        bot_id,
+        adapter.platform_id(),
+        original
+            .platform_conversation_id
+            .as_deref()
+            .unwrap_or(&context.conversation.platform_conversation_id),
+        &reply,
+    ))
+}
+
 #[derive(Debug)]
 struct EditRequestContext {
     outbound: ChannelMessage,
@@ -1550,7 +1583,7 @@ async fn deliver_reply(
     };
     outbound.reply_to_platform_message_id = original.platform_message_id.clone();
     adapter.reply_context(
-        original.thread_id.as_deref(),
+        crate::services::channel_image_audience::message_thread(&original),
         original.created_at,
         &mut outbound.metadata,
     );

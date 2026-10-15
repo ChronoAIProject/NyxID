@@ -236,7 +236,7 @@ async fn parallel_voice_tasks_use_hidden_turns_cancel_independently_and_requeue_
             )
             .await
             .unwrap();
-            Box::pin(engine::begin_turn_with_voice(
+            let claimed = Box::pin(engine::begin_turn_with_voice(
                 db,
                 &call.user_id,
                 &turn(
@@ -248,6 +248,15 @@ async fn parallel_voice_tasks_use_hidden_turns_cancel_independently_and_requeue_
             ))
             .await
             .unwrap();
+            // A voice task turn is the owner's: it never reports to NyxBot.
+            let voice_turn = claimed.active_turn.as_ref().unwrap();
+            assert_eq!(
+                voice_turn.origin,
+                crate::models::assistant_conversation::TurnOrigin::User
+            );
+            assert_eq!(voice_turn.voice_request_id.as_deref(), Some(request.id.as_str()));
+            assert_eq!(voice_turn.report_to, None);
+            assert!(!voice_turn.with_nyxbot);
         }
         assert!(matches!(
             Box::pin(engine::begin_turn_with_voice(
@@ -354,7 +363,7 @@ async fn parallel_voice_tasks_use_hidden_turns_cancel_independently_and_requeue_
                 .unwrap_or(0),
             1
         );
-        Box::pin(engine::begin_turn_with_voice(
+        let replayed = Box::pin(engine::begin_turn_with_voice(
             db,
             &call.user_id,
             &turn(Some(&hidden[2]), "Request 2"),
@@ -363,6 +372,9 @@ async fn parallel_voice_tasks_use_hidden_turns_cancel_independently_and_requeue_
         ))
         .await
         .unwrap();
+        // The recovered replay is still owner work: no report target.
+        assert_eq!(replayed.active_turn.as_ref().unwrap().report_to, None);
+        assert!(!replayed.active_turn.as_ref().unwrap().with_nyxbot);
         assert_eq!(
             db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
                 .find_one(doc! {"_id":&stale.id})
@@ -488,6 +500,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,
@@ -583,6 +596,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 crate::models::assistant_message::COLLECTION_NAME,
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
+                report_to: None,
                 continuation_of: None,
                 retry_of: None,
                 retry_claimed_by: None,

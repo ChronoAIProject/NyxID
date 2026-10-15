@@ -219,7 +219,7 @@ pub async fn persist(
                 conversation_id:call.conversation_id.clone(),user_id:call.user_id.clone(),seq:thread.message_count,
                 turn_id:uuid::Uuid::new_v4().to_string(),role:if segment.speaker==Speaker::User {"user"}else{"assistant"}.into(),
                 text:segment.text.clone(),status:"completed".into(),error_code:None,upstream_error_code:None,error_detail:None,created_at:chrono::Utc::now(),activities:Vec::new(),
-                activity_total:0,attachments:Vec::new(),origin:None,via:Some("voice".into()),retry_of:None}).session(&mut *tx).await?;
+                activity_total:0,attachments:Vec::new(),origin:None,via:Some("voice".into()),retry_of:None,report_to:None}).session(&mut *tx).await?;
             Ok(())
         }).await;
         super::super::api_key_mutation_service::transaction_result(result)

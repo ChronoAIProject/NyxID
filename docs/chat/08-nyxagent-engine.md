@@ -222,6 +222,15 @@ deletes the conversation instead. Rotation and revocation remain available to th
 
 ## Authority: NyxBot access modes and granted specialists
 
+NyxBot is involved in a specialist's work only when the turn's admission
+snapshot says so: `ActiveTurn.report_to` (the exact assigning NyxBot thread) or
+`ActiveTurn.with_nyxbot` (a personal group whose current members include the
+owner's NyxBot). A direct chat with a specialist, in the app or on a channel, is
+handled by that specialist alone: an ungranted call returns `missing_access`
+(no card, no NyxBot event, a link to the agent's details) and the specialist
+continues; the owner grants access in the agent's details. See
+[NyxBot orchestrator §8](09-nyxbot-orchestrator.md#8-permission-requests-specialist--nyxbot).
+
 Every owner has one persistent **NyxBot** agent. The workspace access mode is
 selected in NyxBot settings and is visible in the composer toolbars; an agent may have its own override, shown on the agent page and in its
 thread. The server resolves the effective mode from that persisted policy, so a
@@ -437,7 +446,9 @@ bounded JSON output (100 list rows, 64 KiB), and an explicit destructive descrip
 NyxBot reaches every tool; destructive tools add the single-use action
 confirmation unless the owner turned confirmations off. Specialists reach only the
 read-only tools (`list_*`, `get_*`) and only with an `account_read` grant; every
-other tool returns `orchestrator_only`. NyxBot also gets the agent and channel
+other tool returns `orchestrator_only`, whose guidance names the NyxID page the
+owner uses instead and never tells a direct specialist chat that NyxBot must
+take over. NyxBot also gets the agent and channel
 tools, and every agent gets its memory tools (see NyxBot agents). The closed
 account inventory is:
 
@@ -505,12 +516,24 @@ Creating a specialist fences the owner's NyxBot row; `max_live_subagents`
 (default 8, at most 32) bounds live specialists.
 
 NyxID starts turns itself: specialist work in the agent's home thread
-(`origin: orchestrator`, with `report_to` set to the assigning NyxBot thread),
-wake-ups (`origin: event`) and channel messages (`origin: channel`), with the
-owner's identity and billing. A NyxBot-assigned or event-resumed specialist turn
-reports to `report_to` as a `subagent_settled` event; a direct chat does not wake
-NyxBot and is listed in its next turn's input context instead. A specialist's
-permission request goes to `report_to` or NyxBot's home thread. Events queue on
+(`origin: orchestrator`, with the turn's `report_to` snapshot set to the
+assigning NyxBot thread), wake-ups (`origin: event`) and channel messages
+(`origin: channel`), with the owner's identity and billing. Every turn snapshots
+`report_to` and `with_nyxbot` once at admission, inside `begin_turn`'s
+transaction: an `orchestrator` turn keeps its assigning thread only if every
+event drained into it is bound to that same target; an `event` turn takes the
+one target every drained event is bound to and is otherwise `None`; `user`,
+`channel`, `trigger` and `group` turns are `None` (a group turn sets
+`with_nyxbot` when the owner's NyxBot is a current member of that personal
+group). Unbound, legacy or mixed events and `conversation.report_to` (still
+written for old readers, never read) never create involvement; steering
+continues the running turn and keeps its snapshot. A turn whose snapshot has
+`report_to` reports there as a `subagent_settled` event when it settles; a
+direct chat does not wake NyxBot and is listed in its next turn's input context
+instead. A specialist's permission request exists only for an involved turn and
+goes to the card's stored `routing` (its `assigned` thread, or NyxBot's home
+thread for `group_with_nyxbot` after a live membership recheck); non-involved
+work gets `missing_access` and continues. Events queue on
 the thread (at most 20) and one event turn drains them when it is idle; other
 turns carry drained events in their input context. Loop guards: at most 20 event
 turns per owner per hour, and a NyxBot thread stops after 3 consecutive event
@@ -797,8 +820,46 @@ use one filter. For legacy metadata without this field, only the exact label
 `Machine screenshot` is excluded. This rolling-upgrade shim can be deleted one
 release after every replica runs this version. Web and group display is unchanged.
 
-Each destination has a durable `nyxbot_image_deliveries` claim with a seven-day
-TTL, fixed item states/codes and identifiers only. `sending`, `unknown` and
+Release 0.71.0's v1 `nyxbot_image_deliveries` rows remain read-only delivery
+barriers across every destination alias for the same owner/conversation/turn
+and NyxBot channel. Sent items report previously delivered; sending/unknown
+items and pending items in sending batches remain uncertain. Only a pending
+batch or a proven pre-dispatch skip permits a v2 claim. This can suppress
+another audience of that bot for seven days. The old TTL remains; v2 uses a
+separate collection. Concurrent old/new sends can still race during rollout.
+Remove v1 compatibility one release later and at least seven days after deploy;
+see `CHANNEL_BOT_RELAY.md` for the state rules and rollout/rollback limits.
+
+Each (source image, audience) pair has one durable `nyxbot_image_deliveries_v2`
+claim (v2, `models/nyxbot_image_delivery.rs`, sent through
+`services/channel_image_delivery.rs`): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
+with plain `user_id`, `conversation_id`, `attachment_id` and `audience_key`
+fields and cleanup indexes on `attachment_id` and `(user_id, conversation_id)`.
+The audience (`services/channel_image_audience.rs`) is the resolved outbound
+target actually sent to, after the adapter's own normalization and fallback,
+serialized as
+`"{channel_bot_id}\u{1f}{platform_chat_id}\u{1f}{native_thread_or_empty}"`
+(the real `ChannelBot.id`, never a gateway partition or `NyxbotChannel` id;
+Telegram forum topics and Slack root threads are audience boundaries, reply
+chains and Lark/Feishu thread replies are not; Discord threads are channels;
+WhatsApp uses `wa_id`, X the DM conversation id). Claims hold identifiers,
+fixed states and codes only and have no TTL: they live as long as their source
+image and are deleted in the same paths that delete `assistant_attachments`
+(retention, conversation and group deletion, user purge), plus a bounded
+orphan sweep on the assistant sweep cadence that removes only claims whose
+source attachment no longer exists; a sender that finds its source gone after
+claiming deletes the claim and reports `unavailable`. States move `pending` ->
+`sending{attempt}` -> `sent | failed{code} | skipped{code} | unknown` through
+compare-and-set on the attempt token: success is reported only after an
+acknowledged matching write, an ambiguous write settles locally as `unknown`
+and is never resent, and a claim found `sending` reports
+`in_progress_or_unknown`. Only the winner of the `pending -> sending` race
+dispatches; every other path (automatic replies, explicit `post_to_chat
+include_images`, automation results) reports the existing state
+(`previously_delivered`, the same failure or skip code, or in progress) without
+resending, so one source image reaches one audience once for its whole
+lifetime. Unavailable image metadata never blocks the final text: the text is
+still sent and the image is counted as failed. `sending`, `unknown` and
 completed claims are never retried. A transport failure or ambiguous receipt
 marks an image unknown and skips the rest; a definite refusal permits the next
 image, except a billing refusal stops the batch. Telegram group sends are spaced

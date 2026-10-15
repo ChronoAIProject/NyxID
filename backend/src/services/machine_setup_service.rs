@@ -104,6 +104,7 @@ pub async fn create_link(
     owner: &str,
     conversation: Option<&str>,
     choices: Choices,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineSetup> {
     let choices = validate_choices(db, owner, choices).await?;
     let now = Utc::now();
@@ -127,7 +128,7 @@ pub async fn create_link(
         .insert_one(&row)
         .await?;
     if let Some(conversation) = conversation {
-        watch(db, owner, conversation, &row.id, row.expires_at).await?;
+        watch(db, owner, conversation, &row.id, row.expires_at, provenance).await?;
     }
     Ok(row)
 }
@@ -321,8 +322,9 @@ pub async fn decide(
     id: &str,
     approve: bool,
     conversation: Option<&str>,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineSetup> {
-    decide_with_updates(db, owner, id, approve, conversation, None).await
+    decide_with_updates(db, owner, id, approve, conversation, None, provenance).await
 }
 
 pub async fn decide_with_updates(
@@ -332,13 +334,14 @@ pub async fn decide_with_updates(
     approve: bool,
     conversation: Option<&str>,
     automatic_updates: Option<bool>,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineSetup> {
     let row = db.collection::<MachineSetup>(COLLECTION_NAME).find_one_and_update(
         doc! {"_id":id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},
         doc! {"$set":{"user_id":owner,"status":if approve {"approved"} else {"declined"},"conversation_id":conversation,"choices.automatic_updates":automatic_updates}},
     ).return_document(ReturnDocument::After).await?.ok_or_else(|| AppError::Conflict("Pairing was already decided or expired".into()))?;
     if let Some(conversation) = conversation {
-        watch(db, owner, conversation, &row.id, row.expires_at).await?;
+        watch(db, owner, conversation, &row.id, row.expires_at, provenance).await?;
     }
     Ok(row)
 }
@@ -349,12 +352,18 @@ pub async fn watch(
     conversation: &str,
     id: &str,
     expires: chrono::DateTime<Utc>,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<()> {
     let now = Utc::now();
-    db.collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME).update_one(
-        doc! {"kind":"machine_setup","connect_link_id":id,"user_id":owner},
-        doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"user_id":owner,"kind":"machine_setup","connect_link_id":id,"conversation_id":conversation,"status":"pending","created_at":bson::DateTime::from_chrono(now),"expires_at":bson::DateTime::from_chrono(expires+Duration::hours(1))}},
-    ).upsert(true).await?;
+    let mut insert = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":owner,"kind":"machine_setup","connect_link_id":id,"conversation_id":conversation,"status":"pending","created_at":bson::DateTime::from_chrono(now),"expires_at":bson::DateTime::from_chrono(expires+Duration::hours(1))};
+    insert.extend(provenance.fields());
+    db.collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME)
+        .update_one(
+            doc! {"kind":"machine_setup","connect_link_id":id,"user_id":owner},
+            doc! {"$setOnInsert":insert},
+        )
+        .upsert(true)
+        .await?;
     Ok(())
 }
 

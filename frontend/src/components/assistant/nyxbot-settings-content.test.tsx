@@ -275,8 +275,10 @@ it("asks before every change in Ask every time and explains the specialist reque
   const requests = await within(page).findByRole("combobox", { name: "Specialist access requests" });
   expect(requests).toHaveTextContent("Deny requests");
   expect(
-    within(page).getByText(/you can still grant it in the specialist's details/),
+    within(page).getByText(/A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details/),
   ).toBeVisible();
+  // Denied mode: a direct chat is never handed to NyxBot; only assigned work reports there.
+  expect(within(page).getByText(/Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead/)).toBeVisible();
   await user.click(within(page).getByRole("combobox", { name: "Access mode" }));
   await user.click(await screen.findByRole("option", { name: "Ask every time" }));
   expect(
@@ -284,7 +286,9 @@ it("asks before every change in Ask every time and explains the specialist reque
   ).toBeVisible();
   await user.click(requests);
   await user.click(await screen.findByRole("option", { name: "Route to NyxBot" }));
-  expect(within(page).getByText(/goes to NyxBot, which approves or denies it/)).toBeVisible();
+  expect(within(page).getByText(/For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it/)).toBeVisible();
+  // Routed mode never claims that a direct chat with a specialist is handed to NyxBot.
+  expect(within(page).getByText(/A specialist you talk to directly still tells you what it is missing/)).toBeVisible();
   await user.click(within(page).getByRole("button", { name: "Save settings" }));
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({
@@ -506,7 +510,7 @@ it("shows General's load error with retry without hiding the other sections", as
   settingsRead = "error";
   const user = renderPage();
   expect(
-    await screen.findByText("Could not load settings. Settings unavailable"),
+    await screen.findByText("Could not load settings. NyxBot is temporarily unavailable. Try again shortly."),
   ).toBeVisible();
   expect(
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
@@ -531,7 +535,7 @@ it("keeps dirty values and reports a failed General save inline", async () => {
   await user.type(live, "12");
   await user.click(screen.getByRole("button", { name: "Save settings" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Save unavailable",
+    "NyxBot is temporarily unavailable. Try again shortly.",
   );
   expect(live).toHaveValue(12);
   expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();

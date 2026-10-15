@@ -579,7 +579,13 @@ async fn relay(
                                     )
                                     .await?;
                                     row = desktop::controlled(&state.db, &row, &viewer).await?;
-                                    watch(&state, &row).await?;
+                                    // The owner took control: no causing agent turn.
+                                    watch(
+                                        &state,
+                                        &row,
+                                        &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
+                                    )
+                                    .await?;
                                     controls = true;
                                     audit(&state, &row, "owner_control");
                                 }
@@ -671,29 +677,38 @@ fn audit(state: &AppState, row: &MachineDesktop, outcome: &str) {
     );
 }
 
-pub async fn watch(state: &AppState, row: &MachineDesktop) -> AppResult<()> {
+pub async fn watch(
+    state: &AppState,
+    row: &MachineDesktop,
+    provenance: &crate::services::nyxbot_watch_service::ReportProvenance,
+) -> AppResult<()> {
     use mongodb::bson::{self, doc};
     if let Some(conversation) = &row.conversation_id {
-        state.db.collection::<bson::Document>(crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME).update_one(
-            doc!{
-                "kind":"machine_control",
-                "connect_link_id":&row.id,
-                "conversation_id":conversation,
-                "status":"pending"
-            },
-            doc!{
-                "$setOnInsert":{
-                    "_id":uuid::Uuid::new_v4().to_string(),
-                    "user_id":&row.user_id,
+        let mut insert = doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),
+            "user_id":&row.user_id,
+            "kind":"machine_control",
+            "connect_link_id":&row.id,
+            "conversation_id":conversation,
+            "status":"pending",
+            "created_at":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(1))
+        };
+        insert.extend(provenance.fields());
+        state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME)
+            .update_one(
+                doc! {
                     "kind":"machine_control",
                     "connect_link_id":&row.id,
                     "conversation_id":conversation,
-                    "status":"pending",
-                    "created_at":bson::DateTime::now(),
-                    "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(1))
-                }
-            }
-        ).upsert(true).await?;
+                    "status":"pending"
+                },
+                doc! {"$setOnInsert":insert},
+            )
+            .upsert(true)
+            .await?;
     }
     Ok(())
 }
@@ -743,7 +758,12 @@ pub async fn request_control(
         &secret,
     )
     .await?;
-    watch(state, &row).await?;
+    watch(
+        state,
+        &row,
+        &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
+    )
+    .await?;
     let link = AssistantPage::MachineDesktop {
         node: &node.id,
         conversation: Some(&chat.conversation_id),

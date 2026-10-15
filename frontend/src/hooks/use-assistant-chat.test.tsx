@@ -603,7 +603,7 @@ describe("useAssistantChat", () => {
     await expect(
       act(async () => result.current.send("Keep this draft")),
     ).rejects.toMatchObject({
-      message: "Assistant unavailable",
+      message: "NyxBot is temporarily unavailable. Try again shortly.",
       status: 503,
       code: 9100,
     });

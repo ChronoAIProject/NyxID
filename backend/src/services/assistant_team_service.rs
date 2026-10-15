@@ -108,6 +108,7 @@ pub async fn in_progress(
         .collect())
 }
 
+/// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
         id: Uuid::new_v4().to_string(),
@@ -116,8 +117,21 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
         agent_id: agent_id.map(str::to_owned),
         question_key: None,
         reply_to: Vec::new(),
+        bound: false,
+        report_to: None,
         created_at: Utc::now(),
     }
+}
+
+/// An event whose producer proved `report_to` from a validated source; `None`
+/// proves new owner work.
+pub fn bound_event(
+    kind: &str,
+    text: String,
+    agent_id: Option<&str>,
+    report_to: Option<&str>,
+) -> AgentEvent {
+    event(kind, text, agent_id).bound_to(report_to)
 }
 
 fn not_found() -> AppError {

@@ -207,6 +207,7 @@ pub(super) async fn reserve(
                         api_key_id: card.api_key_id.clone(), turn_id: card.requested_turn_id.clone().unwrap_or_default(),
                         requested_turn_id: card.requested_turn_id.clone(), voice_request_id: card.voice_request_id.clone(),
                         trigger_run_id: card.trigger_run_id.clone(),
+                        routing: card.routing.clone(),
                     };
                     if let Some(reservation) = reuse(db, &claim_id, claim, proposal, Some(card), session).await? {
                         save_claim(db, &reservation.claim_id, &reservation.claim, session).await?;
@@ -235,6 +236,8 @@ pub(super) async fn reserve(
                 api_key_id: chat.api_key_id.clone(), turn_id: turn_id.clone(),
                 requested_turn_id: if turn.trigger_run_id.is_some() { Some(turn_id.clone()) } else { started_by.map(|m| m.turn_id) },
                 voice_request_id: turn.voice_request_id.clone(), trigger_run_id: turn.trigger_run_id.clone(),
+                // Recovery re-raises the card with the drafting turn's routing, not a later turn's.
+                routing: Some(super::super::assistant_access_policy::routing_for(chat, &conversation)),
             };
             proposals.insert_one(candidate).session(&mut *session).await?;
             save_claim(db, &claim_id, &claim, session).await?;
@@ -296,7 +299,7 @@ pub(super) async fn finalize(
             }
             let origin = acks::RequestOrigin {
                 requested_turn_id: claim.requested_turn_id.clone(), voice_request_id: claim.voice_request_id.clone(),
-                trigger_run_id: claim.trigger_run_id.clone(),
+                trigger_run_id: claim.trigger_run_id.clone(), routing: claim.routing.clone(),
             };
             acks::request_in_session(db, &chat, acks::Request {
                 kind:"action", service:None, tool:Some(review::TOOL), arguments:Some(binding),

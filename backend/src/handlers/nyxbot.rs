@@ -1854,6 +1854,7 @@ pub(crate) async fn setup_link_tool(
     platform: &str,
     label: Option<&str>,
     agent: &crate::models::assistant_agent::AssistantAgent,
+    provenance: crate::services::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<(Value, bool)> {
     if agent.user_id != owner {
         return Err(AppError::Forbidden(
@@ -1886,6 +1887,14 @@ pub(crate) async fn setup_link_tool(
     }
     let now = Utc::now();
     let family = canonical_platform(&platform).to_owned();
+    let mut set = provenance.fields();
+    set.insert("agent_id", agent.id.clone());
+    set.insert("conversation_id", source_conversation_id);
+    set.insert("created_at", bson::DateTime::from_chrono(now));
+    set.insert(
+        "expires_at",
+        bson::DateTime::from_chrono(now + ChronoDuration::minutes(SETUP_WATCH_TTL_MINUTES)),
+    );
     // One pending link per owner and platform: a new link replaces the last.
     state
         .db
@@ -1894,14 +1903,7 @@ pub(crate) async fn setup_link_tool(
             doc! {"user_id": owner, "kind": "channel_bot", "platform": &family,
             "status": "pending"},
             doc! {
-                "$set": {
-                    "agent_id": &agent.id,
-                    "conversation_id": source_conversation_id,
-                    "created_at": bson::DateTime::from_chrono(now),
-                    "expires_at": bson::DateTime::from_chrono(
-                        now + ChronoDuration::minutes(SETUP_WATCH_TTL_MINUTES)
-                    ),
-                },
+                "$set": set,
                 "$setOnInsert": {"_id": Uuid::new_v4().to_string()},
             },
         )
@@ -1939,6 +1941,7 @@ pub(crate) async fn watch_connect_link(
     owner: &str,
     conversation_id: &str,
     connect_link_id: &str,
+    provenance: crate::services::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<()> {
     let link = db
         .collection::<crate::models::connect_link::ConnectLink>(
@@ -1962,6 +1965,8 @@ pub(crate) async fn watch_connect_link(
             channel_bot_id: None,
             connect_link_id: Some(connect_link_id.into()),
             last_error: None,
+            report_to: provenance.report_to,
+            report_provenance: provenance.version,
             checked_at: None,
             created_at: now,
             expires_at: link.expires_at.max(now)
@@ -2004,8 +2009,8 @@ async fn wake_with(state: &AppState, watch: &NyxbotWatch, kind: &str, text: Stri
         state,
         &watch.user_id,
         &watch.conversation_id,
-        vec![crate::services::assistant_team_service::event(
-            kind, text, None,
+        vec![crate::services::nyxbot_watch_service::watch_event(
+            watch, kind, text,
         )],
     )
     .await;
@@ -2617,9 +2622,10 @@ async fn owner_linked(state: &AppState, row: &NyxbotChannel, method: &str) -> In
                 &state,
                 &owner,
                 &source,
-                vec![crate::services::assistant_team_service::event(
+                vec![crate::services::assistant_team_service::bound_event(
                     "channel_owner_verified",
                     text,
+                    None,
                     None,
                 )],
             )
@@ -3002,7 +3008,8 @@ async fn start_chat_turn(
                 identifier(&row.platform),
                 excerpt(text, 3000).replace('"', "'")
             );
-            let mut event = crate::services::assistant_team_service::event("message", note, None);
+            let mut event =
+                crate::services::assistant_team_service::bound_event("message", note, None, None);
             event.question_key = question_key;
             event.reply_to = vec![origin.clone()];
             let queued = if origin.thread.is_some() {
@@ -3714,6 +3721,21 @@ async fn gateway_inbound(
     // Keep the exact private-chat mapping for a later flag-off return to
     // the relay; no mentioned names, sender IDs or message content are added.
     let mut metadata = doc! {};
+    if matches!(row.platform.as_str(), "telegram" | "telegram-new") {
+        use crate::models::channel_thread::TelegramTopic;
+        let topic = match crate::services::channel_adapters::telegram::gateway_topic_id(
+            &row.platform,
+            activity,
+        ) {
+            Some(id) => TelegramTopic::Topic { id },
+            None => TelegramTopic::Chat,
+        };
+        metadata.insert(
+            "telegram_topic",
+            bson::to_bson(&topic)
+                .map_err(|_| AppError::Internal("Invalid outbound topic".into()))?,
+        );
+    }
     if kind == "private" && human && !sender.id.is_empty() {
         metadata.insert(
             "relay_partition",
@@ -3871,7 +3893,9 @@ pub async fn deliver_to(
     text: &str,
     images: Option<&images::ImageSendPlan>,
 ) {
-    let result: AppResult<()> = async {
+    // Boxed: the image and platform sends make this future large, and it is
+    // awaited deep inside turn settlement.
+    let result: AppResult<()> = Box::pin(async {
         if origin.thread.is_some() {
             let image_turn = images.and_then(|plan| {
                 row.active_turn.as_ref().map(|turn| images::ImageTurn {
@@ -3890,7 +3914,6 @@ pub async fn deliver_to(
         if let Some(plan) = images
             && let Some(turn) = row.active_turn.as_ref()
         {
-            let claim_key = format!("chat:{}", thread.id);
             let report = images::report_or_failure(
                 state,
                 images::ImageSendContext {
@@ -3907,8 +3930,8 @@ pub async fn deliver_to(
                                     && thread.owner_chat)),
                     },
                     deadline: None,
-                    claim_key: &claim_key,
                     initiated: None,
+                    fence: None,
                 },
                 plan,
             )
@@ -3948,7 +3971,7 @@ pub async fn deliver_to(
             direct_reply(state, &channel, message_id, &reply, None).await?;
         }
         Ok(())
-    }
+    })
     .await;
     if let Err(error) = result {
         tracing::debug!(%error, "NyxBot channel update not delivered");
@@ -4418,6 +4441,7 @@ async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult
             id,
             false,
             Some(&watch.conversation_id),
+            &crate::services::nyxbot_watch_service::ReportProvenance::from_watch(watch),
         )
         .await
         {
@@ -4526,6 +4550,7 @@ pub(crate) async fn trigger_setup_link(
     owner: &str,
     conversation: &str,
     prefill: crate::models::nyxbot_channel::TriggerPrefill,
+    provenance: crate::services::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<Value> {
     if prefill.instruction.trim().is_empty()
         || prefill.instruction.len() > 8192
@@ -4554,13 +4579,15 @@ pub(crate) async fn trigger_setup_link(
             channel_bot_id: None,
             connect_link_id: None,
             last_error: None,
+            report_to: provenance.report_to,
+            report_provenance: provenance.version,
             checked_at: None,
             created_at: now,
             expires_at: now + ChronoDuration::minutes(120),
         })
         .await?;
     Ok(json!({
-        "url": AssistantPage::Automations { setup: Some(&id) }.url(&state.config.frontend_url),
+        "url": AssistantPage::Automations { setup: Some(&id), agent: None }.url(&state.config.frontend_url),
         "note": "Open this page to create the webhook trigger and save its URL and one-time secret. Never paste the secret into chat. NyxID resumes this thread once it exists. Webhooks default to a dedicated thread. Choose home only with explicit owner consent: untrusted event text would remain in later full-authority owner turns, including private channel chats; webhook confirmation policy does not protect those later turns.",
     }))
 }

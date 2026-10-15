@@ -181,6 +181,8 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         missed: None,
         waiting_for: Vec::new(),
         result_claimed: false,
+        image_refs: Vec::new(),
+        image_refs_truncated: 0,
         agent_id: None,
         deliver_to: Default::default(),
         label: trigger.label.clone(),

@@ -61,8 +61,38 @@ pub struct AgentEvent {
     /// of the turn that drains it.
     #[serde(default)]
     pub reply_to: Vec<ChannelOrigin>,
+    /// The producer proved `report_to` from a validated source (the causing
+    /// turn's snapshot, a card's stored routing, or a carrier with validated
+    /// provenance). Unbound (legacy) events never create NyxBot involvement.
+    #[serde(default)]
+    pub bound: bool,
+    #[serde(default)]
+    pub report_to: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+impl AgentEvent {
+    /// Mark the event as proved from a validated source. `None` means the
+    /// causing work was proven not to report to NyxBot (new owner work).
+    pub fn bound_to(mut self, report_to: Option<&str>) -> Self {
+        self.bound = true;
+        self.report_to = report_to.map(str::to_owned);
+        self
+    }
+}
+
+/// First validated report-snapshot format on delayed carriers (async
+/// operations, watches, machine jobs). 0 or absent is legacy and unproven;
+/// unknown versions fail closed.
+pub const REPORT_PROVENANCE_V1: u8 = 1;
+
+pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<String> {
+    if provenance == REPORT_PROVENANCE_V1 {
+        report_to.map(str::to_owned)
+    } else {
+        None
+    }
 }
 
 /// The external channel a conversation answers, when it was started by a
@@ -175,6 +205,14 @@ pub struct ActiveTurn {
     pub heartbeat_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
+    /// Specialist threads: the NyxBot thread this turn reports to, decided
+    /// once at admission; ambiguity resolves to `None`.
+    #[serde(default)]
+    pub report_to: Option<String>,
+    /// Group turns: the owner's NyxBot was a member of this personal group at
+    /// admission (org groups: never).
+    #[serde(default)]
+    pub with_nyxbot: bool,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,
@@ -279,8 +317,9 @@ pub struct AssistantConversation {
     /// the owner/member has opted in.
     #[serde(default)]
     pub learning_epoch: Option<i64>,
-    /// Specialist threads only: the NyxBot thread that assigned the current
-    /// work, which receives its report and permission requests.
+    /// Legacy assignment marker written for old readers only: the NyxBot
+    /// thread that assigned the newest work. New code reads the turn snapshot
+    /// (`ActiveTurn::report_to`), never this field.
     #[serde(default)]
     pub report_to: Option<String>,
     /// Bounded wake-up queue drained by the next event turn.

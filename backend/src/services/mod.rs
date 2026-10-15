@@ -224,6 +224,8 @@ pub mod assistant_settings_service;
 pub mod assistant_steering;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
+pub mod channel_image_audience;
+pub mod channel_image_delivery;
 pub mod channel_retry_ingress;
 pub mod channel_turn_delivery;
 pub mod provider_link_service;
@@ -260,6 +262,7 @@ pub(crate) mod machine_integration_tests;
 #[cfg(test)]
 mod machine_transport_tests;
 
+pub mod trigger_run_images;
 pub mod trigger_schedule;
 
 #[cfg(test)]
@@ -334,5 +337,7 @@ mod platform_provisioning_acceptance_tests;
 
 pub mod platform_setup_notice_service;
 
+pub mod assistant_access_policy;
 pub(crate) mod nyxbot_gateway_service;
+pub mod nyxbot_watch_service;
 pub mod tools_manager_service;

@@ -200,6 +200,9 @@ pub struct NyxbotThread {
     pub platform_chat_id: Option<String>,
     #[serde(default)]
     pub platform_thread_id: Option<String>,
+    /// Outbound evidence; never changes partition, conversation or follow keys.
+    #[serde(default)]
+    pub telegram_topic: Option<super::channel_thread::TelegramTopic>,
     /// The agent this chat reaches instead of the channel's.
     #[serde(default)]
     pub agent_id: Option<String>,
@@ -337,6 +340,10 @@ pub struct NyxbotWatch {
     /// Stable code only, never upstream prose.
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub report_to: Option<String>,
+    #[serde(default)]
+    pub report_provenance: u8,
     /// When the sweep last looked at it: sweeps take the least recently
     /// checked first, so old abandoned watches never starve new ones.
     #[serde(default, with = "crate::models::bson_datetime::optional")]

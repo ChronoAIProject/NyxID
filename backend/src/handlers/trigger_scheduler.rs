@@ -672,7 +672,7 @@ pub(crate) async fn settled(
     }
 }
 
-async fn settle_result(
+pub(super) async fn settle_result(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
     run: &TriggerRun,
@@ -798,10 +798,10 @@ async fn settle_result(
         )
         .await;
     }
-    if state
+    let Some(run) = state
         .db
         .collection::<TriggerRun>(RUNS)
-        .update_one(
+        .find_one_and_update(
             doc! {
                 "_id": &run.id,
                 "outcome": RunOutcome::Started.as_str(),
@@ -810,12 +810,11 @@ async fn settle_result(
             },
             doc! { "$set": {"result_claimed":true} },
         )
+        .return_document(mongodb::options::ReturnDocument::After)
         .await?
-        .modified_count
-        == 0
-    {
+    else {
         return Ok(());
-    }
+    };
     let final_text = if error.is_some() {
         "This automation could not finish. Open its thread for details."
     } else {
@@ -839,29 +838,9 @@ async fn settle_result(
         }
         DeliverTo::Chat { chat_id } => {
             let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
-            if error.is_none()
-                && let Some(turn_id) = run.turn_id.as_deref()
-            {
-                let plan = super::nyxbot::images::ImageSendPlan {
-                    attachments: engine::settled_tool_attachments(
-                        &state.db,
-                        &run.user_id,
-                        &row.id,
-                        turn_id,
-                    )
-                    .await,
-                };
+            if error.is_none() {
                 Box::pin(super::nyxbot::chats::post_automation_images(
-                    state,
-                    &run.user_id,
-                    chat_id,
-                    super::nyxbot::chats::AutomationImages {
-                        turn_id,
-                        plan: &plan,
-                    },
-                    agent_id,
-                    &row.id,
-                    final_text,
+                    state, &run, chat_id, agent_id, &row.id, final_text,
                 ))
                 .await
                 .map(|_| ())
@@ -1001,6 +980,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        report_to: None,
                     continuation_of: None,
                     retry_of: None,
                         retry_claimed_by: None,

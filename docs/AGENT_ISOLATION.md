@@ -405,4 +405,4 @@ All changes are additive. No breaking changes for existing users:
 
 ### NyxBot access authority
 
-Specialist agents cannot widen access or grant permissions. The backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal; only the owner's NyxBot can initiate these requests.
+Specialist agents cannot widen access or grant permissions. For work NyxBot assigned, or in a personal group NyxBot is a member of, access requests go through NyxBot and the backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal. When a person talks to a specialist directly, that work is not NyxBot's: an ungranted call returns a neutral `missing_access` result (scope, target, "no request was created", a link to the agent's details) and the specialist continues; it never asks NyxBot to take over. Only the owner, in the agent's details, or a legitimately involved NyxBot under routed mode can widen a specialist's access.

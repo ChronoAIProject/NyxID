@@ -158,6 +158,14 @@ it("shows no risk line on cards from older servers", () => {
   expect(screen.queryByText(/access mode is/)).not.toBeInTheDocument();
 });
 
+it("never promises NyxBot's follow-up on a skills card NyxBot is not deciding", () => {
+  render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, kind: "skills", decider: "user" }} deciding={false} onDecision={vi.fn()} />);
+  const card = screen.getByRole("region");
+  expect(card).toHaveTextContent("Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor.");
+  expect(card).not.toHaveTextContent("asks NyxBot");
+  expect(card).not.toHaveTextContent("Requested from NyxBot");
+});
+
 it.each(["skills", "operations"] as const)("explains that routed %s widening follows the permission mode", (kind) => {
   render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, kind, decider: "orchestrator" }} deciding={false} onDecision={vi.fn()} />);
   expect(screen.getByRole("region")).toHaveTextContent("follows NyxBot's permission mode");

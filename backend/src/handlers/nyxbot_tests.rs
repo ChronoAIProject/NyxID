@@ -17,6 +17,8 @@ mod transport_tests;
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
+const LEGACY_PROVENANCE: crate::services::nyxbot_watch_service::ReportProvenance =
+    crate::services::nyxbot_watch_service::ReportProvenance::LEGACY;
 const OWNER: &str = "12345678-1234-4123-8123-1234567890ab";
 const PARTITION: &str = "conv_0123456789abcdef0123456789abcdef";
 
@@ -856,6 +858,7 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         "lark",
         None,
         &team,
+        LEGACY_PROVENANCE,
     )
     .await
     .unwrap();
@@ -867,9 +870,17 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .update_one(doc! {"_id":&home.id}, doc! {"$set":{"group_id":&group_id}})
         .await
         .unwrap();
-    let (group, _) = setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
-        .await
-        .unwrap();
+    let (group, _) = setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "lark",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
     assert!(
         group["url"]
             .as_str()
@@ -882,13 +893,30 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .update_one(doc! {"_id":&home.id}, doc! {"$unset":{"group_id":""}})
         .await
         .unwrap();
-    let unknown = setup_link_tool(&state, OWNER, &home.id, "myspace", None, &team).await;
+    let unknown = setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "myspace",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await;
     assert!(matches!(unknown, Err(AppError::ValidationError(message)) if message.contains("lark")));
     // Without an administrator-configured creation manager, Telegram uses
     // the bot-token page.
-    let (telegram, _) = setup_link_tool(&state, OWNER, &home.id, "telegram", Some("Helper"), &team)
-        .await
-        .unwrap();
+    let (telegram, _) = setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "telegram",
+        Some("Helper"),
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
     assert!(
         telegram["url"].as_str().unwrap().contains(&format!(
             "/channel-bots/connect/telegram?label=Helper&return_to={}",
@@ -896,9 +924,17 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         )),
         "{telegram}"
     );
-    let (lark, _) = setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
-        .await
-        .unwrap();
+    let (lark, _) = setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "lark",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
     assert!(
         lark["url"]
             .as_str()
@@ -1046,7 +1082,7 @@ async fn finished_connect_links_resume_the_chat_that_sent_them() {
         })
         .await
         .unwrap();
-    watch_connect_link(&state.db, OWNER, &home.id, &link_id)
+    watch_connect_link(&state.db, OWNER, &home.id, &link_id, LEGACY_PROVENANCE)
         .await
         .unwrap();
     let pending = waiting(&state, OWNER, &home.id).await.unwrap();
@@ -1441,7 +1477,7 @@ async fn live_changes_resume_waiting_chats_without_the_sweep() {
         })
         .await
         .unwrap();
-    watch_connect_link(&state.db, OWNER, &home.id, &link_id)
+    watch_connect_link(&state.db, OWNER, &home.id, &link_id, LEGACY_PROVENANCE)
         .await
         .unwrap();
     state
@@ -1456,9 +1492,17 @@ async fn live_changes_resume_waiting_chats_without_the_sweep() {
     wait_for_event(&state, &home.id, "finished connecting").await;
     // A setup link: the bot the user creates is linked the moment it is
     // saved, even while its webhook is still being verified.
-    setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
-        .await
-        .unwrap();
+    setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "lark",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
     let mut created = bot_doc("lark", "Support desk");
     created.insert("status", "pending_webhook");
     let bot_id = created.get_str("_id").unwrap().to_owned();
@@ -1705,9 +1749,17 @@ async fn linking_an_existing_bot_ends_the_wait_for_a_new_one() {
         .insert_one(existing)
         .await
         .unwrap();
-    setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
-        .await
-        .unwrap();
+    setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "lark",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
     let kinds = |items: Vec<WaitingItem>| -> Vec<&'static str> {
         items.into_iter().map(|item| item.kind).collect()
     };
@@ -4882,3 +4934,233 @@ mod late_delivery_tests;
 
 #[path = "nyxbot_gateway_thread_tests.rs"]
 mod gateway_thread_tests;
+#[path = "nyxbot_gateway_topic_tests.rs"]
+mod gateway_topic_tests;
+
+/// Plan v7 §2.2 carriers: a watch stores the causing turn's report snapshot
+/// with validated provenance and wakes its thread with an event bound from
+/// it; a watch without a live turn proves owner work; a legacy watch wakes
+/// with an unbound event. None of them creates NyxBot involvement by itself.
+#[tokio::test]
+async fn watch_completions_are_bound_from_the_causing_turns_snapshot() {
+    use crate::models::assistant_conversation::REPORT_PROVENANCE_V1;
+    let (state, _calls, server) = setup("nyxbot_watch_provenance").await;
+    let nyxbot = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let nyxbot_home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &nyxbot,
+    )
+    .await
+    .unwrap();
+    let (_, home) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "connector".into(),
+            description: "Connects services".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let start = |text: &str| {
+        engine::TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(home.id.clone()),
+            text: text.into(),
+            model: None,
+            access_mode: None,
+        })
+    };
+    let link = |state: &AppState| {
+        let state = state.clone();
+        async move {
+            let link_id = Uuid::new_v4().to_string();
+            state
+                .db
+                .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+                .insert_one(doc! {
+                    "_id": &link_id, "user_id": OWNER, "service_slug": "api-github",
+                    "service_id": Uuid::new_v4().to_string(), "token_hash": "hash",
+                    "status": "pending", "created_at": bson::DateTime::now(),
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::minutes(15)),
+                })
+                .await
+                .unwrap();
+            link_id
+        }
+    };
+    let complete = |state: &AppState, link_id: &str| {
+        let state = state.clone();
+        let link_id = link_id.to_owned();
+        async move {
+            state
+                .db
+                .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &link_id},
+                    doc! {"$set": {"status": "completed"}},
+                )
+                .await
+                .unwrap();
+            process_watches(&state).await.unwrap();
+        }
+    };
+    let stored = |state: &AppState, link_id: &str| {
+        let state = state.clone();
+        let link_id = link_id.to_owned();
+        async move {
+            state
+                .db
+                .collection::<NyxbotWatch>(WATCHES)
+                .find_one(doc! {"connect_link_id": &link_id})
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+    let home_id = home.id.clone();
+    let queued = |state: &AppState| {
+        let state = state.clone();
+        let home_id = home_id.clone();
+        async move {
+            engine::get(&state.db, OWNER, &home_id)
+                .await
+                .unwrap()
+                .pending_events
+                .into_iter()
+                .filter(|event| event.kind == "connection_finished")
+                .collect::<Vec<_>>()
+        }
+    };
+    use crate::services::{
+        assistant_acknowledgement_service as acks, nyxbot_watch_service::ReportProvenance,
+    };
+    // A watch created by an owner page action (no chat) proves nothing.
+    let owner_link = link(&state).await;
+    watch_connect_link(
+        &state.db,
+        OWNER,
+        &home.id,
+        &owner_link,
+        ReportProvenance::LEGACY,
+    )
+    .await
+    .unwrap();
+    let watch = stored(&state, &owner_link).await;
+    assert_eq!(watch.report_provenance, 0);
+    assert_eq!(watch.report_to, None);
+    // An assigned live turn: the watch stores the exact chat snapshot. The
+    // turn stays live, so every completion waits in the queue where it can
+    // be inspected.
+    let mut assigned = start("Connect GitHub for the user");
+    assigned.origin = TurnOrigin::Orchestrator;
+    assigned.report_to = Some(nyxbot_home.id.clone());
+    let row = engine::begin_turn(&state.db, OWNER, assigned, &state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().report_to.as_deref(),
+        Some(nyxbot_home.id.as_str())
+    );
+    let assigned_chat = acks::for_key(&state.db, OWNER, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let assigned_link = link(&state).await;
+    watch_connect_link(
+        &state.db,
+        OWNER,
+        &home.id,
+        &assigned_link,
+        ReportProvenance::from_chat(&assigned_chat),
+    )
+    .await
+    .unwrap();
+    let watch = stored(&state, &assigned_link).await;
+    assert_eq!(watch.report_provenance, REPORT_PROVENANCE_V1);
+    assert_eq!(watch.report_to.as_deref(), Some(nyxbot_home.id.as_str()));
+    // The snapshot is the chat's own: a chat whose turn was stopped proves
+    // nothing, and a replacement turn is never consulted.
+    let mut stopped_chat = assigned_chat.clone();
+    stopped_chat.turn_stopped = true;
+    assert_eq!(
+        ReportProvenance::from_chat(&stopped_chat),
+        ReportProvenance::LEGACY
+    );
+    // A legacy watch row (no provenance fields) for a third link.
+    let legacy_link = link(&state).await;
+    state
+        .db
+        .collection::<bson::Document>(WATCHES)
+        .insert_one(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": OWNER, "kind": "connect_link",
+            "conversation_id": &home.id, "status": "pending", "connect_link_id": &legacy_link,
+            "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(1)),
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored(&state, &legacy_link).await.report_provenance, 0);
+    for link_id in [&owner_link, &assigned_link, &legacy_link] {
+        complete(&state, link_id).await;
+    }
+    let events = queued(&state).await;
+    assert_eq!(events.len(), 3, "{events:?}");
+    let assigned_event = events
+        .iter()
+        .find(|event| event.report_to.as_deref() == Some(nyxbot_home.id.as_str()))
+        .expect("the assigned completion is bound to the assigning thread");
+    assert!(assigned_event.bound);
+    // The no-turn and legacy watches both wake the thread unbound.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| !event.bound && event.report_to.is_none())
+            .count(),
+        2
+    );
+    for event in &events {
+        assert!(event.text.contains("api-github"));
+    }
+    // Settle the assigned turn; the mixed batch (two proven None/unbound items
+    // beside the assigned one) then admits an event turn with no target.
+    engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "connected".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let mut event_turn = start("");
+    event_turn.origin = TurnOrigin::Event;
+    let admitted = engine::begin_turn(&state.db, OWNER, event_turn, &state.encryption_keys)
+        .await
+        .unwrap();
+    let turn = admitted.active_turn.as_ref().unwrap();
+    assert_eq!(turn.events.len(), 3);
+    assert_eq!(turn.report_to, None);
+    server.abort();
+}

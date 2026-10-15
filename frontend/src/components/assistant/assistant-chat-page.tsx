@@ -1,4 +1,7 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
+import { AssistantErrorNotice } from "./assistant-error-notice";
+import { assistantErrorSummary, withAssistantTrace } from "@/lib/assistant/request-error";
+import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { ReviewCardTarget } from "./review-card-target";
@@ -543,6 +546,9 @@ function NyxAgentThreadPage() {
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
   });
   const selectedId = search.draft ? undefined : search.c;
+  const errorScope = `${user?.id}:${selectedId ?? `draft:${search.agent ?? "nyxbot"}`}`;
+  const [requestError, setRequestError] = useState<{ scope: string; message: string }>();
+  const pendingSend = useRef<{ scope: string } | undefined>(undefined);
   // No thread, draft or agent in the URL: the NyxBot home.
   const home = !search.c && !search.draft && !search.agent;
   // Router state is global: while the sidebar navigates to another page this
@@ -560,12 +566,13 @@ function NyxAgentThreadPage() {
   }, [selectedId]);
   const adopt = useCallback((id: string) => {
     if (selection.current !== selectedId) return;
+    if (pendingSend.current) pendingSend.current.scope = `${user?.id}:${id}`;
     void navigate({
       to: "/assistant",
       search: (previous) => ({ ...parseAccountPanelSearch(previous), c: id, ...(search.mock ? { mock: 1 as const } : {}) }),
       replace: true,
     });
-  }, [navigate, search.mock, selectedId]);
+  }, [navigate, search.mock, selectedId, user?.id]);
   const agents = useNyxBotAgents();
   const groups = useNyxBotGroups();
   // The agent whose details sheet is open (the thread's agent, or NyxBot from home).
@@ -574,7 +581,11 @@ function NyxAgentThreadPage() {
   // The open thread's agent, else the agent in the URL, else NyxBot.
   const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
   const selectedAgent = selectedAgentOf(agents.data?.agents, threadAgent?.id, search.agent);
-  const openDetailsAgentId = detailsAgentId ?? (search.proposal ? selectedAgent?.id : undefined);
+  // Names the exact linked agent even when it is not in the list.
+  const linkedDetails = Boolean(search.details || search.proposal);
+  const openDetailsAgentId =
+    detailsAgentId ??
+    (linkedDetails ? (search.agent ?? threadAgent?.id ?? selectedAgent?.id) : undefined);
 
   const draftAgent: NyxAgentConversationAgent | undefined = selectedAgent
     ? {
@@ -592,12 +603,20 @@ function NyxAgentThreadPage() {
     threadsAgentId: selectedAgent?.id,
     draftAgent,
   });
-  // The bubble shows a rejected retry (turn_active, an expired upload, a
-  // network error) next to its Retry button.
+  // Keep rejected retries with the other request failures above the chat.
   const retryFailedMessage = useCallback(async (messageId: string) => {
     if (!selectedId) throw new Error("Select the conversation to retry.");
-    await chat.retry(selectedId, messageId);
-  }, [chat, selectedId]);
+    setRequestError(undefined);
+    try {
+      await chat.retry(selectedId, messageId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not retry your message. Try again shortly.";
+      setRequestError({ scope: errorScope, message });
+      toast.error(isAdmittedSendError(error) ? "Live reply interrupted" : "Could not retry your message", {
+        description: assistantErrorSummary(message),
+      });
+    }
+  }, [chat, selectedId, errorScope]);
   const checkFailedMessage = useCallback(async (messageId: string) => {
     if (!selectedId) return;
     await chat.checkRecovery(selectedId, messageId);
@@ -628,18 +647,28 @@ function NyxAgentThreadPage() {
     }
     void navigate({
       to: "/assistant",
-      search: (previous) => ({ ...parseAccountPanelSearch(previous), c: latestThreadId, ...(search.mock ? { mock: 1 as const } : {}) }),
+      search: (previous) => ({
+        ...parseAccountPanelSearch(previous),
+        c: latestThreadId,
+        ...(linkedDetails ? { agent: search.agent } : {}),
+        ...(search.details ? { details: search.details } : {}),
+        ...(search.proposal ? { proposal: search.proposal } : {}),
+        ...(search.mock ? { mock: 1 as const } : {}),
+      }),
       replace: true,
     });
   }, [
     chat.threadsLoaded,
     latestThreadId,
+    linkedDetails,
     navigate,
     onChatRoute,
     search.agent,
     search.c,
+    search.details,
     search.draft,
     search.mock,
+    search.proposal,
   ]);
 
   function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
@@ -672,6 +701,10 @@ function NyxAgentThreadPage() {
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
   const agentOverride = agents.data?.agents.find((row) => row.id === headerAgent?.id)?.access_mode_override;
   const accessMode = effectiveAccessMode(nyxBotSettings.data?.access_mode, agentOverride);
+  const lastReply = chat.isStreaming ? undefined : [...chat.session.messages].reverse().find((message) => message.role === "assistant" || message.role === "user");
+  const turnError = lastReply?.status === "error"
+    ? withAssistantTrace(lastReply.error ?? "NyxBot could not complete this turn. Check which actions completed before trying again.", lastReply.turnId ?? null)
+    : undefined;
   const threadPanels = headerAgent && !showHome ? (
     <div className="shrink-0 px-4 pt-3 sm:px-6">
       <div className="mx-auto w-full max-w-[758px] space-y-2">
@@ -714,21 +747,24 @@ function NyxAgentThreadPage() {
           onNewChat={() => go()}
           onSelect={go}
           onDelete={chat.deleteConversation}
-          notice={chat.error}
         />
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
+        <AssistantErrorNotice message={chat.error ?? (requestError?.scope === errorScope ? requestError.message : undefined) ?? turnError} />
         {threadPanels}
         <AgentDetailsSheet
           agentId={openDetailsAgentId}
           agents={agents.data?.agents ?? []}
           proposalId={search.proposal}
+          tab={search.details}
           open={openDetailsAgentId !== undefined}
           onOpenChange={(open) => {
             if (!open) {
               setDetailsAgentId(undefined);
-              if (search.proposal) navigateTo({ c: search.c, agent: search.agent, draft: search.draft ? true : undefined });
+              // Closing a linked sheet drops its URL state (push, like the
+              // account panels, so Back after an explicit close reopens it).
+              if (linkedDetails) navigateTo({ c: search.c, agent: search.agent, draft: search.draft ? true : undefined });
             }
           }}
           onDeleted={() => {
@@ -801,7 +837,9 @@ function NyxAgentThreadPage() {
                 if (message.role === "assistant") {
                   return (
                     <NyxAgentAssistantEntry
-                      message={message}
+                      message={turnError && message.id === lastReply?.id
+                        ? { ...message, error: undefined, errorDetail: undefined }
+                        : message}
                       conversationId={chat.session.conversationId}
                       retry={retryFailedMessage}
                       checkRecovery={checkFailedMessage}
@@ -851,6 +889,7 @@ function NyxAgentThreadPage() {
               }}
               // Everything renderMessage reads besides the message itself.
               projectionVersion={[
+                `top-error:${turnError ? lastReply?.id : ""}`,
                 `card:${search.card ?? ""}`,
                 `deciding:${chat.decidingAcknowledgement ?? ""}`,
                 `channel:${channelPlatform ?? ""}`,
@@ -859,12 +898,11 @@ function NyxAgentThreadPage() {
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
               bottomInset={composerHeight}
-              notice={chat.error}
               // A linked review card may sit outside the mounted window.
               focusMessageId={search.card ? `nyxagent-acknowledgement:${search.card}` : undefined}
               emptyDescription={
                 headerAgent?.kind === "specialist"
-                  ? `Talk to ${agentName} directly. It remembers across its threads and asks NyxBot for anything outside its grants.`
+                  ? `Talk to ${agentName} directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.`
                   : "See your connected services, connect a new one, " +
                     "set up a channel bot, or check approvals."
               }
@@ -902,20 +940,32 @@ function NyxAgentThreadPage() {
             agentOverride={agentOverride}
             placeholder={`Message ${agentName}`}
             onSend={async (text, uploads, model) => {
+              const sending = { scope: errorScope };
+              pendingSend.current = sending;
+              setRequestError(undefined);
               try {
                 await chat.send(text, uploads, model);
               } catch (error) {
-                toast.error(
-                  error instanceof Error ? error.message : "The assistant is unavailable.",
-                );
+                const message = error instanceof Error ? error.message : "NyxBot is temporarily unavailable. Try again shortly.";
+                setRequestError({ scope: sending.scope, message });
+                toast.error(isAdmittedSendError(error) ? "Live reply interrupted" : "Could not send your message", {
+                  description: assistantErrorSummary(message),
+                });
                 throw error;
+              } finally {
+                if (pendingSend.current === sending) pendingSend.current = undefined;
               }
             }}
             onStop={async () => {
+              setRequestError(undefined);
               try {
                 await chat.stop();
-              } catch {
-                toast.error("Could not stop the assistant. Try again.");
+              } catch (error) {
+                const message = error instanceof Error ? error.message : "Could not stop NyxBot. Try again shortly.";
+                setRequestError({ scope: errorScope, message });
+                toast.error("Could not stop NyxBot", {
+                  description: assistantErrorSummary(message),
+                });
               }
             }}
           />

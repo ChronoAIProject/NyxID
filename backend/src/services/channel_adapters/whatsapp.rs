@@ -318,6 +318,7 @@ async fn graph_request(
     request: reqwest::RequestBuilder,
     timeout: std::time::Duration,
 ) -> Result<Value, GraphRequestFailure> {
+    crate::services::channel_platform::mark_provider_attempt();
     let response = request
         .timeout(timeout)
         .send()
@@ -433,11 +434,9 @@ pub(crate) async fn send_outcome_at(
 ) -> AppResult<crate::services::channel_platform::SendOutcome> {
     let phone = credentials.platform_bot_id.unwrap_or_default();
     validate_id(phone, "Phone Number ID")?;
-    let recipient: String = conversation_id
-        .chars()
-        .filter(|c| *c != ' ' && *c != '-')
-        .collect();
-    let recipient = recipient.strip_prefix('+').unwrap_or(&recipient);
+    let recipient =
+        crate::services::channel_image_audience::normalized_chat("whatsapp", conversation_id);
+    let recipient = recipient.as_str();
     validate_id(recipient, "Recipient")?;
     let mut text = reply.clone();
     text.attachments.clear();
