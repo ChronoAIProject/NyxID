@@ -6,11 +6,27 @@ different evidence states. Record the tested commit and actual commands/results
 before changing any row to verified. Mocked upstream calls cannot satisfy A13
 or the external portion of A1/A15.
 
-Current checkpoint: identity, personal engine and ingress slices are integrated;
-public runtime, frontend and transport integration remain in progress. The first
-combined production-bin Clippy run failed with 14 import/async-lifetime errors;
-fixes are integrated and a second run is underway. No feature runtime tests or
-acceptance gates have passed.
+Current checkpoint: identity, personal execution/settlement/Stop, ingress and
+frontend slices are integrated through `243d0d5e5`. Telegram transport/route
+assembly and account lifecycle recovery remain in progress. Public execution
+remains unavailable; its real runtime, FAQ tools and full-loop budget enforcement
+are incomplete. Personal event wakes and delayed-result delivery also remain.
+
+The third production-bin Clippy run reached lint checking and failed with 214
+diagnostics: predominantly unused paths awaiting assembly, plus 16 Clippy
+findings. Earlier import/async-lifetime fixes are integrated. This is not a
+passing build. Test-target type checking is now running; no backend feature
+runtime test or full acceptance gate has passed.
+
+Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
+tests across 12 files, focused ESLint, TypeScript checking, production and
+credential-accept builds, legal prerender and mock-footprint checks. Four
+Chromium journeys passed against HTTP fixtures on an isolated port-4611 server:
+signup invitation navigation; confirmation/reload/intent clearing; retained web
+history after unlink; and a fresh review after ten-minute challenge expiry.
+Command: `node_modules/.bin/playwright test --config
+playwright.platform-personal.config.ts` from `frontend`. These results support
+A3/A5/A11/A16/A17 but do not prove integrated backend or live Telegram behavior.
 
 | Gate | Owners | Required evidence | Status |
 | --- | --- | --- | --- |

@@ -125,20 +125,26 @@ builds remain serialized and subject to a fresh capacity check.
 ## Integrated implementation checkpoint — 2026-10-15
 
 Production slices are integrated on `nyxbot-manager/base`; the opening schedule
-above is historical. The current active workers are Parts 2, 3 and 4, with Parts
-1 and 5 idle. The primary owns shared registration, ingress, and Telegram wiring.
+above is historical. Parts 1 and 5 are completing lifecycle and Telegram wiring,
+while Opus independently reviews the implemented personal path. Parts 2, 3 and 4
+have released their slots after concrete checkpoints. The primary owns builds,
+integration and validation; Part 5 owns transport, routes and composition.
 
 - Part 1: durable personal consent, original-chat confirmation, runtime controls,
   exact-stop recovery records, lifecycle services, and human-only HTTP handlers.
 - Part 2: persisted thread/turn/reply origins and home exclusions, ordinary key
   confinement, transactional turn and card admission, and the shared NyxAgent
   loop. Its ordinary HTTP adapter captures the real incoming authentication
-  context. Settlement/deletion integration and the personal producer are ongoing.
+  context. Exact settlement/deletion, the personal producer and execution-once
+  composition are integrated through `243d0d5e5`. Fresh event wakes, after-turn
+  hooks and original delayed-result destinations remain queued.
 - Part 3: personal typed egress and shared metered response handling; immutable
   public key purpose denied across ordinary authentication, key management,
-  MCP, proxy and LLM entry points. Public runtime producers remain in progress.
-- Part 4: implementing the simple source/budget/quota setup, personal consent,
-  binding inventory and Telegram thread display against the frozen HTTP contract.
+  MCP, proxy and LLM entry points. Public cleanup and unavailable producers are
+  integrated. Real public execution, FAQ tools and full-loop funding remain.
+- Part 4: implemented the simple source/budget/quota setup, personal consent,
+  binding inventory and Telegram thread display against the frozen HTTP contract;
+  checkpoint `8ac676907` is integrated as `678409e8b`.
 - Primary: durable ingress receipts, exact execution/decision claims and reply
   linkage; audience classification before execution, duplicate detection before
   current-sender resolution, and original-private command provenance.
@@ -151,11 +157,17 @@ The pinned upstream source findings are in the
 [upstream evidence](2026-10-15-public-personal-nyxbot-upstream-evidence.md).
 Authorization to edit that separate repository is pending.
 
-Validation remains incomplete. Workspace formatting passed at `e7567a325`.
-One all-target Clippy attempt was interrupted during host paging and produced no
-result. The production-bin attempt at that snapshot reported unused consent
-imports and a missing response-stream import; fixes are integrated, and the
-attempt is still collecting diagnostics. No feature runtime tests, acceptance
-gates, CI run, browser validation, deployment, or live Telegram flow has passed.
-The dedicated MongoDB test instance passed only its transaction-capability probe.
-All A1–A17 acceptance gates remain Open.
+Validation remains incomplete. Workspace formatting passed at `89f6cebfb`.
+The first two production-bin Clippy attempts exposed import and async-lifetime
+errors, now fixed. The third attempt failed with 214 diagnostics, predominantly
+unused paths before route assembly plus 16 lint findings. Shared lints are fixed
+in `545e11ea3`; Part 1 owns its remaining lints. Test-target type checking is
+underway. No backend feature runtime tests, CI, deployment or live Telegram flow
+has passed. The dedicated MongoDB instance passed its transaction-capability
+probe. Frontend evidence now includes 187 focused tests, type/lint/build checks
+and four HTTP-fixture Chromium journeys; details and limits are recorded in the
+acceptance document. All A1–A17 full acceptance gates remain Open.
+
+The immediate integration milestone is link → personal message → own NyxBot →
+web history → unlink, with no interface expansion until it is executable. This
+sequencing does not remove the remaining public or personal-event requirements.
