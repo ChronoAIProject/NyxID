@@ -2244,28 +2244,41 @@ async fn guest_failure_cannot_be_retried_as_owner_turn() {
         .unwrap();
     let state = test_app_state(db.clone());
     let keys = &state.encryption_keys;
-    let mut start: TurnStart = (&request(None, "guest request")).into();
-    start.guest = true;
-    let guest = begin_turn(&db, &user, start, keys).await.unwrap();
-    let guest_turn = guest.active_turn.as_ref().unwrap().turn_id.clone();
-    settle(&db, keys, &user, &guest, "", Some("idle_timeout")).await;
-    let input = db
-        .collection::<AssistantMessage>(MESSAGES)
-        .find_one(doc! {
-            "conversation_id": &guest.id, "turn_id": &guest_turn, "role": "user",
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(input.origin, None);
-    let result = begin_turn(
-        &db,
-        &user,
-        &retry(&guest.id, "guest request", &guest_turn),
-        keys,
-    )
-    .await;
-    assert!(matches!(result, Err(AppError::BadRequest(_))));
+    for origin in [TurnOrigin::User, TurnOrigin::Channel] {
+        let mut start: TurnStart = (&request(None, "guest request")).into();
+        start.guest = true;
+        start.origin = origin;
+        let guest = begin_turn(&db, &user, start, keys).await.unwrap();
+        let guest_turn = guest.active_turn.as_ref().unwrap().turn_id.clone();
+        settle(&db, keys, &user, &guest, "", Some("idle_timeout")).await;
+        let history = messages(&db, &user, &guest.id, 20, None).await.unwrap();
+        let input = history
+            .iter()
+            .find(|message| message.role == "user")
+            .unwrap();
+        let reply = history
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        assert_eq!(input.origin, Some(origin));
+        assert_eq!(reply.origin, Some(origin));
+        assert_eq!(
+            input.author,
+            Some(crate::models::assistant_message::MessageAuthor::Guest)
+        );
+        let preview = recovery_for_message(&db, &user, &guest.id, &reply.id)
+            .await
+            .unwrap();
+        assert_eq!(preview.status, "review");
+        let result = begin_turn(
+            &db,
+            &user,
+            &retry(&guest.id, "guest request", &guest_turn),
+            keys,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
 }
 
 #[tokio::test]

@@ -51,8 +51,8 @@ pub struct AssistantMessage {
     /// Images tools returned during the turn that produced this reply.
     #[serde(default)]
     pub attachments: Vec<super::assistant_conversation::TurnAttachment>,
-    /// What started the turn this message belongs to. Guest turns and older
-    /// rows use `None`, which cannot authorize owner retry.
+    /// What started the turn this message belongs to. Authorship is separate:
+    /// owner retry requires an explicitly owner-authored user input.
     #[serde(default)]
     pub origin: Option<super::assistant_conversation::TurnOrigin>,
     /// A user message written in a chat app: its platform.

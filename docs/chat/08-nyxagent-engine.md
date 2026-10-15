@@ -41,7 +41,10 @@ messages plus the earliest, oldest first, excluding tail duplicates), the newest
 The three latter sections reserve approximately 5 KiB, 5 KiB and 2 KiB, with a
 framed recap below 12 KiB. Each requirement is at most 1,000 bytes. UTF-8 is
 never split. Recent messages preserve bounded head/tail text, failed codes,
-activity labels/statuses and attachment labels. Stored guest user messages keep
+activity labels/statuses and attachment labels. Channel origin is preserved for
+guest messages and replies so their channel-only recap remains available;
+retry eligibility separately requires an explicitly owner-authored input.
+Stored guest user messages keep
 their `user (guest)` label even in an owner recovery recap. Guest recaps omit the checkpoint,
 owner requirements, tool, upload and error metadata. Recap queries run lazily
 only for reset/recovery, at most once per turn.

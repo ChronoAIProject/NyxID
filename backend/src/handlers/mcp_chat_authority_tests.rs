@@ -154,17 +154,6 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
         "https://example.com",
     )
     .await;
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-        )
-        .await
-        .unwrap();
     let credential = credentials::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,
@@ -201,6 +190,31 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert_eq!(result(response, false).await["is_active"], enabled);
     }
+    // Once the turn ends, the same key cannot make an unrecorded edit.
+    crate::services::assistant_nyxagent::force_stop(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &f.row.active_turn.as_ref().unwrap().turn_id,
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let refused = direct_call(
+        &f,
+        &auth,
+        "nyxid__set_service_enabled",
+        json!({"service_id": service, "enabled": false}),
+    )
+    .await;
+    let body = axum::body::to_bytes(refused.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "Assistant turn is no longer active"
+    );
     let events: Vec<ServiceChangeEvent> = f
         .state
         .db
@@ -1003,16 +1017,22 @@ async fn b4_duplicate_action_fence_through_tools_call() {
         .unwrap();
     let first: Value = serde_json::from_slice(&first).unwrap();
     assert_eq!(first["result"]["isError"], false, "{first}");
-    assert!(
-        crate::services::assistant_nyxagent::force_stop(
-            &f.state.db,
-            &f.owner,
-            &f.row.id,
-            &failed_turn
-        )
-        .await
-        .unwrap()
-    );
+    crate::services::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        &f.row,
+        &f.row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &crate::services::assistant_nyxagent::TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(crate::services::assistant_nyxagent::TurnError::new(
+                "idle_timeout",
+            )),
+        },
+    )
+    .await
+    .unwrap();
     // Turn 2 is the owner's Retry of turn 1.
     let retry = crate::services::assistant_nyxagent::begin_turn(
         &f.state.db,
@@ -1023,7 +1043,7 @@ async fn b4_duplicate_action_fence_through_tools_call() {
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
-            text: "find the issues".into(),
+            text: "Please manage my account".into(),
             model: None,
             access_mode: None,
         },

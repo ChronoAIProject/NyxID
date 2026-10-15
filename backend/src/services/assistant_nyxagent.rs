@@ -1994,7 +1994,6 @@ pub async fn begin_turn_with_voice(
                 // A guest turn never inherits the owner's live context (their
                 // tool results may hold more than the chat saw): it starts from
                 // the transcript alone.
-                let previous_guest = row.guest_turn;
                 let guest = start.guest;
                 if guest != row.guest_turn && row.nyxagent_session_id.is_some() {
                     row.nyxagent_session_id = None;
@@ -2107,7 +2106,7 @@ pub async fn begin_turn_with_voice(
                         }).collect(),
                         activity_total: lost.activity_total,
                         attachments: lost.attachments,
-                        origin: (!previous_guest).then_some(lost.origin),
+                        origin: Some(lost.origin),
                         via: None,
                     };
                     Box::pin(write_checkpoint_in_session(
@@ -2347,7 +2346,7 @@ pub async fn begin_turn_with_voice(
                     activities: Vec::new(),
                     activity_total: 0,
                     attachments: uploads,
-                    origin: (!start.guest).then_some(start.origin),
+                    origin: Some(start.origin),
                     via: (start.origin == TurnOrigin::Channel)
                         .then(|| {
                             start
@@ -2865,7 +2864,7 @@ async fn finish_turn_inner(
                     activities,
                     activity_total,
                     attachments,
-                    origin: if current.guest_turn { None } else { origin },
+                    origin,
                     via: None,
                 };
                 if let Some(turn) = settled_turn.as_ref() {
@@ -3555,6 +3554,7 @@ fn retry_evidence(
     let input = input
         .filter(|input| {
             input.role == "user"
+                && input.author == Some(crate::models::assistant_message::MessageAuthor::Owner)
                 && input.status == "completed"
                 && input.origin == Some(TurnOrigin::User)
                 && input.via.is_none()
