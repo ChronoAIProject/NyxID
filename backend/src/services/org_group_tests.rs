@@ -2074,3 +2074,83 @@ async fn personal_group_tool_images_require_owner_and_reject_api_keys() {
     ));
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplicate_messages() {
+    use super::api_key_mutation_service::TransactionCollisionHook;
+    use std::sync::Arc;
+    let f = Fixture::new("org_group_append_collision").await;
+    let (agent, _) = f.create().await;
+    let access = create(&f, &agent).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let first = TransactionCollisionHook::new(barrier.clone());
+    let second = TransactionCollisionHook::new(barrier);
+    let request = |id: &str| GroupRequest {
+        id: id.into(),
+        group_id: access.group.id.clone(),
+        user_id: f.org.clone(),
+        actor_user_id: access.actor.clone(),
+        message_seq: 0,
+        attachment_ids: Vec::new(),
+        pending_agent_ids: vec![agent.id.clone()],
+        hops_remaining: 3,
+        created_at: Utc::now(),
+    };
+    let first_id = Uuid::new_v4().to_string();
+    let second_id = Uuid::new_v4().to_string();
+    let (a, b) = tokio::join!(
+        groups::append_with_hook(
+            &f.state.db,
+            &access,
+            "user",
+            None,
+            "first",
+            Some(&first_id),
+            &[],
+            Some(request(&first_id)),
+            &[],
+            Vec::new(),
+            Some(first.clone())
+        ),
+        groups::append_with_hook(
+            &f.state.db,
+            &access,
+            "user",
+            None,
+            "second",
+            Some(&second_id),
+            &[],
+            Some(request(&second_id)),
+            &[],
+            Vec::new(),
+            Some(second.clone())
+        ),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_ne!(a.seq, b.seq);
+    assert_eq!(a.seq + b.seq, 3);
+    assert!(
+        first.attempts() + second.attempts() >= 3,
+        "the fixture must force a real transaction retry"
+    );
+    let messages = personal::messages(&f.state.db, &f.org, &access.group.id, 50, None)
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    for message in [a, b] {
+        let queued = groups::request(&f.state.db, &access, message.request_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(queued.message_seq, message.seq);
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<GroupRequest>(REQUESTS)
+            .count_documents(doc! {"group_id": &access.group.id})
+            .await
+            .unwrap(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}

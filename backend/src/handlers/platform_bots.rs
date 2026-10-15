@@ -12,6 +12,11 @@ use crate::{
 
 async fn admin(state: &AppState, auth: &AuthUser) -> AppResult<()> {
     super::login_client_context::require_first_party_human(auth)?;
+    if state.db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! {"_id":auth.user_id.to_string(),"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]})
+        .projection(mongodb::bson::doc! {"_id":1}).await?.is_none() {
+        return Err(crate::errors::AppError::Forbidden("Active human administrator required".into()));
+    }
     super::admin_helpers::require_admin(state, auth).await
 }
 
@@ -619,4 +624,468 @@ pub async fn resolve_cleanup(
         Some(serde_json::json!({"profile_id": id, "task_id": task, "action": body.action})),
     );
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// Public/personal v1 routes are mounted only with real producer composition.
+use crate::services::{
+    platform_bot_runtime_control_service as runtime_controls,
+    platform_manager_contract as manager_contract,
+};
+use axum::Extension;
+use std::sync::Arc;
+
+type ManagerProducers = Arc<manager_contract::PlatformManagerProducers>;
+
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicSource {
+    Nyxagent,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicPolicyInput {
+    #[serde(default, deserialize_with = "present")]
+    source: Option<PublicSource>,
+    #[serde(default, deserialize_with = "present")]
+    profile: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    sponsor_owner_user_id: Option<uuid::Uuid>,
+    #[serde(default, deserialize_with = "present")]
+    total_daily_credits: Option<crate::models::credits::Credits>,
+    #[serde(default, deserialize_with = "present")]
+    sender_daily_credits: Option<crate::models::credits::Credits>,
+}
+#[derive(Default)]
+pub enum PublicPolicyField {
+    #[default]
+    Unchanged,
+    Clear,
+    Update(PublicPolicyInput),
+}
+fn policy_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<PublicPolicyField, D::Error> {
+    Ok(match Option::<PublicPolicyInput>::deserialize(d)? {
+        None => PublicPolicyField::Clear,
+        Some(p) => PublicPolicyField::Update(p),
+    })
+}
+impl PublicPolicyField {
+    fn patch(self) -> manager_contract::PolicyPatch {
+        match self {
+            Self::Unchanged => manager_contract::PolicyPatch::Unchanged,
+            Self::Clear => manager_contract::PolicyPatch::Clear,
+            Self::Update(p) => {
+                let _ = p.source;
+                manager_contract::PolicyPatch::Update(manager_contract::PublicPolicyPatch {
+                    sponsor_owner_user_id: p.sponsor_owner_user_id.map(|id| id.to_string()),
+                    nyxagent_profile: p.profile,
+                    total_daily_credits: p.total_daily_credits,
+                    sender_daily_credits: p.sender_daily_credits,
+                })
+            }
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeInput {
+    #[serde(default)]
+    initialize: bool,
+    #[serde(default, deserialize_with = "present")]
+    expected_profile_generation: Option<i64>,
+    expected_manager_authority_epoch: i64,
+    expected_personal_control_revision: i64,
+    expected_public_policy_revision: i64,
+    #[serde(default, deserialize_with = "present")]
+    personal_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    public_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    emergency_stopped: Option<bool>,
+    #[serde(default, deserialize_with = "policy_field")]
+    public_policy: PublicPolicyField,
+}
+impl RuntimeInput {
+    fn patch(self) -> manager_contract::RuntimePatch {
+        manager_contract::RuntimePatch {
+            initialize: self.initialize,
+            expected_profile_generation: self.expected_profile_generation,
+            expected: manager_contract::ExpectedRuntimeRevisions {
+                manager_authority_epoch: self.expected_manager_authority_epoch,
+                personal_control_revision: self.expected_personal_control_revision,
+                public_policy_revision: self.expected_public_policy_revision,
+            },
+            personal_enabled: self.personal_enabled,
+            public_enabled: self.public_enabled,
+            emergency_stopped: self.emergency_stopped,
+            public_policy: self.public_policy.patch(),
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicReviewInput {
+    #[serde(default)]
+    initialize: bool,
+    #[serde(default, deserialize_with = "present")]
+    expected_profile_generation: Option<i64>,
+    expected_manager_authority_epoch: i64,
+    expected_personal_control_revision: i64,
+    expected_public_policy_revision: i64,
+    #[serde(default, deserialize_with = "policy_field")]
+    public_policy: PublicPolicyField,
+}
+impl PublicReviewInput {
+    fn patch(self) -> manager_contract::RuntimePatch {
+        manager_contract::RuntimePatch {
+            initialize: self.initialize,
+            expected_profile_generation: self.expected_profile_generation,
+            expected: manager_contract::ExpectedRuntimeRevisions {
+                manager_authority_epoch: self.expected_manager_authority_epoch,
+                personal_control_revision: self.expected_personal_control_revision,
+                public_policy_revision: self.expected_public_policy_revision,
+            },
+            personal_enabled: None,
+            public_enabled: None,
+            emergency_stopped: None,
+            public_policy: self.public_policy.patch(),
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearEmergencyInput {
+    expected_manager_authority_epoch: i64,
+    expected_personal_control_revision: i64,
+    expected_public_policy_revision: i64,
+}
+#[derive(Serialize)]
+pub struct PublicPolicyResponse {
+    source: &'static str,
+    profile: String,
+    sponsor_owner_user_id: String,
+    total_daily_credits: crate::models::credits::Credits,
+    sender_daily_credits: crate::models::credits::Credits,
+}
+#[derive(Serialize)]
+pub struct RuntimeResponse {
+    manager_authority_epoch: i64,
+    personal_control_revision: i64,
+    public_policy_revision: i64,
+    personal_enabled: bool,
+    public_enabled: bool,
+    emergency_stopped: bool,
+    public_policy: Option<PublicPolicyResponse>,
+}
+impl From<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls>
+    for RuntimeResponse
+{
+    fn from(r: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls) -> Self {
+        Self {
+            manager_authority_epoch: r.manager_authority_epoch,
+            personal_control_revision: r.personal_control_revision,
+            public_policy_revision: r.public_policy_revision,
+            personal_enabled: r.personal_enabled,
+            public_enabled: r.public_enabled,
+            emergency_stopped: r.emergency_stopped,
+            public_policy: r.public_policy.map(|p| PublicPolicyResponse {
+                source: "nyxagent",
+                profile: p.nyxagent_profile,
+                sponsor_owner_user_id: p.sponsor_owner_user_id,
+                total_daily_credits: p.total_daily_credits,
+                sender_daily_credits: p.sender_daily_credits,
+            }),
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct PublicReadinessResponse {
+    status: &'static str,
+    reason: Option<&'static str>,
+    checked_at: Option<String>,
+    expires_at: Option<String>,
+    evidence_digest: Option<String>,
+}
+impl PublicReadinessResponse {
+    fn unavailable(reason: manager_contract::UnavailableReason) -> Self {
+        use manager_contract::UnavailableReason::*;
+        let reason = match reason {
+            ModeDisabled => "mode_disabled",
+            ManagerUnavailable => "manager_unavailable",
+            EmergencyStopped => "emergency_stopped",
+            PersonalDisabled => "personal_disabled",
+            PublicDisabled => "public_disabled",
+            OwnerUnavailable => "owner_unavailable",
+            TransportUnavailable => "transport_unavailable",
+            OriginRevoked => "origin_revoked",
+            EngineUnavailable => "engine_unavailable",
+            InsufficientFunds => "insufficient_funds",
+            CapacityLimited => "capacity_limited",
+            PublicNotReady => "public_not_ready",
+            PublicQuotaLimited => "public_quota_limited",
+            RuntimeUninitialized => "runtime_uninitialized",
+            SponsorUnavailable => "sponsor_unavailable",
+        };
+        Self {
+            status: "unavailable",
+            reason: Some(reason),
+            checked_at: None,
+            expires_at: None,
+            evidence_digest: None,
+        }
+    }
+    fn from_readiness(r: manager_contract::PublicReadiness) -> Self {
+        match r {
+            manager_contract::PublicReadiness::Unavailable(reason) => Self::unavailable(reason),
+            manager_contract::PublicReadiness::Ready(e) => Self {
+                status: "ready",
+                reason: None,
+                checked_at: Some(e.checked_at.to_rfc3339()),
+                expires_at: Some(e.expires_at.to_rfc3339()),
+                evidence_digest: Some(e.evidence_digest),
+            },
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct ManagerRuntimeResponse {
+    contract_version: u32,
+    supported: bool,
+    runtime: Option<RuntimeResponse>,
+    public_readiness: PublicReadinessResponse,
+}
+fn runtime_response(
+    row: Option<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls>,
+) -> ManagerRuntimeResponse {
+    use manager_contract::UnavailableReason;
+    let reason = match &row {
+        None => UnavailableReason::RuntimeUninitialized,
+        Some(r) if r.retired => UnavailableReason::ManagerUnavailable,
+        Some(r) if r.emergency_stopped => UnavailableReason::EmergencyStopped,
+        _ => UnavailableReason::PublicNotReady,
+    };
+    ManagerRuntimeResponse {
+        contract_version: manager_contract::CONTRACT_VERSION,
+        supported: true,
+        runtime: row.map(Into::into),
+        public_readiness: PublicReadinessResponse::unavailable(reason),
+    }
+}
+
+pub async fn get_runtime(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Extension(_producers): Extension<ManagerProducers>,
+    Path(id): Path<uuid::Uuid>,
+) -> AppResult<(HeaderMap, Json<ManagerRuntimeResponse>)> {
+    admin(&state, &auth).await?;
+    configs::get(&state.db, &id.to_string()).await?;
+    Ok((
+        private_headers(),
+        Json(runtime_response(
+            runtime_controls::get(&state.db, &id.to_string()).await?,
+        )),
+    ))
+}
+pub async fn put_runtime(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Extension(producers): Extension<ManagerProducers>,
+    Path(id): Path<uuid::Uuid>,
+    Json(input): Json<RuntimeInput>,
+) -> AppResult<(HeaderMap, Json<ManagerRuntimeResponse>)> {
+    admin(&state, &auth).await?;
+    let row = runtime_controls::update_patch(
+        &state.db,
+        &audit_service::AuditActor::from_auth_user(&auth),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+        &id.to_string(),
+        &input.patch(),
+        producers.public.as_ref(),
+    )
+    .await?;
+    Ok((private_headers(), Json(runtime_response(Some(row)))))
+}
+pub async fn clear_runtime_emergency_stop(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Extension(_producers): Extension<ManagerProducers>,
+    Path(id): Path<uuid::Uuid>,
+    Json(input): Json<ClearEmergencyInput>,
+) -> AppResult<(HeaderMap, Json<ManagerRuntimeResponse>)> {
+    admin(&state, &auth).await?;
+    let row = runtime_controls::clear_emergency_stop(
+        &state.db,
+        &audit_service::AuditActor::from_auth_user(&auth),
+        state.audit_chain_hmac_key.as_ref().as_ref(),
+        &id.to_string(),
+        &manager_contract::ExpectedRuntimeRevisions {
+            manager_authority_epoch: input.expected_manager_authority_epoch,
+            personal_control_revision: input.expected_personal_control_revision,
+            public_policy_revision: input.expected_public_policy_revision,
+        },
+    )
+    .await?;
+    Ok((private_headers(), Json(runtime_response(Some(row)))))
+}
+#[derive(Serialize)]
+pub struct PublicProfileResponse {
+    id: String,
+    label: String,
+}
+#[derive(Serialize)]
+pub struct PublicProfilesResponse {
+    profiles: Vec<PublicProfileResponse>,
+    default_profile: Option<String>,
+    readiness: PublicReadinessResponse,
+}
+pub async fn discover_public_profiles(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Extension(producers): Extension<ManagerProducers>,
+    Path(id): Path<uuid::Uuid>,
+    Json(input): Json<PublicReviewInput>,
+) -> AppResult<(HeaderMap, Json<PublicProfilesResponse>)> {
+    admin(&state, &auth).await?;
+    let policy = runtime_controls::reviewed_policy(
+        &state.db,
+        &auth.user_id.to_string(),
+        &id.to_string(),
+        &input.patch(),
+    )
+    .await?;
+    let discovery = producers
+        .public
+        .discover_public_profiles(&state.db, &policy)
+        .await?;
+    if discovery
+        .default_profile
+        .as_ref()
+        .is_some_and(|id| !discovery.profiles.iter().any(|p| p.id == *id))
+    {
+        return Err(crate::errors::AppError::Internal(
+            "Public profile discovery unavailable".into(),
+        ));
+    }
+    Ok((
+        private_headers(),
+        Json(PublicProfilesResponse {
+            profiles: discovery
+                .profiles
+                .into_iter()
+                .map(|p| PublicProfileResponse {
+                    id: p.id,
+                    label: p.label,
+                })
+                .collect(),
+            default_profile: discovery.default_profile,
+            readiness: PublicReadinessResponse::from_readiness(discovery.readiness),
+        }),
+    ))
+}
+#[derive(Serialize)]
+pub struct ReadinessResponse {
+    public_readiness: PublicReadinessResponse,
+}
+pub async fn probe_public_readiness(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Extension(producers): Extension<ManagerProducers>,
+    Path(id): Path<uuid::Uuid>,
+    Json(input): Json<PublicReviewInput>,
+) -> AppResult<(HeaderMap, Json<ReadinessResponse>)> {
+    admin(&state, &auth).await?;
+    let policy = runtime_controls::reviewed_policy(
+        &state.db,
+        &auth.user_id.to_string(),
+        &id.to_string(),
+        &input.patch(),
+    )
+    .await?;
+    let readiness = producers
+        .public
+        .probe_public_readiness(&state.db, &policy)
+        .await?;
+    Ok((
+        private_headers(),
+        Json(ReadinessResponse {
+            public_readiness: PublicReadinessResponse::from_readiness(readiness),
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod runtime_input_tests {
+    use super::*;
+    use serde_json::json;
+    fn base() -> serde_json::Value {
+        json!({"initialize":true,"expected_profile_generation":7,"expected_manager_authority_epoch":0,"expected_personal_control_revision":0,"expected_public_policy_revision":0,"personal_enabled":true,"public_enabled":false})
+    }
+    #[test]
+    fn control_patches_reject_null_scalars_and_unknown_fields() {
+        assert!(serde_json::from_value::<RuntimeInput>(base()).is_ok());
+        for field in [
+            "personal_enabled",
+            "public_enabled",
+            "emergency_stopped",
+            "expected_profile_generation",
+            "expected_manager_authority_epoch",
+        ] {
+            let mut body = base();
+            body[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<RuntimeInput>(body).is_err(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("source", json!("other")),
+            ("profile", serde_json::Value::Null),
+            ("total_daily_credits", json!(1)),
+            ("sender_daily_credits", serde_json::Value::Null),
+        ] {
+            let mut body = base();
+            body["public_policy"] = json!({field:value});
+            assert!(
+                serde_json::from_value::<RuntimeInput>(body).is_err(),
+                "{field}"
+            );
+        }
+        let mut body = base();
+        body["owner_user_id"] = json!("caller-selected");
+        assert!(serde_json::from_value::<RuntimeInput>(body).is_err());
+    }
+    #[test]
+    fn policy_omission_and_explicit_clear_remain_distinct() {
+        assert!(matches!(
+            serde_json::from_value::<RuntimeInput>(base())
+                .unwrap()
+                .patch()
+                .public_policy,
+            manager_contract::PolicyPatch::Unchanged
+        ));
+        let mut body = base();
+        body["public_policy"] = serde_json::Value::Null;
+        assert!(matches!(
+            serde_json::from_value::<RuntimeInput>(body)
+                .unwrap()
+                .patch()
+                .public_policy,
+            manager_contract::PolicyPatch::Clear
+        ));
+    }
+    #[test]
+    fn absent_configuration_advertises_supported_without_inventing_versions() {
+        let value = serde_json::to_value(runtime_response(None)).unwrap();
+        assert_eq!(value["supported"], true);
+        assert!(value["runtime"].is_null());
+        assert_eq!(value["public_readiness"]["reason"], "runtime_uninitialized");
+        assert!(value["public_readiness"]["evidence_digest"].is_null());
+    }
 }

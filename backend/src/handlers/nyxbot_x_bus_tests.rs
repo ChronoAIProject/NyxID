@@ -114,23 +114,26 @@ async fn x_requests(server: &MockServer, conversation: &str, count: usize) -> Ve
     panic!("X never received {count} replies on {conversation}");
 }
 
-async fn outbound_reason(state: &AppState, bot: &str, expected: &str) -> ChannelBot {
+async fn outbound_outcome(state: &AppState, bot: &str, expected: Option<&str>) -> ChannelBot {
     for _ in 0..400 {
         let current = crate::services::channel_bot_service::get_bot(&state.db, bot)
             .await
             .unwrap();
-        if current
+        let reason = current
             .diagnostics
             .last_outbound_error
             .as_ref()
-            .and_then(|error| error.reason.as_deref())
-            == Some(expected)
+            .and_then(|error| error.reason.as_deref());
+        if reason == expected
+            && (expected.is_some()
+                || (current.diagnostics.last_outbound_at.is_some()
+                    && current.diagnostics.last_outbound_error.is_none()))
         {
             return current;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    panic!("outbound error {expected} was never recorded");
+    panic!("outbound outcome {expected:?} was never recorded");
 }
 
 async fn idle(state: &AppState, conversation: &str) {
@@ -257,9 +260,8 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
             .iter()
             .any(|message| message.role == "assistant" && message.text == "Here is your answer")
     );
-    let healthy = crate::services::channel_bot_service::get_bot(&state.db, &bot.id)
-        .await
-        .unwrap();
+    // Receiving the provider request precedes reply-part persistence and diagnostics.
+    let healthy = outbound_outcome(&state, &bot.id, None).await;
     assert!(healthy.diagnostics.last_inbound_at.is_some());
     assert_eq!(
         healthy.diagnostics.last_inbound_source.as_deref(),
@@ -310,7 +312,7 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     )
     .await;
     deliver("802", "2", "are you there?").await;
-    let refused = outbound_reason(&state, &bot.id, "scopes_missing").await;
+    let refused = outbound_outcome(&state, &bot.id, Some("scopes_missing")).await;
     assert_eq!(
         refused
             .diagnostics
@@ -337,7 +339,7 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     )
     .await;
     deliver("803", "2", "still there?").await;
-    let limited = outbound_reason(&state, &bot.id, "rate_limited").await;
+    let limited = outbound_outcome(&state, &bot.id, Some("rate_limited")).await;
     assert_eq!(
         crate::handlers::channel_bots::health_for(&limited, false, true).recommended_action,
         "wait_rate_limit"

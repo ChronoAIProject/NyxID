@@ -714,7 +714,7 @@ function NyxAgentThreadPage() {
           kind={headerAgent.kind}
           agentId={headerAgent.id}
           destroyed={destroyed}
-          channelPlatform={channelPlatform}
+          channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
           onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
         />
         {headerAgent.kind === "nyxbot" ? (

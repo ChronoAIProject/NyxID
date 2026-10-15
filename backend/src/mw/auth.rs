@@ -153,6 +153,7 @@ impl AuthUser {
         db: &mongodb::Database,
         route: &str,
     ) -> AppResult<()> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         let Some(fence) = self.assistant_turn_fence.as_ref() else {
             return Ok(());
         };
@@ -299,6 +300,7 @@ impl AuthUser {
     }
 
     pub fn ensure_rest_proxy_access(&self) -> Result<(), AppError> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         if self.can_use_rest_proxy() {
             return Ok(());
         }
@@ -309,6 +311,7 @@ impl AuthUser {
     }
 
     pub fn ensure_llm_proxy_access(&self) -> Result<(), AppError> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         if self.can_use_llm_proxy() {
             return Ok(());
         }
@@ -503,6 +506,9 @@ async fn ensure_catalog_editor_route(
 }
 
 pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
+    // Public activation remains unavailable; no generic route, scope, child
+    // or feature flag may turn this purpose into ordinary execution authority.
+    crate::services::key_service::require_ordinary_purpose(api_key.purpose)?;
     if api_key.purpose == ApiKeyPurpose::PermissionBound {
         return if path == "/api/v1/permission-execution/mcp"
             || path.starts_with("/api/v1/permission-execution/rest/")
@@ -649,6 +655,8 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "saved-logins"
                 | "machines"
                 | "onboarding"
+                | "platform-personal-bindings"
+                | "platform-personal-links"
         )
     ) {
         return true;
@@ -813,6 +821,7 @@ pub(crate) async fn api_key_auth_user(
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) -> Result<AuthUser, AppError> {
+    crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
         return Err(AppError::Unauthorized(
             "API key is inactive or expired".into(),
@@ -1502,6 +1511,7 @@ pub async fn ensure_relay_agent_key_active(
         .ok_or_else(|| {
             AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
         })?;
+    crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     Ok(key)
 }
 
@@ -3418,6 +3428,8 @@ mod tests {
         let auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    platform_thread: false,
+                    platform_origin: None,
                     conversation_id: "conversation".into(),
                     turn_id: Some("turn".into()),
                     turn_live: true,
@@ -3487,6 +3499,8 @@ mod tests {
         let mut auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    platform_thread: false,
+                    platform_origin: None,
                     conversation_id: "conversation".into(),
                     turn_id: None,
                     turn_live: false,
@@ -3649,6 +3663,8 @@ mod tests {
         let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
         user.assistant_turn_fence = Some(
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                platform_thread: false,
+                platform_origin: None,
                 conversation_id: "conversation".into(),
                 turn_id: Some("turn".into()),
                 turn_live: true,
@@ -3698,6 +3714,8 @@ mod tests {
     #[test]
     fn conversation_fence_requires_a_live_non_stopped_turn() {
         let base = crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+            platform_thread: false,
+            platform_origin: None,
             conversation_id: "conversation".into(),
             turn_id: Some("turn".into()),
             turn_live: true,
@@ -4153,6 +4171,48 @@ mod tests {
     #[test]
     fn path_matches_prefix_rejects_unrelated() {
         assert!(!path_matches_prefix("/other/path", "/api/v1"));
+    }
+
+    #[test]
+    fn public_keys_cannot_enter_any_ordinary_route_even_with_wide_scopes() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        key.purpose = ApiKeyPurpose::PublicNyxbot;
+        key.scopes = "proxy proxy:all llm:proxy account:read admin".into();
+        for path in [
+            "/mcp",
+            "/api/v1/mcp",
+            "/api/v1/proxy/s/llm-openai/v1/responses",
+            "/api/v1/llm/openai/v1/responses",
+            "/api/v1/llm/gateway/v1/responses",
+            "/api/v1/llm/status",
+            "/api/v1/llm/pools",
+            "/api/v1/api-keys",
+            "/api/v1/assistant/nyxagent/turns",
+        ] {
+            assert!(ensure_api_key_purpose_route(&key, path).is_err(), "{path}");
+        }
+        let mut auth = test_auth_user(AuthMethod::ApiKey, "proxy proxy:all llm:proxy");
+        auth.api_key_purpose = ApiKeyPurpose::PublicNyxbot;
+        assert!(auth.ensure_rest_proxy_access().is_err());
+        assert!(auth.ensure_llm_proxy_access().is_err());
+    }
+
+    #[test]
+    fn personal_binding_and_link_protocol_reads_are_human_only() {
+        for path in [
+            "/api/v1/platform-personal-bindings",
+            "/api/v1/platform-personal-bindings/id",
+            "/api/v1/platform-personal-links",
+            "/api/v1/platform-personal-links/id/status",
+        ] {
+            assert!(delegated_read_denied_path(path), "{path}");
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                path,
+                &HeaderMap::new(),
+                "account:read"
+            ));
+        }
     }
 
     #[test]

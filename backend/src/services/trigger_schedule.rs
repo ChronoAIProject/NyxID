@@ -476,14 +476,14 @@ pub async fn finish(
     let run = session
         .start_transaction()
         .and_run2(async move |session| {
-            let result = finish_update(
+            let result = Box::pin(finish_update(
                 &work_db,
                 doc! {"_id": &run_id, "outcome": {"$in": ["pending", "started", "waiting"]}},
                 outcome,
                 reason.as_deref(),
                 &frontend,
                 session,
-            )
+            ))
             .await;
             transactions::transaction_result(result)
         })
@@ -532,7 +532,7 @@ pub async fn finish_claimed(
                 {
                     return Ok(None);
                 }
-                finish_update(
+                Box::pin(finish_update(
                     &work_db,
                     doc! {
                         "_id": &id,
@@ -542,7 +542,7 @@ pub async fn finish_claimed(
                     reason.as_deref(),
                     &frontend,
                     session,
-                )
+                ))
                 .await
             }
             .await;
@@ -587,7 +587,10 @@ async fn finish_update(
         .return_document(ReturnDocument::After);
     let mut run = action.session(&mut *session).await?;
     if let Some(run) = &mut run {
-        record_terminal_in_session(db, session, run, reason, frontend).await?;
+        Box::pin(record_terminal_in_session(
+            db, session, run, reason, frontend,
+        ))
+        .await?;
         run.terminal_result_recorded = true;
     }
     Ok(run)
@@ -1325,6 +1328,9 @@ async fn record_terminal_in_session(
             .await?
         {
             let message = AssistantMessage {
+                platform_delivery_recovery_queued: false,
+                platform_reply: None,
+                platform_origin: None,
                 author: None,
                 retry_claimed_by: None,
                 activity_count: None,

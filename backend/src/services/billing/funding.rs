@@ -35,6 +35,29 @@ pub(super) async fn reserve_and_open_pool(
     wallet: &crate::models::billing_wallet::BillingWallet,
     layers: Vec<LayerReservation>,
 ) -> AppResult<super::reservation::BillingReservation> {
+    reserve_and_open_durable(db, ctx, wallet, layers).await
+}
+
+pub(super) async fn reserve_and_open_public(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    wallet: &crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> AppResult<super::reservation::BillingReservation> {
+    if ctx.public_admission.is_none() || ctx.pool_attempt.is_some() {
+        return Err(AppError::BillingProviderUnavailable(
+            "Invalid public billing admission".into(),
+        ));
+    }
+    reserve_and_open_durable(db, ctx, wallet, layers).await
+}
+
+async fn reserve_and_open_durable(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    wallet: &crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> AppResult<super::reservation::BillingReservation> {
     let service_id = ctx
         .catalog_service_id
         .as_deref()
@@ -85,7 +108,20 @@ pub(super) async fn reserve_and_open_pool(
     let result = session.start_transaction().and_run2(async move |session| {
         let result: AppResult<super::reservation::BillingReservation> = async {
             let now = Utc::now();
-            if ctx.pool_attempt.as_ref().is_none_or(|attempt| attempt.lease_until <= now) {
+            if let Some(admission) = &ctx.public_admission {
+                use crate::models::platform_public_budget::{CALLS,PublicCallReservation};
+                if admission.expires_at <= now { return Err(AppError::BillingProviderUnavailable("Public admission expired".into())); }
+                let gross=layers.iter().map(|layer| layer.reserved_credits).try_fold(Credits::ZERO,Credits::checked_add)?;
+                let digest=crate::services::platform_public_budget_service::route_digest(&ctx)?;
+                if db.collection::<PublicCallReservation>(CALLS).update_one(doc! {
+                    "_id":&admission.call_id,"state":"prepared","billing_request_id":&ctx.billing_request_id,
+                    "sponsor_owner_user_id":&ctx.billing_owner_id,"credential_api_key_id":&ctx.api_key_id,
+                    "route_digest":digest,"model_id":&admission.model_id,
+                    "expires_at":{"$gt":bson::DateTime::from_chrono(now)},"maximum":{"$gte":gross.decimal()},
+                },doc! {"$set":{"state":"funded"}}).session(&mut *session).await?.matched_count != 1 {
+                    return Err(AppError::Conflict("Public funding authority changed".into()));
+                }
+            } else if ctx.pool_attempt.as_ref().is_none_or(|attempt| attempt.lease_until <= now) {
                 return Err(AppError::BillingProviderUnavailable("Pool admission expired".into()));
             }
             let wallets = db.collection::<crate::models::billing_wallet::BillingWallet>(
@@ -174,6 +210,13 @@ pub(super) async fn reserve_and_open_pool(
             if let Some(resale) = &ctx.resale {
                 rows.push(super::meter::reserved_row(&ctx, BillingLayer::Resale, resale.metric,
                     resale.lago_metric_code.clone(), Some(&reservation), None));
+            }
+            if let Some(admission)=&ctx.public_admission {
+                use crate::models::platform_public_budget::{CALLS,PublicCallReservation};
+                let ids:Vec<_>=rows.iter().map(|row|row.id.clone()).collect();
+                if ids.is_empty() { return Err(AppError::BillingProviderUnavailable("Public meter is missing".into())); }
+                db.collection::<PublicCallReservation>(CALLS).update_one(doc! {"_id":&admission.call_id,"state":"funded"},
+                    doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?;
             }
             if !rows.is_empty() {
                 db.collection::<UsageMeterRow>(USAGE_METER).insert_many(rows).session(&mut *session).await?;
@@ -1701,3 +1744,105 @@ mod target_tests;
 
 #[cfg(test)]
 mod pool_tests;
+
+#[cfg(test)]
+mod public_admission_tests {
+    use super::*;
+    use crate::models::platform_public_budget::{CALLS, PublicCallReservation, PublicCallState};
+    use crate::services::billing::route_context::PublicBillingAdmission;
+    #[tokio::test]
+    async fn public_atomic_bridge_rolls_back_funding_and_call_transition_on_meter_failure() {
+        let (db, mut ctx, wallet, layers) =
+            super::pool_tests::fixture("public_atomic_funding").await;
+        ctx.pool_attempt = None;
+        ctx.api_key_id = Some("public-test-key".into());
+        ctx.user_service_id = None;
+        ctx.public_admission = Some(PublicBillingAdmission {
+            call_id: Uuid::new_v4().to_string(),
+            model_id: "pinned-model".into(),
+            expires_at: Utc::now() + Duration::minutes(1),
+        });
+        let call = PublicCallReservation {
+            id: ctx.public_admission.as_ref().unwrap().call_id.clone(),
+            loop_id: Uuid::new_v4().to_string(),
+            sponsor_owner_user_id: ctx.billing_owner_id.clone(),
+            credential_api_key_id: ctx.api_key_id.clone().unwrap(),
+            billing_request_id: ctx.billing_request_id.clone(),
+            route_digest: crate::services::platform_public_budget_service::route_digest(&ctx)
+                .unwrap(),
+            model_id: "pinned-model".into(),
+            state: PublicCallState::Prepared,
+            maximum: Credits::from_pico(10).unwrap(),
+            cap_charge: Credits::ZERO,
+            meter_row_ids: vec![],
+            next_reconcile_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(1),
+        };
+        db.collection::<PublicCallReservation>(CALLS)
+            .insert_one(&call)
+            .await
+            .unwrap();
+        let blocker = super::super::meter::reserved_row(
+            &ctx,
+            BillingLayer::Platform,
+            crate::models::service_billing::BillingMetric::Tokens,
+            "platform_tokens".into(),
+            None,
+            None,
+        );
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(&blocker)
+            .await
+            .unwrap();
+        assert!(
+            reserve_and_open_public(&db, &ctx, &wallet, layers.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            super::pool_tests::holds(&db).await,
+            (0, Credits::ZERO, Credits::ZERO)
+        );
+        assert_eq!(
+            db.collection::<PublicCallReservation>(CALLS)
+                .find_one(doc! {"_id":&call.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            PublicCallState::Prepared
+        );
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .delete_one(doc! {"_id":blocker.id})
+            .await
+            .unwrap();
+        let funded = reserve_and_open_public(&db, &ctx, &wallet, layers.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            funded.total_reserved_credits,
+            Credits::from_pico(3).unwrap()
+        );
+        let durable = db
+            .collection::<PublicCallReservation>(CALLS)
+            .find_one(doc! {"_id":&call.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.state, PublicCallState::Funded);
+        assert_eq!(durable.meter_row_ids.len(), 1);
+        assert!(
+            reserve_and_open_public(&db, &ctx, &wallet, layers)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            super::pool_tests::holds(&db).await,
+            (
+                2,
+                Credits::from_pico(3).unwrap(),
+                Credits::from_pico(3).unwrap()
+            )
+        );
+    }
+}

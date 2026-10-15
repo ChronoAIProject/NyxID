@@ -718,49 +718,8 @@ async fn confirm_in_group(
 }
 
 /// Instructions for a member's group turn.
-pub(crate) async fn group_note(
-    state: &AppState,
-    row: &AssistantConversation,
-    agent: &AssistantAgent,
-) -> Option<String> {
-    let group_id = row.group_id.as_deref()?;
-    if row.agent_owner_id.is_some() {
-        let access =
-            crate::services::org_group_service::get(&state.db, &row.user_id, group_id, None)
-                .await
-                .ok()?;
-        if access.org.is_some() {
-            return crate::services::org_group_service::note(&state.db, &access, agent)
-                .await
-                .ok();
-        }
-    }
-    let group = groups::get(&state.db, &row.user_id, group_id).await.ok()?;
-    let members = groups::members(&state.db, &row.user_id, &group)
-        .await
-        .ok()?;
-    let others: Vec<String> = members
-        .iter()
-        .filter(|member| member.id != agent.id && member.destroyed_at.is_none())
-        .map(|member| format!("@{}", identifier(&member.name)))
-        .collect();
-    Some(format!(
-        "You are {} in the group chat {} with the user and {}. Your reply is posted to the \
-        group as you. Answer what was asked of you. To hand work to a member write their \
-        @name; mention nobody when you are done or answering the user. The user cannot see \
-        confirmation cards here: only when a tool result contains a confirmation card, ask them to reply with \
-        its confirm_phrase (for example \"yes 4821\"). When a result has review_url instead \
-        of confirm_phrase, send that full URL so the owner can review all files in NyxID. \
-        Group replies never approve publication of a skill draft.",
-        identifier(&agent.name),
-        identifier(&group.name),
-        if others.is_empty() {
-            "no other agents".to_owned()
-        } else {
-            others.join(", ")
-        }
-    ))
-}
+#[cfg(test)]
+use crate::services::assistant_nyxagent_runtime::group_note;
 
 /// Members' action cards waiting for the owner, answerable by reply
 /// ("yes 4821") or through the conversation acknowledgement route.

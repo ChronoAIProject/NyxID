@@ -10,7 +10,21 @@ use crate::{
     models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
 };
 
-const AUTHORITY_FIELDS: [&str; 3] = ["rotation_predecessor_id", "state_version", "updated_at"];
+const AUTHORITY_FIELDS: [&str; 4] = [
+    "rotation_predecessor_id",
+    "state_version",
+    "updated_at",
+    "purpose",
+];
+
+fn authority_field(field: &str) -> bool {
+    AUTHORITY_FIELDS.iter().any(|protected| {
+        field == *protected
+            || field
+                .strip_prefix(protected)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    })
+}
 
 #[derive(Debug)]
 struct TransactionAppError(std::sync::Mutex<Option<AppError>>);
@@ -88,20 +102,15 @@ fn reject_authority_override(update: &Document) -> AppResult<()> {
                 "API key {operator} must be a document"
             )));
         };
-        if fields
-            .keys()
-            .any(|field| AUTHORITY_FIELDS.contains(&field.as_str()))
-        {
+        if fields.keys().any(|field| authority_field(field)) {
             return Err(AppError::Internal(
                 "API key authority fields are owned by the mutation service".to_string(),
             ));
         }
         if operator == "$rename"
-            && fields.values().any(|value| {
-                value
-                    .as_str()
-                    .is_some_and(|field| AUTHORITY_FIELDS.contains(&field))
-            })
+            && fields
+                .values()
+                .any(|value| value.as_str().is_some_and(authority_field))
         {
             return Err(AppError::Internal(
                 "API key authority fields cannot be rename targets".to_string(),
@@ -211,6 +220,11 @@ mod tests {
     fn authoritative_update_rejects_authority_overrides() {
         for update in [
             doc! { "$set": { "updated_at": bson::DateTime::now() } },
+            doc! { "$set": { "purpose": "general" } },
+            doc! { "$set": { "purpose.kind": "general" } },
+            doc! { "$unset": { "purpose": "" } },
+            doc! { "$rename": { "legacy_purpose": "purpose" } },
+            doc! { "$rename": { "legacy_purpose": "purpose.kind" } },
             doc! { "$inc": { "state_version": 10 } },
             doc! { "$unset": { "rotation_predecessor_id": "" } },
             doc! { "$rename": { "legacy_version": "state_version" } },

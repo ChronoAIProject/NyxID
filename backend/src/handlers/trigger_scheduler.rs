@@ -51,10 +51,10 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
                             && let Some(run_job) =
                                 schedules::claim(&state.db, &run.id, Utc::now()).await?
                         {
-                            run_job_once(state, &run_job).await?;
+                            Box::pin(run_job_once(state, &run_job)).await?;
                         }
                     } else {
-                        run_job_once(state, &job).await?;
+                        Box::pin(run_job_once(state, &job)).await?;
                     }
                 }
                 Ok(())
@@ -1019,6 +1019,9 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                    platform_delivery_recovery_queued: false,
+                    platform_reply: None,
+                    platform_origin: None,
                         report_to: None,
                     continuation_of: None,
                     retry_of: None,

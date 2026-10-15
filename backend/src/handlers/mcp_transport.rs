@@ -817,11 +817,30 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 ///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
 #[allow(clippy::result_large_err)]
+enum McpAuthentication {
+    Ordinary(Box<McpAuthContext>),
+    Public(Box<crate::services::platform_public_tools::PublicMcpAuthority>),
+}
+
+#[allow(clippy::result_large_err)]
 async fn authenticate_mcp(
     state: &AppState,
     headers: &HeaderMap,
     session_fallback: bool,
 ) -> Result<McpAuthContext, Response> {
+    match authenticate_mcp_or_public(state, headers, session_fallback, false).await? {
+        McpAuthentication::Ordinary(auth) => Ok(*auth),
+        McpAuthentication::Public(_) => Err(mcp_403_api_key_insufficient_scope()),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn authenticate_mcp_or_public(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_fallback: bool,
+    allow_public: bool,
+) -> Result<McpAuthentication, Response> {
     let request_ip = mcp_extract_ip(headers);
     let request_ua = mcp_extract_user_agent(headers);
 
@@ -833,6 +852,18 @@ async fn authenticate_mcp(
 
         match crate::services::key_service::validate_api_key(&state.db, raw_key).await {
             Ok((user_id, api_key, credential_id)) => {
+                if allow_public
+                    && api_key.purpose == crate::models::api_key::ApiKeyPurpose::PublicNyxbot
+                {
+                    return crate::services::platform_public_tools::authenticate(
+                        &state.db,
+                        &api_key,
+                        credential_id.as_deref(),
+                    )
+                    .await
+                    .map(|authority| McpAuthentication::Public(Box::new(authority)))
+                    .map_err(IntoResponse::into_response);
+                }
                 if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
@@ -884,7 +915,7 @@ async fn authenticate_mcp(
                     )
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
-                return Ok(McpAuthContext {
+                return Ok(McpAuthentication::Ordinary(Box::new(McpAuthContext {
                     caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
@@ -922,7 +953,7 @@ async fn authenticate_mcp(
                     rate_limit_burst: api_key.rate_limit_burst,
                     ip_address: request_ip.clone(),
                     user_agent: request_ua.clone(),
-                });
+                })));
             }
             Err(_) => return Err(mcp_401(&state.config.base_url)),
         }
@@ -932,6 +963,29 @@ async fn authenticate_mcp(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
+
+    // A raw API key must never acquire an unrelated stored MCP session via
+    // bearer/JWT fallback. Public-purpose keys have no session authority.
+    if let Some(token) = token.filter(|token| {
+        token.starts_with(crate::crypto::token::AGENT_KEY_PREFIX) || token.starts_with("nyx_")
+    }) {
+        if allow_public {
+            let (_, key, child) = crate::services::key_service::validate_api_key(&state.db, token)
+                .await
+                .map_err(|_| mcp_401(&state.config.base_url))?;
+            if key.purpose == crate::models::api_key::ApiKeyPurpose::PublicNyxbot {
+                return crate::services::platform_public_tools::authenticate(
+                    &state.db,
+                    &key,
+                    child.as_deref(),
+                )
+                .await
+                .map(|authority| McpAuthentication::Public(Box::new(authority)))
+                .map_err(IntoResponse::into_response);
+            }
+        }
+        return Err(mcp_403_api_key_insufficient_scope());
+    }
 
     // --- Try JWT-based auth ---
     if let Some(token) = token {
@@ -1064,7 +1118,7 @@ async fn authenticate_mcp(
                 ctx.approval_owner_user_id = approval_owner_user_id;
                 ctx.ip_address = request_ip.clone();
                 ctx.user_agent = request_ua.clone();
-                return Ok(ctx);
+                return Ok(McpAuthentication::Ordinary(Box::new(ctx)));
             }
             Err(_) if session_fallback => {
                 // Any JWT error (expired, invalid issuer, etc.) -- fall through
@@ -1105,7 +1159,7 @@ async fn authenticate_mcp(
         let mut ctx = McpAuthContext::user(user_id, AuthMethod::Session);
         ctx.ip_address = request_ip;
         ctx.user_agent = request_ua;
-        return Ok(ctx);
+        return Ok(McpAuthentication::Ordinary(Box::new(ctx)));
     }
 
     Err(mcp_401(&state.config.base_url))
@@ -1346,8 +1400,11 @@ pub async fn mcp_post(
     // `initialize` requires a valid JWT or API key (no session exists yet).
     // All other methods allow session-based auth fallback.
     let is_initialize = request.method == "initialize";
-    let auth = match authenticate_mcp(&state, &headers, !is_initialize).await {
-        Ok(a) => a,
+    let auth = match authenticate_mcp_or_public(&state, &headers, !is_initialize, true).await {
+        Ok(McpAuthentication::Ordinary(a)) => *a,
+        Ok(McpAuthentication::Public(a)) => {
+            return handle_public_rpc(&state, &headers, &body, &request, &a).await;
+        }
         Err(resp) => return resp,
     };
 
@@ -1437,6 +1494,98 @@ pub async fn mcp_post(
         "ping" => rpc_success(request.id, serde_json::json!({})),
 
         _ => rpc_error(request.id, -32601, "Method not found"),
+    }
+}
+
+/// A separate stateless public protocol surface. Session headers never add
+/// authority, and unsupported methods never reach ordinary MCP dispatch.
+async fn handle_public_rpc(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &[u8],
+    request: &JsonRpcRequest,
+    authority: &crate::services::platform_public_tools::PublicMcpAuthority,
+) -> Response {
+    use crate::services::platform_public_tools as public;
+    if let Err(error) = authority.validate_callback_headers(headers) {
+        return app_error_to_rpc(request.id.clone(), &error);
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Envelope {
+        jsonrpc: String,
+        id: Option<serde_json::Value>,
+        method: String,
+        params: Option<serde_json::Value>,
+    }
+    let envelope: Envelope = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return rpc_error(request.id.clone(), -32600, "Invalid public request"),
+    };
+    if envelope.jsonrpc != JSONRPC_VERSION
+        || envelope.method != request.method
+        || envelope.id != request.id
+        || envelope.params != request.params
+        || headers.contains_key("mcp-session-id")
+        || envelope
+            .id
+            .as_ref()
+            .is_some_and(|id| !id.is_string() && !id.is_number())
+    {
+        return rpc_error(request.id.clone(), -32600, "Invalid public request");
+    }
+    match request.method.as_str() {
+        "initialize" => rpc_success(
+            request.id.clone(),
+            serde_json::json!({
+                "protocolVersion":negotiated_protocol_version(request.params.as_ref()),
+                "capabilities":{"tools":{"listChanged":false}},
+                "serverInfo":{"name":"nyxid-public","version":env!("CARGO_PKG_VERSION")},
+                "instructions":public::INSTRUCTIONS,
+            }),
+        ),
+        "notifications/initialized" if request.id.is_none() => StatusCode::ACCEPTED.into_response(),
+        "ping"
+            if request
+                .params
+                .as_ref()
+                .is_none_or(|v| v.as_object().is_some_and(|o| o.is_empty())) =>
+        {
+            rpc_success(request.id.clone(), serde_json::json!({}))
+        }
+        "tools/list"
+            if request
+                .params
+                .as_ref()
+                .is_none_or(|v| v.as_object().is_some_and(|o| o.is_empty())) =>
+        {
+            rpc_success(request.id.clone(), public::definitions())
+        }
+        "tools/call" => {
+            let call =
+                match public::parse_call(request.params.clone().unwrap_or(serde_json::Value::Null))
+                {
+                    Ok(call) => call,
+                    Err(_) => {
+                        return rpc_error(
+                            request.id.clone(),
+                            -32602,
+                            "Public tool or arguments are not allowed",
+                        );
+                    }
+                };
+            match public::execute(state, authority, call).await {
+                Ok(text) => rpc_success(
+                    request.id.clone(),
+                    serde_json::json!({"content":[{"type":"text","text":text.as_str()}],"isError":false}),
+                ),
+                Err(_) => rpc_success(
+                    request.id.clone(),
+                    serde_json::json!({"content":[{"type":"text","text":"Public tool is unavailable for this turn"}],"isError":true}),
+                ),
+            }
+        }
+        _ => rpc_error(request.id.clone(), -32601, "Public method not allowed"),
     }
 }
 
@@ -5548,6 +5697,63 @@ async fn execute_ssh_command_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn public_credentials_never_resolve_ordinary_inventory_or_session_fallback() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_mcp_closed_auth").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "public fixture",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.collection::<mongodb::bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&key.id},
+                doc! {"$set":{"purpose":"public_nyxbot"}},
+            )
+            .await
+            .unwrap();
+        // No connected service or conversation is present. A public key must
+        // fail at the deployment-proof boundary before ordinary resolution.
+        let state = crate::test_utils::test_app_state(db);
+        for (name, value) in [
+            ("x-api-key", key.full_key.clone()),
+            ("authorization", format!("Bearer {}", key.full_key)),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value.parse().unwrap());
+            headers.insert("mcp-session-id", "unrelated-owner-session".parse().unwrap());
+            let failure = authenticate_mcp_or_public(&state, &headers, true, true)
+                .await
+                .err()
+                .expect("unproven public runtime denied");
+            assert_eq!(failure.status(), StatusCode::CONFLICT);
+            assert!(authenticate_mcp(&state, &headers, true).await.is_err());
+        }
+    }
     use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
     use crate::models::notification_channel::{
@@ -7922,6 +8128,8 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            platform_thread: false,
+            platform_origin: None,
             report_to: None,
             with_nyxbot: false,
             org_agent_access: None,

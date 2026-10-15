@@ -23,13 +23,7 @@ pub(super) fn answer(text: &str, failed: bool) -> String {
         if text.trim().is_empty() {
             "I could not finish that. Please try again.".into()
         } else {
-            format!(
-                "{}{INCOMPLETE}",
-                excerpt(
-                    text.trim(),
-                    MAX_CHANNEL_REPLY_CHARS - INCOMPLETE.chars().count() - 2
-                )
-            )
+            format!("{text}{INCOMPLETE}")
         }
     } else {
         bounded_reply(text)
@@ -290,14 +284,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         if message.text.trim().is_empty() {
             failure
         } else {
-            format!(
-                "{}\n\n{}",
-                excerpt(
-                    message.text.trim(),
-                    MAX_CHANNEL_REPLY_CHARS.saturating_sub(failure.chars().count() + 2)
-                ),
-                failure
-            )
+            format!("{}\n\n{}", message.text.trim(), failure)
         }
     } else {
         answer(&message.text, message.status != "completed")

@@ -113,6 +113,11 @@ pub async fn gate_and_reserve(
     }
 
     let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    if ctx.public_admission.is_some() {
+        return super::funding::reserve_and_open_public(db, ctx, &wallet, layers)
+            .await
+            .map(Some);
+    }
     if ctx.pool_attempt.is_some() {
         return super::funding::reserve_and_open_pool(db, ctx, &wallet, layers)
             .await
@@ -1081,7 +1086,7 @@ async fn mark_exhausted_settlement_dead_letter(
     Ok(result.modified_count == 1)
 }
 
-async fn estimate_layer_reservations(
+pub(crate) async fn estimate_layer_reservations(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     rate_cache_ttl_secs: u64,
@@ -1100,7 +1105,13 @@ async fn estimate_layer_reservations(
         )
     });
     for (layer, metric, code) in platform.chain(resale) {
-        let rate = fresh_rate(db, code, None, rate_cache_ttl_secs).await?;
+        let rate = fresh_rate(
+            db,
+            code,
+            ctx.public_admission.as_ref().map(|a| a.model_id.as_str()),
+            rate_cache_ttl_secs,
+        )
+        .await?;
         let rate_pico =
             super::amounts::rate_pico(rate.credits_per_unit_pico, rate.credits_per_unit_micros);
         // Preserve the existing one-unit gate for standalone legacy charges

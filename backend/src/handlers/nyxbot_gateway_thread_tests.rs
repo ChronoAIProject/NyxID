@@ -772,3 +772,104 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn gateway_complete_thread_reply_uses_one_token_and_reconstructs_every_part() {
+    use crate::handlers::channel_relay::{
+        AsyncReplyBody, AsyncReplyRequest, async_reply_with_test_adapter,
+    };
+    let f = Box::pin(Fixture::new("nyx_gw_complete_reply")).await;
+    let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+    assert!(f.send(&body, &id).await.contains("Here is your answer"));
+    let counter = std::sync::atomic::AtomicUsize::new(1);
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages/om_root/reply"))
+        .and(body_partial_json(json!({"reply_in_thread":true})))
+        .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({
+            "code":0,"data":{"message_id":format!("om_part_{}", counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst))}
+        }))).mount(&f.platform).await;
+    let token = crate::crypto::jwt::generate_relay_reply_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &f.row.route_api_key_id,
+        f.row.route_id.as_deref().unwrap(),
+        &id,
+        "lark",
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let adapter = thread_follow::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(&f.row.channel_bot_id)
+        .cloned()
+        .unwrap();
+    let text = format!(
+        "{}\n\nhttps://example.com/complete-link",
+        "界🦉\\*\n\n".repeat(8000)
+    );
+    let request = || AsyncReplyRequest {
+        message_id: id.clone(),
+        thread_reply: true,
+        reply: AsyncReplyBody {
+            text: Some(text.clone()),
+            metadata: None,
+            attachments: vec![],
+        },
+    };
+    let result = Box::pin(async_reply_with_test_adapter(
+        &f.state,
+        &headers,
+        request(),
+        adapter.as_ref(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        result
+            .0
+            .platform_message_id
+            .unwrap()
+            .starts_with("om_part_")
+    );
+    let requests: Vec<_> = f
+        .platform
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/open-apis/im/v1/messages/om_root/reply")
+        .collect();
+    assert!(requests.len() > 1);
+    let mut reconstructed = String::new();
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["reply_in_thread"], true);
+        let content = body["content"].as_str().unwrap();
+        assert!(content.len() <= 30 * 1024);
+        let content: Value = serde_json::from_str(content).unwrap();
+        reconstructed.push_str(content["text"].as_str().unwrap());
+    }
+    assert_eq!(reconstructed, text);
+    assert!(
+        Box::pin(async_reply_with_test_adapter(
+            &f.state,
+            &headers,
+            request(),
+            adapter.as_ref()
+        ))
+        .await
+        .is_err()
+    );
+    let record = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+        .find_one(doc! {"inbound_message_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(record.get_bool("complete").unwrap());
+    assert_eq!(record.get_array("parts").unwrap().len(), requests.len());
+}

@@ -9,13 +9,13 @@ use crate::{
     services::{
         assistant_acknowledgement_service::{self as acks, ChatAuthority},
         assistant_nyxagent as engine, audit_service, machine_service as machines,
-        machine_tools as tools, node_service,
+        machine_tools as tools,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
+use nyxid_machine::Operation;
 use nyxid_machine::authority::Authority;
-use nyxid_machine::{Operation, Request};
 use serde_json::{Value, json};
 
 fn argument<'a>(value: &'a Value, key: &str) -> AppResult<&'a str> {
@@ -294,15 +294,7 @@ pub async fn call(
         .as_deref()
         .filter(|_| !chat.turn_stopped)
         .ok_or(AppError::MachineTurnStopped)?;
-    let admitted = state.db.collection::<crate::models::assistant_conversation::AssistantConversation>(
-        crate::models::assistant_conversation::COLLECTION_NAME,
-    ).update_one(
-        mongodb::bson::doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,"active_turn.turn_id":turn_id,"active_turn.stop_requested":false},
-        mongodb::bson::doc! {"$addToSet":{"active_turn.machine_node_ids":&node.id}},
-    ).await?;
-    if admitted.matched_count != 1 {
-        return Err(AppError::MachineTurnStopped);
-    }
+    machines::admit_turn_operation(&state.db, chat, &node).await?;
     arguments["conversation_id"] = json!(chat.conversation_id);
     arguments["turn_id"] = json!(turn_id);
     // Desktop state is opened only after authority admission. A separated
@@ -707,52 +699,8 @@ pub(crate) async fn permission(
     Ok(acks::refusal(&row))
 }
 
-pub async fn dispatch(
-    state: &AppState,
-    node: &Node,
-    operation: Operation,
-    parameters: Value,
-) -> AppResult<Value> {
-    dispatch_authorized(state, node, operation, parameters, None).await
-}
-async fn dispatch_authorized(
-    state: &AppState,
-    node: &Node,
-    operation: Operation,
-    parameters: Value,
-    authority: Option<Box<Authority>>,
-) -> AppResult<Value> {
-    let request = signed_request(state, node, operation, parameters, authority).await?;
-    Ok(state
-        .node_dispatch
-        .machine_request_with_node(request, node)
-        .await?
-        .result)
-}
-
-async fn signed_request(
-    state: &AppState,
-    node: &Node,
-    operation: Operation,
-    parameters: Value,
-    authority: Option<Box<Authority>>,
-) -> AppResult<Request> {
-    machines::capable(node, operation)?;
-    let secret = node_service::signing_secret_from_node(&state.encryption_keys, node).await?;
-    let mut request = Request {
-        version: if authority.is_some() { 2 } else { 1 },
-        authority,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        node_id: node.id.clone(),
-        operation,
-        parameters,
-        timestamp: Utc::now().timestamp(),
-        nonce: uuid::Uuid::new_v4().to_string(),
-        signature: String::new(),
-    };
-    request.signature = nyxid_machine::signing::sign(&request, &secret);
-    Ok(request)
-}
+pub use crate::services::machine_service::dispatch;
+use crate::services::machine_service::{dispatch_authorized, signed_request};
 
 pub(super) async fn attach_computer_images(
     state: &AppState,

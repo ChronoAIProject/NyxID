@@ -402,6 +402,56 @@ async fn run_billing_route_coverage_smoke() {
         exercised_routes.insert(inventory_path);
     }
 
+    // The public callback has its own primary-key authority boundary. Neither
+    // an owner JWT nor an ordinary API key may enter its sponsor funding path.
+    let ordinary_key = crate::services::key_service::create_api_key(
+        &db,
+        &owner_id,
+        "public-callback-boundary",
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("create ordinary callback-refusal key");
+    for (credential, status) in [
+        (token.as_str(), StatusCode::UNAUTHORIZED),
+        (ordinary_key.full_key.as_str(), StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(route_request(
+                Method::POST,
+                &format!(
+                    "/api/v1/public-nyxbot/models/{}/v1/responses",
+                    proxy_catalog.id
+                ),
+                credential,
+                Body::from(r#"{"model":"test","input":"route boundary"}"#),
+            ))
+            .await
+            .expect("call public model callback boundary");
+        assert_eq!(response.status(), status);
+    }
+    exercised_routes.insert("/api/v1/public-nyxbot/models/{service_id}/{*path}");
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0,
+        "refused public callback credentials must not open sponsor meters"
+    );
+
     let aliases = call_mounted_route(
         &app,
         route_request(Method::GET, "/api/v1/llm/pools", &token, Body::empty()),
@@ -2732,7 +2782,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         BillingMetric::Tokens => {
             if case.scenario.contains("usage-omitted") {
                 let usage = if case.ingress == BillingIngress::Proxy {
-                    crate::handlers::proxy::llm_platform_usage(None, 19)
+                    crate::services::proxy_http_response::llm_platform_usage(None, 19)
                 } else {
                     crate::handlers::llm_gateway::llm_platform_usage(None, 19)
                 };

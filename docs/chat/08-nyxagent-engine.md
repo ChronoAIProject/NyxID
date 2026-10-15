@@ -1,5 +1,15 @@
 # NyxAgent assistant engine
 
+Owner execution and settlement live in `services/assistant_nyxagent_runtime.rs`;
+HTTP adapters retain authentication and channel notice delivery. The shared
+`services/proxy_http_response.rs` relay owns bounded admission rejection capture,
+synchronous zero-usage funding release, and model stream observation. Both HTTP
+owner turns and the typed personal-platform egress use this relay; neither path
+may return a proven capacity refusal until its funding reservation is released.
+Scheduler jobs, shared owner admission, and terminal audit transactions box
+their large futures at call boundaries to keep nested polling within the
+worker's normal stack, including confirmation continuations.
+
 ## Turn diagnostics and context continuity
 
 Failed replies retain a normalized NyxID `error_code` and, only when the
@@ -1679,7 +1689,11 @@ before forwarding failure/EOF where possible; HTTP status is unchanged.
 Both the direct streaming path and the response wrapper use the bounded byte
 decoder, recognizing LF, CRLF (including chunk splits) and CR line endings. The
 observer limit applies to each frame in both transports. Forwarded bytes remain
-unchanged, and decoded events still feed usage extraction on the direct path.
+unchanged. The direct path keeps an independent, uncapped SSE usage parser
+for every service and HTTP status; model observation runs only for captured model
+requests. The diagnostic frame cap never drops billing usage from large
+`response.completed` events such as base64 image results. The response wrapper
+only observes faults and leaves usage collection to its transport.
 Oversized, invalid UTF-8, malformed data or incomplete framing makes terminal
 detection `unknown` for that attempt, even if a later frame appears valid; it
 cannot prove an interrupted stream. Repeated provider-error or unknown facts are

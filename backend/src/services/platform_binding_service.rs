@@ -520,6 +520,29 @@ pub(crate) async fn unlink_sender(
     }).await.map_err(map_transaction_error)
 }
 
+/// Joins broad personal `/unlink`; the caller owns manager identity fencing and
+/// commit. This deliberately does not require the old guide to be enabled.
+pub(crate) async fn unlink_sender_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    profile_id: &str,
+    manager_bot_id: &str,
+    sender: &str,
+    chat: &str,
+) -> AppResult<()> {
+    if sender != chat {
+        return Err(unavailable());
+    }
+    cancel_pending_requests(db, profile_id, sender, None, session).await?;
+    if let Some(binding) = db.collection::<PlatformBinding>(COLLECTION_NAME).find_one_and_update(
+        doc! {"platform_config_id":profile_id,"manager_bot_id":manager_bot_id,"telegram_sender_id":sender,"telegram_chat_id":chat,"is_active":true},
+        doc! {"$set":{"is_active":false,"updated_at":bson::DateTime::now()},"$inc":{"generation":1_i64,"revocation_generation":1_i64}}
+    ).session(&mut *session).await? {
+        invalidate_setups(db, &binding.id, &binding.user_id, binding.generation, true, session).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
