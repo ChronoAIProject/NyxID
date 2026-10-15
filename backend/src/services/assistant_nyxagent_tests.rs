@@ -1090,10 +1090,14 @@ async fn platform_thread_is_excluded_from_home_validation_fallback_repair_and_we
     let team = crate::services::assistant_team_service::agent(&db, &owner, agent_id)
         .await
         .unwrap();
-    let home =
-        crate::services::assistant_team_service::home_thread_for(&db, &state.encryption_keys, &owner, &team)
-            .await
-            .unwrap();
+    let home = crate::services::assistant_team_service::home_thread_for(
+        &db,
+        &state.encryption_keys,
+        &owner,
+        &team,
+    )
+    .await
+    .unwrap();
     assert_eq!(home.id, ordinary.id);
     agents
         .update_one(
@@ -1117,6 +1121,103 @@ async fn platform_thread_is_excluded_from_home_validation_fallback_repair_and_we
         .await
         .unwrap();
     assert!(team.home_conversation_id.is_none());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_owner_admission_commits_proof_input_and_key_together_without_home_adoption() {
+    let db = connect_transaction_test_database("nyxa_platform_admission").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&db, &owner)
+        .await
+        .unwrap();
+    let mut template = stale_test_row(Utc::now());
+    template.user_id = owner.clone();
+    template.agent_id = Some(agent.id.clone());
+    let proof = platform_test_origin(&template);
+    let ids = OwnerTurnIds {
+        conversation_id: template.id,
+        turn_id: Uuid::new_v4().to_string(),
+        message_id: Uuid::new_v4().to_string(),
+    };
+    let start = TurnStart::from(&request(None, "personal input"));
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let aborted = begin_owner_turn_in_session(
+        &db,
+        &mut session,
+        &state.encryption_keys,
+        &owner,
+        &start,
+        &ids,
+        &agent,
+        Some(99),
+        Some(&proof),
+        None,
+    )
+    .await
+    .unwrap();
+    session.abort_transaction().await.unwrap();
+    assert!(get(&db, &owner, &ids.conversation_id).await.is_err());
+    assert!(
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": &aborted.credential.api_key_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<AssistantMessage>(MESSAGES)
+            .count_documents(doc! {"conversation_id": &ids.conversation_id})
+            .await
+            .unwrap(),
+        0
+    );
+    session.start_transaction().await.unwrap();
+    let committed = begin_owner_turn_in_session(
+        &db,
+        &mut session,
+        &state.encryption_keys,
+        &owner,
+        &start,
+        &ids,
+        &agent,
+        Some(99),
+        Some(&proof),
+        None,
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+    let saved = get(&db, &owner, &ids.conversation_id).await.unwrap();
+    assert_eq!(saved.credential_api_key_id, committed.credential.api_key_id);
+    assert!(saved.learning_epoch.is_none());
+    assert_eq!(saved.platform_thread.as_ref(), Some(&proof.thread));
+    assert_eq!(
+        saved.active_turn.as_ref().unwrap().platform_origin.as_ref(),
+        Some(&proof)
+    );
+    let input = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &ids.message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.platform_origin.as_ref(), Some(&proof));
+    assert_eq!(input.turn_id, ids.turn_id);
+    assert!(
+        crate::services::assistant_team_service::agent(&db, &owner, &agent.id)
+            .await
+            .unwrap()
+            .home_conversation_id
+            .is_none()
+    );
     db.drop().await.unwrap();
 }
 
@@ -1215,11 +1316,15 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     .unwrap();
     let proof = platform_test_origin(&old);
     db.collection::<bson::Document>(CONVERSATIONS)
-        .update_one(doc! {"_id": &old.id}, doc! {"$set": {
-            "platform_thread": bson::to_bson(&proof.thread).unwrap(),
-            "active_turn.platform_origin": bson::to_bson(&proof).unwrap(),
-        }})
-        .await.unwrap();
+        .update_one(
+            doc! {"_id": &old.id},
+            doc! {"$set": {
+                "platform_thread": bson::to_bson(&proof.thread).unwrap(),
+                "active_turn.platform_origin": bson::to_bson(&proof).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &old.id},

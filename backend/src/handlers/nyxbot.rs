@@ -2730,7 +2730,8 @@ async fn owner_thread(
     if let Some(home) = agent.home_conversation_id.as_deref() {
         match engine::get(&state.db, &row.user_id, home).await {
             Ok(conversation)
-                if conversation.group_id.is_none() && conversation.channel.is_none()
+                if conversation.group_id.is_none()
+                    && conversation.channel.is_none()
                     && conversation.platform_thread.is_none() =>
             {
                 return Ok((home.to_owned(), true));

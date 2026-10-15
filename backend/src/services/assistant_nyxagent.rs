@@ -1734,6 +1734,725 @@ pub async fn begin_turn(
     Box::pin(begin_turn_with_voice(db, user_id, start, keys, None)).await
 }
 
+/// IDs allocated before entering the transaction retry driver.
+pub(crate) struct OwnerTurnIds {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub message_id: String,
+}
+
+/// This value is not executable until the caller has committed its transaction.
+pub(crate) struct OwnerTurnClaim {
+    pub conversation: AssistantConversation,
+    pub credential: super::assistant_agent_credential_service::AssistantCredential,
+}
+
+/// Shared owner admission. Platform callers join binding and receipt fences in
+/// the same transaction, then pass the complete server-authored origin here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn begin_owner_turn_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user_id: &str,
+    start: &TurnStart,
+    ids: &OwnerTurnIds,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    learning_epoch: Option<i64>,
+    platform: Option<&crate::models::assistant_conversation::PlatformTurnOrigin>,
+    voice_request_id: Option<&str>,
+) -> AppResult<OwnerTurnClaim> {
+    let id = ids.conversation_id.clone();
+    let turn_id = ids.turn_id.clone();
+    let voice_request_id = voice_request_id.map(str::to_owned);
+    let now = Utc::now();
+    let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
+    if start.conversation_id.is_some()
+        && db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .find_one(doc! {"_id": &id, "user_id": user_id, "platform_cleanup_pending": true})
+            .session(&mut *session)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Platform conversion cleanup is pending".into(),
+        ));
+    }
+    let mut row = if start.conversation_id.is_some() {
+        collection
+            .find_one(owner_filter(user_id, &id)?)
+            .session(&mut *session)
+            .await?
+            .ok_or_else(not_found)?
+    } else {
+        AssistantConversation {
+            platform_thread: platform.map(|origin| origin.thread.clone()),
+            machine_previews: false,
+            platform_cleanup_pending: false,
+            platform_cleanup_id: None,
+            automation_thread: false,
+            voice_parent_conversation_id: None,
+            agent_owner_id: (agent.user_id != user_id).then(|| agent.user_id.clone()),
+            id: id.clone(),
+            user_id: user_id.into(),
+            title: start
+                .title
+                .clone()
+                .unwrap_or_else(|| super::assistant_title_service::provisional(&start.text)),
+            title_source: if start.title.is_some() || start.guest || start.channel.is_some() {
+                crate::models::assistant_conversation::TitleSource::User
+            } else {
+                crate::models::assistant_conversation::TitleSource::Provisional
+            },
+            model: start.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()),
+            access_mode: AccessMode::Full,
+            nyxagent_session_id: None,
+            nyxagent_instruction_binding: None,
+            nyxagent_last_response_id: None,
+            credential_api_key_id: String::new(),
+            message_count: 0,
+            active_turn: None,
+            context_reset_at: None,
+            context_reset_reason: None,
+            created_at: now,
+            updated_at: now,
+            role: if agent.is_nyxbot() {
+                AgentRole::Orchestrator
+            } else {
+                AgentRole::Subagent
+            },
+            agent_id: Some(agent.id.clone()),
+            report_to: None,
+            learning_epoch,
+            pending_events: Vec::new(),
+            event_streak: 0,
+            channel: start.channel.clone(),
+            reply_channel: None,
+            deliver_also: Vec::new(),
+            group_id: start.group_id.clone(),
+            group_request_id: None,
+            group_seen_seq: 0,
+            guest_turn: false,
+        }
+    };
+    if row.message_count == 0
+        && super::assistant_title_service::eligible(&row)
+        && start.origin == TurnOrigin::User
+        && !start.guest
+        && start.channel.is_none()
+    {
+        row.title = super::assistant_title_service::provisional(&start.text);
+    }
+    if start.group_request_id.is_some() {
+        row.group_request_id = start.group_request_id.clone();
+    }
+    if row.group_request_id.is_some()
+        && !matches!(start.origin, TurnOrigin::Group | TurnOrigin::Event)
+    {
+        return Err(AppError::Forbidden(
+            "Send messages through the organization group".into(),
+        ));
+    }
+    if let Some(origin) = platform {
+        if origin.thread.user_id != user_id
+            || origin.thread.nyxbot_agent_id != agent.id
+            || agent.user_id != user_id
+            || !agent.is_nyxbot()
+            || row.agent_id.as_deref() != Some(agent.id.as_str())
+            || row.platform_thread.as_ref() != Some(&origin.thread)
+            || row.user_id != user_id
+            || row.is_subagent()
+            || row.channel.is_some()
+            || row.group_id.is_some()
+            || start.guest
+            || start.channel.is_some()
+            || start.group_id.is_some()
+            || start.trigger.is_some()
+            || voice_request_id.is_some()
+        {
+            return Err(AppError::Forbidden(
+                "Personal platform thread authority changed".into(),
+            ));
+        }
+        row.learning_epoch = None;
+    }
+    // Legacy rows predate agents: they are NyxBot threads.
+    if row.agent_id.is_none() {
+        row.agent_id = Some(agent.id.clone());
+        row.role = AgentRole::Orchestrator;
+    }
+    // Refuses destroyed agents before any write.
+    let authority = super::assistant_agent_credential_service::authority_with_access(
+        db,
+        &row,
+        &mut *session,
+        start.org_access.as_ref(),
+    )
+    .await?;
+    if live_turn(&row, now).is_some() {
+        return Err(AppError::AssistantTurnActive);
+    }
+    if start.origin == TurnOrigin::Channel
+        && let Some(origin) = start.channel.as_ref().filter(|o| o.thread.is_some())
+    {
+        if origin
+            .thread
+            .as_ref()
+            .is_some_and(|b| b.guest != start.guest)
+        {
+            return Err(AppError::Forbidden("Thread sender changed".into()));
+        }
+        super::channel_thread_follow_service::admit_turn(db, user_id, origin, &id, session).await?;
+        row.channel = Some(origin.clone());
+    }
+    if let Some(request) = start.group_request_id.as_deref() {
+        if start.origin != TurnOrigin::Group {
+            return Err(AppError::Forbidden("Invalid group request".into()));
+        }
+        let claimed = db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
+            .update_one(doc! {"_id":request,"group_id":&row.group_id,"actor_user_id":user_id,"pending_agent_ids":&row.agent_id},
+                doc! {"$pull":{"pending_agent_ids":&row.agent_id}}).session(&mut *session).await?;
+        if claimed.modified_count != 1 {
+            return Err(AppError::NotFound("Queued group request not found".into()));
+        }
+    }
+    if let Some(claim) = &start.trigger {
+        if start.origin != TurnOrigin::Trigger || start.guest {
+            return Err(AppError::Forbidden("Invalid trigger turn".into()));
+        }
+        super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
+    }
+    let voice_request = if let Some(request_id) = &voice_request_id {
+        if start.origin != TurnOrigin::User || start.guest {
+            return Err(AppError::Forbidden("Invalid voice turn".into()));
+        }
+        Some(super::assistant_voice::claim(db, &row, request_id, &start.text, session).await?)
+    } else {
+        None
+    };
+    let turn_id = voice_request
+        .as_ref()
+        .map(|r| &r.turn_id)
+        .unwrap_or(&turn_id);
+    let message_id = voice_request
+        .as_ref()
+        .map(|r| r.message_id.clone())
+        .unwrap_or_else(|| ids.message_id.clone());
+    // Every chat now runs with Full access. Stale Ask-mode cards for
+    // service or account consent can no longer be meaningful.
+    if row.role == AgentRole::Orchestrator && row.access_mode != AccessMode::Full {
+        row.access_mode = AccessMode::Full;
+        db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .update_many(
+                doc! {"conversation_id": &id, "user_id": user_id,
+                "status": "pending", "kind": {"$in": ["service", "account"]}},
+                doc! {"$set": {"status": "expired"}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    // Every turn drains queued events: an event turn renders them as
+    // its message; other turns carry them in their input context.
+    if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+        return Err(AppError::Conflict("No pending events".into()));
+    }
+    // Queued events are the owner's (guests' messages are never
+    // queued): a guest turn leaves them for the owner's next turn.
+    // A chat app thread's queued messages wait for a turn that
+    // answers in that chat, never one the owner starts in the app.
+    let events = if start.guest
+        || start.origin == TurnOrigin::Trigger
+        || (start.origin == TurnOrigin::User && row.channel.is_some())
+    {
+        Vec::new()
+    } else {
+        super::channel_thread_follow_service::filter_events(
+            db,
+            user_id,
+            &id,
+            super::async_service_operation::select_events(&mut row, start.origin),
+            session,
+        )
+        .await?
+    };
+    if start.origin == TurnOrigin::Event && events.is_empty() {
+        return Err(AppError::Conflict("No eligible pending events".into()));
+    }
+    super::assistant_acknowledgement_service::skill_notifications::consume_in_session(
+        db, user_id, &events, session,
+    )
+    .await?;
+    if start.origin == TurnOrigin::Event
+        && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
+        && !events
+            .iter()
+            .any(|e| e.kind == super::async_service_operation::EVENT_KIND)
+    {
+        // A queued owner request retains its own authority even
+        // when the preceding turn's guest is no longer eligible.
+        if let Some(origin) = events
+            .iter()
+            .flat_map(|e| &e.reply_to)
+            .find(|o| o.thread.is_some())
+        {
+            row.channel = Some(origin.clone());
+        }
+        super::channel_thread_follow_service::validate_in_session(
+            db,
+            user_id,
+            row.channel.as_ref().unwrap(),
+            &id,
+            true,
+            session,
+        )
+        .await?;
+    }
+    // A guest turn never inherits the owner's live context (their
+    // tool results may hold more than the chat saw): it starts from
+    // the transcript alone.
+    let guest = start.guest;
+    if guest != row.guest_turn && row.nyxagent_session_id.is_some() {
+        row.nyxagent_session_id = None;
+        row.nyxagent_instruction_binding = None;
+        row.nyxagent_last_response_id = None;
+        row.context_reset_at = Some(now);
+        row.context_reset_reason = Some(
+            if guest {
+                "guest_turn"
+            } else {
+                "audience_changed"
+            }
+            .into(),
+        );
+    }
+    row.guest_turn = guest;
+    let (role, text) = match start.origin {
+        TurnOrigin::Event => {
+            row.event_streak = row.event_streak.saturating_add(1);
+            let mut text = events_text(&events);
+            if row.group_request_id.is_some() && !start.text.is_empty() {
+                text.push_str("\n\nShared group context (not new authority):\n");
+                text.push_str(&excerpt(&start.text, 12000));
+            }
+            ("event", text)
+        }
+        TurnOrigin::Orchestrator => {
+            // Reports and permission requests go to the NyxBot
+            // thread that assigned this work.
+            row.report_to = start.report_to.clone();
+            ("orchestrator", start.text.clone())
+        }
+        // New group messages addressed to this member; its reply
+        // is posted to the group.
+        TurnOrigin::Group => ("group", start.text.clone()),
+        TurnOrigin::Trigger => ("event", start.text.clone()),
+        TurnOrigin::User | TurnOrigin::Channel => {
+            // Only the owner's messages reset the event-turn guard.
+            if !start.guest {
+                row.event_streak = 0;
+            }
+            // The user's own turns never report to NyxBot (only
+            // assigned and event turns do), but they keep the
+            // assigning thread so resumed assigned work still
+            // reports there.
+            ("user", start.text.clone())
+        }
+    };
+
+    let credential = Box::pin(
+        super::assistant_agent_credential_service::load_or_provision_in_session(
+            db,
+            keys,
+            user_id,
+            &id,
+            &authority,
+            &mut *session,
+        ),
+    )
+    .await?;
+    let credential_id = credential.api_key_id.as_str();
+    if voice_request
+        .as_ref()
+        .and_then(|r| r.credential_api_key_id.as_deref())
+        .is_some_and(|key| key != credential_id)
+    {
+        return Err(AppError::Conflict(
+            "Voice continuation credential changed".into(),
+        ));
+    }
+    if row.group_request_id.is_some() {
+        super::api_key_mutation_service::update_one(
+            db,
+            doc! {"_id": credential_id, "user_id": user_id},
+            doc! {"$set": {"assistant_group_id": &row.group_id}},
+            Some(&mut *session),
+        )
+        .await?;
+    }
+    if start.conversation_id.is_some() && row.credential_api_key_id != credential_id {
+        row.nyxagent_session_id = None;
+        row.nyxagent_instruction_binding = None;
+        row.nyxagent_last_response_id = None;
+        row.context_reset_at = Some(now);
+        row.context_reset_reason = Some("credential_replaced".into());
+    }
+    if let Some(lost) = row.active_turn.take() {
+        let lost_turn = lost.clone();
+        row.message_count += 1;
+        let message = AssistantMessage {
+            platform_origin: lost.platform_origin.clone(),
+            retry_of: lost.retry_of.clone(),
+            retry_claimed_by: None,
+            activity_count: lost.activity_count,
+            continuation_of: None,
+            specialist_id: None,
+            steering: None,
+            author: None,
+            voice: None,
+            execution_pending: false,
+            id: Uuid::new_v4().to_string(),
+            conversation_id: id.clone(),
+            user_id: user_id.into(),
+            seq: row.message_count,
+            turn_id: lost.turn_id.clone(),
+            role: "assistant".into(),
+            text: String::new(),
+            status: "failed".into(),
+            error_code: Some("turn_lost".into()),
+            upstream_error_code: None,
+            error_detail: Some(crate::models::assistant_message::AssistantErrorDetail {
+                stage: "lease_expiry".into(),
+                http_status: None,
+                upstream_request_id: None,
+                response_id: None,
+                continuations: lost.continuations,
+                turn_id: lost.turn_id.clone(),
+                occurred_at: now,
+            }),
+            created_at: now,
+            activities: lost
+                .activities
+                .into_iter()
+                .map(|mut activity| {
+                    if activity.status.as_str() == "running" {
+                        activity.status = "error".into();
+                        activity.ended_at = Some(now);
+                    }
+                    activity
+                })
+                .collect(),
+            activity_total: lost.activity_total,
+            attachments: lost.attachments,
+            origin: Some(lost.origin),
+            via: None,
+        };
+        Box::pin(write_checkpoint_in_session(
+            db, session, &row, &lost_turn, &message, now,
+        ))
+        .await?;
+        db.collection::<AssistantMessage>(MESSAGES)
+            .insert_one(message)
+            .session(&mut *session)
+            .await?;
+        row.nyxagent_session_id = None;
+        row.nyxagent_instruction_binding = None;
+        row.nyxagent_last_response_id = None;
+        row.context_reset_at = Some(now);
+        row.context_reset_reason = Some("turn_failed".into());
+    }
+    // BSON dates have millisecond precision. Keep the next user
+    // message strictly after a reset, including same-tick reclaim.
+    let now = row.context_reset_at.map_or(now, |reset_at| {
+        now.max(reset_at + chrono::Duration::milliseconds(1))
+    });
+    row.credential_api_key_id = credential_id.into();
+    let hidden_voice = voice_request
+        .as_ref()
+        .is_some_and(|r| r.task_conversation_id.as_deref() == Some(&row.id));
+    let input_seq = voice_request
+        .as_ref()
+        .filter(|_| !hidden_voice)
+        .map(|r| r.message_seq)
+        .unwrap_or(row.message_count + 1);
+    // Owner Retry: the failed turn's completed actions are fenced
+    // and its attachments are carried over (they are already bound).
+    let retry = match start.retry_of.as_deref() {
+        Some(retry_of) => {
+            if start.conversation_id.is_none() || start.origin != TurnOrigin::User || start.guest {
+                return Err(AppError::BadRequest(RETRY_INVALID.into()));
+            }
+            Some(
+                Box::pin(retry_context_in_session(
+                    db, session, user_id, &id, retry_of,
+                ))
+                .await?,
+            )
+        }
+        None => None,
+    };
+    if let Some(retry) = retry.as_ref() {
+        if start.text != retry.text || !start.attachment_ids.is_empty() {
+            return Err(AppError::BadRequest(
+                "Retry input changed; refresh recovery".into(),
+            ));
+        }
+        let claimed = db
+            .collection::<bson::Document>(MESSAGES)
+            .update_one(
+                doc! {
+                    "conversation_id": &id, "user_id": user_id,
+                    "turn_id": start.retry_of.as_deref(), "role": "assistant",
+                    "status": "failed", "retry_claimed_by": bson::Bson::Null,
+                },
+                doc! {"$set": {"retry_claimed_by": turn_id}},
+            )
+            .session(&mut *session)
+            .await?;
+        if claimed.modified_count != 1 {
+            return Err(AppError::Conflict(
+                "This reply has already been retried".into(),
+            ));
+        }
+    }
+    let note = match (start.note.as_deref(), retry.as_ref()) {
+        (Some(note), Some(retry)) => Some(format!("{}\n\n{}", excerpt(note, 1200), retry.note)),
+        (Some(note), None) => Some(excerpt(note, 1200)),
+        (None, Some(retry)) => Some(retry.note.clone()),
+        (None, None) => None,
+    };
+    row.active_turn = Some(ActiveTurn {
+        platform_origin: platform.cloned(),
+        activity_count: Some(0),
+        retry_digests: retry
+            .as_ref()
+            .map(|retry| retry.digests.clone())
+            .unwrap_or_default(),
+        retry_of: start.retry_of.clone(),
+        running_response: None,
+        channel_event_id: start.channel_event_id.clone(),
+        initiating_message_seq: Some(input_seq),
+        voice_request_id: voice_request_id.clone(),
+        machine_node_ids: Vec::new(),
+        continuations: 0,
+        tool_progress: Default::default(),
+        lease_expires_at: None,
+        heartbeat_at: Some(now),
+        trigger_run_id: start.trigger.as_ref().map(|c| c.run_id.clone()),
+        turn_id: turn_id.clone(),
+        origin: start.origin,
+        started_at: now,
+        stop_requested: false,
+        activities: Vec::new(),
+        activity_total: 0,
+        attachments: Vec::new(),
+        events,
+        note,
+        question_key: start.question_key.clone().or_else(|| {
+            (start.origin == TurnOrigin::User)
+                .then(|| question_key(&start.text))
+                .flatten()
+        }),
+        question: start
+            .question
+            .as_deref()
+            .or((start.origin == TurnOrigin::User).then_some(start.text.as_str()))
+            .map(|question| excerpt(question, QUESTION_EXCERPT_CHARS)),
+        asked_from: (start.origin == TurnOrigin::Channel)
+            .then(|| {
+                start
+                    .reply_channel
+                    .clone()
+                    .or_else(|| start.channel.clone())
+            })
+            .flatten(),
+        also_deliver: Vec::new(),
+    });
+    if let Some(event_id) = start.channel_event_id.as_deref() {
+        super::channel_turn_delivery::bind_in_session(
+            db,
+            session,
+            event_id,
+            &row.user_id,
+            &row.id,
+            turn_id,
+        )
+        .await?;
+    }
+    Box::pin(super::async_service_operation::bind_in_session(
+        db, &mut row, session,
+    ))
+    .await?;
+    // Chats whose queued messages this turn answers get its reply
+    // too, unless it already goes there.
+    let answered_here = match start.origin {
+        TurnOrigin::Channel => start.reply_channel.clone().or(start.channel.clone()),
+        TurnOrigin::Event => row.channel.clone().or(row.reply_channel.clone()),
+        _ => None,
+    };
+    // Only on the owner's own thread (not a chat app thread), whose
+    // queued messages come from the owner's own private chats.
+    if row.channel.is_none()
+        && let Some(turn) = row.active_turn.as_mut()
+    {
+        for origin in turn.events.iter().flat_map(|event| event.reply_to.iter()) {
+            if Some(origin) != answered_here.as_ref()
+                && !turn.also_deliver.contains(origin)
+                && turn.also_deliver.len() < MAX_ALSO_DELIVER
+            {
+                turn.also_deliver.push(origin.clone());
+            }
+        }
+    }
+    // The owner's own thread follows them between the app and their
+    // chat apps: asynchronous replies go where they last wrote.
+    match start.origin {
+        TurnOrigin::User => row.reply_channel = None,
+        TurnOrigin::Channel if start.reply_channel.is_some() => {
+            row.reply_channel = start.reply_channel.clone();
+        }
+        _ => {}
+    }
+    row.updated_at = now;
+    if voice_request.is_none() || hidden_voice {
+        row.message_count += 1;
+    }
+    if start.conversation_id.is_some() {
+        collection
+            .replace_one(owner_filter(user_id, &id)?, &row)
+            .session(&mut *session)
+            .await?;
+    } else {
+        collection.insert_one(&row).session(&mut *session).await?;
+    }
+    // An agent's first own thread becomes its home; a hidden group
+    // member, channel or isolated automation thread never does.
+    if row.group_id.is_none()
+        && row.channel.is_none()
+        && row.platform_thread.is_none()
+        && !row.automation_thread
+    {
+        db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &row.agent_id, "user_id": user_id,
+                "home_conversation_id": bson::Bson::Null},
+                doc! {"$set": {"home_conversation_id": &row.id}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    if start.guest && !start.attachment_ids.is_empty() {
+        return Err(AppError::Forbidden("Uploads are owner-only".into()));
+    }
+    let mut uploads = Box::pin(super::assistant_upload_service::bind(
+        db,
+        user_id,
+        &id,
+        &message_id,
+        &start.attachment_ids,
+        session,
+    ))
+    .await?;
+    uploads.extend(start.group_attachments.clone());
+    for carried in retry.iter().flat_map(|retry| retry.attachments.iter()) {
+        if !uploads.iter().any(|upload| upload.id == carried.id) {
+            uploads.push(carried.clone());
+        }
+    }
+    Box::pin(super::assistant_upload_retention::used_in_turn(
+        db,
+        session,
+        user_id,
+        &id,
+        turn_id,
+        &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+    ))
+    .await?;
+    if let Some(acknowledgement_id) = &start.acknowledgement_id {
+        let card = db
+            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": acknowledgement_id, "user_id": user_id,
+            "conversation_id": &id, "status": {"$in": ["allowed", "used"]}, "decided_by": "user"})
+            .session(&mut *session)
+            .await?;
+        if card.is_none() {
+            return Err(AppError::BadRequest(
+                "Acknowledgement must be your allowed decision in this conversation".into(),
+            ));
+        }
+    }
+    let message = AssistantMessage {
+        platform_origin: platform.cloned(),
+        retry_of: start.retry_of.clone(),
+        retry_claimed_by: None,
+        activity_count: None,
+        continuation_of: start.acknowledgement_id.clone(),
+        specialist_id: None,
+        steering: None,
+        author: (role == "user").then_some(if row.guest_turn {
+            crate::models::assistant_message::MessageAuthor::Guest
+        } else {
+            crate::models::assistant_message::MessageAuthor::Owner
+        }),
+        voice: None,
+        execution_pending: false,
+        id: if hidden_voice {
+            Uuid::new_v4().to_string()
+        } else {
+            message_id.clone()
+        },
+        conversation_id: id.clone(),
+        user_id: user_id.into(),
+        seq: row.message_count,
+        turn_id: turn_id.clone(),
+        role: role.into(),
+        text: text.clone(),
+        status: "completed".into(),
+        error_code: None,
+        upstream_error_code: None,
+        error_detail: None,
+        created_at: now,
+        activities: Vec::new(),
+        activity_total: 0,
+        attachments: uploads,
+        origin: Some(start.origin),
+        via: (start.origin == TurnOrigin::Channel)
+            .then(|| {
+                start
+                    .reply_channel
+                    .as_ref()
+                    .or(start.channel.as_ref())
+                    .map(|channel| channel.platform.clone())
+            })
+            .flatten(),
+    };
+    if voice_request.is_none() || hidden_voice {
+        db.collection::<AssistantMessage>(MESSAGES)
+            .insert_one(message)
+            .session(&mut *session)
+            .await?;
+    }
+    if voice_request.is_some() {
+        let source_conversation = voice_request
+            .as_ref()
+            .map(|request| request.conversation_id.as_str())
+            .unwrap_or(&id);
+        db.collection::<bson::Document>(MESSAGES)
+            .update_one(
+                doc! {"_id": &message_id, "user_id": user_id, "conversation_id": source_conversation},
+                doc! {"$set": {"execution_pending": false}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    Ok(OwnerTurnClaim {
+        conversation: row,
+        credential,
+    })
+}
+
 pub async fn begin_turn_with_voice(
     db: &Database,
     user_id: &str,
@@ -1748,7 +2467,11 @@ pub async fn begin_turn_with_voice(
         .clone()
         .or_else(|| start.new_id.clone().filter(|id| valid_id(id)))
         .unwrap_or_else(|| format!("nyxa-{}", Uuid::new_v4().simple()));
-    let turn_id = Uuid::new_v4().to_string();
+    let ids = OwnerTurnIds {
+        conversation_id: id,
+        turn_id: Uuid::new_v4().to_string(),
+        message_id: Uuid::new_v4().to_string(),
+    };
     // Every thread belongs to an agent: the requested one for a new thread,
     // otherwise the owner's NyxBot (which also adopts legacy rows).
     let nyxbot = super::assistant_team_service::ensure_nyxbot(db, user_id).await?;
@@ -1787,7 +2510,7 @@ pub async fn begin_turn_with_voice(
     let start = start.clone();
     let audit_db = db.clone();
     let audit_user = user_id.clone();
-    let (row, credential) = session
+    let claim = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db;
@@ -1796,595 +2519,19 @@ pub async fn begin_turn_with_voice(
             // MongoDB's retry driver stores and polls this callback through
             // several frames. Keep the turn/message/upload transaction on the heap.
             let operation: AppResult<_> = Box::pin(async {
-                let now = Utc::now();
-                let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
-                if start.conversation_id.is_some()
-                    && db.collection::<bson::Document>(CONVERSATIONS)
-                        .find_one(doc! {"_id": &id, "user_id": user_id, "platform_cleanup_pending": true})
-                        .session(&mut *session).await?.is_some()
-                {
-                    return Err(AppError::Conflict("Platform conversion cleanup is pending".into()));
-                }
-                let mut row = if start.conversation_id.is_some() {
-                    collection
-                        .find_one(owner_filter(user_id, &id)?)
-                        .session(&mut *session)
-                        .await?
-                        .ok_or_else(not_found)?
-                } else {
-                    AssistantConversation {
-                        platform_thread: None,
-                        machine_previews: false,
-        platform_cleanup_pending: false,
-        platform_cleanup_id: None,
-                        automation_thread: false,
-                        voice_parent_conversation_id: None,
-                        agent_owner_id: (new_agent.user_id != user_id)
-                            .then(|| new_agent.user_id.clone()),
-                        id: id.clone(),
-                        user_id: user_id.into(),
-                        title: start.title.clone().unwrap_or_else(|| {
-                            super::assistant_title_service::provisional(&start.text)
-                        }),
-                        title_source: if start.title.is_some()
-                            || start.guest
-                            || start.channel.is_some()
-                        {
-                            crate::models::assistant_conversation::TitleSource::User
-                        } else {
-                            crate::models::assistant_conversation::TitleSource::Provisional
-                        },
-                        model: start.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()),
-                        access_mode: AccessMode::Full,
-                        nyxagent_session_id: None,
-                        nyxagent_instruction_binding: None,
-                        nyxagent_last_response_id: None,
-                        credential_api_key_id: String::new(),
-                        message_count: 0,
-                        active_turn: None,
-                        context_reset_at: None,
-                        context_reset_reason: None,
-                        created_at: now,
-                        updated_at: now,
-                        role: if new_agent.is_nyxbot() {
-                            AgentRole::Orchestrator
-                        } else {
-                            AgentRole::Subagent
-                        },
-                        agent_id: Some(new_agent.id.clone()),
-                        report_to: None,
-                        learning_epoch,
-                        pending_events: Vec::new(),
-                        event_streak: 0,
-                        channel: start.channel.clone(),
-                        reply_channel: None,
-                        deliver_also: Vec::new(),
-                        group_id: start.group_id.clone(),
-                        group_request_id: None,
-                        group_seen_seq: 0,
-                        guest_turn: false,
-                    }
-                };
-                if row.message_count == 0
-                    && super::assistant_title_service::eligible(&row)
-                    && start.origin == TurnOrigin::User
-                    && !start.guest
-                    && start.channel.is_none()
-                {
-                    row.title = super::assistant_title_service::provisional(&start.text);
-                }
-                if start.group_request_id.is_some() {
-                    row.group_request_id = start.group_request_id.clone();
-                }
-                if row.group_request_id.is_some()
-                    && !matches!(start.origin, TurnOrigin::Group | TurnOrigin::Event)
-                {
-                    return Err(AppError::Forbidden(
-                        "Send messages through the organization group".into(),
-                    ));
-                }
-                // Legacy rows predate agents: they are NyxBot threads.
-                if row.agent_id.is_none() {
-                    row.agent_id = Some(nyxbot.id.clone());
-                    row.role = AgentRole::Orchestrator;
-                }
-                // Refuses destroyed agents before any write.
-                let authority = super::assistant_agent_credential_service::authority_with_access(
+                begin_owner_turn_in_session(
                     db,
-                    &row,
-                    &mut *session,
-                    start.org_access.as_ref(),
+                    session,
+                    &keys,
+                    user_id,
+                    start,
+                    &ids,
+                    &new_agent,
+                    learning_epoch,
+                    None,
+                    voice_request_id.as_deref(),
                 )
-                .await?;
-                if live_turn(&row, now).is_some() {
-                    return Err(AppError::AssistantTurnActive);
-                }
-                if start.origin == TurnOrigin::Channel
-                    && let Some(origin) = start.channel.as_ref().filter(|o| o.thread.is_some())
-                {
-                    if origin.thread.as_ref().is_some_and(|b|b.guest!=start.guest) {
-                        return Err(AppError::Forbidden("Thread sender changed".into()));
-                    }
-                    super::channel_thread_follow_service::admit_turn(db,user_id,origin,&id,session).await?;
-                    row.channel=Some(origin.clone());
-                }
-                if let Some(request) = start.group_request_id.as_deref() {
-                    if start.origin != TurnOrigin::Group { return Err(AppError::Forbidden("Invalid group request".into())); }
-                    let claimed = db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
-                        .update_one(doc! {"_id":request,"group_id":&row.group_id,"actor_user_id":user_id,"pending_agent_ids":&row.agent_id},
-                            doc! {"$pull":{"pending_agent_ids":&row.agent_id}}).session(&mut *session).await?;
-                    if claimed.modified_count != 1 { return Err(AppError::NotFound("Queued group request not found".into())); }
-                }
-                if let Some(claim) = &start.trigger {
-                    if start.origin != TurnOrigin::Trigger || start.guest {
-                        return Err(AppError::Forbidden("Invalid trigger turn".into()));
-                    }
-                    super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session)
-                        .await?;
-                }
-                let voice_request = if let Some(request_id) = &voice_request_id {
-                    if start.origin != TurnOrigin::User || start.guest {
-                        return Err(AppError::Forbidden("Invalid voice turn".into()));
-                    }
-                    Some(
-                        super::assistant_voice::claim(db, &row, request_id, &start.text, session)
-                            .await?,
-                    )
-                } else {
-                    None
-                };
-                let turn_id = voice_request
-                    .as_ref()
-                    .map(|r| &r.turn_id)
-                    .unwrap_or(&turn_id);
-                let message_id = voice_request
-                    .as_ref()
-                    .map(|r| r.message_id.clone())
-                    .unwrap_or_else(|| Uuid::new_v4().to_string());
-                // Every chat now runs with Full access. Stale Ask-mode cards for
-                // service or account consent can no longer be meaningful.
-                if row.role == AgentRole::Orchestrator && row.access_mode != AccessMode::Full {
-                    row.access_mode = AccessMode::Full;
-                    db.collection::<bson::Document>(
-                        crate::models::assistant_acknowledgement::COLLECTION_NAME,
-                    )
-                    .update_many(
-                        doc! {"conversation_id": &id, "user_id": user_id,
-                        "status": "pending", "kind": {"$in": ["service", "account"]}},
-                        doc! {"$set": {"status": "expired"}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                }
-                // Every turn drains queued events: an event turn renders them as
-                // its message; other turns carry them in their input context.
-                if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
-                    return Err(AppError::Conflict("No pending events".into()));
-                }
-                // Queued events are the owner's (guests' messages are never
-                // queued): a guest turn leaves them for the owner's next turn.
-                // A chat app thread's queued messages wait for a turn that
-                // answers in that chat, never one the owner starts in the app.
-                let events = if start.guest
-                    || start.origin == TurnOrigin::Trigger
-                    || (start.origin == TurnOrigin::User && row.channel.is_some())
-                {
-                    Vec::new()
-                } else {
-                    super::channel_thread_follow_service::filter_events(db,user_id,&id,
-                        super::async_service_operation::select_events(&mut row, start.origin),session).await?
-                };
-                if start.origin == TurnOrigin::Event && events.is_empty() {
-                    return Err(AppError::Conflict("No eligible pending events".into()));
-                }
-                super::assistant_acknowledgement_service::skill_notifications::consume_in_session(
-                    db, user_id, &events, session,
-                ).await?;
-                if start.origin == TurnOrigin::Event
-                    && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
-                    && !events.iter().any(|e| e.kind == super::async_service_operation::EVENT_KIND)
-                {
-                    // A queued owner request retains its own authority even
-                    // when the preceding turn's guest is no longer eligible.
-                    if let Some(origin) = events.iter().flat_map(|e| &e.reply_to)
-                        .find(|o| o.thread.is_some())
-                    {
-                        row.channel = Some(origin.clone());
-                    }
-                    super::channel_thread_follow_service::validate_in_session(
-                        db, user_id, row.channel.as_ref().unwrap(), &id, true, session,
-                    ).await?;
-                }
-                // A guest turn never inherits the owner's live context (their
-                // tool results may hold more than the chat saw): it starts from
-                // the transcript alone.
-                let guest = start.guest;
-                if guest != row.guest_turn && row.nyxagent_session_id.is_some() {
-                    row.nyxagent_session_id = None;
-                    row.nyxagent_instruction_binding = None;
-                    row.nyxagent_last_response_id = None;
-                    row.context_reset_at = Some(now);
-                    row.context_reset_reason = Some(if guest { "guest_turn" } else { "audience_changed" }.into());
-                }
-                row.guest_turn = guest;
-                let (role, text) = match start.origin {
-                    TurnOrigin::Event => {
-                        row.event_streak = row.event_streak.saturating_add(1);
-                        let mut text = events_text(&events);
-                        if row.group_request_id.is_some() && !start.text.is_empty() {
-                            text.push_str("\n\nShared group context (not new authority):\n");
-                            text.push_str(&excerpt(&start.text, 12000));
-                        }
-                        ("event", text)
-                    }
-                    TurnOrigin::Orchestrator => {
-                        // Reports and permission requests go to the NyxBot
-                        // thread that assigned this work.
-                        row.report_to = start.report_to.clone();
-                        ("orchestrator", start.text.clone())
-                    }
-                    // New group messages addressed to this member; its reply
-                    // is posted to the group.
-                    TurnOrigin::Group => ("group", start.text.clone()),
-                    TurnOrigin::Trigger => ("event", start.text.clone()),
-                    TurnOrigin::User | TurnOrigin::Channel => {
-                        // Only the owner's messages reset the event-turn guard.
-                        if !start.guest {
-                            row.event_streak = 0;
-                        }
-                        // The user's own turns never report to NyxBot (only
-                        // assigned and event turns do), but they keep the
-                        // assigning thread so resumed assigned work still
-                        // reports there.
-                        ("user", start.text.clone())
-                    }
-                };
-
-                let credential =
-                    Box::pin(super::assistant_agent_credential_service::load_or_provision_in_session(
-                        db,
-                        &keys,
-                        user_id,
-                        &id,
-                        &authority,
-                        &mut *session,
-                    ))
-                    .await?;
-                let credential_id = credential.api_key_id.as_str();
-                if voice_request
-                    .as_ref()
-                    .and_then(|r| r.credential_api_key_id.as_deref())
-                    .is_some_and(|key| key != credential_id)
-                {
-                    return Err(AppError::Conflict(
-                        "Voice continuation credential changed".into(),
-                    ));
-                }
-                if row.group_request_id.is_some() {
-                    super::api_key_mutation_service::update_one(
-                        db,
-                        doc! {"_id": credential_id, "user_id": user_id},
-                        doc! {"$set": {"assistant_group_id": &row.group_id}},
-                        Some(&mut *session),
-                    )
-                    .await?;
-                }
-                if start.conversation_id.is_some() && row.credential_api_key_id != credential_id {
-                    row.nyxagent_session_id = None;
-                    row.nyxagent_instruction_binding = None;
-                    row.nyxagent_last_response_id = None;
-                    row.context_reset_at = Some(now);
-                    row.context_reset_reason = Some("credential_replaced".into());
-                }
-                if let Some(lost) = row.active_turn.take() {
-                    let lost_turn = lost.clone();
-                    row.message_count += 1;
-                    let message = AssistantMessage {
-                        platform_origin: lost.platform_origin.clone(),
-                        retry_of: lost.retry_of.clone(),
-                        retry_claimed_by: None,
-                        activity_count: lost.activity_count,
-                        continuation_of: None,
-                        specialist_id: None,
-                        steering: None,
-                        author: None,
-                        voice: None,
-                        execution_pending: false,
-                        id: Uuid::new_v4().to_string(),
-                        conversation_id: id.clone(),
-                        user_id: user_id.into(),
-                        seq: row.message_count,
-                        turn_id: lost.turn_id.clone(),
-                        role: "assistant".into(),
-                        text: String::new(),
-                        status: "failed".into(),
-                        error_code: Some("turn_lost".into()),
-                        upstream_error_code: None,
-                        error_detail: Some(crate::models::assistant_message::AssistantErrorDetail {
-                            stage: "lease_expiry".into(), http_status: None, upstream_request_id: None,
-                            response_id: None, continuations: lost.continuations, turn_id: lost.turn_id.clone(), occurred_at: now,
-                        }),
-                        created_at: now,
-                        activities: lost.activities.into_iter().map(|mut activity| {
-                            if activity.status.as_str() == "running" { activity.status = "error".into(); activity.ended_at = Some(now); }
-                            activity
-                        }).collect(),
-                        activity_total: lost.activity_total,
-                        attachments: lost.attachments,
-                        origin: Some(lost.origin),
-                        via: None,
-                    };
-                    Box::pin(write_checkpoint_in_session(
-                        db, session, &row, &lost_turn, &message, now,
-                    ))
-                    .await?;
-                    db.collection::<AssistantMessage>(MESSAGES)
-                        .insert_one(message)
-                        .session(&mut *session)
-                        .await?;
-                    row.nyxagent_session_id = None;
-                    row.nyxagent_instruction_binding = None;
-                    row.nyxagent_last_response_id = None;
-                    row.context_reset_at = Some(now);
-                    row.context_reset_reason = Some("turn_failed".into());
-                }
-                // BSON dates have millisecond precision. Keep the next user
-                // message strictly after a reset, including same-tick reclaim.
-                let now = row.context_reset_at.map_or(now, |reset_at| {
-                    now.max(reset_at + chrono::Duration::milliseconds(1))
-                });
-                row.credential_api_key_id = credential_id.into();
-                let hidden_voice = voice_request.as_ref()
-                    .is_some_and(|r| r.task_conversation_id.as_deref() == Some(&row.id));
-                let input_seq = voice_request
-                    .as_ref().filter(|_| !hidden_voice)
-                    .map(|r| r.message_seq).unwrap_or(row.message_count + 1);
-                // Owner Retry: the failed turn's completed actions are fenced
-                // and its attachments are carried over (they are already bound).
-                let retry = match start.retry_of.as_deref() {
-                    Some(retry_of) => {
-                        if start.conversation_id.is_none()
-                            || start.origin != TurnOrigin::User
-                            || start.guest
-                        {
-                            return Err(AppError::BadRequest(RETRY_INVALID.into()));
-                        }
-                        Some(
-                            Box::pin(retry_context_in_session(
-                                db, session, user_id, &id, retry_of,
-                            ))
-                            .await?,
-                        )
-                    }
-                    None => None,
-                };
-                if let Some(retry) = retry.as_ref() {
-                    if start.text != retry.text || !start.attachment_ids.is_empty() {
-                        return Err(AppError::BadRequest("Retry input changed; refresh recovery".into()));
-                    }
-                    let claimed = db.collection::<bson::Document>(MESSAGES)
-                        .update_one(doc! {
-                            "conversation_id": &id, "user_id": user_id,
-                            "turn_id": start.retry_of.as_deref(), "role": "assistant",
-                            "status": "failed", "retry_claimed_by": bson::Bson::Null,
-                        }, doc! {"$set": {"retry_claimed_by": turn_id}})
-                        .session(&mut *session).await?;
-                    if claimed.modified_count != 1 {
-                        return Err(AppError::Conflict("This reply has already been retried".into()));
-                    }
-                }
-                let note = match (start.note.as_deref(), retry.as_ref()) {
-                    (Some(note), Some(retry)) => {
-                        Some(format!("{}\n\n{}", excerpt(note, 1200), retry.note))
-                    }
-                    (Some(note), None) => Some(excerpt(note, 1200)),
-                    (None, Some(retry)) => Some(retry.note.clone()),
-                    (None, None) => None,
-                };
-                row.active_turn = Some(ActiveTurn {
-                    platform_origin: None,
-                    activity_count: Some(0),
-                    retry_digests: retry
-                        .as_ref()
-                        .map(|retry| retry.digests.clone())
-                        .unwrap_or_default(),
-                    retry_of: start.retry_of.clone(),
-                    running_response: None,
-                    channel_event_id: start.channel_event_id.clone(),
-                    initiating_message_seq: Some(input_seq),
-                    voice_request_id: voice_request_id.clone(),
-                    machine_node_ids: Vec::new(),
-                    continuations: 0,
-                    tool_progress: Default::default(),
-                    lease_expires_at: None,
-                    heartbeat_at: Some(now),
-                    trigger_run_id: start.trigger.as_ref().map(|c| c.run_id.clone()),
-                    turn_id: turn_id.clone(),
-                    origin: start.origin,
-                    started_at: now,
-                    stop_requested: false,
-                    activities: Vec::new(),
-                    activity_total: 0,
-                    attachments: Vec::new(),
-                    events,
-                    note,
-                    question_key: start.question_key.clone().or_else(|| {
-                        (start.origin == TurnOrigin::User)
-                            .then(|| question_key(&start.text))
-                            .flatten()
-                    }),
-                    question: start
-                        .question
-                        .as_deref()
-                        .or((start.origin == TurnOrigin::User).then_some(start.text.as_str()))
-                        .map(|question| excerpt(question, QUESTION_EXCERPT_CHARS)),
-                    asked_from: (start.origin == TurnOrigin::Channel)
-                        .then(|| {
-                            start
-                                .reply_channel
-                                .clone()
-                                .or_else(|| start.channel.clone())
-                        })
-                        .flatten(),
-                    also_deliver: Vec::new(),
-                });
-                if let Some(event_id) = start.channel_event_id.as_deref() {
-                    super::channel_turn_delivery::bind_in_session(
-                        db, session, event_id, &row.user_id, &row.id, turn_id,
-                    ).await?;
-                }
-                Box::pin(super::async_service_operation::bind_in_session(db, &mut row, session)).await?;
-                // Chats whose queued messages this turn answers get its reply
-                // too, unless it already goes there.
-                let answered_here = match start.origin {
-                    TurnOrigin::Channel => start.reply_channel.clone().or(start.channel.clone()),
-                    TurnOrigin::Event => row.channel.clone().or(row.reply_channel.clone()),
-                    _ => None,
-                };
-                // Only on the owner's own thread (not a chat app thread), whose
-                // queued messages come from the owner's own private chats.
-                if row.channel.is_none()
-                    && let Some(turn) = row.active_turn.as_mut()
-                {
-                    for origin in turn.events.iter().flat_map(|event| event.reply_to.iter()) {
-                        if Some(origin) != answered_here.as_ref()
-                            && !turn.also_deliver.contains(origin)
-                            && turn.also_deliver.len() < MAX_ALSO_DELIVER
-                        {
-                            turn.also_deliver.push(origin.clone());
-                        }
-                    }
-                }
-                // The owner's own thread follows them between the app and their
-                // chat apps: asynchronous replies go where they last wrote.
-                match start.origin {
-                    TurnOrigin::User => row.reply_channel = None,
-                    TurnOrigin::Channel if start.reply_channel.is_some() => {
-                        row.reply_channel = start.reply_channel.clone();
-                    }
-                    _ => {}
-                }
-                row.updated_at = now;
-                if voice_request.is_none() || hidden_voice {
-                    row.message_count += 1;
-                }
-                if start.conversation_id.is_some() {
-                    collection
-                        .replace_one(owner_filter(user_id, &id)?, &row)
-                        .session(&mut *session)
-                        .await?;
-                } else {
-                    collection.insert_one(&row).session(&mut *session).await?;
-                }
-                // An agent's first own thread becomes its home; a hidden group
-                // member, channel or isolated automation thread never does.
-                if row.group_id.is_none() && row.channel.is_none()
-                    && row.platform_thread.is_none() && !row.automation_thread {
-                    db.collection::<bson::Document>(
-                        crate::models::assistant_agent::COLLECTION_NAME,
-                    )
-                    .update_one(
-                        doc! {"_id": &row.agent_id, "user_id": user_id,
-                        "home_conversation_id": bson::Bson::Null},
-                        doc! {"$set": {"home_conversation_id": &row.id}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                }
-                if start.guest && !start.attachment_ids.is_empty() {
-                    return Err(AppError::Forbidden("Uploads are owner-only".into()));
-                }
-                let mut uploads = Box::pin(super::assistant_upload_service::bind(
-                    db,
-                    user_id,
-                    &id,
-                    &message_id,
-                    &start.attachment_ids,
-                    session,
-                ))
-                .await?;
-                uploads.extend(start.group_attachments.clone());
-                for carried in retry.iter().flat_map(|retry| retry.attachments.iter()) {
-                    if !uploads.iter().any(|upload| upload.id == carried.id) {
-                        uploads.push(carried.clone());
-                    }
-                }
-                Box::pin(super::assistant_upload_retention::used_in_turn(
-                    db,
-                    session,
-                    user_id,
-                    &id,
-                    turn_id,
-                    &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
-                ))
-                .await?;
-                if let Some(acknowledgement_id) = &start.acknowledgement_id {
-                    let card = db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
-                        crate::models::assistant_acknowledgement::COLLECTION_NAME)
-                        .find_one(doc! {"_id": acknowledgement_id, "user_id": user_id,
-                            "conversation_id": &id, "status": {"$in": ["allowed", "used"]}, "decided_by": "user"})
-                        .session(&mut *session).await?;
-                    if card.is_none() {
-                        return Err(AppError::BadRequest("Acknowledgement must be your allowed decision in this conversation".into()));
-                    }
-                }
-                let message = AssistantMessage {
-                    platform_origin: None,
-                    retry_of: start.retry_of.clone(),
-                    retry_claimed_by: None,
-                    activity_count: None,
-                    continuation_of: start.acknowledgement_id.clone(),
-                    specialist_id: None,
-                    steering: None,
-                    author: (role == "user").then_some(if row.guest_turn { crate::models::assistant_message::MessageAuthor::Guest } else { crate::models::assistant_message::MessageAuthor::Owner }),
-                    voice: None,
-                    execution_pending: false,
-                    id: if hidden_voice { Uuid::new_v4().to_string() } else { message_id.clone() },
-                    conversation_id: id.clone(),
-                    user_id: user_id.into(),
-                    seq: row.message_count,
-                    turn_id: turn_id.clone(),
-                    role: role.into(),
-                    text: text.clone(),
-                    status: "completed".into(),
-                    error_code: None,
-                        upstream_error_code: None,
-                        error_detail: None,
-                    created_at: now,
-                    activities: Vec::new(),
-                    activity_total: 0,
-                    attachments: uploads,
-                    origin: Some(start.origin),
-                    via: (start.origin == TurnOrigin::Channel)
-                        .then(|| {
-                            start
-                                .reply_channel
-                                .as_ref()
-                                .or(start.channel.as_ref())
-                                .map(|channel| channel.platform.clone())
-                        })
-                        .flatten(),
-                };
-                if voice_request.is_none() || hidden_voice {
-                    db.collection::<AssistantMessage>(MESSAGES)
-                        .insert_one(message)
-                        .session(&mut *session)
-                        .await?;
-                }
-                if voice_request.is_some() {
-                    let source_conversation = voice_request
-                        .as_ref()
-                        .map(|request| request.conversation_id.as_str())
-                        .unwrap_or(&id);
-                    db.collection::<bson::Document>(MESSAGES)
-                        .update_one(
-                            doc! {"_id": &message_id, "user_id": user_id, "conversation_id": source_conversation},
-                            doc! {"$set": {"execution_pending": false}},
-                        )
-                        .session(&mut *session)
-                        .await?;
-                }
-                Ok((row, credential))
+                .await
             })
             .await;
             transactions::transaction_result(operation)
@@ -2394,12 +2541,12 @@ pub async fn begin_turn_with_voice(
     super::assistant_agent_credential_service::audit_provision(
         &audit_db,
         &audit_user,
-        &row.id,
-        &credential,
+        &claim.conversation.id,
+        &claim.credential,
         replaced,
     )
     .await;
-    Ok(row)
+    Ok(claim.conversation)
 }
 
 /// The input NyxAgent receives for a claimed turn: the message text, or the

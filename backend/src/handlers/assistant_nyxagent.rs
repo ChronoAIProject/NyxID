@@ -188,7 +188,9 @@ pub struct PlatformTurnOriginResponse {
     manager_authority_epoch: i64,
     personal_control_revision: i64,
 }
-impl From<&crate::models::assistant_conversation::PlatformTurnOrigin> for PlatformTurnOriginResponse {
+impl From<&crate::models::assistant_conversation::PlatformTurnOrigin>
+    for PlatformTurnOriginResponse
+{
     fn from(origin: &crate::models::assistant_conversation::PlatformTurnOrigin) -> Self {
         Self {
             binding_id: origin.thread.binding_id.clone(),
@@ -299,7 +301,10 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
-            platform_origin: turn.platform_origin.as_ref().map(PlatformTurnOriginResponse::from),
+            platform_origin: turn
+                .platform_origin
+                .as_ref()
+                .map(PlatformTurnOriginResponse::from),
             response_id: turn
                 .running_response
                 .as_ref()
@@ -327,7 +332,10 @@ impl From<AssistantConversation> for ConversationResponse {
                 .collect(),
         });
         Self {
-            platform_thread: row.platform_thread.as_ref().map(PlatformThreadResponse::from),
+            platform_thread: row
+                .platform_thread
+                .as_ref()
+                .map(PlatformThreadResponse::from),
             id: row.id,
             title: row.title,
             title_source: row.title_source,
@@ -437,7 +445,10 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
-            platform_origin: row.platform_origin.as_ref().map(PlatformTurnOriginResponse::from),
+            platform_origin: row
+                .platform_origin
+                .as_ref()
+                .map(PlatformTurnOriginResponse::from),
             recovery: None,
             feedback: None,
             steering: row
