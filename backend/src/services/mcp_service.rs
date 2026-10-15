@@ -4784,6 +4784,7 @@ pub async fn execute_tool_resolved(
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&str>,
 ) -> AppResult<McpToolExecutionOutcome> {
+    let managed = super::telnyx_platform_service::contract(&target.service).is_some();
     let lease = super::service_concurrency_service::acquire(
         db,
         &target.service,
@@ -4813,7 +4814,13 @@ pub async fn execute_tool_resolved(
         has_server_credential,
         billing_context_builder,
         catalog_service_slug,
+        lease.clone(),
     );
+    // Preserve the worker's uncertain-outcome classification so approval
+    // redemption cannot replay a dispatched call after capacity-lease loss.
+    if managed {
+        return execution.await;
+    }
     match lease {
         Some(lease) => {
             let mut outcome = lease.run(execution).await?;
@@ -4850,6 +4857,7 @@ fn execute_tool_resolved_boxed<'a>(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&'a str>,
+    service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(execute_tool_resolved_inner(
         http_client,
@@ -4874,6 +4882,7 @@ fn execute_tool_resolved_boxed<'a>(
         has_server_credential,
         billing_context_builder,
         catalog_service_slug,
+        service_lease,
     ))
 }
 
@@ -4901,6 +4910,7 @@ async fn execute_tool_resolved_inner(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&str>,
+    service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -5185,6 +5195,45 @@ async fn execute_tool_resolved_inner(
         &billing_ctx.billing_request_id,
         billing_ctx.credential_class,
     );
+    if super::telnyx_platform_service::contract(&target.service).is_some() {
+        if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
+            return Err(AppError::BadRequest(
+                "This Telnyx platform operation requires direct managed execution".into(),
+            ));
+        }
+        destination_audit.dispatch();
+        let managed = match super::telnyx_platform_service::execute(
+            db,
+            billing.clone(),
+            billing_ctx,
+            target,
+            method.as_str(),
+            &path,
+            query.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            service_lease,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(super::telnyx_platform_service::ManagedExecutionError::OutcomeUnknown(error)) => {
+                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
+            }
+            Err(super::telnyx_platform_service::ManagedExecutionError::Rejected(error)) => {
+                request_audit.admission_error(&error);
+                return Err(error);
+            }
+        };
+        destination_audit.complete(managed.status);
+        request_audit.response(managed.status);
+        return Ok(McpToolExecutionOutcome::Response(ToolResponse {
+            concurrency: None,
+            status: managed.status,
+            text: String::from_utf8(managed.body.to_vec())
+                .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
+            media: None,
+        }));
+    }
     let metered = billing
         .open(&billing_ctx)
         .await

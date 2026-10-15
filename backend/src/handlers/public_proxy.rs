@@ -882,6 +882,7 @@ mod tests {
             };
             let mut service = public_service("pub", "https://example.test", 100);
             service.billing = Some(ServiceBilling {
+                managed_execution: None,
                 platform_billable: false,
                 platform_charge_nyxid_credentials_only: false,
                 platform_metric: None,

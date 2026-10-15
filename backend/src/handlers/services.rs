@@ -398,6 +398,9 @@ impl BillingUpdate {
         let Some(current) = current else {
             return;
         };
+        if !self.present_fields.contains("managed_execution") {
+            self.value.managed_execution = current.managed_execution.clone();
+        }
         if !self
             .present_fields
             .contains("platform_charge_nyxid_credentials_only")
@@ -975,6 +978,7 @@ fn validate_service_billing(billing: Option<&ServiceBilling>) -> AppResult<()> {
     let Some(billing) = billing else {
         return Ok(());
     };
+    crate::services::telnyx_platform_service::validate_billing(billing)?;
 
     if !billing.resale_billable {
         return Ok(());
@@ -1789,6 +1793,13 @@ async fn create_service_inner(
         .await?;
     }
     validate_service_billing(body.billing.as_ref())?;
+    if body
+        .billing
+        .as_ref()
+        .is_some_and(|b| b.managed_execution.is_some())
+    {
+        require_admin(&state, &auth_user).await?;
+    }
 
     let destination_targets = crate::services::destination_routing::normalize_targets(
         &slug,
@@ -1892,6 +1903,7 @@ async fn create_service_inner(
         updated_at: now,
     };
     crate::services::tool_topics::validate_tool_service(&new_service)?;
+    crate::services::telnyx_platform_service::validate_catalog(&new_service)?;
     crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
@@ -2395,7 +2407,10 @@ pub(crate) async fn update_service_inner(
     let mut platform_price_changed = false;
     if let Some(billing) = body.billing.as_mut() {
         billing.preserve_omitted_fields(service.billing.as_ref());
-        if billing.byok_present || billing.platform_present {
+        if billing.byok_present
+            || billing.platform_present
+            || billing.present_fields.contains("managed_execution")
+        {
             require_admin(&state, &auth_user).await?;
         }
         crate::services::billing::pricing::normalize_lane_pricing(
@@ -2958,6 +2973,7 @@ pub(crate) async fn update_service_inner(
         validate_service_billing(body.billing.as_deref())?;
         let next_billing = body.billing.clone().filter(|billing| {
             billing.platform_billable
+                || billing.managed_execution.is_some()
                 || billing.platform_charge_nyxid_credentials_only
                 || billing.platform_metric.is_some()
                 || billing.platform_pricing.is_some()
@@ -3210,6 +3226,15 @@ pub(crate) async fn update_service_inner(
             "At least one field must be provided for update".to_string(),
         ));
     }
+
+    // Validate the complete effective contract, including fields outside the
+    // billing patch (destination, credentials and identity forwarding).
+    let mut managed_proposed =
+        bson::to_document(&service).map_err(|e| AppError::Internal(e.to_string()))?;
+    managed_proposed.extend(set_doc.clone());
+    let managed_proposed: DownstreamService =
+        bson::from_document(managed_proposed).map_err(|e| AppError::Internal(e.to_string()))?;
+    crate::services::telnyx_platform_service::validate_catalog(&managed_proposed)?;
 
     let identity_fields = identity_update_fields(&body);
     let identity_changed = !identity_fields.is_empty();
@@ -7077,6 +7102,31 @@ mod platform_key_request_tests {
             billing.platform_key_pricing.as_ref().unwrap().metric,
             BillingMetric::Tokens
         );
+    }
+
+    #[test]
+    fn legacy_billing_edits_preserve_managed_contract_until_explicitly_cleared() {
+        let current = ServiceBilling {
+            managed_execution: Some(crate::models::service_billing::ManagedExecutionContract {
+                model: "verified/model".into(),
+                max_input_tokens: 8192,
+                max_output_tokens: 512,
+                max_request_bytes: 4096,
+                max_response_bytes: 65536,
+                tariff_version: "v1".into(),
+                tariff_source: "https://api.telnyx.com/v2/pricing/products/inference".into(),
+                tariff_verified_at: Utc::now(),
+            }),
+            ..Default::default()
+        };
+        let mut omitted: BillingUpdate =
+            serde_json::from_value(serde_json::json!({"platform_billable":true})).unwrap();
+        omitted.preserve_omitted_fields(Some(&current));
+        assert_eq!(omitted.managed_execution, current.managed_execution);
+        let mut clear: BillingUpdate =
+            serde_json::from_value(serde_json::json!({"managed_execution":null})).unwrap();
+        clear.preserve_omitted_fields(Some(&current));
+        assert!(clear.managed_execution.is_none());
     }
     #[test]
     fn component_updates_preserve_omissions_clear_explicit_values_and_validate_units() {

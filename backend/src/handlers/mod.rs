@@ -74,6 +74,7 @@ pub mod llms_txt;
 pub mod login_approval;
 pub(crate) mod login_client_context;
 pub mod login_code;
+pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;

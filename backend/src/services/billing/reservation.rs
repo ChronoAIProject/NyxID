@@ -113,6 +113,12 @@ pub async fn gate_and_reserve(
     }
 
     let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    if ctx.managed_admission.is_some() {
+        crate::services::managed_execution_service::validate_reserved_rates(ctx, &layers)?;
+        return super::funding::reserve_and_open_managed(db, ctx, &wallet, layers)
+            .await
+            .map(Some);
+    }
     if ctx.public_admission.is_some() {
         return super::funding::reserve_and_open_public(db, ctx, &wallet, layers)
             .await
@@ -920,6 +926,7 @@ pub async fn abandon_stale_unforwarded(
             "forwarded": false,
             "released": false,
             "updated_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
+            "managed_execution_id": { "$exists": false },
         })
         .await?;
     let mut rows = Vec::new();
