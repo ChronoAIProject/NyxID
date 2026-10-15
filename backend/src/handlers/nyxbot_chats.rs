@@ -300,6 +300,27 @@ pub(super) async fn record_chat_with_relay(
     if let Some(message_id) = relay_message_id {
         set.insert("last_relay_message_id", message_id);
     }
+    if matches!(row.platform.as_str(), "telegram" | "telegram-new")
+        && let Some(message_id) = last_message_id.or(relay_message_id)
+    {
+        let source = state
+            .db
+            .collection::<crate::models::channel_message::ChannelMessage>(
+                crate::models::channel_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": message_id, "channel_bot_id": &row.channel_bot_id})
+            .await?;
+        if let Some(topic) = source
+            .and_then(|source| source.thread_context)
+            .and_then(|facts| facts.telegram_topic)
+        {
+            set.insert(
+                "telegram_topic",
+                bson::to_bson(&topic)
+                    .map_err(|_| AppError::Internal("Invalid outbound topic".into()))?,
+            );
+        }
+    }
     let threads = state.db.collection::<NyxbotThread>(THREADS);
     // Before NyxID passed each message's own chat type on, a group reached
     // through a default route looked like private chats (one per member):
@@ -1449,12 +1470,25 @@ pub(crate) async fn post_current_turn(
         }
         Err(_) => ("failed", None),
     };
-    audit(state,&chat.user_id,"nyxbot_channel_chat_posted",json!({
-        "channel_agent_id":target.channel.id,"chat_id":chat_id,"message_id":message_id,"text_status":status,
-    })).await;
-    Ok(
-        json!({"status":if status=="sent"{"posted"}else{status},"text":status,"images":images,"chat_id":chat_id,"message_id":message_id}),
+    audit(
+        state,
+        &chat.user_id,
+        "nyxbot_channel_chat_posted",
+        json!({
+            "channel_agent_id": target.channel.id,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text_status": status,
+        }),
     )
+    .await;
+    Ok(json!({
+        "status": if status == "sent" { "posted" } else { status },
+        "text": status,
+        "images": images,
+        "chat_id": chat_id,
+        "message_id": message_id,
+    }))
 }
 
 pub(crate) async fn post_automation(
@@ -1591,6 +1625,7 @@ pub(super) async fn send_post_with_fence(
     if channel.channel_bot_id != target.bot.id
         || thread.platform_chat_id != target.thread.platform_chat_id
         || thread.platform_thread_id != target.thread.platform_thread_id
+        || thread.telegram_topic != target.thread.telegram_topic
     {
         return Err(AppError::Conflict("Post target changed".into()));
     }
@@ -1601,7 +1636,7 @@ pub(super) async fn send_post_with_fence(
         ));
     }
     target.adapter.reply_context(
-        target.thread.platform_thread_id.as_deref(),
+        crate::services::channel_image_audience::chat_thread(&target.thread),
         target.thread.created_at,
         &mut outbound.metadata,
     );
@@ -1661,10 +1696,22 @@ async fn post_inner(
         },
     )
     .await?;
-    audit(state, owner, "nyxbot_channel_chat_posted", json!({
-        "channel_agent_id": &target.channel.id, "chat_id": &target.thread.id, "message_id": &sent.message_id,
-    })).await;
-    Ok(json!({"status":"posted", "chat_id": target.thread.id, "message_id": sent.message_id}))
+    audit(
+        state,
+        owner,
+        "nyxbot_channel_chat_posted",
+        json!({
+            "channel_agent_id": &target.channel.id,
+            "chat_id": &target.thread.id,
+            "message_id": &sent.message_id,
+        }),
+    )
+    .await;
+    Ok(json!({
+        "status": "posted",
+        "chat_id": target.thread.id,
+        "message_id": sent.message_id,
+    }))
 }
 
 pub(crate) async fn post_automation_images(
@@ -1688,7 +1735,7 @@ pub(crate) async fn post_automation_images(
         reply_to_platform_message_id: None,
     };
     target.adapter.reply_context(
-        target.thread.platform_thread_id.as_deref(),
+        crate::services::channel_image_audience::chat_thread(&target.thread),
         target.thread.created_at,
         &mut outbound.metadata,
     );
@@ -1752,6 +1799,35 @@ pub(crate) async fn post_automation_images(
             report.failed += 1;
             report.attempted += 1;
             continue;
+        }
+        match crate::services::channel_image_delivery::read_legacy(
+            &state.db,
+            &run.user_id,
+            &item.conversation_id,
+            &item.turn_id,
+            &target.channel.id,
+            &item.attachment.id,
+        )
+        .await
+        {
+            Ok(Some(outcome)) => {
+                report
+                    .outcomes
+                    .push(super::images::legacy_item(&item.attachment.id, outcome));
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                report.outcomes.push(super::images::ImageItemResult {
+                    attachment_id: item.attachment.id.clone(),
+                    status: "unknown".into(),
+                    code: None,
+                });
+                report.unknown += 1;
+                report.attempted += 1;
+                stop = Some("after_unknown");
+                continue;
+            }
         }
         let existing = match crate::services::channel_image_delivery::read(
             &state.db,
@@ -1868,10 +1944,23 @@ pub(crate) async fn post_automation_images(
         },
     )
     .await?;
-    audit(state,&run.user_id,"nyxbot_channel_chat_posted",json!({"channel_agent_id":target.channel.id,"chat_id":chat_id,"message_id":sent.message_id})).await;
-    Ok(
-        json!({"status":"posted","chat_id":chat_id,"message_id":sent.message_id,"images":super::images::image_result(&report)}),
+    audit(
+        state,
+        &run.user_id,
+        "nyxbot_channel_chat_posted",
+        json!({
+            "channel_agent_id": target.channel.id,
+            "chat_id": chat_id,
+            "message_id": sent.message_id,
+        }),
     )
+    .await;
+    Ok(json!({
+        "status": "posted",
+        "chat_id": chat_id,
+        "message_id": sent.message_id,
+        "images": super::images::image_result(&report),
+    }))
 }
 
 /// Chats given to a destroyed agent go back to their bot's agent (in new

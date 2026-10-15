@@ -1,5 +1,39 @@
 use crate::services::channel_platform::OutboundReply;
 
+pub fn chat_thread(thread: &crate::models::nyxbot_channel::NyxbotThread) -> Option<&str> {
+    match thread.telegram_topic.as_ref() {
+        Some(crate::models::channel_thread::TelegramTopic::Chat) => None,
+        Some(crate::models::channel_thread::TelegramTopic::Topic { id }) => Some(id),
+        None => thread.platform_thread_id.as_deref(),
+    }
+}
+
+pub fn message_thread(message: &crate::models::channel_message::ChannelMessage) -> Option<&str> {
+    match message
+        .thread_context
+        .as_ref()
+        .and_then(|facts| facts.telegram_topic.as_ref())
+    {
+        Some(crate::models::channel_thread::TelegramTopic::Chat) => None,
+        Some(crate::models::channel_thread::TelegramTopic::Topic { id }) => Some(id),
+        None => message.thread_id.as_deref(),
+    }
+}
+
+pub fn facts_thread<'a>(
+    platform: &str,
+    facts: &'a crate::models::channel_thread::ChannelThreadFacts,
+) -> Option<&'a str> {
+    if platform == "slack" {
+        return facts.root_id.as_deref();
+    }
+    match facts.telegram_topic.as_ref() {
+        Some(crate::models::channel_thread::TelegramTopic::Chat) => None,
+        Some(crate::models::channel_thread::TelegramTopic::Topic { id }) => Some(id),
+        None => facts.native_thread_id.as_deref(),
+    }
+}
+
 pub fn native_thread(platform: &str, reply: &OutboundReply) -> Option<String> {
     match platform {
         "telegram" | "telegram-new" => reply

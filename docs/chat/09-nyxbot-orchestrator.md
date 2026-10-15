@@ -801,6 +801,14 @@ per-image counts (`sent_now`, `previously_delivered`, `failed`, `skipped`,
 this call's attempts. Tool-image notes mention `include_images` when the turn's
 images would not otherwise reach a chat the agent posts to. Guests cannot post.
 
+Upgrade from 0.71.0 keeps v1 image barriers in `nyxbot_image_deliveries`
+(read-only, original seven-day TTL) before every v2 attempt in the separate
+`nyxbot_image_deliveries_v2` collection. The guard matches the source turn and
+NyxBot channel across all aliases, so it may suppress another chat's image
+rather than duplicate an old send. Concurrent old/new sends during rollout
+remain a residual risk. Remove compatibility one release later and at least
+seven days after deploy; see `CHANNEL_BOT_RELAY.md` for state rules and rollback.
+
 **UI.** Under each agent, a bot's chats are one collapsed section (label,
 platform, count, a dot while one is working) that opens for the thread being
 viewed and shows five chats, then more on request. Each thread row shows a

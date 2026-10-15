@@ -954,7 +954,29 @@ chats, chat-delivered automations and explicit `nyxid__post_to_chat
 include_images` posts). Uncertain or in-progress sends are never retried and
 never reported as delivered.
 
-**Claim (v2).** `nyxbot_image_deliveries` holds one document per (source
+Release 0.71.0 includes #1889 and its v1 image claims. Before any v2 claim,
+new replicas read `nyxbot_image_deliveries` for the same owner, conversation,
+turn and NyxBot channel, across every destination alias (`inbound:`, `thread:`,
+`chat:`, `initiated:`). A sent item reports `previously_delivered`; sending,
+unknown, or a pending item in a sending batch reports `in_progress_or_unknown`.
+Failures and unrecognized skips retain their old outcome. Only a pending batch
+or a skip code v1 set before dispatch (`deadline`, `after_unknown`, `billing`)
+permits a new v2 attempt. No new code rewrites the v1 rows; their existing
+seven-day `expires_at` TTL stays. Existing conversation/user deletion still
+purges their metadata.
+
+This guard is deliberately conservative across all audiences of the same bot
+for that turn: it can suppress a second chat's image during the seven-day
+window. It covers old-replica sends completed before the new replica reads.
+An old 0.71.0 replica and a new replica can still race between the read and
+claim during rolling deployment; concurrent duplicates remain a rollout risk.
+There is no mixed-fleet guarantee and no data repair is needed. Rollback to
+0.71.0 restores its old behavior and ignores v2 claims, so it does not preserve
+the new delivery invariant. Remove the v1 read path and collection/index one
+release after this change ships, at least seven days after deployment; track
+that sunset in the PR description.
+
+**Claim (v2).** `nyxbot_image_deliveries_v2` holds one document per (source
 image, audience): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
 plus plain `user_id`, `conversation_id`, `attachment_id`, `audience_key`,
 `state`, `attempt`, `code` and `created_at`, with cleanup indexes on
@@ -968,6 +990,14 @@ locally as `unknown`, and a claim found `sending` reports
 `in_progress_or_unknown`. A later caller reports an existing claim's durable
 state (`previously_delivered`, the same failure or skip code, in progress or
 unknown) without resending and without repeating another path's failure line.
+A definite refusal before any provider request (cancelled, deadline,
+after-unknown, billing preflight or another pre-dispatch error) releases its
+own `sending{attempt}` back to `pending` with an attempt-token CAS, clearing
+attempt and code. This call reports the skip or failure; a later post or
+automation may acquire the pending image. Unsupported audiences, missing
+anchors and unavailable sources remain permanent refusals. Once provider I/O
+begins, even a timeout or failed settlement retains the durable barrier and
+never releases it for retry.
 Claims live as long as their source image: they are deleted in the same
 transactions that delete `assistant_attachments` (retention, conversation and
 group deletion, user purge), a sender that finds its source gone after claiming
@@ -994,23 +1024,23 @@ id). Per adapter:
 
 The Telegram and Slack adapters build their outbound `message_thread_id` /
 `thread_ts` from the same `native_thread` function the audience uses, so the
-key and the provider payload cannot drift. Telegram topic evidence is
-`is_topic_message: true` only (`telegram::topic_of`, shared by the relay
-parser and the follow-scope thread facts): Telegram also stamps replies in
-plain supergroups and in a forum's General topic with `message_thread_id`
-(the reply-chain root), and `chat.is_forum` alone proves nothing, so those
-stay chat-level. Gateway Activities carry no native payload; for Telegram
-channels NyxID keeps `conversation.thread_id` only when version 1
-`activity.thread` facts say `topic` (its decimal `native_thread_id`), or,
-without facts, when it is a positive integer sent for a forum topic under the
-gateway contract. Version 1 reply-chain facts make the message chat-level
-even if the gateway sent an id. NyxID validates Lark and Feishu facts only
-(`gateway::retain`); Telegram facts are the gateway's declaration.
+key and the provider payload cannot drift.
+
+Inbound Telegram thread keys and follow-scope classification remain unchanged.
+Native `message_thread_id` and gateway `conversation.thread_id` continue to
+select existing conversations, including reply chains. Separate additive
+`telegram_topic` evidence selects the outbound target and image audience:
+native messages require `is_topic_message: true`; gateway version 1 facts
+must declare a topic and positive decimal native ID. Explicit reply-chain
+evidence sends at chat level without changing its inbound partition. Legacy
+anchors without evidence retain their old outbound target. Old replicas ignore
+the additive field and reuse the same conversation keys; there is no migration.
+The image guarantee applies only after every replica is upgraded.
 
 **Topics.** Agent-initiated posts (`nyxid__post_to_chat` and chat-delivered
 automation results) keep the thread's native topic
-(`NyxbotThread.platform_thread_id`: a Telegram forum topic or a Slack root
-thread) for text and images through the adapter's `reply_context`; a topic is
+(the separate Telegram topic evidence, falling back to legacy
+`platform_thread_id`, or a Slack root thread) for text and images through the adapter's `reply_context`; a topic is
 therefore its own audience, and the parent chat is another.
 
 **Explicit posts and automations.** `include_images` (default false) sends the

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use bson::{Document, doc};
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::{Database, IndexModel};
+use mongodb::{Database, IndexModel, options::IndexOptions};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -12,7 +12,8 @@ use crate::{
     models::{
         assistant_attachment::COLLECTION_NAME as ATTACHMENTS,
         nyxbot_image_delivery::{
-            COLLECTION_NAME as CLAIMS, ImageDeliveryState, NyxbotImageDelivery,
+            COLLECTION_NAME as CLAIMS, ImageDeliveryState, LEGACY_COLLECTION_NAME as LEGACY,
+            NyxbotImageDelivery,
         },
     },
 };
@@ -24,6 +25,21 @@ pub fn image_delivery_id(owner: &str, attachment: &str, audience: &str) -> Strin
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    db.collection::<Document>(LEGACY)
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"expires_at": 1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::ZERO)
+                        .build(),
+                )
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"user_id": 1, "conversation_id": 1, "turn_id": 1, "channel_id": 1})
+                .build(),
+        ])
+        .await?;
     db.collection::<Document>(CLAIMS)
         .create_indexes([
             IndexModel::builder()
@@ -40,7 +56,99 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
 pub enum ImageClaim {
     Dispatch { id: String, attempt: String },
     Existing(NyxbotImageDelivery),
+    Legacy(LegacyImageOutcome),
     Unknown,
+}
+
+pub struct LegacyImageOutcome {
+    pub state: ImageDeliveryState,
+    pub code: Option<String>,
+}
+
+/// V1 aliases do not prove an audience. Any possible prior effect on this
+/// channel suppresses the image for all its audiences until the row expires.
+pub async fn read_legacy(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+    channel: &str,
+    attachment: &str,
+) -> AppResult<Option<LegacyImageOutcome>> {
+    let mut rows = db
+        .collection::<Document>(LEGACY)
+        .find(doc! {
+            "user_id": owner, "conversation_id": conversation, "turn_id": turn,
+            "channel_id": channel, "items.id": attachment,
+        })
+        .projection(doc! {"state": 1, "items": 1})
+        .await?;
+    let mut result: Option<LegacyImageOutcome> = None;
+    while let Some(row) = rows.try_next().await? {
+        let Ok(items) = row.get_array("items") else {
+            result = Some(LegacyImageOutcome {
+                state: ImageDeliveryState::Sending,
+                code: None,
+            });
+            continue;
+        };
+        for item in items
+            .iter()
+            .filter_map(bson::Bson::as_document)
+            .filter(|item| item.get_str("id").ok() == Some(attachment))
+        {
+            let code = item.get_str("code").ok();
+            let state = match item.get_str("state").ok() {
+                Some("sent") => {
+                    return Ok(Some(LegacyImageOutcome {
+                        state: ImageDeliveryState::Sent,
+                        code: code.map(str::to_owned),
+                    }));
+                }
+                Some("pending") if row.get_str("state").ok() == Some("pending") => continue,
+                // V1 assigned these skip codes before calling send_one. Failure
+                // codes also came from adapters, so they cannot prove no I/O.
+                Some("skipped")
+                    if matches!(code, Some("deadline" | "after_unknown" | "billing")) =>
+                {
+                    continue;
+                }
+                Some("failed") => ImageDeliveryState::Failed,
+                Some("skipped") => ImageDeliveryState::Skipped,
+                _ => ImageDeliveryState::Sending,
+            };
+            let rank = |state| match state {
+                ImageDeliveryState::Sending => 3,
+                ImageDeliveryState::Failed => 2,
+                _ => 1,
+            };
+            if result
+                .as_ref()
+                .is_none_or(|previous| rank(state) > rank(previous.state))
+            {
+                result = Some(LegacyImageOutcome {
+                    state,
+                    code: code.map(str::to_owned),
+                });
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub async fn claim_for_turn(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+    channel: &str,
+    attachment: &str,
+    audience: &str,
+) -> AppResult<ImageClaim> {
+    if let Some(outcome) = read_legacy(db, owner, conversation, turn, channel, attachment).await? {
+        return Ok(ImageClaim::Legacy(outcome));
+    }
+    claim_v2(db, owner, conversation, attachment, audience).await
 }
 
 pub async fn read(
@@ -55,7 +163,7 @@ pub async fn read(
         .await?)
 }
 
-pub async fn claim(
+async fn claim_v2(
     db: &Database,
     owner: &str,
     conversation: &str,
@@ -98,6 +206,17 @@ pub async fn claim(
     }
 }
 
+#[cfg(test)]
+pub async fn claim(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    attachment: &str,
+    audience: &str,
+) -> AppResult<ImageClaim> {
+    claim_v2(db, owner, conversation, attachment, audience).await
+}
+
 pub enum ImageCompletion {
     Recorded,
     Existing(NyxbotImageDelivery),
@@ -127,6 +246,29 @@ pub async fn finish(
     {
         Ok(result) if result.matched_count == 1 => Ok(ImageCompletion::Recorded),
         Ok(_) => Ok(match collection.find_one(doc! {"_id":id}).await {
+            Ok(Some(row)) => ImageCompletion::Existing(row),
+            _ => ImageCompletion::Unknown,
+        }),
+        Err(_) => Ok(ImageCompletion::Unknown),
+    }
+}
+
+/// Release only an attempt whose caller proved that no provider I/O started.
+/// An old attempt token cannot release a later sender's claim.
+pub async fn release(db: &Database, id: &str, attempt: &str) -> AppResult<ImageCompletion> {
+    let collection = db.collection::<NyxbotImageDelivery>(CLAIMS);
+    match collection
+        .update_one(
+            doc! {"_id": id, "state": "sending", "attempt": attempt},
+            doc! {
+                "$set": {"state": "pending"},
+                "$unset": {"attempt": "", "code": ""},
+            },
+        )
+        .await
+    {
+        Ok(result) if result.matched_count == 1 => Ok(ImageCompletion::Recorded),
+        Ok(_) => Ok(match collection.find_one(doc! {"_id": id}).await {
             Ok(Some(row)) => ImageCompletion::Existing(row),
             _ => ImageCompletion::Unknown,
         }),
@@ -214,6 +356,267 @@ mod tests {
         }).await.unwrap();
     }
 
+    fn legacy_row(
+        attachment: &str,
+        alias: &str,
+        state: &str,
+        item_state: &str,
+        code: Option<&str>,
+    ) -> Document {
+        doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": "owner",
+            "conversation_id": "conversation", "turn_id": "turn", "channel_id": "channel",
+            "destination_key": format!("{alias}:destination"), "state": state,
+            "claim_id": "old-attempt", "items": [{"id": attachment, "state": item_state, "code": code}],
+            "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::days(7)),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_image_claims_block_all_aliases_for_sent_and_uncertain_items() {
+        let db = crate::test_utils::connect_transaction_test_database("image_v1_barriers").await;
+        for alias in ["inbound", "thread", "chat", "initiated"] {
+            for (state, item_state, expected) in [
+                ("done", "sent", ImageDeliveryState::Sent),
+                ("sending", "sending", ImageDeliveryState::Sending),
+                ("done", "unknown", ImageDeliveryState::Sending),
+                ("sending", "pending", ImageDeliveryState::Sending),
+            ] {
+                let attachment = format!("{alias}-{item_state}");
+                let row = legacy_row(&attachment, alias, state, item_state, None);
+                db.collection::<Document>(LEGACY)
+                    .insert_one(&row)
+                    .await
+                    .unwrap();
+                for audience in ["first-chat", "second-chat-topic"] {
+                    assert!(matches!(
+                        claim_for_turn(&db, "owner", "conversation", "turn", "channel", &attachment, audience).await.unwrap(),
+                        ImageClaim::Legacy(outcome) if outcome.state == expected
+                    ));
+                }
+                assert_eq!(
+                    db.collection::<Document>(LEGACY)
+                        .find_one(doc! {"_id": &row["_id"]})
+                        .await
+                        .unwrap(),
+                    Some(row)
+                );
+            }
+        }
+        let uncertain = legacy_row("mixed", "inbound", "sending", "unknown", None);
+        let sent = legacy_row("mixed", "initiated", "done", "sent", None);
+        db.collection::<Document>(LEGACY)
+            .insert_many([uncertain, sent])
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim_for_turn(&db, "owner", "conversation", "turn", "channel", "mixed", "audience").await.unwrap(),
+            ImageClaim::Legacy(outcome) if outcome.state == ImageDeliveryState::Sent
+        ));
+        assert_eq!(
+            db.collection::<Document>(CLAIMS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_image_claims_ignore_other_sources_and_allow_absent_images() {
+        let db = crate::test_utils::connect_transaction_test_database("image_v1_sources").await;
+        for field in ["user_id", "conversation_id", "turn_id", "channel_id"] {
+            let mut row = legacy_row("A", "inbound", "done", "sent", None);
+            row.insert(field, "other");
+            db.collection::<Document>(LEGACY)
+                .insert_one(row)
+                .await
+                .unwrap();
+        }
+        db.collection::<Document>(LEGACY)
+            .insert_one(legacy_row("another-image", "chat", "done", "sent", None))
+            .await
+            .unwrap();
+        for attachment in ["A", "absent"] {
+            assert!(matches!(
+                claim_for_turn(
+                    &db,
+                    "owner",
+                    "conversation",
+                    "turn",
+                    "channel",
+                    attachment,
+                    "audience"
+                )
+                .await
+                .unwrap(),
+                ImageClaim::Dispatch { .. }
+            ));
+        }
+        assert_eq!(
+            db.collection::<Document>(CLAIMS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            2
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_image_claims_retry_only_proven_pre_dispatch_states() {
+        let db = crate::test_utils::connect_transaction_test_database("image_v1_preflight").await;
+        for (index, (state, item_state, code, retry)) in [
+            ("done", "skipped", Some("deadline"), true),
+            ("done", "skipped", Some("after_unknown"), true),
+            ("done", "skipped", Some("billing"), true),
+            ("pending", "pending", None, true),
+            ("done", "failed", Some("billing"), false),
+            ("done", "failed", Some("platform_error"), false),
+            ("done", "skipped", Some("unrecognized"), false),
+            ("done", "pending", None, false),
+            ("done", "unrecognized", None, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let attachment = index.to_string();
+            let row = legacy_row(&attachment, "thread", state, item_state, code);
+            db.collection::<Document>(LEGACY)
+                .insert_one(&row)
+                .await
+                .unwrap();
+            let result = claim_for_turn(
+                &db,
+                "owner",
+                "conversation",
+                "turn",
+                "channel",
+                &attachment,
+                "audience",
+            )
+            .await
+            .unwrap();
+            if retry {
+                assert!(matches!(result, ImageClaim::Dispatch { .. }));
+            } else {
+                let ImageClaim::Legacy(outcome) = result else {
+                    panic!("legacy barrier")
+                };
+                assert_eq!(outcome.code.as_deref(), code);
+                assert_eq!(
+                    outcome.state,
+                    match item_state {
+                        "failed" => ImageDeliveryState::Failed,
+                        "skipped" => ImageDeliveryState::Skipped,
+                        _ => ImageDeliveryState::Sending,
+                    }
+                );
+            }
+            assert_eq!(
+                db.collection::<Document>(LEGACY)
+                    .find_one(doc! {"_id": &row["_id"]})
+                    .await
+                    .unwrap(),
+                Some(row)
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_image_ttl_and_v2_documents_stay_separate() {
+        let db = crate::test_utils::connect_transaction_test_database("image_v1_v2_indexes").await;
+        ensure_indexes(&db).await.unwrap();
+        source(&db, "A").await;
+        let mut row = legacy_row("A", "chat", "done", "sent", None);
+        row.insert("_id", image_delivery_id("owner", "A", "audience"));
+        row.insert("turn_id", "another-turn");
+        db.collection::<Document>(LEGACY)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim_for_turn(
+                &db,
+                "owner",
+                "conversation",
+                "turn",
+                "channel",
+                "A",
+                "audience"
+            )
+            .await
+            .unwrap(),
+            ImageClaim::Dispatch { .. }
+        ));
+        ensure_indexes(&db).await.unwrap();
+        let claim = read(&db, "owner", "A", "audience").await.unwrap().unwrap();
+        assert_eq!(claim.state, ImageDeliveryState::Sending);
+        assert!(sweep_orphans(&db, "", 10).await.unwrap().is_empty());
+        assert_eq!(
+            read(&db, "owner", "A", "audience")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            claim.id
+        );
+        db.collection::<Document>(ATTACHMENTS)
+            .delete_one(doc! {"_id": "A"})
+            .await
+            .unwrap();
+        assert!(sweep_orphans(&db, "", 10).await.unwrap().is_empty());
+        assert!(read(&db, "owner", "A", "audience").await.unwrap().is_none());
+        assert_eq!(
+            db.collection::<Document>(LEGACY)
+                .find_one(doc! {"_id": &row["_id"]})
+                .await
+                .unwrap(),
+            Some(row)
+        );
+        assert_eq!(
+            db.collection::<Document>(CLAIMS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let old_indexes: Vec<_> = db
+            .collection::<Document>(LEGACY)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(old_indexes.iter().any(|index| {
+            index.keys == doc! {"expires_at": 1}
+                && index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.expire_after)
+                    == Some(std::time::Duration::ZERO)
+        }));
+        let new_indexes: Vec<_> = db
+            .collection::<Document>(CLAIMS)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(new_indexes.iter().all(|index| {
+            index
+                .options
+                .as_ref()
+                .is_none_or(|options| options.expire_after.is_none())
+        }));
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn channel_image_claims_arbitrate_each_image_and_audience_and_report_durable_states() {
         let db = crate::test_utils::connect_transaction_test_database("channel_image_v2").await;
@@ -234,7 +637,7 @@ mod tests {
                     assert_eq!(row.state, ImageDeliveryState::Sending);
                     peers += 1;
                 }
-                ImageClaim::Unknown => {
+                ImageClaim::Unknown | ImageClaim::Legacy(_) => {
                     panic!("Acknowledged competing claims must have a durable winner")
                 }
             }
@@ -404,7 +807,63 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a private MongoDB replica set with enableTestCommands=true; run explicitly"]
+    async fn channel_image_release_is_attempt_fenced_and_cannot_reset_terminal_effects() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("channel_image_release").await;
+        let ImageClaim::Dispatch { id, attempt: first } =
+            claim(&db, "owner", "conversation", "A", "audience")
+                .await
+                .unwrap()
+        else {
+            panic!("new claim")
+        };
+        assert!(
+            matches!(release(&db, &id, "stale").await.unwrap(), ImageCompletion::Existing(row) if row.state == ImageDeliveryState::Sending)
+        );
+        assert!(matches!(
+            release(&db, &id, &first).await.unwrap(),
+            ImageCompletion::Recorded
+        ));
+        let pending = read(&db, "owner", "A", "audience").await.unwrap().unwrap();
+        assert_eq!(pending.state, ImageDeliveryState::Pending);
+        assert!(pending.attempt.is_none() && pending.code.is_none());
+        let ImageClaim::Dispatch {
+            attempt: second, ..
+        } = claim(&db, "owner", "conversation", "A", "audience")
+            .await
+            .unwrap()
+        else {
+            panic!("released claim")
+        };
+        assert_ne!(first, second);
+        assert!(
+            matches!(release(&db, &id, &first).await.unwrap(), ImageCompletion::Existing(row) if row.state == ImageDeliveryState::Sending)
+        );
+        for state in [
+            ImageDeliveryState::Sent,
+            ImageDeliveryState::Failed,
+            ImageDeliveryState::Unknown,
+        ] {
+            let audience = state.as_str();
+            let ImageClaim::Dispatch { id, attempt } =
+                claim(&db, "owner", "conversation", "B", audience)
+                    .await
+                    .unwrap()
+            else {
+                panic!("new claim")
+            };
+            finish(&db, &id, &attempt, state, None).await.unwrap();
+            assert!(
+                matches!(release(&db, &id, &attempt).await.unwrap(), ImageCompletion::Existing(row) if row.state == state)
+            );
+            assert!(
+                matches!(claim(&db, "owner", "conversation", "B", audience).await.unwrap(), ImageClaim::Existing(row) if row.state == state)
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn channel_image_claims_fail_closed_on_uncommitted_and_committed_uncertain_writes() {
         let base =
             crate::test_utils::connect_transaction_test_database("channel_image_write_faults")
@@ -436,7 +895,21 @@ mod tests {
         };
         // A rejected acquisition never authorizes dispatch; the pending claim
         // can safely be acquired by a later acknowledged CAS.
-        fail(false).await.unwrap();
+        if let Err(error) = fail(false).await {
+            if matches!(
+                error.kind.as_ref(),
+                mongodb::error::ErrorKind::Command(command)
+                    if matches!(command.code, 13 | 59 | 115)
+            ) {
+                eprintln!(
+                    "Skipping image uncertain-write fault test: configureFailPoint was rejected; \
+                     enable MongoDB test commands and grant failpoint authority ({error})"
+                );
+                base.drop().await.unwrap();
+                return;
+            }
+            panic!("Failed to configure image write fault: {error}");
+        }
         assert!(matches!(
             claim(&db, "owner", "conversation", "A", "rejected")
                 .await

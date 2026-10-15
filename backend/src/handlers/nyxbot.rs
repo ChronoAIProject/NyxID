@@ -3680,9 +3680,7 @@ async fn gateway_inbound(
     let conversation = &activity["conversation"];
     let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
     let chat_id = conversation["id"].as_str().unwrap_or_default();
-    let thread_id =
-        crate::services::channel_adapters::telegram::gateway_thread_id(&row.platform, activity);
-    let thread_id = thread_id.as_deref();
+    let thread_id = conversation["thread_id"].as_str();
     if crate::services::channel_thread_service::gateway::candidate(row, activity)
         && let Some(result) = Box::pin(thread_follow::gateway_inbound(
             state, row, activity, text, event_key,
@@ -3723,6 +3721,21 @@ async fn gateway_inbound(
     // Keep the exact private-chat mapping for a later flag-off return to
     // the relay; no mentioned names, sender IDs or message content are added.
     let mut metadata = doc! {};
+    if matches!(row.platform.as_str(), "telegram" | "telegram-new") {
+        use crate::models::channel_thread::TelegramTopic;
+        let topic = match crate::services::channel_adapters::telegram::gateway_topic_id(
+            &row.platform,
+            activity,
+        ) {
+            Some(id) => TelegramTopic::Topic { id },
+            None => TelegramTopic::Chat,
+        };
+        metadata.insert(
+            "telegram_topic",
+            bson::to_bson(&topic)
+                .map_err(|_| AppError::Internal("Invalid outbound topic".into()))?,
+        );
+    }
     if kind == "private" && human && !sender.id.is_empty() {
         metadata.insert(
             "relay_partition",

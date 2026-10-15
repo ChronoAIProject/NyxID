@@ -627,6 +627,7 @@ impl PlatformAdapter for SlackAdapter {
                     Some(&self.base_url),
                 )
                 .await?;
+                crate::services::channel_platform::mark_provider_attempt();
                 let response = client
                     .put(url)
                     .body(attachment.bytes.clone())

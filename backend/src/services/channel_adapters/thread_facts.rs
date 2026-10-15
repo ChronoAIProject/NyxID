@@ -56,8 +56,11 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
         .get("message")
         .or_else(|| raw.get("edited_message"))
         .or_else(|| raw.get("channel_post"))?;
-    // See `telegram::topic_of`.
-    let topic = super::telegram::topic_of(native);
+    // message_thread_id can also appear on non-forum reply threads. Only
+    // positive forum evidence makes the follow scope an entire topic.
+    let topic = (native["is_topic_message"] == true || native["chat"]["is_forum"] == true)
+        .then(|| numeric_id(&native["message_thread_id"]))
+        .flatten();
     let mut facts = base(
         message,
         if topic.is_some() {
@@ -71,6 +74,10 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
     } else {
         human(native["from"]["is_bot"].as_bool())
     };
+    facts.telegram_topic = Some(match super::telegram::topic_of(native) {
+        Some(id) => crate::models::channel_thread::TelegramTopic::Topic { id },
+        None => crate::models::channel_thread::TelegramTopic::Chat,
+    });
     facts.native_thread_id = topic.clone();
     facts.root_id = topic.or_else(|| {
         facts
@@ -508,42 +515,26 @@ mod tests {
     }
 
     #[test]
-    fn telegram_follow_scope_is_a_topic_only_for_messages_telegram_flags_as_topic() {
+    fn telegram_outbound_topic_evidence_preserves_existing_follow_scope() {
+        use crate::models::channel_thread::TelegramTopic;
         let bot = bot();
-        let topic = telegram(&inbound(reply(true, true)), &bot).unwrap();
-        assert_eq!(topic.kind, ThreadKind::Topic);
-        assert_eq!(topic.native_thread_id.as_deref(), Some("16"));
-        assert_eq!(topic.root_id.as_deref(), Some("16"));
-        // A reply chain in a plain supergroup and one inside a forum's
-        // General topic carry the same field: neither is a topic.
         for forum in [false, true] {
-            let chain = telegram(&inbound(reply(false, forum)), &bot).unwrap();
-            assert_eq!(chain.kind, ThreadKind::ReplyChain, "forum flag {forum}");
-            assert_eq!(chain.native_thread_id, None);
-            assert_eq!(chain.parent_message_id.as_deref(), Some("16"));
-            assert!(
-                chain.root_id.is_none(),
-                "an immediate parent is not a proven root"
+            let facts = telegram(&inbound(reply(false, forum)), &bot).unwrap();
+            assert_eq!(facts.telegram_topic, Some(TelegramTopic::Chat));
+            assert_eq!(
+                facts.kind,
+                if forum {
+                    ThreadKind::Topic
+                } else {
+                    ThreadKind::ReplyChain
+                },
             );
         }
-        // Only the literal boolean counts, and only with a positive id.
-        let mut falsy = reply(false, true);
-        falsy["is_topic_message"] = json!("true");
+        let topic = telegram(&inbound(reply(true, true)), &bot).unwrap();
+        assert_eq!(topic.kind, ThreadKind::Topic);
         assert_eq!(
-            telegram(&inbound(falsy), &bot).unwrap().kind,
-            ThreadKind::ReplyChain
-        );
-        let mut zero = reply(true, true);
-        zero["message_thread_id"] = json!(0);
-        assert_eq!(
-            telegram(&inbound(zero), &bot).unwrap().kind,
-            ThreadKind::ReplyChain
-        );
-        let mut no_id = reply(true, true);
-        no_id.as_object_mut().unwrap().remove("message_thread_id");
-        assert_eq!(
-            telegram(&inbound(no_id), &bot).unwrap().kind,
-            ThreadKind::ReplyChain
+            topic.telegram_topic,
+            Some(TelegramTopic::Topic { id: "16".into() })
         );
     }
 }

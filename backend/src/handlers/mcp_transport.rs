@@ -345,7 +345,6 @@ pub(crate) fn image_note(
             ImageNoteDestination::App
                 | ImageNoteDestination::Group { .. }
                 | ImageNoteDestination::AppViaTrigger
-                | ImageNoteDestination::Trigger { .. }
         )
     {
         note.push_str(" If the owner asked you to post to a chat, use nyxid__post_to_chat with include_images:true to include this turn's tool images in that post.");
@@ -8065,6 +8064,9 @@ mod image_note_tests {
                 group_id: "group".into(),
             },
             ImageNoteDestination::AppViaTrigger,
+            ImageNoteDestination::Trigger {
+                run_id: "run".into(),
+            },
             ImageNoteDestination::Chat {
                 platform: "telegram-new".into(),
                 threads: 2,

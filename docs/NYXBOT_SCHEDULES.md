@@ -391,6 +391,16 @@ the image is counted as failed. The single result-attempt claim and the
 error/Stop semantics are unchanged. Screenshots and images of an unrelated
 owner turn in the same home thread never enter a run.
 
+During the upgrade from 0.71.0, automation image delivery also honors v1
+claims for each reference's original conversation/turn and NyxBot channel,
+across all destination aliases. Previously sent or uncertain v1 items do not
+consume the eight-image first-send budget. The conservative guard may suppress
+a second audience of that bot until the old seven-day TTL expires. V2 claims
+use `nyxbot_image_deliveries_v2`; old rows and their TTL remain intact. Concurrent
+old/new replicas can still race during rollout. Remove the v1 read path and
+collection/index one release later, at least seven days after deployment;
+see `CHANNEL_BOT_RELAY.md` for the full compatibility contract.
+
 Final delivery is claimed once. If a replica dies around a remote send, recovery
 reports `result_delivery_interrupted` rather than duplicating an ambiguous send.
 Schedule-to-webhook delivery retains the existing signed delivery record and

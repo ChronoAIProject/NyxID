@@ -454,7 +454,7 @@ pub(crate) fn image_reply_audience(
         reply_to_platform_message_id: original.platform_message_id.clone(),
     };
     adapter.reply_context(
-        original.thread_id.as_deref(),
+        crate::services::channel_image_audience::message_thread(original),
         original.created_at,
         &mut reply.metadata,
     );
@@ -1583,7 +1583,7 @@ async fn deliver_reply(
     };
     outbound.reply_to_platform_message_id = original.platform_message_id.clone();
     adapter.reply_context(
-        original.thread_id.as_deref(),
+        crate::services::channel_image_audience::message_thread(&original),
         original.created_at,
         &mut outbound.metadata,
     );

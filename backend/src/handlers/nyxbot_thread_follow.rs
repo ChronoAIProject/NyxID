@@ -695,11 +695,8 @@ pub(super) async fn bound_image_audience(
         attachments: Vec::new(),
         reply_to_platform_message_id: Some(target.facts().message_id.clone()),
     };
-    let thread = if bot.platform == "slack" {
-        target.facts().root_id.as_deref()
-    } else {
-        target.facts().native_thread_id.as_deref()
-    };
+    let thread =
+        crate::services::channel_image_audience::facts_thread(&bot.platform, target.facts());
     adapter.reply_context(thread, chrono::Utc::now(), &mut outbound.metadata);
     Ok(crate::services::channel_image_audience::resolve(
         &bot.id,

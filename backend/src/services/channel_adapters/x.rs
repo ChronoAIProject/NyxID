@@ -279,6 +279,7 @@ fn response_error_with(
 }
 
 async fn send(request: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+    crate::services::channel_platform::mark_provider_attempt();
     request
         .timeout(Duration::from_secs(20))
         .send()

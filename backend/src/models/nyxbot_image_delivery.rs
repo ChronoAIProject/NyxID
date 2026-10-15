@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const COLLECTION_NAME: &str = "nyxbot_image_deliveries";
+pub const COLLECTION_NAME: &str = "nyxbot_image_deliveries_v2";
+pub const LEGACY_COLLECTION_NAME: &str = "nyxbot_image_deliveries";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

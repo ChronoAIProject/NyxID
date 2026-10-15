@@ -138,7 +138,22 @@ impl ImageReport {
 }
 
 pub(super) fn existing_item(row: &NyxbotImageDelivery) -> ImageItemResult {
-    let status = match row.state {
+    existing_outcome(&row.attachment_id, row.state, row.code.clone())
+}
+
+pub(super) fn legacy_item(
+    attachment: &str,
+    outcome: claims::LegacyImageOutcome,
+) -> ImageItemResult {
+    existing_outcome(attachment, outcome.state, outcome.code)
+}
+
+fn existing_outcome(
+    attachment: &str,
+    state: ImageDeliveryState,
+    code: Option<String>,
+) -> ImageItemResult {
+    let status = match state {
         ImageDeliveryState::Sent => "previously_delivered",
         ImageDeliveryState::Failed => "failed",
         ImageDeliveryState::Skipped => "skipped",
@@ -146,9 +161,9 @@ pub(super) fn existing_item(row: &NyxbotImageDelivery) -> ImageItemResult {
         ImageDeliveryState::Sending | ImageDeliveryState::Pending => "in_progress_or_unknown",
     };
     ImageItemResult {
-        attachment_id: row.attachment_id.clone(),
+        attachment_id: attachment.into(),
         status: status.into(),
-        code: row.code.clone(),
+        code,
     }
 }
 
@@ -229,7 +244,7 @@ async fn audience_key(state: &AppState, ctx: &ImageSendContext<'_>) -> AppResult
                 reply_to_platform_message_id: None,
             };
             target.adapter.reply_context(
-                target.thread.platform_thread_id.as_deref(),
+                crate::services::channel_image_audience::chat_thread(&target.thread),
                 target.thread.created_at,
                 &mut reply.metadata,
             );
@@ -335,10 +350,12 @@ pub(super) async fn send_turn_images_with_stop(
             });
             continue;
         }
-        let (id, attempt) = match claims::claim(
+        let (id, attempt) = match claims::claim_for_turn(
             &state.db,
             ctx.owner,
             ctx.conversation_id,
+            ctx.turn_id,
+            &ctx.channel.id,
             &attachment.id,
             &key,
         )
@@ -348,6 +365,10 @@ pub(super) async fn send_turn_images_with_stop(
             claims::ImageClaim::Dispatch { id, attempt } => (id, attempt),
             claims::ImageClaim::Existing(row) => {
                 report.outcomes.push(existing_item(&row));
+                continue;
+            }
+            claims::ImageClaim::Legacy(outcome) => {
+                report.outcomes.push(legacy_item(&attachment.id, outcome));
                 continue;
             }
             claims::ImageClaim::Unknown => {
@@ -380,6 +401,7 @@ pub(super) async fn send_turn_images_with_stop(
             });
             continue;
         }
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut code = None;
         let mut outcome = if source_exists.is_err() {
             ImageOutcome::Unknown
@@ -435,7 +457,10 @@ pub(super) async fn send_turn_images_with_stop(
                     last_send = Some(Instant::now());
                     match tokio::time::timeout(
                         Duration::from_secs(35).min(end.saturating_duration_since(Instant::now())),
-                        send_one(state, &ctx, materialized),
+                        crate::services::channel_platform::track_provider_attempt(
+                            progress.clone(),
+                            send_one(state, &ctx, materialized),
+                        ),
                     )
                     .await
                     {
@@ -471,10 +496,16 @@ pub(super) async fn send_turn_images_with_stop(
             }
             ImageOutcome::Skipped(reason) => (ImageDeliveryState::Skipped, Some(reason), "skipped"),
         };
-        match claims::finish(&state.db, &id, &attempt, durable_state, item_code)
-            .await
-            .unwrap_or(claims::ImageCompletion::Unknown)
-        {
+        let permanent = matches!(
+            outcome,
+            ImageOutcome::Sent | ImageOutcome::Failed("unsupported" | "no_anchor" | "unavailable")
+        );
+        let completion = if !permanent && !progress.load(std::sync::atomic::Ordering::Relaxed) {
+            claims::release(&state.db, &id, &attempt).await
+        } else {
+            claims::finish(&state.db, &id, &attempt, durable_state, item_code).await
+        };
+        match completion.unwrap_or(claims::ImageCompletion::Unknown) {
             claims::ImageCompletion::Recorded => {
                 report.record(outcome);
                 report.outcomes.push(ImageItemResult {
@@ -501,11 +532,23 @@ pub(super) async fn send_turn_images_with_stop(
             _ => {}
         }
     }
-    super::audit(state,ctx.owner,"nyxbot_channel_image_delivery",serde_json::json!({
-        "conversation_id":ctx.conversation_id,"turn_id":ctx.turn_id,"channel_agent_id":ctx.channel.id,
-        "transport":ctx.channel.transport,"attempted":report.attempted,"sent":report.sent,
-        "failed":report.failed,"unknown":report.unknown,"skipped":report.skipped,
-    })).await;
+    super::audit(
+        state,
+        ctx.owner,
+        "nyxbot_channel_image_delivery",
+        serde_json::json!({
+            "conversation_id": ctx.conversation_id,
+            "turn_id": ctx.turn_id,
+            "channel_agent_id": ctx.channel.id,
+            "transport": ctx.channel.transport,
+            "attempted": report.attempted,
+            "sent": report.sent,
+            "failed": report.failed,
+            "unknown": report.unknown,
+            "skipped": report.skipped,
+        }),
+    )
+    .await;
     Ok(report)
 }
 

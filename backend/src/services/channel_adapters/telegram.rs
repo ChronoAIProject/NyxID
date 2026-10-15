@@ -278,17 +278,10 @@ pub(super) fn topic_of(native: &serde_json::Value) -> Option<String> {
         .flatten()
 }
 
-/// The thread a gateway Activity's `conversation.thread_id` stands for, for
-/// a NyxBot channel on `platform`.
-///
-/// The Agent Event Gateway carries no native payload and sets `thread_id` for
-/// forum topics only, so a Telegram id is read against the Activity's version
-/// 1 thread facts (a `topic` keeps its decimal id, anything else is
-/// chat-level) or kept exactly as sent once it is a positive integer; ids are
-/// never rewritten, so existing chat partitions stay put. Those facts are the
-/// gateway's declaration, not validated by NyxID (`gateway::retain` validates
-/// Lark and Feishu facts only).
-pub fn gateway_thread_id(platform: &str, activity: &serde_json::Value) -> Option<String> {
+/// Resolve only the outbound topic declared by a gateway Activity. Inbound
+/// partitioning keeps conversation.thread_id exactly as the gateway sent it.
+/// Telegram facts are the gateway's declaration, not NyxID-verified facts.
+pub fn gateway_topic_id(platform: &str, activity: &serde_json::Value) -> Option<String> {
     let sent = activity["conversation"]["thread_id"]
         .as_str()
         .map(str::to_owned);
@@ -342,7 +335,10 @@ fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
         .and_then(|v| v.as_i64())
         .map(|id| id.to_string());
 
-    let thread_id = topic_of(msg);
+    let thread_id = msg
+        .get("message_thread_id")
+        .and_then(|v| v.as_i64())
+        .map(|id| id.to_string());
 
     let attachments = extract_attachments(msg);
 
@@ -381,9 +377,9 @@ fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_jso
     }
 
     if let Some(thread) = crate::services::channel_image_audience::native_thread("telegram", reply)
+        && let Ok(id) = thread.parse::<i64>()
     {
-        body["message_thread_id"] =
-            serde_json::json!(thread.parse::<i64>().expect("normalized topic"));
+        body["message_thread_id"] = serde_json::json!(id);
     }
 
     body
@@ -1698,7 +1694,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_thread_id_only_for_actual_forum_topics() {
+    async fn parse_thread_id_preserves_existing_reply_chain_partitions() {
         let adapter = TelegramAdapter::new();
         // A forum topic message: `is_topic_message` marks it, with or without
         // a reply inside the topic, on messages and edits alike.
@@ -1729,31 +1725,42 @@ mod tests {
             Some("42")
         );
         // A reply in a plain supergroup carries the reply-chain root as
-        // `message_thread_id`: it is not a topic and stays in the chat.
+        // `message_thread_id`: its inbound thread key stays intact while its
+        // outbound audience is chat-level.
         let chain = parse_one(&adapter, "message", supergroup_reply(91, 16, false, false)).await;
-        assert_eq!(chain.thread_id, None);
+        assert_eq!(chain.thread_id.as_deref(), Some("16"));
         assert_eq!(chain.reply_to_platform_message_id.as_deref(), Some("16"));
         // Nor is a reply chain in a forum's General topic: the forum flag on
         // the chat alone proves nothing about this message.
         assert_eq!(
             parse_one(&adapter, "message", supergroup_reply(92, 16, false, true))
                 .await
-                .thread_id,
-            None
+                .thread_id
+                .as_deref(),
+            Some("16")
         );
         // The literal flag must be true; any other value is no evidence.
         let mut falsy = supergroup_reply(93, 42, false, true);
         falsy["is_topic_message"] = serde_json::json!(false);
-        assert_eq!(parse_one(&adapter, "message", falsy).await.thread_id, None);
+        assert_eq!(
+            parse_one(&adapter, "message", falsy)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
+        );
         let mut string_flag = supergroup_reply(94, 42, false, true);
         string_flag["is_topic_message"] = serde_json::json!("true");
         assert_eq!(
-            parse_one(&adapter, "message", string_flag).await.thread_id,
-            None
+            parse_one(&adapter, "message", string_flag)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
         );
     }
 
-    /// Our replies and tool images follow the parsed thread: a reply-chain
+    /// Replies and tool images use outbound topic evidence independently: a reply-chain
     /// answer stays in the chat (no `message_thread_id`, one image audience
     /// with the chat), a topic answer carries the topic and is its own
     /// audience (#1884 P15).
@@ -1771,7 +1778,7 @@ mod tests {
                 reply_to_platform_message_id: Some(inbound.platform_message_id.clone()),
             };
             adapter.reply_context(
-                inbound.thread_id.as_deref(),
+                topic_of(&inbound.raw_data["message"]).as_deref(),
                 chrono::Utc::now(),
                 &mut reply.metadata,
             );
@@ -1897,22 +1904,31 @@ mod tests {
     /// and never rewritten. Other platforms pass through exactly as sent.
     #[test]
     fn gateway_telegram_thread_ids_follow_version_1_thread_facts_and_stay_decimal() {
-        let activity = |thread_id: serde_json::Value, facts: serde_json::Value| serde_json::json!({ "conversation": { "id": "-100999", "kind": "group", "thread_id": thread_id }, "thread": facts });
+        let activity = |thread_id: serde_json::Value, facts: serde_json::Value| {
+            serde_json::json!({
+                "conversation": {
+                    "id": "-100999",
+                    "kind": "group",
+                    "thread_id": thread_id,
+                },
+                "thread": facts,
+            })
+        };
         let topic = serde_json::json!({ "version": 1, "kind": "topic", "chat_id": "-100999", "message_id": "18", "native_thread_id": "7", "root_id": "7" });
         let chain = serde_json::json!({ "version": 1, "kind": "reply_chain", "chat_id": "-100999", "message_id": "17", "parent_message_id": "16" });
         for platform in ["telegram", "telegram-new"] {
             assert_eq!(
-                gateway_thread_id(platform, &activity(serde_json::json!("7"), topic.clone()))
+                gateway_topic_id(platform, &activity(serde_json::json!("7"), topic.clone()))
                     .as_deref(),
                 Some("7")
             );
             // A reply chain is chat-level even though the gateway sent an id.
             assert_eq!(
-                gateway_thread_id(platform, &activity(serde_json::json!("16"), chain.clone())),
+                gateway_topic_id(platform, &activity(serde_json::json!("16"), chain.clone())),
                 None
             );
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(
                         serde_json::json!("16"),
@@ -1923,7 +1939,7 @@ mod tests {
             );
             // A topic fact without a usable native id is not a topic either.
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(
                         serde_json::json!("7"),
@@ -1934,7 +1950,7 @@ mod tests {
             );
             // Other versions or absent facts: positive integers survive as sent.
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(serde_json::json!("16"), serde_json::Value::Null)
                 )
@@ -1942,7 +1958,7 @@ mod tests {
                 Some("16")
             );
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(
                         serde_json::json!("0007"),
@@ -1953,28 +1969,28 @@ mod tests {
                 Some("0007")
             );
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(serde_json::json!("0"), serde_json::Value::Null)
                 ),
                 None
             );
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(serde_json::json!("omt_thread"), serde_json::Value::Null)
                 ),
                 None
             );
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(serde_json::json!(""), serde_json::Value::Null)
                 ),
                 None
             );
             assert_eq!(
-                gateway_thread_id(
+                gateway_topic_id(
                     platform,
                     &activity(serde_json::Value::Null, serde_json::Value::Null)
                 ),
@@ -1982,11 +1998,11 @@ mod tests {
             );
         }
         assert_eq!(
-            gateway_thread_id("lark", &activity(serde_json::json!("omt_thread"), chain)).as_deref(),
+            gateway_topic_id("lark", &activity(serde_json::json!("omt_thread"), chain)).as_deref(),
             Some("omt_thread")
         );
         assert_eq!(
-            gateway_thread_id(
+            gateway_topic_id(
                 "slack",
                 &activity(
                     serde_json::json!("1700000000.000100"),
@@ -1997,7 +2013,7 @@ mod tests {
             Some("1700000000.000100")
         );
         assert_eq!(
-            gateway_thread_id(
+            gateway_topic_id(
                 "lark",
                 &activity(serde_json::json!(""), serde_json::Value::Null)
             )

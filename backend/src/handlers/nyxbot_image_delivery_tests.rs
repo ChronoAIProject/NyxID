@@ -266,6 +266,66 @@ async fn send_plan(
 }
 
 #[tokio::test]
+async fn nyxbot_v1_image_barriers_prevent_provider_calls_and_leave_new_images_deliverable() {
+    use crate::models::nyxbot_image_delivery::{COLLECTION_NAME, LEGACY_COLLECTION_NAME};
+    for (state, item_state, expected) in [
+        ("done", "sent", "previously_delivered"),
+        ("sending", "sending", "in_progress_or_unknown"),
+        ("done", "unknown", "in_progress_or_unknown"),
+        ("sending", "pending", "in_progress_or_unknown"),
+    ] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        let attachments = add_images(&f).await;
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        let legacy = doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": OWNER,
+            "conversation_id": &f.event.conversation_id, "turn_id": &f.event.turn_id,
+            "channel_id": &f.channel.id, "destination_key": "initiated:old-chat",
+            "state": state, "claim_id": "old-attempt",
+            "items": [{"id": &attachments[0].id, "state": item_state}],
+            "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::days(7)),
+        };
+        f.state
+            .db
+            .collection::<bson::Document>(LEGACY_COLLECTION_NAME)
+            .insert_one(&legacy)
+            .await
+            .unwrap();
+        let report = send_plan(&f, attachments.clone(), None).await;
+        assert_eq!(report.outcomes[0].status, expected);
+        assert_eq!(report.outcomes[1].status, "sent_now");
+        assert_eq!((report.claimed, report.sent), (1, 1));
+        let repeated = send_plan(&f, attachments, None).await;
+        assert_eq!(repeated.outcomes[0].status, expected);
+        assert_eq!(repeated.outcomes[1].status, "previously_delivered");
+        assert_eq!(repeated.claimed, 0);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(String::from_utf8_lossy(&requests[0].body).contains("pixels-1"));
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(LEGACY_COLLECTION_NAME)
+                .find_one(doc! {"_id": &legacy["_id"]})
+                .await
+                .unwrap(),
+            Some(legacy)
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn nyxbot_direct_images_precede_text_preserve_anchor_and_never_resend() {
     for platform in ["lark", "telegram"] {
         let (f, server) = image_fixture(platform, "direct").await;
@@ -475,14 +535,26 @@ async fn nyxbot_unknown_image_skips_rest_and_claim_survives_retry() {
     )
     .await;
     assert_eq!((first.unknown, first.skipped), (1, 1));
+    let before = claim(&f).await;
+    assert_eq!(before.items[0].state.as_str(), "unknown");
+    assert_eq!(before.items[1].state.as_str(), "pending");
+    assert!(before.items[1].code.is_none());
+    assert!(before.items[1].attempt.is_none());
+    Mock::given(path("/bottoken/sendPhoto"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":19}})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
     let again = send_plan(&f, images, None).await;
     assert_eq!(images::image_result(&again)["unknown"], 1);
-    assert_eq!(images::image_result(&again)["skipped"], 1);
+    assert_eq!(again.sent, 1);
     assert!(images::failure_note(&again).is_empty());
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
     let claim = claim(&f).await;
     assert_eq!(claim.items[0].state.as_str(), "unknown");
-    assert_eq!(claim.items[1].code.as_deref(), Some("after_unknown"));
+    assert_eq!(claim.items[1].state.as_str(), "sent");
     delivery::detach(&f.state.db, &f.event.id).await.unwrap();
     late_delivery::process(&f.state, &f.event.id).await;
     late_delivery::process(&f.state, &f.event.id).await;
@@ -492,7 +564,7 @@ async fn nyxbot_unknown_image_skips_rest_and_claim_survives_retry() {
             .iter()
             .filter(|r| r.url.path().ends_with("sendPhoto"))
             .count(),
-        1
+        2
     );
     assert_eq!(
         requests
@@ -674,21 +746,16 @@ async fn nyxbot_x_image_billing_refusal_suspends_bot_and_skips_remaining_images(
     let report = send_plan(&f, attachments.clone(), None).await;
     assert_eq!((report.failed, report.skipped), (1, 1));
     let row = claim(&f).await;
-    assert_eq!(row.items[0].state.as_str(), "failed");
-    assert_eq!(row.items[1].state.as_str(), "skipped");
-    assert!(
-        row.items
-            .iter()
-            .all(|item| item.code.as_deref() == Some("billing"))
-    );
+    assert!(row.items.iter().all(|item| item.state.as_str() == "pending"
+        && item.code.is_none()
+        && item.attempt.is_none()));
     let bot = crate::services::channel_bot_service::get_bot(&f.state.db, &f.channel.channel_bot_id)
         .await
         .unwrap();
     assert_eq!(bot.status, "failed");
     let repeated = send_plan(&f, attachments, None).await;
-    assert_eq!(repeated.outcomes, report.outcomes);
-    assert_eq!((repeated.claimed, repeated.attempted), (0, 0));
-    assert!(images::failure_note(&repeated).is_empty());
+    assert_eq!(repeated.claimed, 2);
+    assert_eq!(repeated.sent, 0);
     assert!(server.received_requests().await.unwrap().is_empty());
     f.state.db.drop().await.unwrap();
 }
@@ -816,7 +883,13 @@ async fn nyxbot_event_turn_and_duplicate_question_destinations_get_images_before
     .unwrap();
     // An event turn on a channel thread uses its configured chat. An additional
     // reply destination follows the same image plan and has independent claims.
-    crate::handlers::assistant_team::after_turn(&f.state, &row, "Useful answer", None).await;
+    crate::handlers::assistant_team::after_turn_boxed(
+        f.state.clone(),
+        row,
+        "Useful answer".into(),
+        None,
+    )
+    .await;
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
         requests
@@ -1031,11 +1104,11 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
         .await
         .unwrap();
         let error = engine::TurnError::internal("upstream_failed", "upstream");
-        crate::handlers::assistant_team::after_turn(
-            &f.state,
-            &row,
-            "Useful answer",
-            failed.then_some(&error),
+        crate::handlers::assistant_team::after_turn_boxed(
+            f.state.clone(),
+            row.clone(),
+            "Useful answer".into(),
+            failed.then_some(error),
         )
         .await;
         let requests = server.received_requests().await.unwrap();
@@ -1184,23 +1257,26 @@ async fn nyxbot_image_deadline_requires_a_useful_send_window() {
     mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
     let report = send_plan(
         &f,
-        attachments,
+        attachments.clone(),
         Some(std::time::Instant::now() + std::time::Duration::from_secs(24)),
     )
     .await;
     assert_eq!((report.sent, report.unknown, report.skipped), (0, 0, 2));
     assert!(server.received_requests().await.unwrap().is_empty());
     let claim = claim(&f).await;
-    assert!(claim.items.iter().all(|item| !matches!(
-        item.state,
-        crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
-            | crate::models::nyxbot_image_delivery::ImageDeliveryState::Sending
-    )));
     assert!(
-        claim.items.iter().all(
-            |item| item.state.as_str() == "skipped" && item.code.as_deref() == Some("deadline")
-        )
+        claim
+            .items
+            .iter()
+            .all(|item| item.state.as_str() == "pending"
+                && item.code.is_none()
+                && item.attempt.is_none())
     );
+    let later = send_plan(&f, attachments.clone(), None).await;
+    assert_eq!(later.sent, 2);
+    let repeated = send_plan(&f, attachments, None).await;
+    assert_eq!(images::image_result(&repeated)["previously_delivered"], 2);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
     f.state.db.drop().await.unwrap();
 }
 
@@ -1756,7 +1832,26 @@ async fn nyxbot_automation_terminal_refs_do_not_consume_the_eight_unsent_budget(
     let audience = format!("{}\u{1f}123\u{1f}", f.channel.channel_bot_id);
     // Newest refs are already terminal; all eight older pending refs still
     // have capacity for their first attempt in this delivery.
-    for attachment in &attachments[8..] {
+    let legacy_items: Vec<_> = attachments[8..12]
+        .iter()
+        .map(|attachment| {
+            doc! {"id": &attachment.id, "state": "sent"}
+        })
+        .collect();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": OWNER,
+            "conversation_id": &run.thread_id, "turn_id": &later_turn,
+            "channel_id": &f.channel.id, "destination_key": "initiated:legacy-chat",
+            "state": "done", "claim_id": "legacy-attempt", "items": legacy_items,
+            "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::days(7)),
+        })
+        .await
+        .unwrap();
+    for attachment in &attachments[12..] {
         let claims::ImageClaim::Dispatch { id, attempt } = claims::claim(
             &f.state.db,
             OWNER,
@@ -1816,6 +1911,17 @@ async fn nyxbot_deleting_a_conversation_removes_every_image_audience_claim() {
         .await
         .unwrap();
     }
+    let legacy = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME);
+    legacy
+        .insert_one(doc! {
+            "_id": "legacy", "user_id": OWNER, "conversation_id": &f.event.conversation_id,
+            "turn_id": &f.event.turn_id, "channel_id": &f.channel.id,
+        })
+        .await
+        .unwrap();
     engine::delete(
         &f.state.db,
         OWNER,
@@ -1824,6 +1930,7 @@ async fn nyxbot_deleting_a_conversation_removes_every_image_audience_claim() {
     .await
     .unwrap();
     assert!(claim(&f).await.items.is_empty());
+    assert_eq!(legacy.count_documents(doc! {}).await.unwrap(), 0);
     f.state.db.drop().await.unwrap();
 }
 
@@ -1940,10 +2047,9 @@ async fn nyxbot_slack_image_payloads_bind_top_level_and_two_native_roots_across_
 }
 
 /// Telegram sets `message_thread_id` on replies inside plain supergroups too
-/// (the reply-chain root). Ingestion keeps a thread only for an actual forum
-/// topic, so an automatic reply to a reply-chain message and a later explicit
-/// post to that chat resolve the same audience and share one claim per image;
-/// a real topic is its own audience in both directions.
+/// (the reply-chain root). Inbound thread keys stay intact; outbound topic
+/// evidence makes an automatic reply and a later explicit post share the chat
+/// audience and one claim per image. A real topic has its own audience.
 #[tokio::test]
 async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_audience_while_topics_stay_separate()
  {
@@ -1970,7 +2076,7 @@ async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_a
         .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
     // The stored inbound row is what ingestion keeps for a reply in a plain
     // supergroup: the reply-chain root arrives as `message_thread_id` without
-    // `is_topic_message`, so no thread is recorded.
+    // `is_topic_message`: keep the inbound key and separately record chat-level outbound evidence.
     let chain = parse(json!({
         "message_id": 17, "message_thread_id": 16,
         "from": {"id": 7, "is_bot": false, "first_name": "Owner"},
@@ -1978,11 +2084,26 @@ async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_a
         "reply_to_message": {"message_id": 16, "chat": {"id": 123, "type": "supergroup"}, "date": 1699999999, "text": "root"},
     }))
     .await;
-    assert_eq!(chain.thread_id, None);
+    assert_eq!(chain.thread_id.as_deref(), Some("16"));
+    let bot = crate::services::channel_bot_service::get_bot(&f.state.db, &f.channel.channel_bot_id)
+        .await
+        .unwrap();
+    let chain_facts = adapter.thread_facts(&chain, &bot, None).unwrap();
     messages
         .update_one(
             doc! {"_id": &original},
-            doc! {"$set": {"thread_id": bson::Bson::Null, "reply_to_platform_message_id": "16"}},
+            doc! {"$set": {"thread_id": "16", "reply_to_platform_message_id": "16", "thread_context": bson::to_bson(&chain_facts).unwrap()}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"channel_id": &f.channel.id},
+            doc! {"$set": {
+                "platform_thread_id": "16", "telegram_topic": {"kind": "chat"},
+            }},
         )
         .await
         .unwrap();
@@ -1991,7 +2112,7 @@ async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_a
     // The explicit post addresses the chat itself: same audience, nothing resent.
     let chat = live_image_authority(&f, &attachments).await;
     let target = thread(&f).await;
-    assert_eq!(target.platform_thread_id, None);
+    assert_eq!(target.platform_thread_id.as_deref(), Some("16"));
     let posted = chats::post_current_turn(&f.state, &chat, &target.id, "Posted", true)
         .await
         .unwrap();
@@ -2010,10 +2131,11 @@ async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_a
     }))
     .await;
     assert_eq!(topic.thread_id.as_deref(), Some("7"));
+    let topic_facts = adapter.thread_facts(&topic, &bot, None).unwrap();
     messages
         .update_one(
             doc! {"_id": &original},
-            doc! {"$set": {"thread_id": "7", "reply_to_platform_message_id": "7"}},
+            doc! {"$set": {"thread_id": "7", "reply_to_platform_message_id": "7", "thread_context": bson::to_bson(&topic_facts).unwrap()}},
         )
         .await
         .unwrap();
@@ -2023,6 +2145,8 @@ async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_a
     topic_thread.id = Uuid::new_v4().to_string();
     topic_thread.partition = topic_thread.id.clone();
     topic_thread.platform_thread_id = Some("7".into());
+    topic_thread.telegram_topic =
+        Some(crate::models::channel_thread::TelegramTopic::Topic { id: "7".into() });
     f.state
         .db
         .collection::<NyxbotThread>(THREADS)
@@ -2178,5 +2302,105 @@ async fn nyxbot_automation_delivers_later_turn_images_without_reposting_explicit
     let text = String::from_utf8_lossy(&requests.last().unwrap().body);
     assert!(text.contains("Automation result"));
     assert!(!text.contains("could not be sent"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
+    use crate::models::{
+        trigger_run::{RunImageRef, TriggerRun},
+        trigger_schedule::DeliverTo,
+    };
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = add_images(&f).await;
+    let target = thread(&f).await;
+    let prepared = chats::prepare_post(&f.state, OWNER, &target.id, None)
+        .await
+        .unwrap();
+    let chat = live_image_authority(&f, &attachments).await;
+    let first = images::send_turn_images_with_stop(
+        &f.state,
+        ImageSendContext {
+            owner: OWNER,
+            conversation_id: f.event.conversation_id.as_deref().unwrap(),
+            turn_id: f.event.turn_id.as_deref().unwrap(),
+            channel: &f.channel,
+            thread: &target,
+            anchor: ImageAnchor::Initiated {
+                chat_id: target.id.clone(),
+            },
+            audience: ImageAudience {
+                owner_private: true,
+            },
+            deadline: None,
+            initiated: Some(&prepared),
+            fence: Some(&chat),
+        },
+        &ImageSendPlan {
+            attachments: attachments.clone(),
+        },
+        Some("cancelled"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.claimed, 2);
+    assert!(first.outcomes.iter().all(|item| item.status == "cancelled"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(
+        claim(&f)
+            .await
+            .items
+            .iter()
+            .all(|item| item.state.as_str() == "pending")
+    );
+    let refs: Vec<_> = attachments
+        .into_iter()
+        .map(|attachment| RunImageRef {
+            conversation_id: f.event.conversation_id.clone().unwrap(),
+            turn_id: f.event.turn_id.clone().unwrap(),
+            attachment,
+        })
+        .collect();
+    let run: TriggerRun = bson::from_document(doc! {
+        "_id": Uuid::new_v4().to_string(), "trigger_id": "trigger", "user_id": OWNER,
+        "scheduled_at": bson::DateTime::now(), "deadline": bson::DateTime::now(), "outcome": "started",
+        "thread_id": &f.event.conversation_id, "turn_id": &f.event.turn_id,
+        "deliver_to": bson::to_bson(&DeliverTo::Chat { chat_id: target.id.clone() }).unwrap(),
+        "image_refs": bson::to_bson(&refs).unwrap(), "fence": "fence",
+        "lease_until": bson::DateTime::now(), "expires_at": bson::DateTime::now(),
+    }).unwrap();
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    let result = chats::post_automation_images(
+        &f.state,
+        &run,
+        &target.id,
+        None,
+        run.thread_id.as_deref().unwrap(),
+        "Automation result",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["images"]["sent_now"], 2);
+    let repeated = chats::post_automation_images(
+        &f.state,
+        &run,
+        &target.id,
+        None,
+        run.thread_id.as_deref().unwrap(),
+        "Repeated result",
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeated["images"]["previously_delivered"], 2);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("sendPhoto"))
+            .count(),
+        2
+    );
     f.state.db.drop().await.unwrap();
 }

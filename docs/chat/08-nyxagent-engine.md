@@ -808,7 +808,17 @@ use one filter. For legacy metadata without this field, only the exact label
 `Machine screenshot` is excluded. This rolling-upgrade shim can be deleted one
 release after every replica runs this version. Web and group display is unchanged.
 
-Each (source image, audience) pair has one durable `nyxbot_image_deliveries`
+Release 0.71.0's v1 `nyxbot_image_deliveries` rows remain read-only delivery
+barriers across every destination alias for the same owner/conversation/turn
+and NyxBot channel. Sent items report previously delivered; sending/unknown
+items and pending items in sending batches remain uncertain. Only a pending
+batch or a proven pre-dispatch skip permits a v2 claim. This can suppress
+another audience of that bot for seven days. The old TTL remains; v2 uses a
+separate collection. Concurrent old/new sends can still race during rollout.
+Remove v1 compatibility one release later and at least seven days after deploy;
+see `CHANNEL_BOT_RELAY.md` for the state rules and rollout/rollback limits.
+
+Each (source image, audience) pair has one durable `nyxbot_image_deliveries_v2`
 claim (v2, `models/nyxbot_image_delivery.rs`, sent through
 `services/channel_image_delivery.rs`): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
 with plain `user_id`, `conversation_id`, `attachment_id` and `audience_key`

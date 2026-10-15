@@ -48,6 +48,25 @@ pub fn platform_name(platform: &str) -> String {
     }
 }
 
+tokio::task_local! {
+    static PROVIDER_ATTEMPT: std::sync::Arc<std::sync::atomic::AtomicBool>;
+}
+
+pub(crate) async fn track_provider_attempt<F: std::future::Future>(
+    progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    send: F,
+) -> F::Output {
+    PROVIDER_ATTEMPT.scope(progress, send).await
+}
+
+/// Called immediately before provider I/O; the enclosing image attempt keeps
+/// this evidence even if its send future is cancelled or times out.
+pub(crate) fn mark_provider_attempt() {
+    let _ = PROVIDER_ATTEMPT.try_with(|progress| {
+        progress.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
 /// Adapter send evidence. WhatsApp returns `Err` only when no message could
 /// have been accepted. Once acceptance is possible, the outcome retains IDs
 /// and an optional failure; callers persist that evidence before returning it.

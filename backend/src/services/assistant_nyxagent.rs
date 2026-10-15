@@ -3926,6 +3926,7 @@ pub async fn delete(
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::nyxbot_image_delivery::COLLECTION_NAME,
+                        crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
                         crate::models::assistant_upload_retention::TOMBSTONES,
                         crate::models::assistant_agent_credential::COLLECTION_NAME,
                         MESSAGES,

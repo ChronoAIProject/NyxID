@@ -200,6 +200,9 @@ pub struct NyxbotThread {
     pub platform_chat_id: Option<String>,
     #[serde(default)]
     pub platform_thread_id: Option<String>,
+    /// Outbound evidence; never changes partition, conversation or follow keys.
+    #[serde(default)]
+    pub telegram_topic: Option<super::channel_thread::TelegramTopic>,
     /// The agent this chat reaches instead of the channel's.
     #[serde(default)]
     pub agent_id: Option<String>,

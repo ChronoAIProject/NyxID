@@ -49,10 +49,10 @@ async fn partitions(state: &AppState, channel_id: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn gateway_telegram_reply_chains_stay_in_the_chat_and_topics_get_their_own_thread() {
+async fn gateway_telegram_keeps_existing_inbound_threads_and_separate_outbound_topic_evidence() {
+    use crate::models::channel_thread::TelegramTopic;
     let (state, _calls, server) = setup("nyxbot_gateway_topics").await;
     let (row, agent_key) = channel(&state, "gateway").await;
-    assert_eq!(row.platform, "telegram");
     state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -72,12 +72,32 @@ async fn gateway_telegram_reply_chains_stay_in_the_chat_and_topics_get_their_own
     assert_eq!(bound.status(), StatusCode::OK);
     let partition = "conv_00000000000000000000000000000007";
     ensure_partition(&state, &agent_key, partition).await;
-    let chat_partition = chats::group_partition("-100200", None);
-    let topic_partition = chats::group_partition("-100200", Some("7"));
-
-    // A reply inside the plain group: the gateway sends the reply-chain root
-    // as `conversation.thread_id`, and its version 1 facts say reply chain.
-    // The message lands in the chat's own thread with no topic recorded.
+    let chain_partition = chats::group_partition("-100200", Some("16"));
+    // First create the legacy reply-chain partition without new topic facts.
+    answered(
+        &state,
+        &agent_key,
+        &telegram_group_event(
+            "@helper_bot before upgrade",
+            "evt-old",
+            partition,
+            Some("16"),
+            None,
+        ),
+        "evt_old",
+    )
+    .await;
+    partitions(&state, &row.id).await;
+    let old = thread_row(&state, &row.id, &chain_partition).await.unwrap();
+    state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id": &old.id},
+            doc! {"$set": {"allow_posts": true, "members": "everyone"}},
+        )
+        .await
+        .unwrap();
     let chain_facts = json!({
         "version": 1, "kind": "reply_chain", "chat_id": "-100200",
         "message_id": "17", "parent_message_id": "16",
@@ -86,122 +106,82 @@ async fn gateway_telegram_reply_chains_stay_in_the_chat_and_topics_get_their_own
         &state,
         &agent_key,
         &telegram_group_event(
-            "@helper_bot plan lunch",
-            "evt-chain",
+            "@helper_bot after upgrade",
+            "evt-new",
             partition,
             Some("16"),
-            Some(chain_facts.clone()),
+            Some(chain_facts),
         ),
-        "evt_chain",
+        "evt_new",
     )
     .await;
     assert_eq!(
         partitions(&state, &row.id).await.as_slice(),
-        std::slice::from_ref(&chat_partition)
+        std::slice::from_ref(&chain_partition),
     );
-    let chat = thread_row(&state, &row.id, &chat_partition).await.unwrap();
-    assert_eq!(chat.platform_chat_id.as_deref(), Some("-100200"));
-    assert_eq!(chat.platform_thread_id, None);
-    assert!(
-        thread_row(
-            &state,
-            &row.id,
-            &chats::group_partition("-100200", Some("16"))
-        )
-        .await
-        .is_none()
+    let current = thread_row(&state, &row.id, &chain_partition).await.unwrap();
+    assert_eq!(current.id, old.id);
+    assert_eq!(current.conversation_id, old.conversation_id);
+    assert_eq!(current.platform_thread_id.as_deref(), Some("16"));
+    assert!(current.allow_posts);
+    assert_eq!(current.members.as_deref(), Some("everyone"));
+    assert_eq!(current.telegram_topic, Some(TelegramTopic::Chat));
+    assert_eq!(
+        crate::services::channel_image_audience::chat_thread(&current),
+        None
     );
-
-    // A real forum topic (version 1 facts: topic 7) is its own thread with
-    // the decimal topic recorded, separate from the chat's thread.
-    let topic_facts = json!({
-        "version": 1, "kind": "topic", "chat_id": "-100200",
-        "message_id": "18", "native_thread_id": "7", "root_id": "7",
-    });
+    let topic_partition = chats::group_partition("-100200", Some("7"));
     answered(
         &state,
         &agent_key,
         &telegram_group_event(
-            "@helper_bot in the topic",
+            "@helper_bot real topic",
             "evt-topic",
             partition,
             Some("7"),
-            Some(topic_facts),
+            Some(json!({
+                "version": 1,
+                "kind": "topic",
+                "chat_id": "-100200",
+                "message_id": "18",
+                "native_thread_id": "7",
+                "root_id": "7",
+            })),
         ),
         "evt_topic",
     )
     .await;
-    assert_eq!(
-        partitions(&state, &row.id).await,
-        [chat_partition.clone(), topic_partition.clone()]
-    );
+    partitions(&state, &row.id).await;
     let topic = thread_row(&state, &row.id, &topic_partition).await.unwrap();
-    assert_eq!(topic.platform_chat_id.as_deref(), Some("-100200"));
-    assert_eq!(topic.platform_thread_id.as_deref(), Some("7"));
-    assert_ne!(topic.id, chat.id);
-
-    // Without facts a positive decimal id keeps the existing gateway
-    // contract: the same topic thread, no new conversation.
-    answered(
-        &state,
-        &agent_key,
-        &telegram_group_event(
-            "@helper_bot again in the topic",
-            "evt-topic-2",
-            partition,
-            Some("7"),
-            None,
-        ),
-        "evt_topic_2",
-    )
-    .await;
+    assert_ne!(topic.id, current.id);
     assert_eq!(
-        partitions(&state, &row.id).await,
-        [chat_partition.clone(), topic_partition.clone()]
-    );
-    assert_eq!(
-        thread_row(&state, &row.id, &topic_partition)
-            .await
-            .unwrap()
-            .platform_thread_id
-            .as_deref(),
+        crate::services::channel_image_audience::chat_thread(&topic),
         Some("7")
     );
-
-    // Without facts anything that is not a positive integer is chat-level,
-    // and a reply chain declared by facts stays chat-level however many ids
-    // the gateway sends: the chat's thread is reused, nothing new is created.
-    for (event_id, thread_id, facts) in [
-        ("evt-chain-2", Some("chain-16"), None),
-        ("evt-chain-3", Some("0"), None),
-        ("evt-chain-4", Some("23"), Some(chain_facts.clone())),
-        ("evt-chain-5", None, Some(chain_facts.clone())),
-    ] {
+    // Legacy gateway IDs remain exact inbound keys, including nonnumeric IDs.
+    for (i, id) in ["chain-16", "0"].into_iter().enumerate() {
         answered(
             &state,
             &agent_key,
             &telegram_group_event(
-                "@helper_bot once more",
-                event_id,
+                "@helper_bot legacy key",
+                &format!("evt-legacy-{i}"),
                 partition,
-                thread_id,
-                facts,
+                Some(id),
+                None,
             ),
-            &event_id.replace('-', "_"),
+            &format!("evt_legacy_{i}"),
         )
         .await;
-        assert_eq!(
-            partitions(&state, &row.id).await,
-            [chat_partition.clone(), topic_partition.clone()],
-            "{event_id}"
-        );
-        assert_eq!(
-            thread_row(&state, &row.id, &chat_partition)
-                .await
-                .unwrap()
-                .platform_thread_id,
-            None
-        );
+        partitions(&state, &row.id).await;
+        let thread = thread_row(
+            &state,
+            &row.id,
+            &chats::group_partition("-100200", Some(id)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(thread.platform_thread_id.as_deref(), Some(id));
     }
     server.abort();
 }
