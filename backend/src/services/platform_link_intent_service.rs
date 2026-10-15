@@ -221,6 +221,80 @@ pub(crate) async fn begin_public_in_session(
     key: &[u8],
     context: &PublicExecutionContext,
 ) -> AppResult<IntentIssued> {
+    let authority = fence_public_authority_in_session(db, session, key, context).await?;
+    mint_intent_in_session(
+        db,
+        session,
+        key,
+        IntentMint {
+            controls: &authority.controls,
+            sender_id: authority.sender_id,
+            chat_id: authority.chat_id,
+            reference: &authority.reference,
+        },
+    )
+    .await
+}
+
+/// Validate a public signup bearer for one transport attempt, returning only its ID.
+/// The caller owns commit and must abort on error; this neither consumes consent
+/// nor grants permission to retry delivery.
+pub(crate) async fn fence_public_intent_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+    context: &PublicExecutionContext,
+    token: &str,
+) -> AppResult<String> {
+    let lookup = token_lookup(key, token)?;
+    let authority = fence_public_authority_in_session(db, session, key, context).await?;
+    let controls = &authority.controls;
+    let rows = db.collection::<PlatformLinkIntent>(COLLECTION_NAME);
+    let mut filter = doc! {
+        "token_lookup_hmac": lookup, "purpose": PURPOSE,
+        "platform_config_id": &controls.platform_config_id,
+        "manager_bot_id": &controls.manager_bot_id, "telegram_bot_id": controls.telegram_bot_id,
+        "manager_authority_epoch": controls.manager_authority_epoch,
+        "telegram_sender_id": authority.sender_id, "telegram_chat_id": authority.chat_id,
+        "initiation_ref": &authority.reference, "state": "pending", "$expr": live(),
+    };
+    let row = rows
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
+        .ok_or_else(bindings::unavailable)?;
+    if !equal(&row.token_hmac, &intent_hash(key, &row, token)) {
+        return Err(bindings::unavailable());
+    }
+    filter.insert("_id", &row.id);
+    filter.insert("token_hmac", &row.token_hmac);
+    // A real conditional write conflicts with concurrent cancellation/consumption.
+    // This internal counter is not delivery state; the transport owns dedupe.
+    if rows
+        .update_one(filter, doc! {"$inc": {"public_delivery_fence": 1_i64}})
+        .session(session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(bindings::unavailable());
+    }
+    Ok(row.id)
+}
+
+struct PublicIntentAuthority {
+    controls: PlatformBotRuntimeControls,
+    sender_id: i64,
+    chat_id: i64,
+    reference: String,
+}
+
+async fn fence_public_authority_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+    context: &PublicExecutionContext,
+) -> AppResult<PublicIntentAuthority> {
     use crate::models::{
         platform_manager_ingress::{COLLECTION_NAME as RECEIPTS, PlatformManagerIngress},
         platform_public_session::COLLECTION_NAME as PUBLIC_SESSIONS,
@@ -293,18 +367,12 @@ pub(crate) async fn begin_public_in_session(
             ]
         )
     );
-    mint_intent_in_session(
-        db,
-        session,
-        key,
-        IntentMint {
-            controls: &controls,
-            sender_id: receipt.sender_id,
-            chat_id: receipt.chat_id,
-            reference: &reference,
-        },
-    )
-    .await
+    Ok(PublicIntentAuthority {
+        controls,
+        sender_id: receipt.sender_id,
+        chat_id: receipt.chat_id,
+        reference,
+    })
 }
 
 struct IntentMint<'a> {
@@ -1478,6 +1546,162 @@ mod tests {
                 .id,
             issued.intent.id
         );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_delivery_intent_fence_rolls_back_and_preserves_pending_consent() {
+        let (db, _, context) = public_fixture("public_delivery_intent_transaction").await;
+        let issued = issue_public(&db, &context).await;
+        let token = issued.token.as_ref().unwrap();
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        let filter = doc! {"_id": &issued.intent.id};
+        let original = rows.find_one(filter.clone()).await.unwrap().unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert_eq!(
+            fence_public_intent_in_session(&db, &mut session, KEY, &context, token)
+                .await
+                .unwrap(),
+            issued.intent.id
+        );
+        session.abort_transaction().await.unwrap();
+        assert_eq!(
+            rows.find_one(filter.clone()).await.unwrap().unwrap(),
+            original
+        );
+        session.start_transaction().await.unwrap();
+        assert_eq!(
+            fence_public_intent_in_session(&db, &mut session, KEY, &context, token)
+                .await
+                .unwrap(),
+            issued.intent.id
+        );
+        session.commit_transaction().await.unwrap();
+        let stored = rows.find_one(filter).await.unwrap().unwrap();
+        assert_eq!(stored.get_str("state").unwrap(), "pending");
+        assert_eq!(stored.get_i64("public_delivery_fence").unwrap(), 1);
+        assert_eq!(stored.get("claimant_user_id"), Some(&bson::Bson::Null));
+        assert_eq!(stored.get("current_challenge_id"), Some(&bson::Bson::Null));
+        assert_eq!(stored.get("completion"), Some(&bson::Bson::Null));
+        assert!(!format!("{stored:?}").contains(token.as_str()));
+        db.drop().await.unwrap();
+    }
+
+    async fn refused_public_intent(db: &Database, context: &PublicExecutionContext, token: &str) {
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            fence_public_intent_in_session(db, &mut session, KEY, context, token)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_delivery_intent_fence_rejects_foreign_or_nonpending_bearer_and_stale_context() {
+        use crate::models::{
+            platform_manager_ingress::COLLECTION_NAME as RECEIPTS,
+            platform_public_session::COLLECTION_NAME as SESSIONS,
+        };
+        let (db, _, context) = public_fixture("public_delivery_intent_identity").await;
+        let issued = issue_public(&db, &context).await;
+        let token = issued.token.as_ref().unwrap();
+        let filter = doc! {"_id": &issued.intent.id};
+        let intents = db.collection::<Document>(COLLECTION_NAME);
+        let original = intents.find_one(filter.clone()).await.unwrap().unwrap();
+        for changes in [
+            doc! {"purpose": "another-purpose"},
+            doc! {"platform_config_id": "another-profile"},
+            doc! {"manager_bot_id": "another-manager"},
+            doc! {"telegram_bot_id": context.ingress.manager.telegram_bot_id + 1},
+            doc! {"manager_authority_epoch": context.ingress.manager.manager_authority_epoch + 1},
+            doc! {"telegram_sender_id": context.ingress.sender_id + 1},
+            doc! {"telegram_chat_id": context.ingress.chat_id + 1},
+            doc! {"initiation_ref": "ordinary-original-command"},
+            doc! {"token_lookup_hmac": "invalid-lookup"},
+            doc! {"token_hmac": "invalid-proof"},
+            doc! {"state": "cancelled"},
+            doc! {"state": "consumed"},
+            doc! {"expires_at": bson::DateTime::from_millis(0)},
+        ] {
+            intents
+                .update_one(filter.clone(), doc! {"$set": changes})
+                .await
+                .unwrap();
+            refused_public_intent(&db, &context, token).await;
+            intents
+                .replace_one(filter.clone(), &original)
+                .await
+                .unwrap();
+        }
+        refused_public_intent(&db, &context, "invalid-bearer").await;
+        let mut stale = context.clone();
+        stale.turn.turn_id = "another-turn".into();
+        refused_public_intent(&db, &stale, token).await;
+        for (collection, row_filter, changes) in [
+            (
+                RECEIPTS,
+                doc! {"_id": &context.ingress.ingress.receipt_id},
+                doc! {"phase": "settled"},
+            ),
+            (
+                RECEIPTS,
+                doc! {"_id": &context.ingress.ingress.receipt_id},
+                doc! {"observation_id": "stale-observation"},
+            ),
+            (
+                SESSIONS,
+                doc! {"_id": &context.public_session_id},
+                doc! {"revoked_at": bson::DateTime::now()},
+            ),
+            (
+                SESSIONS,
+                doc! {"_id": &context.public_session_id},
+                doc! {"active_turn.stop_requested": true},
+            ),
+        ] {
+            let rows = db.collection::<Document>(collection);
+            let before = rows.find_one(row_filter.clone()).await.unwrap().unwrap();
+            rows.update_one(row_filter.clone(), doc! {"$set": changes})
+                .await
+                .unwrap();
+            refused_public_intent(&db, &context, token).await;
+            rows.replace_one(row_filter, &before).await.unwrap();
+        }
+        assert_eq!(intents.find_one(filter).await.unwrap().unwrap(), original);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_delivery_intent_fence_conflicts_with_cancellation_after_snapshot() {
+        let (db, _, context) = public_fixture("public_delivery_intent_cancel_race").await;
+        let issued = issue_public(&db, &context).await;
+        let token = issued.token.as_ref().unwrap();
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        let filter = doc! {"_id": &issued.intent.id};
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            rows.find_one(filter.clone())
+                .session(&mut session)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        rows.update_one(filter.clone(), doc! {"$set": {"state": "cancelled"}})
+            .await
+            .unwrap();
+        assert!(
+            fence_public_intent_in_session(&db, &mut session, KEY, &context, token)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        let current = rows.find_one(filter).await.unwrap().unwrap();
+        assert_eq!(current.get_str("state").unwrap(), "cancelled");
+        assert!(!current.contains_key("public_delivery_fence"));
         db.drop().await.unwrap();
     }
 
