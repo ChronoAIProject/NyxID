@@ -1,11 +1,13 @@
 # Part 3 execution interfaces and security proposal
 
-Status: first-stage source investigation and proposed contracts, 2026-10-15.
-Source baseline: `7ff461c9236bc87f65f8f89efd278a566d7ebce8`, branch
-`nyxbot-manager/public`. This document is the only change in this stage.
-The signatures and HTTP examples below acknowledge Part 5's shared contract
-commit `1b5aea084` (candidate v1) and propose the refinements identified below.
-They are not implemented APIs or runtime evidence.
+Status: implementation checkpoint, 2026-10-15, through `c32ef6cb1` on
+`nyxbot-manager/public`. The final checkpoint below supersedes historical
+first-stage and next-wave status statements. The initial investigation used
+`7ff461c9236bc87f65f8f89efd278a566d7ebce8` and candidate contract `1b5aea084`;
+implementation follows frozen contract `ac78da2a7` and the explicitly approved
+narrow ownership additions. Earlier proposed signatures remain investigation
+history; actual consumer signatures and remaining proof gaps are recorded at
+the end. Source implementation is not deployed runtime evidence.
 
 Public activation remains disabled. Personal routing can proceed after the
 shared contract and the local security slice, without NyxAgent public-runtime
@@ -1289,3 +1291,140 @@ and `services::platform_public_budget_service`; call its
 No route or shared producer signature changes are required. Closed tools,
 immutable public issuance and final common-loop wiring remain the following
 slices; deployed capability/retention proof remains an external blocker.
+
+
+## Public consumer checkpoint: exact callbacks and pre-dispatch evidence
+
+The authorized implementation stage adds these reviewable commits after the
+budget work: `042bbb1bc` (restricted issuance, disposable encrypted turns and
+settled reader), `63a5f3823` (ephemeral signup with status-only model output),
+`64ddaa4d5` (preparation/expired-turn recovery), `593db0e99` (current bot
+observation for settled delivery and MCP enum boxing), `85f07ae4c` (public
+execution plus sponsored callbacks), `e61d7af44` (quote/catalog pin and admission
+fixture correction), and `c32ef6cb1` (scheduled cleanup and absolute reply
+expiry). Primary integrates module/route/index/worker registrations and the
+small paired shared-contract cleanup. Ordinary owner execution, its real
+incoming AuthUser approval adapter and OwnerTurnSettledHook are unchanged by
+the public dispatch bridge.
+
+Actual public execution enters
+`services/assistant_nyxagent_runtime.rs::ExecutionProducer`'s Public arm and
+calls `platform_public_execution::execute` (`:15`). It uses the existing
+Responses decoder and the frozen runtime/egress traits; it does not converge
+through owner credentials or read owner history. Preparation encrypts bounded
+input and reserves the complete loop before network activity. A saved reply
+and exact ingress settlement commit together before ReplyReady is emitted.
+The public turn collection has an absolute session expiry of at most 24 hours;
+non-TTL session, meter and cleanup records retain authority and crash evidence.
+Idle session reuse and credential replacement preserve that absolute expiry.
+
+`platform_public_proxy_service::dispatch_nyxagent` (`:629`) permits one exact
+POST `v1/responses` for the prepared turn. The current outer catalog contract
+is NoAuth. This adapter accepts it only when its billing configuration is
+absent; a priced outer service is refused. Preparation pins the server-selected
+outer service ID and full catalog digest. Final admission rechecks it and
+commits both `outer_dispatch_admitted=true` and the non-TTL session's
+`upstream_may_exist=true` before the outbound effect (`:603`). A lost response
+cannot authorize a replay. Ambiguous failed execution shortens and revokes the
+session and leaves cleanup pending. Expired-turn recovery also revokes any
+potential upstream session even when no handle returned. No cleanup path
+restores the revoked bearer or reports unsupported remote deletion complete.
+
+The dedicated callback handler is
+`handlers/platform_public_model.rs::dispatch` (`:22`). It accepts only a
+public-purpose primary key and derives the active authority from storage. It
+requires the exact session, turn, receipt and claim headers; reused credentials
+do not let old callbacks attach to a new turn. A UUID v4 call ID is the once-only
+billing/dispatch identity. Ordinary AuthUser middleware must not wrap this
+handler. The dedicated public authentication and final transactional fence
+replace it. Query, upgrade, child credentials, arbitrary payer/destination
+selection and caller header forwarding are refused.
+
+A symbolic callback fixture, requiring actual verified runtime support, is:
+
+```http
+POST /api/v1/public-nyxbot/models/MODEL_SERVICE_ID/v1/responses
+Authorization: Bearer PUBLIC_SESSION_KEY_REDACTED
+Content-Type: application/json
+x-nyx-public-session-id: EXACT_SESSION_UUID
+x-nyx-public-turn-id: EXACT_TURN_UUID
+x-nyx-public-receipt-id: EXACT_RECEIPT_UUID
+x-nyx-public-claim-id: EXACT_CLAIM_UUID
+x-nyx-public-call-id: UNIQUE_CALL_UUID_V4
+
+{"model":"PINNED_MODEL","input":"public question","max_output_tokens":256,"stream":false}
+```
+
+The body model and explicit positive output bound must match the verified
+operation. Input bytes, conservative input-token admission, response bytes and
+absolute turn duration are bounded. Closed schemas accept text and fixed
+FAQ/signup function call/result round trips for OpenAI Responses, OpenAI Chat
+Completions and Anthropic Messages. Unknown fields, provider web search,
+computer/shell/native tools, images/audio, remote content references and custom
+tool declarations are denied. Only the server's exact three tool declarations
+are admitted. Public MCP uses the same four authority headers and checks the
+committed outer attempt before spending a tool call; wrapper normalization
+continues to resolve exclusively to those three public tools.
+
+Every paid callback uses `dispatch_model` (`:382`), not an ordinary LLM wrapper.
+It validates the pinned catalog projection before quote and after awaited
+funding, then fences the published endpoint generation, exact model, live
+public context, callback turn and sponsor. Whole-loop total/sender cap holds
+and per-call Prepared/Funded/DispatchAdmitted transitions remain the sole
+public admission system. Funded uses existing sponsor allowance/grant/wallet
+holds and real usage-meter IDs. Final admission marks those meters forwarded
+in the same transaction as dispatch permission. Known no-dispatch failures
+cancel only Prepared/Funded; ambiguous admitted work retains its reservation.
+Billing posts actual cost, including overrun, before cap reconciliation. There
+is no second wallet debit or public cap ledger.
+
+| Path | Public behavior in this checkpoint |
+| --- | --- |
+| `/api/v1/public-nyxbot/models/{service_id}/v1/responses` | Exact pinned OpenAI Responses callback through public sponsor admission |
+| `/api/v1/public-nyxbot/models/{service_id}/v1/chat/completions` | Exact pinned OpenAI Chat Completions callback through the same admission |
+| `/api/v1/public-nyxbot/models/{service_id}/v1/messages` | Exact pinned Anthropic Messages callback through the same admission |
+| Any dedicated callback ending in `v1/responses/compact` | Denied: current compaction contract has no accepted explicit output bound |
+| `/api/v1/llm/{provider_slug}/v1/{*path}` | Denied before ordinary provider/credential resolution |
+| `/api/v1/llm/gateway/v1/{*path}` | Denied before fallback, translation, pool or owner resolution |
+| `/api/v1/llm/status`, `/api/v1/llm/pools`, ordinary direct proxy | Denied; no ordinary inventory is exposed |
+
+The required upstream `public_execution` wire extension is built at
+`platform_public_execution.rs:153`. It binds purpose, profile/model selection,
+policy, exact session/turn/receipt/claim, callback contract and paths, deadline,
+and hard call/tool/continuation/token/byte bounds. **Pinned NyxAgent source
+`fe9745799cc1d46f1290e84effb366ff12600577` does not establish acceptance or
+enforcement of this extension.** It also does not prove callback headers or
+that every model call, retry and compaction uses the dedicated admission route.
+Public compaction must be disabled under a verified profile or receive an
+explicit bounded supported upstream contract. No authorization for upstream
+repository edits has arrived, and no upstream edit or checkout was performed.
+
+`verify_contract` still refuses all production evidence. Source flags for
+native tools and NyxID responses/compact credential propagation are useful
+source evidence, but deployment/build/effective-profile binding, hard upstream
+limits, no fallback/provider web search, every-replica purpose enforcement,
+absolute remote expiry and cleanup using revoked credentials remain unresolved.
+No Ready value, successful capability probe, live bill or deployed acceptance
+is claimed. Personal execution remains independent of this boundary.
+
+`public_reply_expiry(db, context)` (`platform_public_credential_service.rs:763`)
+returns the exact session's absolute delivery deadline separately from the
+execution lease. The settled fence (`:783`) uses the current profile observation
+while retaining the original numeric bot, manager epoch, sender, session and
+claim. Same-bot token rotation therefore does not bind a queued reply to the
+old transport token. The primary owns the tiny transport expiry call-site
+pairing. The obsolete cleanup producer forwarding method and returned recovery
+record ID are removed as a paired shared-contract cleanup; actual lifecycle
+sweeps, paged drains and durable cleanup records remain authoritative.
+
+Written regressions cover three protocol schemas and fixed function round
+trips, native/multimodal/unknown-field denial, exact callback headers after key
+reuse, outer admission rollback and once-only ambiguous evidence, Prepared
+cancellation without a meter or duplicate allocation release, and refusal to
+cancel an already admitted call. Existing transaction sources cover competing
+sender/day caps, funding rollback, conservative/late/overrun cost correction,
+mixed recovery batches, scope migration/drain, preparation failure before a
+turn row exists and active-lease expiry. Targeted rustfmt and `git diff --check`
+passed. No Cargo/build/runtime test ran on this worker. Central CI, backend
+transaction execution and the independent bridge review remain primary-owned;
+this checkpoint does not claim they passed.
