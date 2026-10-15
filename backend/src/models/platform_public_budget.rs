@@ -39,6 +39,10 @@ pub struct PublicBudgetLoop {
     pub output_tokens: i64,
     pub max_input_tokens: i64,
     pub max_output_tokens: i64,
+    #[serde(default)]
+    pub tool_calls: i64,
+    #[serde(default)]
+    pub max_tool_calls: i64,
     pub closed: bool,
 }
 

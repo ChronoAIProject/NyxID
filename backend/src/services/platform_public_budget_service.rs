@@ -233,6 +233,8 @@ pub(crate) async fn reserve_loop_in_session(
         output_tokens: 0,
         max_input_tokens: i64::from(context.limits.max_input_tokens),
         max_output_tokens: i64::from(context.limits.max_output_tokens),
+        tool_calls: 0,
+        max_tool_calls: i64::from(context.limits.max_tool_calls),
         closed: false,
     };
     let mut fields = bson::to_document(&loop_row).map_err(|_| denied())?;
@@ -418,6 +420,21 @@ pub(crate) async fn fund_call(
     quote: &CallQuote,
 ) -> AppResult<MeteredProxyContext> {
     state.billing.open_required(&quote.route).await
+}
+
+pub(crate) async fn admit_tool_call_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    context: &PublicExecutionContext,
+    key_id: &str,
+) -> AppResult<()> {
+    fence_context(db, session, context, key_id).await?;
+    if db.collection::<PublicBudgetLoop>(LOOPS).update_one(doc! {
+        "public_session_id":&context.public_session_id,"turn_id":&context.turn.turn_id,"credential_api_key_id":key_id,
+        "receipt_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,"policy_digest":&context.policy_digest,
+        "closed":false,"$expr":{"$and":[{"$gt":["$expires_at","$$NOW"]},{"$lt":["$tool_calls","$max_tool_calls"]}]}},
+        doc! {"$inc":{"tool_calls":1_i64}}).session(session).await?.matched_count!=1 {return Err(denied());}
+    Ok(())
 }
 
 /// The final dispatch permission is spent once. An uncertain response never
@@ -1041,6 +1058,59 @@ mod tests {
                 .await
                 .unwrap(),
             0
+        );
+    }
+    #[tokio::test]
+    async fn public_tool_count_joins_caller_transaction_and_never_resets_on_retry() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_tool_admission").await;
+        ensure_indexes(&db).await.unwrap();
+        let (ctx, key) = context(&db, 5, None).await;
+        let row = reserve(
+            db.clone(),
+            ctx.clone(),
+            key.clone(),
+            Credits::from_pico(10).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        admit_tool_call_in_session(&db, &mut session, &ctx, &key)
+            .await
+            .unwrap();
+        session.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<PublicBudgetLoop>(LOOPS)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .tool_calls,
+            0
+        );
+        session.start_transaction().await.unwrap();
+        for _ in 0..ctx.limits.max_tool_calls {
+            admit_tool_call_in_session(&db, &mut session, &ctx, &key)
+                .await
+                .unwrap();
+        }
+        session.commit_transaction().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            admit_tool_call_in_session(&db, &mut session, &ctx, &key)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<PublicBudgetLoop>(LOOPS)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .tool_calls,
+            i64::from(ctx.limits.max_tool_calls)
         );
     }
     #[tokio::test]

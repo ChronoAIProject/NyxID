@@ -53,6 +53,74 @@ pub fn readiness() -> PublicReadiness {
     PublicReadiness::Unavailable(UnavailableReason::PublicNotReady)
 }
 
+/// All public consumers enter through this boundary, including local issuance
+/// and tools. The unavailable assessment cannot be replaced by caller evidence.
+pub(crate) fn verified_readiness() -> AppResult<(
+    VerifiedPublicContract,
+    super::platform_manager_contract::PublicReadinessEvidence,
+)> {
+    match readiness() {
+        PublicReadiness::Ready(evidence) => Ok((verify_contract(&evidence)?, evidence)),
+        PublicReadiness::Unavailable(_) => Err(unavailable()),
+    }
+}
+
+pub(crate) fn verified_context(
+    context: &super::platform_manager_contract::PublicExecutionContext,
+) -> AppResult<VerifiedPublicContract> {
+    let (proof, evidence) = verified_readiness()?;
+    if context.policy_digest != evidence.policy_digest
+        || context.ingress.manager != evidence.manager
+        || context.ingress.public_policy_revision != evidence.public_policy_revision
+        || context.sponsor_owner_user_id != evidence.sponsor_owner_user_id
+        || context.nyxagent_profile != evidence.nyxagent_profile
+        || context.expires_at > evidence.expires_at
+        || context.expires_at <= chrono::Utc::now()
+        || context.model_operations.len() != evidence.model_operations.len()
+        || !context
+            .model_operations
+            .iter()
+            .zip(&evidence.model_operations)
+            .all(|(a, b)| operation_matches(a, b))
+        || !limits_match(&context.limits, &evidence.limits)
+    {
+        return Err(unavailable());
+    }
+    Ok(proof)
+}
+
+pub(crate) fn operation_matches(
+    a: &super::platform_manager_contract::PublicModelOperation,
+    b: &super::platform_manager_contract::PublicModelOperation,
+) -> bool {
+    a.service_id == b.service_id
+        && a.operation == b.operation
+        && a.method == b.method
+        && a.canonical_path == b.canonical_path
+        && a.protocol == b.protocol
+        && a.execution_authority_digest == b.execution_authority_digest
+        && a.endpoint_generation == b.endpoint_generation
+        && a.model_id == b.model_id
+        && a.max_input_bytes == b.max_input_bytes
+        && a.max_input_tokens == b.max_input_tokens
+        && a.max_output_tokens == b.max_output_tokens
+        && a.max_response_bytes == b.max_response_bytes
+}
+fn limits_match(
+    a: &super::platform_manager_contract::PublicExecutionLimits,
+    b: &super::platform_manager_contract::PublicExecutionLimits,
+) -> bool {
+    a.max_duration_secs == b.max_duration_secs
+        && a.max_model_calls == b.max_model_calls
+        && a.max_tool_calls == b.max_tool_calls
+        && a.max_continuations == b.max_continuations
+        && a.max_input_tokens == b.max_input_tokens
+        && a.max_output_tokens == b.max_output_tokens
+        && a.max_input_bytes == b.max_input_bytes
+        && a.max_context_bytes == b.max_context_bytes
+        && a.max_output_bytes == b.max_output_bytes
+}
+
 /// Canonical local candidate identity. This is never a readiness proof digest.
 pub fn candidate_digest(policy: &ManagerRuntimePolicy) -> AppResult<String> {
     let selection = policy.public_policy.as_ref().ok_or_else(unavailable)?;
