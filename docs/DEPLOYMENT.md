@@ -184,17 +184,23 @@ turn is running/waiting, a mutation or dialog is active, editable controls conta
 text, the tab is hidden, or the destination changes during validation. Automatic
 activation uses the same session reload-loop guard as hidden-tab updates.
 
-If an update remains pending for two hours, a dismissible refresh banner appears.
-On `/assistant` and its workspace routes, it appears only when the assistant
-fingerprint changes or either build lacks that fingerprint. The
-SHA-256 fingerprint covers the assistant's resolved source dependencies, the
+Every confirmed frontend build still pending after 15 minutes shows a dismissible
+refresh banner, including on `/assistant` and its workspace routes. The banner
+does not filter by assistant fingerprint or change size. Dismissal applies only
+to the displayed build; a later frontend build can show its own reminder. The
+15-minute delay starts when the first pending update has been confirmed and its
+assets checked, after the two consecutive observations described above. Later
+deployments retain that deadline.
+
+The assistant fingerprint controls automatic activation on safe view switches.
+This SHA-256 fingerprint covers the assistant's resolved source dependencies, the
 bootstrap and root-shell dependencies, source styles, audio worklet, build
 configuration and scripts, and the dependency lockfile. Other routes are pruned
 at the lazy page barrel. Raw source bytes avoid changes caused only by a new
 commit stamp or regrouped output chunks; project version bumps are ignored in
 the lockfile. Public build environment changes also count. This identifies
 frontend assistant changes; `/health` does not expose a separate backend
-assistant version. Fingerprints are notification hints and do not retain old
+assistant version. Fingerprints are activation hints and do not retain old
 lazy assets across deployments.
 
 An untouched tab on the landing, dashboard, docs, blog or legal reading pages can

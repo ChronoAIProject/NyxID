@@ -92,8 +92,9 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 ## See It in Action
 
 The web app checks for frontend updates every ten minutes. Assistant updates
-apply on safe chat or view switches; updates still pending after two hours show
-a refresh reminder. See [deployment behavior](docs/DEPLOYMENT.md#frontend).
+apply on safe chat or view switches; every frontend build still pending after
+15 minutes shows a refresh reminder, including on Nyxbot pages.
+See [deployment behavior](docs/DEPLOYMENT.md#frontend).
 
 The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 

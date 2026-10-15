@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { parseBuildVersion, type BuildVersion } from "@/lib/build-version";
 
-export const UPDATE_REMINDER_DELAY = 2 * 60 * 60_000;
+export const UPDATE_REMINDER_DELAY = 15 * 60_000;
 
 interface PendingUpdate {
   readonly build: BuildVersion;

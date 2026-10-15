@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, render, renderHook, screen } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,7 @@ vi.mock("@/lib/assistant/direct-transport", () => ({ directAssistantTransport: {
 import { useBuildUpdateStore, UPDATE_REMINDER_DELAY } from "@/stores/build-update-store";
 import { BUILD_UPDATE_VIEW_SWITCH } from "@/lib/build-update-navigation";
 import { useBuildUpdates } from "./use-build-updates";
+import { BuildUpdateBanner } from "@/components/build-update-banner";
 
 let hidden = false;
 beforeEach(() => {
@@ -89,7 +90,7 @@ describe("automatic update safety", () => {
     unmount();
   });
 
-  it("blocks pending mutations and only updates the hook when a build becomes ready", () => {
+  it("blocks automatic updates during mutations and shows the reminder after exactly 15 minutes", () => {
     const { client, gate, hide, result, unmount } = mount();
     vi.spyOn(client, "isMutating").mockReturnValue(1);
     hide();
@@ -97,7 +98,9 @@ describe("automatic update safety", () => {
     expect(result.current.available).toBe(false);
     act(() => mocks.start.mock.calls[0]![0].onReady({ buildId: "next", commit: null, assets: ["assets/next.js"] }));
     expect(result.current.available).toBe(false);
-    act(() => vi.advanceTimersByTime(UPDATE_REMINDER_DELAY));
+    act(() => vi.advanceTimersByTime(15 * 60_000 - 1));
+    expect(result.current.available).toBe(false);
+    act(() => vi.advanceTimersByTime(1));
     expect(result.current.available).toBe(true);
     unmount();
   });
@@ -118,6 +121,22 @@ describe("automatic update safety", () => {
     expect(result.current.available).toBe(false);
     act(() => vi.advanceTimersByTime(1));
     expect(result.current.available).toBe(true);
+    unmount();
+  });
+
+  it("shows frontend update reminders on Nyxbot even when the assistant fingerprint is unchanged", () => {
+    window.history.replaceState({}, "", "/assistant");
+    const fingerprint = "a".repeat(64);
+    document.head.insertAdjacentHTML("beforeend", `<meta name="nyxid-assistant-build-id" content="${fingerprint}">`);
+    const { unmount } = render(<BuildUpdateBanner ready queryClient={new QueryClient()} />);
+    act(() => mocks.start.mock.calls[0]![0].onReady({
+      buildId: "next", commit: null, assistant: fingerprint, assets: ["assets/next.js"],
+    }));
+    act(() => vi.advanceTimersByTime(15 * 60_000 - 1));
+    expect(screen.queryByRole("status")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByRole("status")).toHaveTextContent("A new version of NyxID is ready.");
+    expect(mocks.apply).not.toHaveBeenCalled();
     unmount();
   });
 
