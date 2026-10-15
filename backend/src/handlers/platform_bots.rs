@@ -831,8 +831,6 @@ impl PublicReadinessResponse {
             PublicQuotaLimited => "public_quota_limited",
             RuntimeUninitialized => "runtime_uninitialized",
             SponsorUnavailable => "sponsor_unavailable",
-            ProfileUnavailable => "profile_unavailable",
-            ProofExpired => "proof_expired",
         };
         Self {
             status: "unavailable",
