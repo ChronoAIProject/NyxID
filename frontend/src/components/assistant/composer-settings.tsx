@@ -70,7 +70,7 @@ export function ComposerSettings({
   const modelLocked =
     active || changeModel.isPending || models.isPending || models.isError;
   const permissionsLocked =
-    Boolean(agentOverride) || changePermissions.isPending || !settings.data;
+    active || Boolean(agentOverride) || changePermissions.isPending || !settings.data;
 
   function selectModel(next: string) {
     if (next === model) return;

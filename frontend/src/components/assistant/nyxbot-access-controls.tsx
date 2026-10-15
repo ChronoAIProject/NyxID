@@ -61,9 +61,11 @@ export function AccessModeBadge({
 /** The owner's workspace access mode, readable and switchable in place. */
 export function AccessModeSwitcher({
   agentOverride,
+  disabled,
 }: {
   /** The thread's agent's own mode; when set it governs instead. */
   readonly agentOverride?: NyxAgentAccessMode | null;
+  readonly disabled?: boolean;
 }) {
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
@@ -77,7 +79,7 @@ export function AccessModeSwitcher({
     <div className="flex items-center gap-1">
       <Select
         value={workspace}
-        disabled={update.isPending}
+        disabled={disabled || update.isPending}
         onValueChange={(value) => {
           setError(undefined);
           update
