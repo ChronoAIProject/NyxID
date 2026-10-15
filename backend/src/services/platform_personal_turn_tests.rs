@@ -1161,7 +1161,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
                 report_to: None,
                 report_provenance: model::REPORT_PROVENANCE_V1,
             },
-            operation_id: Some("operation".into()),
+            operation_id: Some(uuid::Uuid::new_v4().to_string()),
             state: "queued".into(),
             reason: Some("done".into()),
             attempts: 0,

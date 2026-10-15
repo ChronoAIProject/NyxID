@@ -6,39 +6,54 @@ different evidence states. Record the tested commit and actual commands/results
 before changing any row to verified. Mocked upstream calls cannot satisfy A13
 or the external portion of A1/A15.
 
-Current checkpoint: identity, personal execution/settlement/Stop, ingress,
-Telegram transport, account lifecycle recovery and frontend slices are integrated
-through `0f34c0f72` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
-Seven integrated journey/regression tests are written, including real local
-consent and personal execution against mocked upstream/Telegram HTTP. They have
-not yet run. Public execution remains unavailable; exact budget/funding,
-restricted FAQ/signup tools, encrypted public turn/reply storage and transport
-consumers and the execution/model-callback bridge are integrated. Public
-activation remains blocked by the unavailable deployed-contract verifier. Fresh personal event admission, the durable saved-reply after-turn
-hook, card continuation scheduling and retained original result destinations
-are integrated. The final Telegram delivery/card rendering and recovery
-consumers are also integrated, with six further regression tests written.
+Current checkpoint: all implementation slices are integrated through
+`df91ba159` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
+Identity, personal execution/settlement/Stop, ingress, Telegram transport, account
+lifecycle recovery and frontend controls are integrated. Personal event admission,
+the durable saved-reply hook, card continuation and original delayed-result
+routing are also integrated. Public keys, exact budget/funding, restricted
+FAQ/signup tools, encrypted disposable replies, model callbacks and cleanup are
+implemented, but public activation remains unavailable until the deployed
+upstream contract can be verified.
 
-CI [38728299188](https://github.com/ChronoAIProject/NyxID/actions/runs/38728299188)
-on `5c9dcec9b` passed frontend tests/coverage, formatting, CLI tests/coverage and
-wizard freshness. Backend production/test-target compilation failed on one
-missing `platform_delivery_recovery_queued` initializer in the compact voice
-transcript path; `0e444ddb5` corrects it. The assembled production backend then
-passed `CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo +1.98.1 check -p nyxid
---bin nyxid-server` locally in 2m08s, with five unused-code warning groups. This
-is a type-check result, not a runtime test pass. Log:
-`/tmp/nyxbot-manager-check-bridge.log`.
+CI [38731500507](https://github.com/ChronoAIProject/NyxID/actions/runs/38731500507)
+on `f1234a53a` passed all-target strict Rust Clippy, formatting, frontend
+tests/coverage, CLI tests/coverage, wizard freshness and separate AWS/GCP builds.
+CodeQL completed all four languages. Backend coverage compiled and executed the
+full suite: **8,516 passed, 10 failed, 6 ignored**. The failures exposed acceptance
+of array-shaped public-tool arguments, malformed or incomplete test fixtures,
+and a missing public-callback route smoke case. Docker input validation also
+found the FAQ missing from builder inputs. The combined AWS/GCP build was
+interrupted by runner shutdown. No passing full backend run is claimed.
 
-`9c1a1c3df` removes superseded outcome/revocation variants and connects actual
-public quota and sponsor funding refusals to fixed transport responses. Four
-precise lint expectations document intentionally unavailable verifier inputs
-and the production Ready constructor; the verifier still refuses all activation.
-There is no blanket lint suppression or fabricated readiness. Local production Clippy with `-D warnings` passed at `04fa4f308` in 1m49s after
-removing two obsolete response mappings. The final exact-settlement and usage
-consistency correction is integrated as `23508ea09`; Astra reviewed it without a
-confirmed blocker, but its new runtime regressions have not executed. Integrated
-CI validation of that correction remains pending. Earlier CodeQL completed all four
-language checks on `f8f623a42`.
+`71759e243` stages the embedded FAQ and exercises public callback credential
+refusals through the real mounted route, checking that no sponsor meter opens.
+`df91ba159` requires object-shaped public-tool arguments, tests both direct and
+wrapped calls, and corrects response-ID, live-turn, revision and card-collision
+fixtures without relaxing production authority checks.
+[CI 38736949991](https://github.com/ChronoAIProject/NyxID/actions/runs/38736949991)
+validated strict Clippy, all three AWS/GCP combinations, frontend/CLI
+tests and coverage, wizard freshness, billing route smoke and Docker embedded
+inputs on that revision. Full backend tests and coverage remain pending.
+
+A focused local nextest run at `df91ba159` compiled in 10m02s and executed 24
+tests against the transaction-capable MongoDB below: **23 passed, 1 failed**.
+All Telegram transport journeys, public-tool tests, machine authority regressions
+and billing route smoke passed. The remaining async-routing test progressed
+past its corrected revision assertion and exposed a reused operation ID in its
+three-case fixture. With a unique ID per operation, the focused rerun passed
+all three cases in 2.669 seconds after a 9m42s rebuild. The 23 passing tests plus
+this final focused pass verify all 24 selected regressions. Logs:
+`/tmp/nyxbot-manager-ci-fixes-test.log` and
+`/tmp/nyxbot-manager-async-fixture-test.log`. These tests use local HTTP fixtures;
+they do not establish live Telegram or deployed public-runtime proof.
+
+The final exact-settlement and usage consistency correction is integrated as
+`23508ea09`. Astra reviewed it without a confirmed blocker. Its runtime
+regressions passed in the full coverage test execution above; the ten unrelated
+failures still prevent a green integrated result. Four precise lint expectations
+identify intentionally unavailable verifier inputs and the Ready constructor;
+there is no blanket lint suppression or fabricated readiness.
 
 Earlier missing webhook arguments, transaction callback `Send` diagnostics and
 four merge-related test-target errors have been corrected. Main `828009878` was
@@ -55,8 +70,8 @@ incremental compilation and line-table-only test debug information. The compiler
 reported unused-code warnings and no type errors before interruption. This is
 not a successful build or runtime result. Log:
 `/tmp/nyxbot-manager-journey-1.log`. Runtime validation moves to CI after the
-production consumer fixes. No backend feature runtime test or full acceptance
-gate has passed yet.
+production consumer fixes. That interrupted local attempt supplies no runtime evidence; subsequent CI
+and focused results are recorded above. Full acceptance gates remain open.
 
 Main advanced again to `616a9131c`; merge `bf1ae6211` retains its inherited request
 span and turn-start trace in the extracted runtime. Public budget recovery fixes
@@ -79,8 +94,8 @@ revoking a successor turn are integrated in `23508ea09` and passed Astra's bound
 source review. None of these reviews ran tests or
 endorsed merging. Captured delayed-result
 destinations currently expire with the original 2,100-second turn lease; later
-results remain in web history. A source regression now exercises that limit,
-but runtime execution is still pending.
+results remain in web history. The focused Telegram regression run now passes that limit check; live
+acceptance is still pending.
 
 Main advanced to `897a89c2b` during verification. Merge `f00faf456` preserves its
 composer/model-label/manual-CLI-login changes and the feature's Telegram labels
@@ -89,8 +104,9 @@ canonical `npm --prefix frontend run build:wizard` regenerated them on Node
 22.21.1 and passed TypeScript checking. Independent hashing of all 175 manifest
 inputs and extras matched
 `3852abf799a366390be2b284ccc4712ed34eae9eb18bc56153971f4ab40fce26`.
-The four affected frontend suites passed 115 tests after the merge. Workspace
-formatting was checked again. Logs: `/tmp/nyxbot-manager-wizard-main897.log`,
+The four affected frontend suites passed 115 tests after the merge. All four
+personal Chromium journeys passed again on that merged source against HTTP
+fixtures. Workspace formatting was checked again. Logs: `/tmp/nyxbot-manager-wizard-main897.log`,
 `/tmp/nyxbot-manager-frontend-main897.log`.
 
 Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
@@ -181,5 +197,5 @@ unrelated.
 - All serving auth/MCP/proxy/webhook/worker replicas support the new mode before
   enabling it. Additive deserialization alone is insufficient.
 
-No production readiness, external proof, CI result or live acceptance is claimed
-by this initial record. Each completed gate must link to its evidence.
+The test results above do not establish production readiness, external runtime
+proof or live acceptance. Each completed gate must link to its evidence.
