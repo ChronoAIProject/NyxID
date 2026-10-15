@@ -12,6 +12,8 @@ pub enum ApiKeyPurpose {
     General,
     ScheduledInvocation,
     PermissionBound,
+    /// Server-issued, session-bound public runtime capability. Never a general key.
+    PublicNyxbot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

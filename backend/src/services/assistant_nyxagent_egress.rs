@@ -281,9 +281,25 @@ impl NyxAgentEgress for Egress {
         let metered = state.billing.open(&context).await?;
         // Revalidate after target/policy/billing awaits and immediately before
         // marking dispatch. Platform fencing always joins a real transaction.
-        self.fence_owner(user_id, turn, credential, platform_origin)
-            .await?;
-        state.billing.mark_forwarded(&metered).await?;
+        if let Err(error) = self
+            .fence_owner(user_id, turn, credential, platform_origin)
+            .await
+        {
+            state
+                .billing
+                .fail(&metered, "personal authority changed before dispatch")
+                .await?;
+            return Err(error);
+        }
+        if let Err(error) = state.billing.mark_forwarded(&metered).await {
+            // fail releases only rows still proven unforwarded. A partial or
+            // uncertain mark stays durable for ordinary meter reconciliation.
+            state
+                .billing
+                .fail(&metered, "billing mark failed before dispatch")
+                .await?;
+            return Err(error);
+        }
         let admission_ms = response_core::elapsed_ms(started);
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -309,7 +325,7 @@ impl NyxAgentEgress for Egress {
         let result = crate::downstream_disconnect::until_client_disconnect(
             &cancellation,
             proxy_service::forward_request_with_extra_outbound_headers(
-                &state.http_client,
+                proxy_service::no_redirect_http_client(),
                 &target,
                 request.method.clone(),
                 &request.relative_path,
@@ -338,6 +354,9 @@ impl NyxAgentEgress for Egress {
                     &headers,
                     "upstream_error",
                 );
+                // Dispatch was marked before transport: preserve the meter for
+                // ordinary stale-forwarded reconciliation; do not release an
+                // ambiguous provider effect or invent zero usage here.
                 return Err(error.into_app_error());
             }
             Err(_) => return Err(AppError::ClientDisconnected),

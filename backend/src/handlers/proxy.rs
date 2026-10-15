@@ -3024,6 +3024,9 @@ async fn assistant_model_call(
     auth_user: &AuthUser,
     catalog: Option<mongodb::bson::Document>,
 ) -> AppResult<bool> {
+    if auth_user.api_key_purpose == ApiKeyPurpose::PublicNyxbot {
+        return Ok(false);
+    }
     let (Some(key_id), Some(mut catalog)) = (auth_user.api_key_id.as_deref(), catalog) else {
         return Ok(false);
     };
@@ -3067,6 +3070,7 @@ async fn execute_proxy_inner(
     extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     // Poll resolution and forwarding sequentially so their debug frames never
     // stack, including when a machine request is nested in pool dispatch.
     let (resolved, extra_outbound_headers) = resolve_proxy_execution(
@@ -3855,6 +3859,7 @@ async fn execute_resolved_proxy_inner(
             resolved_user_service_id.as_deref(),
             &operation_target_id,
         );
+    crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     let operation_scoped = crate::services::agent_operation_scope_service::is_scoped(
         &auth_user.assistant_operation_scopes,
         operation_scope_id,

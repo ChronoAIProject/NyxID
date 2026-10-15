@@ -923,6 +923,12 @@ async fn authenticate_mcp(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
 
+    // A raw API key must never acquire an unrelated stored MCP session via
+    // bearer/JWT fallback. Public-purpose keys have no session authority.
+    if token.is_some_and(|token| token.starts_with(crate::crypto::token::AGENT_KEY_PREFIX)) {
+        return Err(mcp_403_api_key_insufficient_scope());
+    }
+
     // --- Try JWT-based auth ---
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {

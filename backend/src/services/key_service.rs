@@ -533,6 +533,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
     scheduled_write_enabled: bool,
     session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<CreatedApiKey> {
+    require_ordinary_purpose(purpose)?;
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
             "API key name must be between 1 and 200 characters".to_string(),
@@ -717,6 +718,7 @@ pub async fn effective_allowed_service_ids(
     db: &mongodb::Database,
     key: &ApiKey,
 ) -> AppResult<Vec<String>> {
+    require_ordinary_purpose(key.purpose)?;
     let access = super::org_agent_service::resolve_key_access(
         db,
         &key.user_id,
@@ -731,6 +733,7 @@ pub async fn effective_allowed_service_ids_with_access(
     key: &ApiKey,
     access: Option<&super::org_agent_service::RequestAccess>,
 ) -> AppResult<Vec<String>> {
+    require_ordinary_purpose(key.purpose)?;
     if let Some(ids) = super::org_agent_service::key_services(db, key, access).await? {
         return Ok(ids);
     }
@@ -774,7 +777,7 @@ pub async fn active_auto_connected_service_ids(
 pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<ApiKey>> {
     let keys: Vec<ApiKey> = db
         .collection::<ApiKey>(API_KEYS)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} })
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
@@ -786,7 +789,7 @@ pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<V
 /// Get a single API key by ID, verifying ownership.
 pub async fn get_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<ApiKey> {
     db.collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))
 }
@@ -817,7 +820,8 @@ pub(crate) async fn delete_api_key_in_session(
     mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<Vec<crate::models::api_key_credential::ApiKeyCredential>> {
     let collection = db.collection::<ApiKey>(API_KEYS);
-    let read = collection.find_one(doc! {"_id": key_id, "user_id": user_id});
+    let read = collection
+        .find_one(doc! {"_id": key_id, "user_id": user_id, "purpose": {"$ne": "public_nyxbot"}});
     let key = match session.as_deref_mut() {
         Some(session) => read.session(session).await?,
         None => read.await?,
@@ -1034,7 +1038,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                 {
-                    if existing.user_id != user_id {
+                    if existing.user_id != user_id || existing.purpose == ApiKeyPurpose::PublicNyxbot {
                         return Err(AppError::NotFound("API key not found".to_string()));
                     }
                     if existing.rotation_predecessor_id.as_deref() == Some(predecessor_id.as_str())
@@ -1059,6 +1063,9 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+                if old_key.purpose == ApiKeyPurpose::PublicNyxbot {
+                    return Err(AppError::NotFound("API key not found".into()));
+                }
                 if old_key.purpose == ApiKeyPurpose::PermissionBound {
                     return Err(AppError::Forbidden("Reissue permission-bound keys through /permission-keys, then revoke the predecessor".into()));
                 }
@@ -1469,7 +1476,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
 ) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
     if let Some(expected) = expected_state_version
@@ -1647,7 +1654,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
         return Ok(existing);
     }
 
-    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true };
+    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} };
     if let Some(expected) = expected_state_version {
         filter.insert("state_version", expected);
     }
@@ -1663,7 +1670,18 @@ pub async fn update_api_key_scope_with_expected_state_version(
         .ok_or_else(|| AppError::Internal("API key disappeared after update".to_string()))
 }
 
-/// Validate an API key from a request. Returns the user_id if valid.
+/// Public runtime keys never acquire ordinary owner, service or node authority.
+/// This boundary is independent of feature flags and of caller-supplied scopes.
+pub(crate) fn require_ordinary_purpose(purpose: ApiKeyPurpose) -> AppResult<()> {
+    if purpose == ApiKeyPurpose::PublicNyxbot {
+        return Err(AppError::Forbidden(
+            "Public runtime keys cannot use ordinary execution".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a primary or child credential without widening the parent purpose.
 pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
@@ -1695,9 +1713,14 @@ pub async fn validate_api_key(
         (parent, Some(child.id))
     };
 
+    if key.purpose == ApiKeyPurpose::PublicNyxbot && credential_id.is_some() {
+        return Err(AppError::Unauthorized(
+            "Public runtime keys cannot have child credentials".into(),
+        ));
+    }
     // Check expiration
     if let Some(expires_at) = key.expires_at
-        && expires_at < Utc::now()
+        && expires_at <= Utc::now()
     {
         return Err(AppError::Unauthorized("API key has expired".to_string()));
     }

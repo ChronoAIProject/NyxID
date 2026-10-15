@@ -185,6 +185,7 @@ pub async fn llm_status(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<llm_gateway_service::LlmStatusResponse>> {
+    llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
 
     let user_id_str = auth_user.user_id.to_string();
@@ -224,6 +225,7 @@ pub async fn pool_aliases(
 ) -> AppResult<Json<PoolAliasesResponse>> {
     use crate::models::service_pool::{PoolMemberContract, PoolStrategy, ServicePool};
     use futures::TryStreamExt;
+    llm_gateway_service::require_ordinary_purpose(auth.api_key_purpose)?;
     auth.ensure_llm_proxy_access()?;
     let actor = auth.proxy_resolution_user_id();
     let mut owners = vec![actor.clone()];
@@ -343,6 +345,7 @@ pub async fn llm_proxy_request(
     Path((provider_slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
     auth_user
         .ensure_live_assistant_turn(&state.db, "llm.provider")
@@ -851,6 +854,7 @@ async fn gateway_request_inner(
     let gateway_started_at = std::time::Instant::now();
     let gateway_uri = request.uri().clone();
     let gateway_extensions = request.extensions().clone();
+    llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
     auth_user
         .ensure_live_assistant_turn(&state.db, "llm.gateway")
