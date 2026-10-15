@@ -445,42 +445,48 @@ pub async fn revoke_owned(
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run2(async move |session| {
-            let result: AppResult<_> = async {
-                if !fence_person(&db, session, &actor.user_id).await? {
-                    return Err(unavailable());
-                }
-                let binding = db
+        .and_run(
+            (db, actor, key, id, generation, effects),
+            |session, (db, actor, key, id, generation, effects)| {
+                Box::pin(async move {
+                    let result: AppResult<_> =
+                        async {
+                            if !fence_person(db, session, &actor.user_id).await? {
+                                return Err(unavailable());
+                            }
+                            let binding = db
                     .collection::<PlatformPersonalBinding>(COLLECTION_NAME)
-                    .find_one(doc! {"_id":&id,"user_id":&actor.user_id,"generation":generation})
+                    .find_one(doc! {"_id":&*id,"user_id":&actor.user_id,"generation":*generation})
                     .session(&mut *session)
                     .await?
                     .ok_or_else(unavailable)?;
-                if revoke_binding_in_session(
-                    &db,
-                    session,
-                    &binding,
-                    PersonalRevocationReason::Unlinked,
-                    effects,
-                    None,
-                )
-                .await?
-                {
-                    super::audit_service::log_actor_event_in_session(
-                        &db,
-                        session,
-                        &key,
-                        &actor,
-                        "platform_personal_binding_revoked",
-                        serde_json::json!({"binding_id":id,"generation":generation}),
-                    )
-                    .await?;
-                }
-                Ok(())
-            }
-            .await;
-            super::api_key_mutation_service::transaction_result(result)
-        })
+                            if revoke_binding_in_session(
+                                db,
+                                session,
+                                &binding,
+                                PersonalRevocationReason::Unlinked,
+                                *effects,
+                                None,
+                            )
+                            .await?
+                            {
+                                super::audit_service::log_actor_event_in_session(
+                                    db,
+                                    session,
+                                    key,
+                                    actor,
+                                    "platform_personal_binding_revoked",
+                                    serde_json::json!({"binding_id":id,"generation":*generation}),
+                                )
+                                .await?;
+                            }
+                            Ok(())
+                        }
+                        .await;
+                    super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)
 }

@@ -308,7 +308,7 @@ pub async fn update(
 ) -> AppResult<PlatformBotRuntimeControls> {
     let profile = super::platform_bot_config_service::get(db, profile_id).await?;
     let previous = get(db, profile_id).await?;
-    let mut proposed = candidate(&profile, previous.as_ref(), change)?;
+    let proposed = candidate(&profile, previous.as_ref(), change)?;
     let public_changed = previous.as_ref().is_none_or(|r| {
         r.public_enabled != proposed.public_enabled || r.public_policy != proposed.public_policy
     });
@@ -328,36 +328,38 @@ pub async fn update(
     let change = change.clone();
     let profile_id = profile_id.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction().and_run(
+        (db, actor, key, change, profile_id, profile, proposed, evidence, readiness, public_changed, needs_probe),
+        |session, (db, actor, key, change, profile_id, profile, proposed, evidence, readiness, public_changed, needs_probe)| Box::pin(async move {
         let result:AppResult<_>=async {
-            super::platform_bot_config_service::fence_admin(&db,&actor.user_id,session).await?;
-            let mut filter=doc! {"_id":&profile_id,"manager_bot_id":&profile.manager_bot_id,"deleted_at":bson::Bson::Null};
+            super::platform_bot_config_service::fence_admin(db,&actor.user_id,session).await?;
+            let mut filter=doc! {"_id":&*profile_id,"manager_bot_id":&profile.manager_bot_id,"deleted_at":bson::Bson::Null};
             if change.initialize {filter.insert("generation",change.expected_profile_generation.ok_or_else(changed)?);}
             let live=db.collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME).find_one_and_update(filter,doc! {"$inc":{"runtime_configuration_revision":1_i64}}).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(changed)?;
-            let current=db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).find_one(doc! {"platform_config_id":&profile_id}).session(&mut *session).await?;
-            let rebuilt=candidate(&live,current.as_ref(),&change)?;
-            if policy_digest_fields(&rebuilt)!=policy_digest_fields(&proposed) {return Err(changed());}
+            let current=db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).find_one(doc! {"platform_config_id":&*profile_id}).session(&mut *session).await?;
+            let rebuilt=candidate(&live,current.as_ref(),change)?;
+            if policy_digest_fields(&rebuilt)!=policy_digest_fields(proposed) {return Err(changed());}
             proposed.effect_revision=rebuilt.effect_revision;
             proposed.updated_at=Utc::now();
             if (proposed.personal_enabled || proposed.public_enabled)
                 && db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
             if (proposed.personal_enabled || proposed.public_enabled)
-                && db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&live.channel_bot_id,"platform_profile_id":&profile_id,"platform_bot_id":&live.manager_bot_id,"is_active":true},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-            if proposed.public_enabled && public_changed {
+                && db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&live.channel_bot_id,"platform_profile_id":&*profile_id,"platform_bot_id":&live.manager_bot_id,"is_active":true},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
+            if proposed.public_enabled && *public_changed {
                 let sponsor=proposed.public_policy.as_ref().ok_or_else(changed)?;
                 if db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id":&sponsor.sponsor_owner_user_id,"is_active":true,"user_type":"org"},doc! {"$inc":{"runtime_funding_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
                 if db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME).update_one(doc! {"org_user_id":&sponsor.sponsor_owner_user_id,"member_user_id":&actor.user_id,"role":"admin","revoked_at":bson::Bson::Null},doc! {"$inc":{"runtime_funding_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-                if let Some(evidence)=&evidence {readiness.fence(&db,session,&policy(&proposed),evidence).await?;} else if needs_probe {return Err(changed());}
+                if let Some(evidence)=evidence.as_ref() {readiness.fence(db,session,&policy(proposed),evidence).await?;} else if *needs_probe {return Err(changed());}
             }
             if let Some(old)=&current
                 && old.public_enabled && (!proposed.public_enabled || old.public_policy!=proposed.public_policy) {
-                readiness.revoke_public_manager(&db,session,&policy(old)).await?;
+                readiness.revoke_public_manager(db,session,&policy(old)).await?;
             }
-            if current.is_some() {db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).replace_one(doc! {"platform_config_id":&profile_id},&proposed).session(&mut *session).await?;}else{db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).insert_one(&proposed).session(&mut *session).await?;}
-            super::audit_service::log_actor_event_in_session(&db,session,&key,&actor,"platform_manager_runtime_changed",serde_json::json!({"profile_id":profile_id,"epoch":proposed.manager_authority_epoch,"personal_revision":proposed.personal_control_revision,"public_revision":proposed.public_policy_revision,"personal_enabled":proposed.personal_enabled,"public_enabled":proposed.public_enabled})).await?;
+            if current.is_some() {db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).replace_one(doc! {"platform_config_id":&*profile_id},&*proposed).session(&mut *session).await?;}else{db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).insert_one(&*proposed).session(&mut *session).await?;}
+            super::audit_service::log_actor_event_in_session(db,session,key,actor,"platform_manager_runtime_changed",serde_json::json!({"profile_id":profile_id,"epoch":proposed.manager_authority_epoch,"personal_revision":proposed.personal_control_revision,"public_revision":proposed.public_policy_revision,"personal_enabled":proposed.personal_enabled,"public_enabled":proposed.public_enabled})).await?;
             Ok(proposed.clone())
         }.await;transaction_result(result)
-    }).await.map_err(map_transaction_error)
+    })).await.map_err(map_transaction_error)
 }
 
 fn policy_digest_fields(
