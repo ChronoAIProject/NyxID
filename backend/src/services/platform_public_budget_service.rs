@@ -365,7 +365,7 @@ pub(crate) async fn reserve_loop_in_session(
             .matched_count
             != 1
         {
-            return Err(denied());
+            return Err(AppError::RateLimited);
         }
         saved.bucket_ids.push(bucket);
     }
@@ -1134,6 +1134,10 @@ mod tests {
             reserve(db.clone(), b, key_b, Credits::from_pico(6).unwrap())
         );
         assert_ne!(left.is_ok(), right.is_ok());
+        assert!(matches!(
+            left.err().or(right.err()),
+            Some(AppError::RateLimited)
+        ));
         let buckets: Vec<PublicBudgetBucket> = db
             .collection::<PublicBudgetBucket>(BUCKETS)
             .find(doc! {})

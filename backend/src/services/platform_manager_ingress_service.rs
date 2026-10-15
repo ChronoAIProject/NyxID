@@ -198,8 +198,6 @@ fn reason_code(reason: UnavailableReason) -> &'static str {
         UnavailableReason::PublicQuotaLimited => "public_quota_limited",
         UnavailableReason::RuntimeUninitialized => "runtime_uninitialized",
         UnavailableReason::SponsorUnavailable => "sponsor_unavailable",
-        UnavailableReason::ProfileUnavailable => "profile_unavailable",
-        UnavailableReason::ProofExpired => "proof_expired",
     }
 }
 

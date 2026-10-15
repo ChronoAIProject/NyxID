@@ -197,8 +197,6 @@ pub enum UnavailableReason {
     PublicQuotaLimited,
     RuntimeUninitialized,
     SponsorUnavailable,
-    ProfileUnavailable,
-    ProofExpired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,10 +471,22 @@ pub struct PublicReadinessEvidence {
     pub manager: ManagerAuthority,
     pub public_policy_revision: i64,
     pub policy_digest: String,
+    #[expect(
+        dead_code,
+        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
+    )]
     pub proof_record_id: String,
+    #[expect(
+        dead_code,
+        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
+    )]
     pub candidate_digest: String,
     pub evidence_digest: String,
     pub sponsor_owner_user_id: String,
+    #[expect(
+        dead_code,
+        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
+    )]
     pub nyxagent_build: String,
     pub nyxagent_profile: String,
     pub model_operations: Vec<PublicModelOperation>,
@@ -488,6 +498,13 @@ pub struct PublicReadinessEvidence {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // Readiness carries one bounded proof across the producer boundary.
 pub enum PublicReadiness {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Public activation awaits deployed-contract verification; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
+        )
+    )]
     Ready(PublicReadinessEvidence),
     Unavailable(UnavailableReason),
 }
@@ -528,8 +545,6 @@ pub enum PublicRevocationReason {
     PersonalLinkConfirmed,
     SenderUnlinked,
     ManagerRetired,
-    ManagerIdentityChanged,
-    SponsorUnavailable,
     SessionExpired,
 }
 
@@ -574,8 +589,6 @@ pub struct ObservedUpstreamBinding {
 #[derive(Clone, Debug)]
 pub enum SettledExecution {
     Saved(ReplyRef),
-    ConversationDeleted { turn: TurnRef },
-    PersistenceUnavailable { turn: TurnRef },
 }
 
 #[derive(Clone, Debug)]

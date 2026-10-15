@@ -470,19 +470,21 @@ pub(crate) async fn dispatch_update(
                 .await
             {
                 Ok(context) => context,
-                Err(AppError::Conflict(_) | AppError::Forbidden(_)) => {
+                Err(error) => {
+                    let Some(reason) = public_failure(&error) else {
+                        return Err(error);
+                    };
                     send_fixed(
                         state,
                         &producers,
                         &verified,
                         &ingress,
                         admitted.manager,
-                        UnavailableReason::PublicNotReady,
+                        reason,
                     )
                     .await?;
                     return Ok(true);
                 }
-                Err(error) => return Err(error),
             };
             let mut session = state.db.client().start_session().await?;
             let fenced = session
@@ -540,7 +542,25 @@ pub(crate) async fn dispatch_update(
                     },
                     events,
                 )
-                .await?;
+                .await;
+            let turn = match turn {
+                Ok(turn) => turn,
+                Err(error) => {
+                    let Some(reason) = public_failure(&error) else {
+                        return Err(error);
+                    };
+                    send_fixed(
+                        state,
+                        &producers,
+                        &verified,
+                        &ingress,
+                        destination.manager,
+                        reason,
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            };
             if turn != expected {
                 return Err(AppError::Conflict("Public execution turn changed".into()));
             }
@@ -607,6 +627,17 @@ async fn send_fixed(
         )
         .await?;
     Ok(())
+}
+
+fn public_failure(error: &AppError) -> Option<UnavailableReason> {
+    Some(match error {
+        AppError::RateLimited => UnavailableReason::PublicQuotaLimited,
+        AppError::InsufficientCredits | AppError::WalletSuspended => {
+            UnavailableReason::SponsorUnavailable
+        }
+        AppError::Conflict(_) | AppError::Forbidden(_) => UnavailableReason::PublicNotReady,
+        _ => return None,
+    })
 }
 
 fn expected_failure(error: &AppError) -> Option<UnavailableReason> {

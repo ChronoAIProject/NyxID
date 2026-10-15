@@ -130,18 +130,8 @@ pub(crate) async fn execute(
     };
     // Settlement remains permitted after the execution deadline or revocation.
     let message_id = uuid::Uuid::new_v4().to_string();
-    let settled = runtime.settle(db, &context, &message_id, &result).await?;
-    match settled {
-        SettledExecution::Saved(reply) => {
-            let _ = events.send(ExecutionEvent::ReplyReady(reply)).await;
-        }
-        SettledExecution::ConversationDeleted { turn }
-        | SettledExecution::PersistenceUnavailable { turn } => {
-            if turn != context.turn {
-                return Err(policy::unavailable());
-            }
-        }
-    }
+    let SettledExecution::Saved(reply) = runtime.settle(db, &context, &message_id, &result).await?;
+    let _ = events.send(ExecutionEvent::ReplyReady(reply)).await;
     let _ = events
         .send(ExecutionEvent::Settled { turn: context.turn })
         .await;

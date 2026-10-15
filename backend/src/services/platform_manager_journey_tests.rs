@@ -911,6 +911,18 @@ async fn stopped_reply_and_mismatched_current_token_never_send() {
 #[test]
 fn expected_personal_admission_errors_are_bounded_and_infrastructure_stays_error() {
     assert_eq!(
+        public_failure(&AppError::RateLimited),
+        Some(UnavailableReason::PublicQuotaLimited)
+    );
+    assert_eq!(
+        public_failure(&AppError::InsufficientCredits),
+        Some(UnavailableReason::SponsorUnavailable)
+    );
+    assert_eq!(
+        public_failure(&AppError::Internal("persistence failed".into())),
+        None
+    );
+    assert_eq!(
         expected_failure(&AppError::AssistantTurnActive),
         Some(UnavailableReason::CapacityLimited)
     );

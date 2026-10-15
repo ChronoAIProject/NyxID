@@ -102,6 +102,12 @@ pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
         UnavailableReason::CapacityLimited => {
             "Your NyxBot is busy. Wait for the current work or open NyxID."
         }
+        UnavailableReason::PublicQuotaLimited => {
+            "Public chat has reached a daily limit. Try again after midnight UTC, or send /link to use your own NyxBot."
+        }
+        UnavailableReason::SponsorUnavailable => {
+            "Public chat funding is unavailable. Send /link to use your own NyxBot when personal linking is enabled."
+        }
         UnavailableReason::EmergencyStopped
         | UnavailableReason::ManagerUnavailable
         | UnavailableReason::TransportUnavailable => {
@@ -1519,6 +1525,8 @@ fn fixed_reason(reason: &str) -> Option<UnavailableReason> {
         TransportUnavailable,
         PublicDisabled,
         PublicNotReady,
+        PublicQuotaLimited,
+        SponsorUnavailable,
         RuntimeUninitialized,
         EngineUnavailable,
         ModeDisabled,

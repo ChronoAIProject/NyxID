@@ -257,8 +257,6 @@ fn reason_label(reason: PublicRevocationReason) -> &'static str {
         PublicRevocationReason::PersonalLinkConfirmed => "personal_link_confirmed",
         PublicRevocationReason::SenderUnlinked => "sender_unlinked",
         PublicRevocationReason::ManagerRetired => "manager_retired",
-        PublicRevocationReason::ManagerIdentityChanged => "manager_identity_changed",
-        PublicRevocationReason::SponsorUnavailable => "sponsor_unavailable",
         PublicRevocationReason::SessionExpired => "session_expired",
     }
 }
