@@ -180,7 +180,7 @@ impl From<&crate::models::assistant_conversation::PlatformThread> for PlatformTh
     fn from(thread: &crate::models::assistant_conversation::PlatformThread) -> Self {
         Self {
             platform: thread.platform.clone(),
-            manager_id: thread.manager_bot_id.clone(),
+            manager_id: thread.profile_id.clone(),
             binding_id: thread.binding_id.clone(),
             binding_generation: thread.binding_generation,
         }

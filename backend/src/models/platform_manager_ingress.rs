@@ -24,6 +24,8 @@ pub struct PlatformManagerIngress {
     pub execution: Option<IngressExecution>,
     pub decision: Option<IngressDecision>,
     pub reply_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_reason: Option<String>,
     pub effect_revision: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub admitted_at: DateTime<Utc>,

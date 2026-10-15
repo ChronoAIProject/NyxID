@@ -993,6 +993,58 @@ fn platform_test_origin(
     }
 }
 
+async fn seed_platform_execution(
+    db: &Database,
+    row: &AssistantConversation,
+    proof: &crate::models::assistant_conversation::PlatformTurnOrigin,
+) {
+    use crate::models::assistant_conversation::PlatformOriginSource;
+    let turn = row.active_turn.as_ref().unwrap();
+    let PlatformOriginSource::Ingress {
+        receipt_id,
+        claim_id,
+    } = &proof.source
+    else {
+        panic!("ingress fixture");
+    };
+    db.collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME).insert_one(doc! {
+        "_id":&proof.thread.binding_id, "user_id":&row.user_id, "generation":proof.thread.binding_generation,
+        "state":"revoked", "conversation_id":&row.id, "nyxbot_agent_id":&proof.thread.nyxbot_agent_id,
+        "active_turn":{"conversation_id":&row.id,"turn_id":&turn.turn_id},
+    }).await.unwrap();
+    db.collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME).insert_one(doc! {
+        "_id":receipt_id, "claim_id":claim_id, "phase":"executing", "reply_id":bson::Bson::Null,"decision":bson::Bson::Null,
+        "profile_id":&proof.thread.profile_id,"manager_bot_id":&proof.thread.manager_bot_id,
+        "telegram_bot_id":proof.thread.telegram_bot_id,"manager_authority_epoch":proof.manager_authority_epoch,
+        "sender_id":proof.sender_id,"chat_id":proof.chat_id,
+        "audience":{"kind":"personal","user_id":&row.user_id,"binding_id":&proof.thread.binding_id,
+            "binding_generation":proof.thread.binding_generation,"personal_control_revision":proof.personal_control_revision},
+        "execution":{"conversation_id":&row.id,"turn_id":&turn.turn_id,"payer_user_id":&row.user_id},
+    }).await.unwrap();
+}
+
+async fn assert_platform_settled(
+    db: &Database,
+    proof: &crate::models::assistant_conversation::PlatformTurnOrigin,
+    reply_id: &str,
+) {
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.get("active_turn"), Some(&bson::Bson::Null));
+    let receipt = db
+        .collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
+        .find_one(doc! {"audience.binding_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.get_str("phase").unwrap(), "settled");
+    assert_eq!(receipt.get_str("reply_id").unwrap(), reply_id);
+}
+
 #[test]
 fn platform_provenance_round_trips_and_legacy_rows_remain_origin_free() {
     let mut row = stale_test_row(Utc::now());
@@ -1247,6 +1299,7 @@ async fn settlement_retains_platform_origin_after_active_turn_is_cleared() {
         .replace_one(doc! {"_id": &row.id}, &row)
         .await
         .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
     let message_id = Uuid::new_v4().to_string();
     finish_turn(
         &db,
@@ -1275,6 +1328,7 @@ async fn settlement_retains_platform_origin_after_active_turn_is_cleared() {
         .await
         .unwrap()
         .unwrap();
+    assert_platform_settled(&db, &proof, &reply.id).await;
     assert_eq!(reply.platform_origin, Some(proof));
     let mut legacy = bson::to_document(&reply).unwrap();
     legacy.remove("platform_origin");
@@ -1316,6 +1370,7 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     .await
     .unwrap();
     let proof = platform_test_origin(&old);
+    seed_platform_execution(&db, &old, &proof).await;
     db.collection::<bson::Document>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &old.id},
@@ -1352,6 +1407,7 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     assert_eq!(transcript.len(), 3);
     let lost = &transcript[1];
     assert_eq!(lost.platform_origin.as_ref(), Some(&proof));
+    assert_platform_settled(&db, &proof, &lost.id).await;
     assert!(next.active_turn.as_ref().unwrap().platform_origin.is_none());
     assert_eq!(lost.turn_id, old.active_turn.as_ref().unwrap().turn_id);
     assert_eq!(lost.role, "assistant");
@@ -4918,4 +4974,121 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
             .platform_origin
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn personal_settlement_receipt_mismatch_rolls_back_reply_and_pointer_clear() {
+    let db = connect_transaction_test_database("nyxa_personal_settle_abort").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let mut row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    let receipts =
+        db.collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME);
+    receipts
+        .update_one(doc! {}, doc! {"$set":{"claim_id":"different-claim"}})
+        .await
+        .unwrap();
+    let reply_id = Uuid::new_v4().to_string();
+    assert!(
+        finish_turn(
+            &db,
+            &row,
+            &row.credential_api_key_id,
+            &reply_id,
+            &TurnResult {
+                text: "uncommitted".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        get(&db, "owner", &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
+    assert!(
+        db.collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"_id":reply_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(binding.get_document("active_turn").is_ok());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_personal_thread_interrupts_only_its_exact_claim_and_clears_reference() {
+    let db = connect_transaction_test_database("nyxa_personal_delete").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let mut row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    delete(&db, "owner", &row.id).await.unwrap();
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.get("conversation_id"), Some(&bson::Bson::Null));
+    assert_eq!(binding.get("active_turn"), Some(&bson::Bson::Null));
+    let receipt = db
+        .collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.get_str("phase").unwrap(), "interrupted");
+    assert_eq!(
+        receipt.get_str("interrupted_reason").unwrap(),
+        "conversation_deleted"
+    );
+    assert_eq!(receipt.get("reply_id"), Some(&bson::Bson::Null));
+    assert!(matches!(
+        get(&db, "owner", &row.id).await,
+        Err(AppError::NotFound(_))
+    ));
+    db.drop().await.unwrap();
 }

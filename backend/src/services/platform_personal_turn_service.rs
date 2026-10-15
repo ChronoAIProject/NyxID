@@ -277,3 +277,90 @@ pub(crate) async fn claim_personal_turn_in_session(
         .await?;
     Ok(claim)
 }
+
+/// Reply insertion, ingress settlement and pointer clearing share the caller's
+/// transaction. Revoked consent must still let this exact old turn settle.
+pub(crate) async fn settle_saved_reply_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    message: &crate::models::assistant_message::AssistantMessage,
+) -> AppResult<()> {
+    use contract::{ManagerIdentityProducer, ManagerIngressTurnStore};
+    let Some(origin) = message.platform_origin.as_ref() else {
+        return Ok(());
+    };
+    if origin.thread.user_id != message.user_id {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let turn = contract::TurnRef {
+        conversation_id: message.conversation_id.clone(),
+        turn_id: message.turn_id.clone(),
+    };
+    super::platform_personal_binding_service::IdentityProducer
+        .clear_binding_turn(
+            db,
+            session,
+            &message.user_id,
+            &origin.thread.binding_id,
+            origin.thread.binding_generation,
+            &turn,
+        )
+        .await?;
+    if let model::PlatformOriginSource::Ingress {
+        receipt_id,
+        claim_id,
+    } = &origin.source
+    {
+        super::platform_manager_ingress_service::IngressTurnStore
+            .settle_personal_execution(
+                db,
+                session,
+                &contract::IngressClaim {
+                    receipt_id: receipt_id.clone(),
+                    claim_id: claim_id.clone(),
+                },
+                &contract::ReplyRef {
+                    turn,
+                    reply_id: message.id.clone(),
+                },
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn clear_thread_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+) -> AppResult<bool> {
+    use contract::ManagerIdentityProducer;
+    let Some(thread) = row.platform_thread.as_ref() else {
+        return Ok(false);
+    };
+    if let Some(turn) = row.active_turn.as_ref()
+        && let Some(origin) = turn.platform_origin.as_ref()
+        && matches!(origin.source, model::PlatformOriginSource::Ingress { .. })
+    {
+        super::platform_manager_ingress_service::interrupt_personal_execution_in_session(
+            db,
+            session,
+            &contract_origin(origin)?,
+            &contract::TurnRef {
+                conversation_id: row.id.clone(),
+                turn_id: turn.turn_id.clone(),
+            },
+        )
+        .await?;
+    }
+    super::platform_personal_binding_service::IdentityProducer
+        .clear_binding_thread_reference(
+            db,
+            session,
+            &row.user_id,
+            &thread.binding_id,
+            thread.binding_generation,
+            &row.id,
+        )
+        .await
+}

@@ -2151,6 +2151,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             db, session, &row, &lost_turn, &message, now,
         ))
         .await?;
+        super::platform_personal_turn_service::settle_saved_reply_in_session(db, session, &message)
+            .await?;
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(message)
             .session(&mut *session)
@@ -2849,6 +2851,9 @@ async fn finish_turn_inner(
                         "user_id": &row.user_id,
                         "active_turn.turn_id": &turn_id,
                     };
+                if let Some(expected) = row.active_turn.as_ref().and_then(|turn| turn.platform_origin.as_ref()) {
+                    active_filter.insert("active_turn.platform_origin", bson::to_bson(expected).map_err(|_|AppError::AssistantTurnRequired)?);
+                }
                 if let Some(before) = heartbeat_before {
                     active_filter.insert(
                         "active_turn.heartbeat_at",
@@ -3030,6 +3035,7 @@ async fn finish_turn_inner(
                     ))
                     .await?;
                 }
+                super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
                     .session(&mut *session)
@@ -4263,6 +4269,10 @@ pub async fn delete(
                 let mut children = Vec::new();
                 for row in &rows {
                     let id = row.id.as_str();
+                    super::platform_personal_turn_service::clear_thread_in_session(
+                        db, session, row,
+                    )
+                    .await?;
                     if row.channel.as_ref().is_some_and(|o| o.thread.is_some()) {
                         super::channel_thread_follow_service::delete_conversation(
                             db, user_id, id, session,

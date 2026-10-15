@@ -149,6 +149,7 @@ pub async fn record_admission_in_session(
         execution: None,
         decision: None,
         reply_id: None,
+        interrupted_reason: None,
         effect_revision: 0,
         admitted_at: now,
         start_before: now + Duration::minutes(10),
@@ -423,6 +424,43 @@ async fn settle_execution(
     .await
 }
 
+/// Deletion invalidates delivery without inventing a reply or changing the
+/// originally admitted audience. A retry may only observe this same terminal.
+pub(crate) async fn interrupt_personal_execution_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    origin: &PlatformTurnOrigin,
+    turn: &TurnRef,
+) -> AppResult<()> {
+    let PlatformOriginSource::Ingress(ingress) = &origin.source else {
+        return Err(changed());
+    };
+    let mut filter = personal_filter(&AdmittedPersonalUpdate {
+        ingress: ingress.clone(),
+        authority: origin.authority.clone(),
+    });
+    filter.extend(doc! {
+        "execution.conversation_id": &turn.conversation_id,
+        "execution.turn_id": &turn.turn_id,
+        "execution.payer_user_id": &origin.authority.user_id,
+        "decision": bson::Bson::Null, "reply_id":bson::Bson::Null,
+        "$or": [
+            {"phase":"executing", "interrupted_reason":bson::Bson::Null},
+            {"phase":"interrupted", "interrupted_reason":"conversation_deleted"},
+        ],
+    });
+    update_exact(
+        db,
+        session,
+        filter,
+        doc! {
+            "phase":"interrupted", "interrupted_reason":"conversation_deleted",
+            "settled_at":bson::DateTime::from_chrono(Utc::now()),
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +529,91 @@ mod tests {
             conversation_id: format!("nyxa-{}", Uuid::new_v4().simple()),
             turn_id: Uuid::new_v4().to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn deletion_interruption_is_exact_transactional_and_terminal() {
+        let (db, update, admitted) = fixture().await;
+        admit(&db, &update, &admitted).await;
+        let turn = turn();
+        let origin = PlatformTurnOrigin {
+            authority: admitted.authority.clone(),
+            nyxbot_agent_id: Uuid::new_v4().to_string(),
+            source: PlatformOriginSource::Ingress(admitted.ingress.clone()),
+        };
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        IngressTurnStore
+            .claim_personal_execution(&db, &mut session, &admitted, &turn)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        session.start_transaction().await.unwrap();
+        interrupt_personal_execution_in_session(&db, &mut session, &origin, &turn)
+            .await
+            .unwrap();
+        session.abort_transaction().await.unwrap();
+        let receipt = db
+            .collection::<PlatformManagerIngress>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&admitted.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(receipt.phase == IngressPhase::Executing);
+        let mut wrong = origin.clone();
+        wrong.authority.binding_generation += 1;
+        session.start_transaction().await.unwrap();
+        assert!(
+            interrupt_personal_execution_in_session(&db, &mut session, &wrong, &turn)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        for _ in 0..2 {
+            session.start_transaction().await.unwrap();
+            interrupt_personal_execution_in_session(&db, &mut session, &origin, &turn)
+                .await
+                .unwrap();
+            session.commit_transaction().await.unwrap();
+        }
+        session.start_transaction().await.unwrap();
+        assert!(
+            IngressTurnStore
+                .settle_personal_execution(
+                    &db,
+                    &mut session,
+                    &admitted.ingress,
+                    &ReplyRef {
+                        turn: turn.clone(),
+                        reply_id: "invented".into()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        let receipt = db
+            .collection::<PlatformManagerIngress>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&admitted.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(receipt.phase == IngressPhase::Interrupted);
+        assert_eq!(
+            receipt.interrupted_reason.as_deref(),
+            Some("conversation_deleted")
+        );
+        assert!(receipt.reply_id.is_none());
+        assert!(
+            receipt.audience
+                == IngressAudience::Personal {
+                    user_id: admitted.authority.user_id.clone(),
+                    binding_id: admitted.authority.binding_id.clone(),
+                    binding_generation: admitted.authority.binding_generation,
+                    personal_control_revision: admitted.authority.personal_control_revision
+                }
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
