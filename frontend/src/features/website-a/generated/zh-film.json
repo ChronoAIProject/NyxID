@@ -1,0 +1,236 @@
+[
+  {
+    "id": "rest",
+    "label": "餐厅经理",
+    "bot": "Luna Bistro",
+    "sub": "订位",
+    "key": "订位助手",
+    "sys": "周六 晚上 11:42 · 餐厅已打烊",
+    "user": "你好，我是 Sarah！明晚 7:30 有 4 人位吗？我们有一位吃素。",
+    "tools": [
+      "✓ 已查日历 · 7:30 有空",
+      "✓ 已订位"
+    ],
+    "reply": "订好了！周日晚上 7:30，4 人桌，Sarah 名下。已备注素食，厨房会知道。",
+    "rows": [
+      [
+        "tg",
+        "Telegram",
+        "回复客人",
+        "ok",
+        1
+      ],
+      [
+        "cal",
+        "Google 日历",
+        "查空位并订桌",
+        "ok",
+        1
+      ],
+      [
+        "sh",
+        "Google 表格",
+        "客人备注",
+        "ok",
+        1
+      ],
+      [
+        "cal",
+        "Google 日历",
+        "取消订位",
+        "ask",
+        0
+      ]
+    ],
+    "req": "POST /api/v1/proxy/s/google-calendar\n     /calendars/primary/events\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"summary\": \"Sarah · table for 4\",\n  \"start\": \"2026-10-18T19:30\",\n  \"notes\": \"1 vegan guest\" }",
+    "res": "→ 200 OK\n{ \"status\": \"confirmed\",\n  \"id\": \"evt_9f2c41\" }",
+    "cap": "全天候接受订位，打烊后也不例外。"
+  },
+  {
+    "id": "help",
+    "label": "24 小时客服",
+    "bot": "Kite Supply",
+    "sub": "客户服务",
+    "key": "客服助手",
+    "sys": "周二 凌晨 3:12",
+    "user": "我的订单 #4821 还没到，在哪里？",
+    "tools": [
+      "✓ 已查询订单 #4821"
+    ],
+    "reply": "抱歉让你久等！#4821 昨天已发货，明天下午 6 点前送达。物流单号：KT-55210。",
+    "rows": [
+      [
+        "tg",
+        "Telegram",
+        "回复客户",
+        "ok",
+        1
+      ],
+      [
+        "sh",
+        "Google 表格",
+        "查询订单",
+        "ro",
+        1
+      ],
+      [
+        "gm",
+        "Gmail",
+        "通知团队",
+        "ok",
+        1
+      ],
+      [
+        "pay",
+        "支付",
+        "办理退款",
+        "no",
+        0
+      ]
+    ],
+    "req": "GET /api/v1/proxy/s/google-sheets\n    /v4/spreadsheets/1Bx…/values\n    /Orders!A:F\nAuthorization: Bearer nyxid_ag_••••",
+    "res": "→ 200 OK\n{ \"values\": [\n  [\"4821\", \"shipped\",\n   \"KT-55210\", \"arrives Wed\"] ] }",
+    "cap": "凌晨三点也能回复客户，团队不用熬夜。"
+  },
+  {
+    "id": "stock",
+    "label": "股票分析师",
+    "bot": "Market Desk",
+    "sub": "我的自选股",
+    "key": "分析助手",
+    "sys": "周一 下午 4:05 · 已收盘",
+    "user": "我的自选股今天收盘怎么样？有什么要注意的吗？",
+    "tools": [
+      "✓ 已获取收盘价",
+      "✓ 已扫描 X 上的帖子"
+    ],
+    "reply": "NVDA +2.1%，AAPL −0.4%，TSLA −1.8%。TSLA 的讨论主要围绕交付数据。笔记已写入你的表格。",
+    "rows": [
+      [
+        "mk",
+        "行情数据",
+        "你自己的 API",
+        "ro",
+        1
+      ],
+      [
+        "x",
+        "X（推特）",
+        "搜索帖子",
+        "ro",
+        1
+      ],
+      [
+        "cl",
+        "Claude / GPT",
+        "总结",
+        "ok",
+        1
+      ],
+      [
+        "tr",
+        "券商",
+        "下单交易",
+        "no",
+        0
+      ]
+    ],
+    "req": "POST /api/v1/llm/gateway/v1\n     /chat/completions\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"model\": \"claude-sonnet-5-5\",\n  \"messages\": [{ \"role\": \"user\",\n    \"content\": \"Summarise my\n     watchlist moves\" }] }",
+    "res": "→ 200 OK\n{ \"choices\": [{ \"message\":\n  { \"content\": \"NVDA +2.1% led…\" }}] }",
+    "cap": "盯盘并用大白话给你简报。只能读，绝不交易。"
+  },
+  {
+    "id": "news",
+    "label": "新闻聚合",
+    "bot": "Morning Brief",
+    "sub": "每天早上 8:00",
+    "key": "新闻助手",
+    "sys": "早上 8:00 · 定时运行",
+    "user": null,
+    "tools": [
+      "✓ 已阅读 42 个来源",
+      "✓ 已去除重复"
+    ],
+    "reply": "早上好！今天：1）欧盟发布 AI 规则新指引 2）一家支付公司推出稳定币付款 3）芯片股因财报上涨。",
+    "rows": [
+      [
+        "fc",
+        "Firecrawl",
+        "读取新闻网站",
+        "ro",
+        1
+      ],
+      [
+        "x",
+        "X（推特）",
+        "搜索帖子",
+        "ro",
+        1
+      ],
+      [
+        "tv",
+        "Tavily",
+        "网页搜索",
+        "ro",
+        1
+      ],
+      [
+        "tg",
+        "Telegram",
+        "发送简报",
+        "ok",
+        1
+      ]
+    ],
+    "req": "POST /api/v1/proxy/s/firecrawl\n     /v1/search\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"query\": \"AI regulation fintech\",\n  \"limit\": 20 }",
+    "res": "→ 200 OK\n{ \"data\": [\n  { \"title\": \"EU publishes…\",\n    \"url\": \"https://…\" }, … ] }",
+    "cap": "替你读新闻，每天早上发一份清爽的简报。"
+  },
+  {
+    "id": "research",
+    "label": "案头研究员",
+    "bot": "Research Desk",
+    "sub": "研究",
+    "key": "研究助手",
+    "sys": "周三 上午 10:20",
+    "user": "找 5 个和我们订位应用竞争的产品，比较一下价格。",
+    "tools": [
+      "✓ 已搜索 18 个网页",
+      "✓ 已撰写报告"
+    ],
+    "reply": "完成！已比较 5 个竞品：价格从免费到每月 79 美元不等。报告在你的 Google 文档“竞品扫描”里。",
+    "rows": [
+      [
+        "tv",
+        "Tavily",
+        "网页搜索",
+        "ro",
+        1
+      ],
+      [
+        "fc",
+        "Firecrawl",
+        "读取网页",
+        "ro",
+        1
+      ],
+      [
+        "dc",
+        "Google 文档",
+        "撰写报告",
+        "ok",
+        1
+      ],
+      [
+        "dr",
+        "Google 云端硬盘",
+        "删除文件",
+        "no",
+        0
+      ]
+    ],
+    "req": "POST /api/v1/proxy/s/google-docs\n     /v1/documents\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"title\": \"Competitor scan\" }",
+    "res": "→ 200 OK\n{ \"documentId\": \"1aF7…\",\n  \"title\": \"Competitor scan\" }",
+    "cap": "完成案头研究，交给你一份完整报告。"
+  }
+]

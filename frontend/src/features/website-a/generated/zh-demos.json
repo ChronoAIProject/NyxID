@@ -1,0 +1,106 @@
+{
+  "demos": [
+    {
+      "label": "在 Telegram 上接订位",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "在 Telegram 上帮我的小酒馆接订位。取消前一定要问我。"
+        },
+        {
+          "kind": "out",
+          "text": "好的。我创建了一个餐厅经理，可以使用 Telegram、Google 日历和客人表格。取消会先发给你确认。"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已创建专属助手 · 餐厅经理"
+        },
+        {
+          "kind": "tool",
+          "text": "🔗 安全登录链接 · Google 日历"
+        },
+        {
+          "kind": "out",
+          "text": "连接日历后即可上线。要每天早上 8 点给你发订位汇总吗？"
+        }
+      ],
+      "active": 0
+    },
+    {
+      "label": "每天给我发早报",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "每个工作日早上 8 点给我发 AI 和金融科技新闻，不要重复。"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已创建计划 · 工作日 8:00"
+        },
+        {
+          "kind": "out",
+          "text": "好了。新闻聚合助手会以只读方式读取 Firecrawl、X 和 Tavily。明早 8 点发第一份简报。"
+        }
+      ],
+      "active": 1
+    },
+    {
+      "label": "去供应商那里补货",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "番茄少于 3 箱时，去 Fresh Farms 补货。"
+        },
+        {
+          "kind": "out",
+          "text": "Fresh Farms 没有 API，我会用你 Mac mini 上的浏览器和已保存的登录。下单前会先问你。"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 机器 · Mac mini · 浏览器已开启"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 规则 · 库存少于 3 箱"
+        }
+      ],
+      "active": 2
+    },
+    {
+      "label": "回电今天的线索",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "今天给“线索”表里的每个人打电话，并记录他们说了什么。"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 回访队列 · 9 人"
+        },
+        {
+          "kind": "out",
+          "text": "上午 10 点开始通过 Twilio 拨打。折扣需要你确认，我会在这里通知你。"
+        }
+      ],
+      "active": 3
+    }
+  ],
+  "agents": [
+    {
+      "name": "餐厅经理",
+      "icon": "rest"
+    },
+    {
+      "name": "新闻聚合",
+      "icon": "news"
+    },
+    {
+      "name": "后台文员",
+      "icon": "monitor"
+    },
+    {
+      "name": "回访队列",
+      "icon": "phone"
+    }
+  ]
+}

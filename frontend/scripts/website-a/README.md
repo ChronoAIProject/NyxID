@@ -1,0 +1,32 @@
+# Website A source migration
+
+The approved product HTML is an external design input with SHA-256
+`5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33`.
+The original review materials remain untouched and are not a production runtime
+or a build dependency. Production builds compile the committed React source.
+
+From `frontend`, using a supported Node runtime and `npm ci`:
+
+```sh
+node scripts/website-a/generate.mjs /absolute/path/to/nyxid-site-preview.html
+```
+
+The migration checks the exact baseline hash. Its isolated VM evaluates only
+baseline template/data declarations at development time; it never runs in the
+web app. The generated output uses native JSX, local brand assets, isolated
+locale resources, pathname routes and explicitly implemented React interactions.
+No HTML iframe, script, `eval` or raw HTML insertion ships to the website.
+
+Files in `src/features/website-a/generated` are separated by locale and route for
+lazy loading. The generator contains the explicit production adaptations:
+auth/query mapping, disabled newsletter, Discord contact, documentation/legal
+links, illustrative story disclosure and excluded internal review guides. Change
+the generator when updating those adaptations, then regenerate and run the
+checks in `docs/plans/website-a-delivery.md`. The runtime interactions, auth link
+helpers, public route policy, legacy blog compatibility and workflow CSS are
+maintained normally outside the generated directory.
+
+The baseline's five-workflow embedded film is migrated to locale JSON and native
+React, with accessible selection and playback controls. Its animation timing and
+responsive arrangement are implemented in `interactions.tsx` / `workflow-film.css`.
+All public CSS selectors and animation names are scoped to avoid changing the app.

@@ -5,6 +5,7 @@ import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 import fs from "node:fs"
 import https from "node:https"
+import websitePages from "./src/features/website-a/generated/routes.json"
 import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
@@ -105,7 +106,7 @@ interface DocFile {
 // Canonical origin for sitemap <loc> entries (matches public/robots.txt).
 const SITEMAP_BASE = "https://nyx.chrono-ai.fun"
 // Public, indexable routes outside the docs tree.
-const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms"]
+const STATIC_SITEMAP_ROUTES = [...websitePages, "/docs", "/privacy", "/terms"]
 
 function docsSync(): Plugin {
   const srcDir = path.resolve(__dirname, "../docs/site")

@@ -1,0 +1,109 @@
+.website-a .workflow-film {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+  margin: 32px 0;
+  background:
+    radial-gradient(
+      55% 70% at 50% 0%,
+      rgba(110, 73, 179, 0.22),
+      transparent 70%
+    ),
+    var(--bg);
+}
+.website-a .workflow-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+.website-a .workflow-heading h3 {
+  font-size: 28px;
+  line-height: 1.2;
+  margin-top: 8px;
+}
+.website-a .workflow-chips {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin: 20px 0 26px;
+}
+.website-a .workflow-chips .pill {
+  white-space: normal;
+  text-align: left;
+  height: auto;
+  min-height: 42px;
+  border-radius: 10px;
+}
+.website-a .workflow-columns {
+  display: grid;
+  grid-template-columns: 1fr 1.1fr 1fr;
+  gap: 18px;
+  animation: website-a-nbIn 0.35s ease;
+}
+.website-a .workflow-columns > div {
+  min-width: 0;
+}
+.website-a .workflow-columns .phone {
+  max-width: none;
+  width: 100%;
+}
+.website-a .workflow-columns .ph-h {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.website-a .workflow-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg2);
+  margin-bottom: 12px;
+}
+.website-a .workflow-columns .m {
+  font-size: 12px;
+}
+.website-a .workflow-columns .perm-card {
+  padding: 16px;
+}
+.website-a .workflow-columns .prow {
+  grid-template-columns: 24px 1fr auto;
+  font-size: 12px;
+  gap: 8px;
+}
+.website-a .workflow-columns .gl {
+  width: 24px;
+  height: 24px;
+  font-size: 9px;
+  background: var(--muted);
+}
+.website-a .workflow-columns .code pre {
+  padding: 16px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.website-a .workflow-response {
+  color: var(--ok);
+  border-top: 1px solid var(--border);
+}
+.website-a .workflow-caption {
+  font-size: 16px;
+  text-align: center;
+  margin: 24px 0 0;
+  font-weight: 600;
+}
+@media (max-width: 960px) {
+  .website-a .workflow-columns {
+    grid-template-columns: 1fr;
+  }
+  .website-a .workflow-chips {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .website-a .workflow-film {
+    padding: 20px;
+  }
+  .website-a .workflow-heading h3 {
+    font-size: 22px;
+  }
+}

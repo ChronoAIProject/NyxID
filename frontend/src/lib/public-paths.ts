@@ -8,8 +8,20 @@
  * paths belong to NyxID's backend IdP surface.
  */
 export function isPublicPath(path: string): boolean {
+  const websitePath = path.replace(/\/$/, "") || "/";
   return (
     path === "/" ||
+    [
+      "/nyxbot",
+      "/solutions",
+      "/how-it-works",
+      "/security",
+      "/agents",
+      "/integrations",
+      "/pricing",
+      "/contact",
+    ].includes(websitePath) ||
+    /^\/solutions\/[^/]+$/.test(websitePath) ||
     path === "/login" ||
     path === "/register" ||
     path === "/nyxbot/onboarding" ||

@@ -98,10 +98,10 @@ export function DocsPage() {
   // matches the current slug, and "loading" until it catches up.
   const status: Status = !known
     ? "missing"
-    : loaded?.slug === slug
+    : loaded !== null && loaded.slug === slug
       ? loaded.status
       : "loading";
-  const doc = known && loaded?.slug === slug ? loaded.doc : null;
+  const doc = known && loaded !== null && loaded.slug === slug ? loaded.doc : null;
 
   // Build the on-page TOC from rendered h2 headings (ids come from rehype-slug).
   useEffect(() => {

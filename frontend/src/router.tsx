@@ -144,7 +144,6 @@ import {
   OrgServiceAccountDetailPage,
   OrgDeveloperAppDetailPage,
   OrgJoinPage,
-  BlogIndexPage,
   BlogDetailPage,
   BlogPreviewPage,
   DesignSystemPage,
@@ -285,10 +284,64 @@ const termsRoute = createRoute({
   component: TermsPage,
 });
 
+const website0Route = createRoute({
+  path: "/nyxbot",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website1Route = createRoute({
+  path: "/solutions",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website2Route = createRoute({
+  path: "/solutions/$slug",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website3Route = createRoute({
+  path: "/how-it-works",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website4Route = createRoute({
+  path: "/security",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website5Route = createRoute({
+  path: "/agents",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website6Route = createRoute({
+  path: "/integrations",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website7Route = createRoute({
+  path: "/pricing",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website8Route = createRoute({
+  path: "/contact",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
 const blogIndexRoute = createRoute({
   path: "/blog",
   getParentRoute: () => rootRoute,
-  component: BlogIndexPage,
+  component: LandingPage,
 });
 
 const blogDetailRoute = createRoute({
@@ -1212,6 +1265,15 @@ const routeTree = rootRoute.addChildren([
   platformOnboardingRoute,
   platformBindingReviewRoute,
   landingRoute,
+  website0Route,
+  website1Route,
+  website2Route,
+  website3Route,
+  website4Route,
+  website5Route,
+  website6Route,
+  website7Route,
+  website8Route,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
