@@ -81,7 +81,7 @@ pub async fn issue_ssh_certificate(
 ) -> AppResult<Json<IssueSshCertificateResponse>> {
     let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    let service_slug = auth_context.service_slug;
+    let service_slug = auth_context.service_slug.clone();
     let user_id = auth_user.user_id.to_string();
     if auth_context.mode != SshAuthMode::Cert {
         return Err(AppError::SshAuthModeUnsupportedForOperation(
@@ -136,6 +136,18 @@ pub async fn issue_ssh_certificate(
         },
     );
 
+    approval_service::record_chat_approval(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        auth_context.approval_bypass,
+        &service_id,
+        &auth_context.service_slug,
+        &operation_descriptor::build_ssh_descriptor(
+            operation_descriptor::SshOperationKind::Tunnel,
+            None,
+        ),
+    )
+    .await;
     Ok(Json(IssueSshCertificateResponse {
         service_id,
         key_id: issued.key_id,
@@ -231,6 +243,7 @@ pub async fn ssh_tunnel_ws(
                     client_meta,
                     tele,
                     auth_context.owner_user_id,
+                    auth_context.approval_bypass,
                     billing_egress_permit,
                 )
                 .await;
@@ -257,6 +270,7 @@ async fn handle_ssh_socket(
     client_meta: TunnelClientMeta,
     tele: TelemetryContext,
     resource_owner_id: String,
+    approval_auto: Option<crate::services::assistant_acknowledgement_service::AutoAllowed>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) {
     // Held for Drop-based session count cleanup for the tunnel lifetime.
@@ -367,6 +381,8 @@ async fn handle_ssh_socket(
             metered,
             billing_egress_permit,
             slot_cancel,
+            auth_user.assistant_chat.clone(),
+            approval_auto,
         )
         .await;
         return;
@@ -528,6 +544,19 @@ async fn handle_ssh_socket(
         None,
     );
 
+    approval_service::record_chat_approval(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        approval_auto,
+        &service_id,
+        &service_slug,
+        &operation_descriptor::build_ssh_descriptor(
+            operation_descriptor::SshOperationKind::Tunnel,
+            None,
+        ),
+    )
+    .await;
+
     // Telemetry: ssh.tunnel_opened (direct path).
     emit_event(
         state.telemetry.as_deref(),
@@ -668,6 +697,10 @@ async fn handle_node_ssh_socket(
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     slot_cancel: tokio_util::sync::CancellationToken,
+    approval_chat: Option<
+        std::sync::Arc<crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    >,
+    approval_auto: Option<crate::services::assistant_acknowledgement_service::AutoAllowed>,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -891,6 +924,19 @@ async fn handle_node_ssh_socket(
         None,
     );
 
+    approval_service::record_chat_approval(
+        &state.db,
+        approval_chat.as_deref(),
+        approval_auto,
+        &service_id,
+        &service_slug,
+        &operation_descriptor::build_ssh_descriptor(
+            operation_descriptor::SshOperationKind::Tunnel,
+            None,
+        ),
+    )
+    .await;
+
     // Telemetry: ssh.tunnel_opened (node path).
     emit_event(
         state.telemetry.as_deref(),
@@ -1089,10 +1135,10 @@ pub(crate) async fn authorize_ssh_access_for_operation(
             &resolution_user_id
         }
     };
-    let auth_context =
+    let mut auth_context =
         ssh_service::resolve_ssh_auth_context_for_owner(&state.db, owner_for_resolution, &service)
             .await?;
-    let approval_outcome = approval_service::evaluate_and_check(
+    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
@@ -1104,8 +1150,10 @@ pub(crate) async fn authorize_ssh_access_for_operation(
         // SSH services are not auto-provisioned today, so there is no
         // auto-connected source to exempt from the global fallback here.
         false,
+        auth_user.assistant_chat.as_deref(),
     )
     .await?;
+    auth_context.approval_bypass = automatic;
 
     let pending = match approval_outcome {
         approval_service::ApprovalOutcome::Allowed { .. } => return Ok(auth_context),

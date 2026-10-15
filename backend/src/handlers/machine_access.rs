@@ -368,6 +368,8 @@ pub async fn native(
             (Some(_), None) => true,
             _ => false,
         };
+    let mut auto_allowed = None;
+    let mut receipt_summary = String::new();
     if widens || !chat.is_orchestrator() {
         let tool = "nyxid__machine_capabilities";
         let approved = if let Some(id) = args["acknowledgement_id"].as_str() {
@@ -376,23 +378,6 @@ pub async fn native(
             false
         };
         if !approved {
-            let routed = crate::services::assistant_settings_service::get(&state.db, &chat.user_id)
-                .await
-                .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
-                .unwrap_or(false);
-            if !routed {
-                crate::services::assistant_acknowledgement_service::audit_access_request_denied(
-                    &state.db,
-                    chat,
-                    Some(node),
-                    "machine_capabilities",
-                )
-                .await;
-                return Ok((
-                    crate::services::assistant_acknowledgement_service::access_request_denied(),
-                    true,
-                ));
-            }
             let login_scope = selection.saved_login_ids.as_ref().map_or_else(
                 || "inherit the agent's saved-login grants".to_owned(),
                 |ids| format!("limit saved logins to {} selected", ids.len()),
@@ -402,9 +387,81 @@ pub async fn native(
             } else {
                 ""
             };
-            let card=acks::request(&state.db,chat,acks::Request{kind:"action",service:None,tool:Some(tool),arguments:Some(args),
-                summary:&format!("Change {} on machine {}: shell={}, files={}, browser={}, computer={}, developer browser={}; {}. Current work for this agent on this machine will stop.{mode_note}",agent.name,machine.name,selection.capabilities.shell,selection.capabilities.files,selection.capabilities.browser,selection.capabilities.computer,selection.capabilities.developer_browser,login_scope),platform:false}).await?;
-            return Ok((acks::refusal(&card), true));
+            receipt_summary = format!(
+                "Change {} on machine {}: shell={}, files={}, browser={}, computer={}, developer browser={}; {}. Current work for this agent on this machine will stop.{mode_note}",
+                agent.name,
+                machine.name,
+                selection.capabilities.shell,
+                selection.capabilities.files,
+                selection.capabilities.browser,
+                selection.capabilities.computer,
+                selection.capabilities.developer_browser,
+                login_scope
+            );
+            if chat.is_orchestrator() {
+                let gate = acks::confirmation_needed(
+                    &state.db,
+                    chat,
+                    acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+                    false,
+                )
+                .await?;
+                auto_allowed = gate.auto_allowed();
+                if let Some(need) = gate.ask()
+                    && let Some(refusal) =
+                        acks::confirm_action(&state.db, chat, tool, args, &need, &receipt_summary)
+                            .await?
+                {
+                    return Ok((refusal, true));
+                }
+            } else {
+                let routed =
+                    crate::services::assistant_settings_service::get(&state.db, &chat.user_id)
+                        .await
+                        .map(|s| {
+                            chat.access_request_allowed_with_mode(s.specialist_access_requests)
+                        })
+                        .unwrap_or(false);
+                if !routed {
+                    acks::audit_access_request_denied(
+                        &state.db,
+                        chat,
+                        Some(node),
+                        "machine_capabilities",
+                    )
+                    .await;
+                    return Ok((acks::access_request_denied(), true));
+                }
+                if acks::effective_access_mode(&state.db, chat).await?
+                    == crate::models::assistant_settings::AccessMode::Autopilot
+                {
+                    let (request, created) = acks::request_tracked(
+                        &state.db, chat, acks::Request {
+                            kind: "machine", service: Some((node, node, &machine.name)),
+                            tool: Some(tool), arguments: Some(args),
+                            summary: &format!("{receipt_summary} Desired selection: {}. NyxBot must inspect the current machine policy and apply these capabilities with nyxid__machine_capabilities after deciding this request.", args["selection"]),
+                            platform: false,
+                        }).await?;
+                    if created {
+                        super::assistant_team::permission_requested(state, chat, &request).await;
+                    }
+                    return Ok((acks::refusal(&request), true));
+                }
+                let card = acks::request(
+                    &state.db,
+                    chat,
+                    acks::Request {
+                        kind: "action",
+                        service: None,
+                        tool: Some(tool),
+                        arguments: Some(args),
+                        summary: &receipt_summary,
+                        platform: false,
+                    },
+                )
+                .await?;
+                return Ok((acks::refusal(&card), true));
+            }
         }
     }
     let policy = Box::pin(access::configure(
@@ -415,6 +472,17 @@ pub async fn native(
         selection,
     ))
     .await?;
+    if let Some(auto) = auto_allowed {
+        acks::record_auto_allowed(
+            &state.db,
+            chat,
+            "nyxid__machine_capabilities",
+            args,
+            &auto,
+            &receipt_summary,
+        )
+        .await;
+    }
     crate::services::audit_service::log_async(
         state.db.clone(),
         Some(chat.user_id.clone()),

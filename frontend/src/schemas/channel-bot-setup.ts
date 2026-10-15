@@ -24,7 +24,7 @@ export function parseChannelBotSetupSearch(search: Record<string, unknown>): {
 
 export function parseChannelBotSetupPageSearch(
   search: Record<string, unknown>,
-) {
+): Record<string, string | undefined> & { return_to?: string } {
   const fields = Object.fromEntries(
     Object.entries(search)
       .filter(
@@ -36,7 +36,16 @@ export function parseChannelBotSetupPageSearch(
       )
       .map(([name, value]) => [name, String(value)]),
   );
-  return { ...fields, ...parseChannelBotSetupSearch(fields) };
+  return { ...fields, ...parseChannelBotSetupSearch(fields), return_to: fields.return_to };
+}
+
+/** Read the unnormalised query string before the router's JSON coercion. */
+export function parseRawChannelBotReturnTo(search: string): string | undefined {
+  const values = new URLSearchParams(search).getAll("return_to");
+  if (values.length !== 1 || !/^nyx[ag]-[0-9a-f]{32}$/.test(values[0]!)) return undefined;
+  // Encoded values/keys and router JSON values are not canonical raw IDs.
+  const raw = /(?:^|[?&])return_to=([^&]*)/.exec(search)?.[1];
+  return raw === values[0] ? values[0] : undefined;
 }
 
 /** Preserve long numeric IDs and accept strings quoted by the router's serializer. */
@@ -78,7 +87,7 @@ export const channelBotSetupRewrite = {
       for (const [name, value] of Object.entries(
         channelBotSetupUrlValues(url.search),
       )) {
-        url.searchParams.set(name, JSON.stringify(value));
+        if (name !== "return_to") url.searchParams.set(name, JSON.stringify(value));
       }
     }
     return url;

@@ -58,6 +58,9 @@ export interface ProfileConfig {
 export interface UserCapabilities {
   /** Admin, or Operator holding Tools Manager. Older backends omit it. */
   readonly manage_tools?: boolean;
+  readonly read_feature_flags?: boolean;
+  readonly create_feature_flags?: boolean;
+  readonly manage_all_feature_flags?: boolean;
   /** Admin, or Operator holding Catalog Manager. Older backends omit it. */
   readonly manage_catalog?: boolean;
   readonly billing_available?: boolean;
@@ -174,6 +177,26 @@ export function canReadAdminUsage(
     | undefined,
 ): boolean {
   return hasAdminRead(user) || user?.capabilities?.read_admin_usage === true;
+}
+
+export function canReadFeatureFlags(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return hasAdminRead(user) || user?.capabilities?.read_feature_flags === true;
+}
+
+export function canCreateFeatureFlags(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return (
+    canAdminWrite(user) || user?.capabilities?.create_feature_flags === true
+  );
 }
 
 export interface ApiKey {

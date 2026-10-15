@@ -338,19 +338,16 @@ function StandardConsentPage({
   const currentBindingAllowsAllServices =
     search.get("current_binding_allow_all_services") === "true";
   const isLarkBinding = externalSubjectPlatform.toLowerCase() === "lark";
-  // Agent apps (Claude, Codex and other MCP clients) request `proxy`. They
-  // read every service by default and only write where the user explicitly
-  // allows it; binding reviews keep their own grant flow.
+  // Agent apps requesting `proxy` choose service grants; binding reviews
+  // keep their own grant flow.
   const agentAccess = !bindingReview && scope.split(/\s+/).includes("proxy");
   const [allowAllServices, setAllowAllServices] = useState(
     bindingReview && currentBindingAllowsAllServices,
   );
-  // Every service is readable by default; services the app asked for can
-  // never be turned off.
-  const [defaultLevel, setDefaultLevel] = useState<AccessLevel>("read");
+  const [defaultLevel, setDefaultLevel] = useState<AccessLevel>("off");
   const [levelOverrides, setLevelOverrides] = useState<
     Readonly<Record<string, AccessLevel>>
-  >({});
+  >(() => Object.fromEntries(preselectServiceIds.map((id) => [id, "allow"])));
   const [customize, setCustomize] = useState(bindingReview);
   const [selectedServiceIds, setSelectedServiceIds] = useState<
     readonly string[]
@@ -486,20 +483,17 @@ function StandardConsentPage({
         secondary: serviceSecondaryText(service),
         orgName: serviceOrgName(service),
         requiredByApp:
-          preselectServiceIds.includes(service.id) ||
           resourceSelectedServiceIds.includes(service.id) ||
           requiredServiceIds.includes(service.id),
       })),
-    [
-      selectableServices,
-      preselectServiceIds,
-      resourceSelectedServiceIds,
-      requiredServiceIds,
-    ],
+    [selectableServices, resourceSelectedServiceIds, requiredServiceIds],
   );
   const grant = agentGrant(accessRows, defaultLevel, levelOverrides);
   const submittedAccess = agentAccess
-    ? { allow_all_services: grant.allowAll, allowed_service_ids: grant.readIds }
+    ? {
+        allow_all_services: grant.allowAll,
+        allowed_service_ids: grant.serviceIds,
+      }
     : serviceAccess;
 
   function changeDefaultLevel(level: AccessLevel) {
@@ -1047,19 +1041,6 @@ function StandardConsentPage({
             value={resource}
           />
         ))}
-        {agentAccess && (
-          <input type="hidden" name="write_access" value={grant.writeMode} />
-        )}
-        {agentAccess &&
-          grant.writeMode === "selected" &&
-          grant.writeIds.map((serviceId) => (
-            <input
-              key={`write-${serviceId}`}
-              type="hidden"
-              name="write_service_ids"
-              value={serviceId}
-            />
-          ))}
 
         <Button
           type="submit"

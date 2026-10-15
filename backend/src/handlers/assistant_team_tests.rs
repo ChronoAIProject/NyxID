@@ -175,6 +175,7 @@ async fn server_started_turn_preserves_picocredits_and_obeys_cutover() {
                 .unwrap();
         }
         let start = TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -244,6 +245,7 @@ async fn user_turn(
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: agent_id.map(str::to_owned),
@@ -273,6 +275,7 @@ async fn orchestrator(state: &AppState) -> (AssistantConversation, ChatAuthority
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -730,6 +733,7 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1268,6 +1272,7 @@ async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialis
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1809,6 +1814,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
 // path. Captured prompts contain a private marker: never print request bodies.
 fn refresh_start(id: Option<&str>, agent_id: Option<&str>, text: &str) -> TurnStart {
     TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: agent_id.map(str::to_owned),
@@ -2358,7 +2364,7 @@ async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
         let note = skill_request_allowed_note(&agent, &roots);
         assert!(note.chars().count() <= 3200);
         assert!(note.contains(&roots.summary));
-        assert!(note.ends_with("Do not ask for another permission decision."));
+        assert!(note.ends_with(acks::DECISION_NARRATION));
         let note = acks::decisions_note(std::slice::from_ref(&card));
         assert!(note.contains("do not request it again"));
         assert!(!note.contains("retry"));
@@ -2582,6 +2588,7 @@ async fn skill_allow_outbox_recovers_eviction_and_consumes_once() {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             attachment_ids: vec![],
             agent_id: None,
             conversation_id: Some(f.nyxbot_thread.clone()),
@@ -2944,6 +2951,7 @@ async fn skill_outbox_rechecks_revoked_org_source_and_retains_decision_until_res
         &f.state.db,
         &f.admin,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             conversation_id: Some(thread.id.clone()),
             text: "Need review skill".into(),
             attachment_ids: vec![],
@@ -3094,8 +3102,8 @@ async fn set_access_mode(state: &AppState, mode: crate::models::assistant_settin
 }
 
 /// Team tools go through the owner's access mode at their real call site:
-/// grants are sensitive (NyxMode asks), memory is an ordinary change (only
-/// Ask Every Time asks), listings never ask, and one approved card runs once.
+/// grants are sensitive (Auto asks), memory is an ordinary change (only
+/// Ask every time asks), listings never ask, and one approved card runs once.
 #[tokio::test]
 async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
     use crate::models::assistant_settings::AccessMode;
@@ -3139,7 +3147,7 @@ async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
     );
     assert!(row.summary.contains("subagent coder"), "{}", row.summary);
     let (_, error) = execute_tool(&state, &chat, "nyxid__remember", &remember).await;
-    assert!(!error, "an ordinary change runs in NyxMode");
+    assert!(!error, "an ordinary change runs in Auto");
     let (listed, error) = execute_tool(&state, &chat, "nyxid__list_subagents", &json!({})).await;
     assert!(!error, "{listed}");
     acks::decide(
@@ -3184,7 +3192,7 @@ async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
     .await;
     assert!(
         !error,
-        "Autopilot runs destructive team tools without a card: {value}"
+        "Full access runs destructive team tools without a card: {value}"
     );
     server.abort();
 }
@@ -3229,7 +3237,7 @@ async fn access_request_decision_and_grant_audits_name_requester_and_approver() 
     assert_eq!(requested.get_str("scope").unwrap(), "service");
     assert_eq!(requested.get_str("decider").unwrap(), "orchestrator");
     assert_eq!(requested.get_str("decision").unwrap(), "pending");
-    // NyxBot decides it (Autopilot: no owner card for NyxBot's decision).
+    // NyxBot decides it (Full access: no owner card for NyxBot's decision).
     let (value, error) = execute_tool(
         &state,
         &chat,
@@ -3391,7 +3399,7 @@ async fn agent_model_and_access_mode_override_round_trip_through_patch() {
 }
 
 /// NyxBot can change an agent's model only through the owner's access mode:
-/// NyxMode asks first; the approved card applies the exact model once.
+/// Auto asks first; the approved card applies the exact model once.
 #[tokio::test]
 async fn nyxbot_model_change_follows_the_access_mode() {
     use crate::models::assistant_settings::AccessMode;
@@ -3415,7 +3423,7 @@ async fn nyxbot_model_change_follows_the_access_mode() {
             .model,
         "nyxagent/research"
     );
-    // A profile edit without a model is an ordinary change in NyxMode.
+    // A profile edit without a model is an ordinary change in Auto.
     let (_, error) = execute_tool(
         &state,
         &chat,
@@ -3481,7 +3489,7 @@ async fn owner_settings_put_audits_access_mode_changes() {
     assert_eq!(rows[0].get_str("user_id").unwrap(), OWNER);
     let data = rows[0].get_document("event_data").unwrap();
     assert_eq!(data.get_str("scope").unwrap(), "workspace");
-    // The team fixture starts in Autopilot.
+    // The team fixture starts in Full access.
     assert_eq!(data.get_str("old").unwrap(), "autopilot");
     assert_eq!(data.get_str("new").unwrap(), "ask_every_time");
     server.abort();

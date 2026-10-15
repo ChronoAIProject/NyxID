@@ -236,6 +236,11 @@ pub struct NyxbotThread {
     /// Direct only: the newest inbound NyxID message ID, for asynchronous replies.
     #[serde(default)]
     pub last_message_id: Option<String>,
+    /// Newest inbound NyxID relay message ID, regardless of transport.
+    /// Kept separate from `last_message_id` so gateway text routing semantics
+    /// remain unchanged while image delivery can target the relay adapter.
+    #[serde(default)]
+    pub last_relay_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -269,6 +274,10 @@ pub struct NyxbotEvent {
     pub user_id: String,
     pub partition: String,
     pub event_id: String,
+    /// NyxID relay message anchoring this event, when the gateway activity
+    /// originated from NyxID's own relay.
+    #[serde(default)]
+    pub relay_message_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
     /// `running`, `completed`, `failed`, or `refused`.

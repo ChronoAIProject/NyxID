@@ -6,6 +6,9 @@ use wiremock::{
     matchers::{method, path},
 };
 
+#[path = "nyxbot_image_delivery_tests.rs"]
+mod image_delivery_tests;
+
 struct Fixture {
     state: AppState,
     channel: NyxbotChannel,

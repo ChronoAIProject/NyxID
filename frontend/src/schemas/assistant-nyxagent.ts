@@ -14,6 +14,7 @@ export const nyxAgentTurnActivitySchema = z.object({
   status: z.enum(["running", "completed", "error"]),
   started_at: z.string(),
   ended_at: z.string().nullable().default(null),
+  failure: z.object({ kind: z.enum(["service_status", "tool_error", "refused", "internal"]), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
@@ -90,6 +91,7 @@ export const nyxAgentConversationSchema = z.object({
       steering_allowed: z.boolean().optional(),
       stop_requested: z.boolean().optional(),
       continuations: z.number().int().nonnegative().optional(),
+      activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -121,9 +123,18 @@ export type NyxAgentSteering = z.infer<typeof nyxAgentSteeringSchema>;
 export const nyxAgentCapabilitiesSchema = z.object({
   steer: z.object({ max_chars: z.number().int().positive(), max_per_turn: z.number().int().positive() }).nullable(),
 });
+export const nyxAgentRecoverySchema = z.object({
+  status: z.enum(["available", "review"]),
+  reason: z.string(),
+  text: z.string().nullable(),
+  attachments: z.array(z.string()),
+});
+export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
 export const nyxAgentMessageSchema = z.object({
+  recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),
+  continuation_of: z.string().nullish(),
   id: z.string(),
   seq: z.number().int().positive(),
   turn_id: z.string(),
@@ -144,6 +155,7 @@ export const nyxAgentMessageSchema = z.object({
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
+  activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
@@ -156,7 +168,7 @@ export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
 export const nyxAgentActionConfirmationSchema = z.object({
   risk: z.enum(["read", "change", "sensitive", "destructive"]),
   access_mode: nyxAgentAccessModeSchema.nullish(),
-  reason: z.enum(["access_mode", "webhook", "policy"]),
+  reason: z.enum(["access_mode", "webhook", "policy", "approval"]).catch("access_mode"),
 });
 export type NyxAgentActionConfirmation = z.infer<typeof nyxAgentActionConfirmationSchema>;
 
@@ -175,12 +187,13 @@ export const nyxAgentAcknowledgementSchema = z.object({
   continuation_receipt_id: z.string().uuid().nullish(),
   trigger_run_id: z.string().nullable().optional(),
   id: z.string().uuid(),
-  kind: z.enum(["service", "account", "action", "operations", "skills"]),
+  kind: z.enum(["service", "account", "action", "operations", "skills", "machine", "saved_login"]),
   status: z.enum(["pending", "allowed", "denied", "expired", "used"]),
   summary: z.string(),
+  link: z.string().nullish(),
   /** `orchestrator`: a specialist's request that NyxBot decides (the user may too). */
   decider: z.enum(["user", "orchestrator"]).default("user"),
-  decided_by: z.enum(["user", "orchestrator"]).nullable().default(null),
+  decided_by: z.string().nullable().default(null),
   reason: z.string().nullable().default(null),
   confirmation: nyxAgentActionConfirmationSchema.nullish(),
   service_slug: z.string().nullable(),
@@ -243,7 +256,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
   base.extend({ event: z.literal("turn.continuing"), turn_id: z.string(), continuation: z.number().int().positive() }),
   base.extend({
     event: z.literal("turn.notice"),
-    code: z.enum(["context_reset", "image_input_unavailable"]),
+    code: z.enum(["context_reset", "image_input_unavailable", "retrying"]),
     message: z.string(),
   }),
   base.extend({

@@ -38,6 +38,8 @@ pub struct AssistantAcknowledgement {
     #[serde(default)]
     pub skill_selection: Option<super::assistant_agent::SkillSelection>,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
     pub status: String,
     /// Denial is sticky for the user turn that requested it. A new user turn
     /// may ask again; the model is explicitly instructed not to retry otherwise.

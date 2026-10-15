@@ -983,6 +983,29 @@ Role definitions for RBAC. Roles have permission string tags and can be scoped t
 
 **Indexes:** `slug` (unique)
 
+#### feature flag definitions and settings
+
+`feature_flag_definitions` stores runtime-created flags alongside the built-in
+registry in `services/feature_flag_service.rs`. Each row has a UUID string `_id`,
+unique `flag_key`, required `description`, `default_enabled`, immutable
+`created_by` user ID, and BSON `created_at`. Built-ins take precedence over a
+runtime definition with the same key.
+
+`feature_flag_overrides` and `feature_flag_metadata` include an optional
+`definition_id`: missing or null identifies a built-in, while a runtime flag
+uses its definition UUID. Unique indexes include this identity so settings do
+not carry across a built-in/runtime key reuse. Startup creates the replacement
+indexes before removing the legacy indexes. See the
+[deployment notes](API.md#feature-flag-roles-and-management) before a mixed-version
+upgrade or rollback.
+
+The protected, non-default `feature-flag-operator` and `feature-flag-admin`
+system roles grant `nyxid:feature_flags:own:write` and
+`nyxid:feature_flags:admin`, respectively. Handlers resolve current direct and
+group assignments on every request. Operator writes require the immutable
+creator ID; editable owner metadata does not affect permission. Platform
+admins retain full access and platform operators retain read access.
+
 #### groups
 
 Group definitions for RBAC. Groups inherit roles, and all group members receive those roles. Groups can form hierarchies via `parent_group_id`.

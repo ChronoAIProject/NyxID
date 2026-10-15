@@ -665,13 +665,14 @@ class ResizeObserverMock {
   disconnect() {}
 }
 
-function renderMeasuredComposer() {
+function renderMeasuredComposer(toolbar?: React.ReactNode) {
   render(
     <ChatComposer
       active={false}
       sending={false}
       ownerUserId="user-1"
       draftKey="conv:layout"
+      toolbar={toolbar}
       onSend={vi.fn().mockResolvedValue(undefined)}
       onStop={vi.fn().mockResolvedValue(undefined)}
     />,
@@ -680,7 +681,7 @@ function renderMeasuredComposer() {
   const textarea = screen.getByRole("textbox");
   const button = screen.getByRole("button", { name: "Send message" });
   const controls = button.parentElement;
-  const composer = controls?.parentElement;
+  const composer = controls?.parentElement?.hasAttribute("data-composer-toolbar") ? controls.parentElement.parentElement : controls?.parentElement;
   const textMeasure = composer?.querySelector(":scope > span[aria-hidden]");
   if (!controls || !composer || !(textMeasure instanceof HTMLElement)) {
     throw new Error("Composer measurement elements were not rendered");
@@ -745,6 +746,43 @@ describe("ChatComposer measured layout", () => {
     expect(composer.closest("[data-composer-input]")).toHaveClass("sm:ml-[30px]");
     expect(button).toHaveClass("h-8");
     expect(textarea).toHaveClass("min-h-8", "px-0");
+  });
+
+  it("keeps toolbar controls on a second row and measures the whole textarea width", () => {
+    const parts = renderMeasuredComposer(<button>Permission mode</button>);
+    setComposerMetrics({ ...parts, textWidth: 350 });
+    fireEvent.change(parts.textarea, { target: { value: "Wide draft" } });
+    expect(parts.composer).toHaveClass("flex-col", "items-stretch");
+    expect(parts.controls).not.toHaveClass("self-end");
+    expect(parts.controls.parentElement).toHaveAttribute("data-composer-toolbar");
+    expect(screen.getByRole("button", { name: "Permission mode" }).parentElement?.parentElement).toBe(parts.controls.parentElement);
+    expect([...parts.composer.children].map((node) => node.tagName)).toMatchInlineSnapshot(`
+      [
+        "SPAN",
+        "DIV",
+        "DIV",
+      ]
+    `);
+    vi.mocked(parts.controls.getBoundingClientRect).mockReturnValue({ width: 160 } as DOMRect);
+    act(() => { for (const callback of resizeCallbacks) callback([], {} as ResizeObserver); });
+    expect(parts.controls).not.toHaveClass("self-end");
+    Object.defineProperty(parts.composer, "clientWidth", { configurable: true, value: 360 });
+    act(() => { for (const callback of resizeCallbacks) callback([], {} as ResizeObserver); });
+    expect(parts.controls).toHaveClass("self-end");
+  });
+
+  it("preserves the single-row composer without a toolbar", () => {
+    const parts = renderMeasuredComposer();
+    expect(parts.composer.querySelector("[data-composer-toolbar]")).toBeNull();
+    expect(parts.controls.parentElement).toBe(parts.composer);
+    expect([...parts.composer.children].map((node) => node.tagName)).toMatchInlineSnapshot(`
+      [
+        "SPAN",
+        "DIV",
+        "DIV",
+      ]
+    `);
+    expect(parts.composer).not.toHaveClass("flex-col");
   });
 
   it("keeps a short single-line draft and its action inline", () => {

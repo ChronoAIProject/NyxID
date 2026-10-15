@@ -135,6 +135,9 @@ function firstSentence(text: string): string {
  */
 export function describeEventNotice(text: string): EventNotice {
   const notice = text.trim();
+  if (notice.startsWith("Skill ") && (notice.includes("published and attached") || notice.includes("requires a corrected package"))) {
+    return { kind: "notice", tone: notice.includes("published and attached") ? "success" : "warning", summary: "Skill publication", detail: notice };
+  }
   // The server swaps double quotes in quoted text for single ones.
   let match = /^Specialist (\S+) (replied|was stopped|failed \(([^)]*)\))\. Reply excerpt: "([^"]*)"/.exec(
     notice,
@@ -321,16 +324,16 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
 }
 
 export const ACCESS_MODE_LABEL = {
-  autopilot: "Autopilot",
-  nyxmode: "NyxMode",
-  ask_every_time: "Ask Every Time",
+  autopilot: "Full access",
+  nyxmode: "Auto",
+  ask_every_time: "Ask every time",
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
 /** What each access mode asks before, in one line. */
 export const ACCESS_MODE_DESCRIPTION = {
   autopilot:
-    "Acts without approval prompts. Webhook, machine and saved-login confirmations still ask.",
-  nyxmode: "Acts on ordinary requests; asks before sensitive or destructive actions.",
+    "Never asks. Every action, including automation, machine, saved-login and service-approval confirmations, runs on its own and the chat records what was allowed automatically.",
+  nyxmode: "Acts on its own; asks before sensitive or destructive actions.",
   ask_every_time: "Asks before every action that changes something. Reading never asks.",
 } as const satisfies Record<NyxAgentAccessMode, string>;
 

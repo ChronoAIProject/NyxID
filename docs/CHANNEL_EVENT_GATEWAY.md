@@ -484,7 +484,7 @@ channel and route key. A busy bot answers first and retries in ten minutes.
 Returning releases the gateway channel and deletes its agent key and old route
 key. Telegram always uses the gateway and is excluded from flag-off returns.
 
-Lark and Feishu gateway connections remain **text-only**, including org bots;
+Lark and Feishu gateway input remains **text-only**, including org bots;
 media handling is unchanged. These changes require no gateway-side implementation
 or new environment variables. See the [NyxBot transport contract](chat/09-nyxbot-orchestrator.md)
 for private-chat continuity, refusal handling and rolling metadata compatibility.
@@ -544,7 +544,7 @@ Event Gateway remains distinct from NyxID's device HTTP Event Gateway.
 | Lark / Feishu reply target | Native reply endpoint with `reply_in_thread=true` | **Both:** CMA uses the legacy relay reply API without a bound thread request | Seal the thread-reply decision with the source event; explicitly request server-resolved targeting in NyxID for immediate and delayed sends. Never fall back to the parent. |
 | Mentions | Real bot mentions address; other-user-only mentions stay quiet in a followed child; broadcasts retain ordinary followed behavior | **CMA:** Lark requires pinned bot identity for exact evidence; no other-user boolean | Carry only address evidence and `mentions_others`, never mentioned names/IDs. Broadcasts do not become bot mentions. |
 | Lark / Feishu inbound media | Native adapter normalizes supported attachments | **CMA:** text-only verifier rejects attachments | Follow-up: verified bounded attachment references, authenticated fetch, and provider input support. No media change here. |
-| Lark / Feishu outbound media | Native adapter uploads supported attachments | **CMA:** renderer reduces attachments to safe link text | Follow-up: typed bounded media delivery through NyxID's existing upload/send path, retaining exact thread target. |
+| Lark / Feishu outbound media | Native adapter uploads supported attachments | **CMA:** renderer reduces attachments to safe link text | NyxID delivers NyxBot tool images itself through existing adapters before text, retaining exact thread targets. A CMA attachment-block renderer is **not required**. |
 | Edits | Adapter-specific edit hooks and authenticated outbound receipts | **CMA:** Lark/Feishu edits unsupported; only confirmed Telegram interactive cards edit | Follow-up: platform capabilities plus opaque receipt-bound edits through NyxID. Inbound edits need explicit replacement/dedup policy before they can affect an agent. |
 | Slack | `thread_ts`, structured mentions, native bound replies and bounded history | **CMA:** no raw verifier; `trust_normalized` gives unknown actors and no address/thread evidence; NyxID does not opt in | Follow-up: verify Slack raw events and correlate channel/sender/message, then enable the same contract. |
 | Discord | Validated thread channels and correlated reply chains; native bound replies | **CMA:** same normalized-only limitation as Slack | Follow-up: raw verifier plus trusted thread-channel type/parent evidence; exclude interaction credentials from identities. |
@@ -556,7 +556,7 @@ Event Gateway remains distinct from NyxID's device HTTP Event Gateway.
 
 The implementation contract and validation results are recorded below as the two
 sides are completed. Until negotiation succeeds, existing gateway channels keep
-legacy admission and follow remains unavailable. Lark/Feishu stay text-only.
+legacy admission and follow remains unavailable. Lark/Feishu input stays text-only; NyxID sends tool images directly.
 
 The concrete wire contract is [thread contract 1](CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md).
 It replaces the earlier generic handoff proposal: `activity.thread` carries

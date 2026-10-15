@@ -7,6 +7,7 @@ use crate::services::channel_platform::{BotCredentials, OutboundReply};
 /// caller must not retry the whole reply or send a second error notice.
 pub struct ThreadDelivery {
     pub message_ids: Vec<String>,
+    pub delivered_kinds: Vec<crate::services::channel_platform::MediaKind>,
     pub error: Option<crate::errors::AppError>,
 }
 
@@ -34,6 +35,7 @@ pub async fn send_reply(
     let http = resolution::client()?;
     let mut result = ThreadDelivery {
         message_ids: Vec::new(),
+        delivered_kinds: Vec::new(),
         error: None,
     };
     for part in components {
@@ -53,7 +55,7 @@ pub async fn send_reply(
             if !eligible {
                 return Err(unavailable());
             }
-            adapter
+            let outcome = adapter
                 .send_bound_reply_outcome(
                     db,
                     &http,
@@ -64,12 +66,16 @@ pub async fn send_reply(
                     &part,
                     Some(target),
                 )
-                .await?
-                .into_result()
+                .await?;
+            let kinds = outcome
+                .delivered_kinds
+                .clone()
+                .unwrap_or_else(|| part.attachments.iter().map(|a| a.kind).collect());
+            Ok((outcome.into_result()?, kinds))
         }
         .await;
-        let id = match sent {
-            Ok(Some(id)) if valid_id(&id) => id,
+        let (id, kinds) = match sent {
+            Ok((Some(id), kinds)) if valid_id(&id) => (id, kinds),
             Ok(_) => {
                 result.error = Some(unavailable());
                 break;
@@ -87,6 +93,7 @@ pub async fn send_reply(
         };
         // Preserve known acceptance even if recording fails. Never retry sends.
         result.message_ids.push(id.clone());
+        result.delivered_kinds.extend(&kinds);
         crate::services::channel_bot_service::record_outbound_outcome(db, &bot.id, None).await;
         let mut facts = target.facts.clone();
         facts.message_id = id.clone();
@@ -105,11 +112,7 @@ pub async fn send_reply(
         record.platform_send = None;
         record.thread_id = None;
         record.thread_context = Some(facts);
-        record.content_type = part
-            .attachments
-            .first()
-            .map_or("text", |a| a.kind.as_str())
-            .into();
+        record.content_type = kinds.first().map_or("text", |kind| kind.as_str()).into();
         record.reply_to_message_id = Some(source.id.clone());
         record.reply_to_platform_message_id = source.platform_message_id.clone();
         record.platform_reply_message_id = None;

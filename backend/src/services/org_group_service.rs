@@ -806,6 +806,7 @@ pub async fn append(
     ids: &[String],
     enqueue: Option<crate::models::assistant_group::GroupRequest>,
     recipients: &[String],
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
 ) -> AppResult<crate::models::assistant_group::GroupMessage> {
     use crate::models::assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME as MESSAGES};
     let name = display_name(db, &access.actor).await?;
@@ -818,9 +819,10 @@ pub async fn append(
         doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::from_chrono(now),"last_message_at":bson::DateTime::from_chrono(now)}})
         .return_document(mongodb::options::ReturnDocument::After).session(&mut session).await?.ok_or_else(missing)?;
     let id = Uuid::new_v4().to_string();
-    let attachments =
+    let mut attachments =
         super::assistant_upload_service::bind(db, &access.actor, &group.id, &id, ids, &mut session)
             .await?;
+    attachments.extend(extra_attachments);
     let message = GroupMessage {
         activities: Vec::new(),
         org_group: true,

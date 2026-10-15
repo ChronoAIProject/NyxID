@@ -1377,6 +1377,7 @@ async fn recovery_pre_1828_rows_accept_operator_release_and_pre_claim_records() 
         &card,
         attempt,
         review::PublicationFailureCode::NyxidRefused,
+        &[],
     )
     .await
     .unwrap();

@@ -957,7 +957,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/feature-flags",
-            get(handlers::admin_feature_flags::list_feature_flags),
+            get(handlers::admin_feature_flags::list_feature_flags)
+                .post(handlers::admin_feature_flags::create_feature_flag),
+        )
+        .route(
+            "/feature-flag-targets",
+            get(handlers::admin_feature_flags::list_feature_flag_targets),
         )
         .route(
             "/feature-flags/{flag_key}",
@@ -2236,6 +2241,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations/{id}",
             get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/messages/{message_id}/recovery",
+            get(handlers::assistant_nyxagent::recovery),
         )
         .route(
             "/nyxagent/conversations/{id}/model",

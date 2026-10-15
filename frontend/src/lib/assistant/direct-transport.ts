@@ -46,6 +46,7 @@ export interface DirectTextBlock {
 }
 
 export interface DirectAssistantMessage {
+  readonly continuation_of?: string | null;
   readonly id: string;
   readonly role: "user" | "assistant";
   readonly schema_version: 1;
@@ -75,7 +76,7 @@ export type DirectTurnEvent =
   | (DirectTurnEventBase & { readonly event: "turn.continuing"; readonly turn_id: string; readonly continuation: number })
   | (DirectTurnEventBase & {
       readonly event: "turn.notice";
-      readonly code: "context_reset" | "image_input_unavailable";
+      readonly code: "context_reset" | "image_input_unavailable" | "retrying";
       readonly message: string;
     })
   | (DirectTurnEventBase & {

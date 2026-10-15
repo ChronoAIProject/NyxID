@@ -16,6 +16,35 @@ use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
 
+// One extractor handles verdict and problem shapes. The model projection
+// preserves the released sanitizer/cap; persisted diagnostics use only the
+// allowlisted enum (unknown identifiers become `other`, never echoed).
+fn rule_identifiers(value: &Value) -> Vec<(&str, Option<&str>)> {
+    value["data"]["violations"]
+        .as_array()
+        .or_else(|| value["errors"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let rule = item.get("rule").or_else(|| item.get("code"))?.as_str()?;
+            Some((rule, item.get("path").and_then(Value::as_str)))
+        })
+        .collect()
+}
+
+pub(crate) fn validation_rules(value: &Value) -> Vec<skills::OrnnValidationRule> {
+    rule_identifiers(value)
+        .into_iter()
+        .take(10)
+        .map(|(rule, path)| {
+            skills::OrnnValidationRule::parse(
+                path.filter(|path| path.starts_with("frontmatter."))
+                    .unwrap_or(rule),
+            )
+        })
+        .collect()
+}
+
 fn invalid() -> AppError {
     AppError::Conflict("publication_integrity_failed".into())
 }
@@ -26,7 +55,10 @@ pub(super) enum PublicationError {
     Ambiguous(Option<u16>),
     BaseChanged,
     BaseInterfaceIncompatible,
-    Validation(Option<u16>),
+    Validation {
+        status: Option<u16>,
+        rules: Vec<skills::OrnnValidationRule>,
+    },
     AuthMissing(u16),
     ReadForbidden(u16),
     SkillNotFound(u16),
@@ -36,11 +68,19 @@ pub(super) enum PublicationError {
 }
 
 impl PublicationError {
+    pub(super) fn rules(&self) -> Vec<String> {
+        match self {
+            Self::Validation { rules, .. } => {
+                rules.iter().map(|rule| rule.as_str().to_owned()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
     pub(super) fn status(&self) -> Option<u16> {
         match self {
-            Self::Ambiguous(status) | Self::Validation(status) | Self::Unavailable(status) => {
-                *status
-            }
+            Self::Ambiguous(status)
+            | Self::Validation { status, .. }
+            | Self::Unavailable(status) => *status,
             Self::AuthMissing(status)
             | Self::ReadForbidden(status)
             | Self::SkillNotFound(status) => Some(*status),
@@ -60,7 +100,7 @@ impl PublicationError {
             (Self::Integrity, _) => Code::OrnnValidationFailed,
             (Self::BaseChanged, _) => Code::BaseChanged,
             (Self::BaseInterfaceIncompatible, _) => Code::BaseInterfaceIncompatible,
-            (Self::Validation(_), _) => Code::OrnnValidationFailed,
+            (Self::Validation { .. }, _) => Code::OrnnValidationFailed,
             (Self::AuthMissing(_), _) => Code::OrnnAuthMissing,
             (Self::ReadForbidden(_), _) => Code::OrnnReadForbidden,
             (
@@ -85,7 +125,7 @@ impl PublicationError {
             Self::BaseInterfaceIncompatible => {
                 AppError::Conflict("base_interface_incompatible".into())
             }
-            Self::Validation(_) => AppError::Conflict("ornn_validation_failed".into()),
+            Self::Validation { .. } => AppError::Conflict("ornn_validation_failed".into()),
             Self::AuthMissing(_) => AppError::Conflict("ornn_auth_missing".into()),
             Self::ReadForbidden(_) => AppError::Conflict("ornn_read_forbidden".into()),
             Self::SkillNotFound(_) => AppError::Conflict("ornn_skill_not_found".into()),
@@ -587,7 +627,14 @@ pub(super) async fn verify_base(
 pub(super) async fn validate(reader: &impl OrnnReader, bytes: &[u8]) -> PublicationResult<()> {
     match validate_report(reader, bytes).await? {
         None => Ok(()),
-        Some(_) => Err(PublicationError::Validation(None)),
+        Some(rules) => Err(PublicationError::Validation {
+            status: None,
+            rules: rules
+                .iter()
+                .take(10)
+                .map(|rule| skills::OrnnValidationRule::parse(rule))
+                .collect(),
+        }),
     }
 }
 
@@ -609,22 +656,27 @@ pub(super) async fn validate_report(
         OrnnOutcome::Response {
             code: OrnnCode::ValidationFailed,
             status: status @ 400..=499,
-            ..
+            rules,
         } => {
-            return Err(PublicationError::Validation(Some(status)));
+            return Err(PublicationError::Validation {
+                status: Some(status),
+                rules,
+            });
         }
         other => return read_result(other).map(|_| None),
     };
     let response: Value = serde_json::from_slice(&response).map_err(|_| malformed())?;
     let valid = response["data"]["valid"].as_bool().ok_or_else(malformed)?;
-    let violations = match &response["data"]["violations"] {
-        Value::Null => Vec::new(),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| item["rule"].as_str().map(str::to_owned))
-            .collect(),
-        _ => return Err(malformed()),
-    };
+    if !matches!(
+        &response["data"]["violations"],
+        Value::Null | Value::Array(_)
+    ) {
+        return Err(malformed());
+    }
+    let violations: Vec<String> = rule_identifiers(&response)
+        .into_iter()
+        .map(|(rule, _)| rule.to_owned())
+        .collect();
     // Only an explicit verdict refuses the package.
     if !valid || !violations.is_empty() {
         return Ok(Some(violations));
@@ -656,6 +708,7 @@ pub(super) enum PublishOutcome {
     Refused {
         code: FailureCode,
         status: Option<u16>,
+        rules: Vec<skills::OrnnValidationRule>,
     },
     VersionConflict {
         status: u16,
@@ -693,11 +746,16 @@ pub(super) async fn publish_classified(
         OrnnOutcome::LocalRefusal(_) | OrnnOutcome::LocalError(_) => PublishOutcome::Refused {
             code: FailureCode::NyxidRefused,
             status: None,
+            rules: vec![],
         },
         OrnnOutcome::Uncertain | OrnnOutcome::ProxyError | OrnnOutcome::Interrupted => {
             PublishOutcome::Uncertain { status: None }
         }
-        OrnnOutcome::Response { status, code } => {
+        OrnnOutcome::Response {
+            status,
+            code,
+            rules,
+        } => {
             if !(400..500).contains(&status) || status == 408 || status == 429 {
                 return PublishOutcome::Uncertain {
                     status: Some(status),
@@ -738,6 +796,7 @@ pub(super) async fn publish_classified(
                 |code| PublishOutcome::Refused {
                     code,
                     status: Some(status),
+                    rules,
                 },
             )
         }
@@ -869,6 +928,7 @@ pub(super) async fn legacy_release_evidence(
         OrnnOutcome::Response {
             status: 404,
             code: OrnnCode::SkillVersionNotFound,
+            ..
         } => {}
         _ => return LegacyReleaseEvidence::Uncertain,
     }
@@ -901,6 +961,9 @@ pub(super) fn binding(
     skills_revision: i64,
 ) -> Value {
     let mut binding = json!({"agent_id":row.agent_id,"proposal_id":row.id,"owner_id":row.owner_id,"config_revision":row.config_revision,"skills_revision":skills_revision,"revision":row.revision,"fingerprint":row.fingerprint,"operation_id":p.operation_id,"package_sha256":p.sha256,"version":p.version});
+    if let Some(scope_digest) = &row.scope_digest {
+        binding["scope_digest"] = json!(scope_digest);
+    }
     if row.source == crate::models::assistant_agent_learning::ProposalSource::Authored {
         binding["authored_skill"] = json!({"agent_id":row.agent_id,"proposal_id":row.id,"revision":row.revision,"skills_revision":skills_revision});
     }
@@ -959,6 +1022,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verdict_and_problem_share_safe_owner_rule_projection() {
+        let verdict = json!({"data":{"valid":false,"violations":[
+            {"rule":"allowed-root-items","message":"SENTINEL_PRIVATE_DETAIL"},
+            {"rule":"SENTINEL_SECRET_RULE"}, {"message":"no identifier"}
+        ]}});
+        let problem = json!({"code":"validation_failed","errors":[
+            {"code":"allowed-root-items","detail":"SENTINEL_PRIVATE_DETAIL"},
+            {"code":"SENTINEL_SECRET_RULE"}, {"path":"no identifier"}
+        ]});
+        let expected = vec![
+            skills::OrnnValidationRule::AllowedRootItems,
+            skills::OrnnValidationRule::Other,
+        ];
+        assert_eq!(validation_rules(&verdict), expected);
+        assert_eq!(validation_rules(&problem), expected);
+        let encoded = serde_json::to_string(&validation_rules(&problem)).unwrap();
+        assert!(!encoded.contains("SENTINEL"));
+        assert_eq!(
+            validation_rules(
+                &json!({"errors":[{"code":"invalid","path":"frontmatter.description"}]})
+            ),
+            vec![skills::OrnnValidationRule::FrontmatterDescription]
+        );
+        assert!(validation_rules(&json!({"errors":"malformed"})).is_empty());
+    }
+
     struct ClassifiedReader(OrnnCode, u16);
     #[async_trait::async_trait]
     impl OrnnReader for ClassifiedReader {
@@ -969,6 +1059,7 @@ mod tests {
             OrnnOutcome::Response {
                 status: self.1,
                 code: self.0,
+                rules: vec![],
             }
         }
     }
@@ -1001,7 +1092,8 @@ mod tests {
             .await,
             PublishOutcome::Refused {
                 code: FailureCode::OrnnInterfaceChangeRequiresMajor,
-                status: Some(409)
+                status: Some(409),
+                ..
             }
         ));
         assert!(matches!(
@@ -1056,8 +1148,9 @@ mod tests {
             let error = validate(&ClassifiedReader(code, status), b"zip")
                 .await
                 .unwrap_err();
+            let error = error.into_app_error();
             assert_eq!(
-                error.into_app_error().to_string(),
+                error.to_string(),
                 AppError::Conflict(expected.into()).to_string()
             );
         }
@@ -1068,6 +1161,7 @@ mod tests {
         let anomalous = read_result(OrnnOutcome::Response {
             status: 451,
             code: OrnnCode::Forbidden,
+            rules: vec![],
         })
         .unwrap_err();
         assert_eq!(anomalous.status(), Some(451));
@@ -1205,7 +1299,7 @@ mod tests {
         ));
         assert!(matches!(
             validate(&verdict(br#"{"data":{"valid":false}}"#), b"zip").await,
-            Err(PublicationError::Validation(None))
+            Err(PublicationError::Validation { status: None, .. })
         ));
         assert!(matches!(
             validate(
@@ -1213,7 +1307,7 @@ mod tests {
                 b"zip"
             )
             .await,
-            Err(PublicationError::Validation(None))
+            Err(PublicationError::Validation { status: None, .. })
         ));
     }
 

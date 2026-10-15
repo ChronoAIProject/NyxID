@@ -2,6 +2,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { canManageCatalog, canAdminWrite } from "@/types/api";
 import { useState } from "react";
 import { useServices, useDeleteService } from "@/hooks/use-services";
+import { useProviders } from "@/hooks/use-providers";
 import { CreateServiceDialog } from "@/components/services/create-service-dialog";
 import { ServiceCard } from "@/components/dashboard/service-card";
 import { PageHeader } from "@/components/shared/page-header";
@@ -13,6 +14,10 @@ import { toast } from "sonner";
 export function ServiceListPage() {
   const user = useAuthStore((state) => state.user);
   const { data: services, isLoading } = useServices();
+  const { data: providers } = useProviders();
+  const providerIcons = new Map(
+    providers?.map((provider) => [provider.id, provider.icon_url]),
+  );
   const deleteMutation = useDeleteService();
   const [createOpen, setCreateOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -70,6 +75,7 @@ export function ServiceListPage() {
             <ServiceCard
               key={service.id}
               service={service}
+              providerIconUrl={providerIcons.get(service.provider_config_id ?? "")}
               onDelete={canAdminWrite(user) ? handleDelete : undefined}
               isDeleting={deletingId === service.id}
             />

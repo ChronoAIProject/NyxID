@@ -51,7 +51,7 @@ import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { RoutingSection } from "@/components/dashboard/routing-section";
-import { useMyProviderTokens } from "@/hooks/use-providers";
+import { useMyProviderTokens, useProvider } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -123,6 +123,9 @@ export function ServiceDetailPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
   const { data: service, isLoading, error, refetch } = useService(serviceId);
+  const { data: provider } = useProvider(
+    service?.offering_kind !== "tool" ? (service?.provider_config_id ?? "") : "",
+  );
   const deleteMutation = useDeleteService();
   const testSshMutation = useTestSshConnection();
   const { data: tokens } = useMyProviderTokens();
@@ -218,7 +221,13 @@ export function ServiceDetailPage() {
       <PageHeader
         title={service.name}
         description={service.description ?? undefined}
-        leading={<ServiceIcon slug={service.slug} size="md" />}
+        leading={
+          <ServiceIcon
+            slug={service.slug}
+            iconUrl={service.icon_url || provider?.icon_url}
+            size="md"
+          />
+        }
         actions={
           <>
             {terminalSupported && (

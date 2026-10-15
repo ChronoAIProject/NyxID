@@ -1565,6 +1565,11 @@ impl AppError {
                 } => {
                     format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
                 }
+                AppError::SkillDraftValidation(diagnostic)
+                    if diagnostic.rule == "ornn_format_rejected" && diagnostic.ornn_rules.is_empty() =>
+                {
+                    format!("Skill draft failed validation ({}); details unavailable.", diagnostic.rule)
+                }
                 other => other.to_string(),
             },
             session_token: mfa_session_token,
@@ -1635,6 +1640,44 @@ mod tests {
         ] {
             assert!(!error.is_forbidden());
         }
+    }
+
+    #[test]
+    fn only_empty_ornn_verdict_reports_unavailable_details() {
+        let local = AppError::SkillDraftValidation(Box::new(
+            skill_draft::SkillDraftValidation::size("package", "bytes", 10, 11),
+        ));
+        assert_eq!(
+            local.response_body().message,
+            "Skill draft failed validation (too_large)"
+        );
+        for rule in [
+            "credential_shape",
+            "required",
+            "unsafe_path",
+            "scope_required",
+        ] {
+            let local: AppError = skill_draft::SkillDraftValidation::at(rule, "draft")
+                .on_line(3)
+                .into();
+            let response = local.response_body();
+            assert_eq!(response.message, local.to_string());
+            assert_eq!(response.details.unwrap()["line"], 3);
+        }
+        let detailed: AppError =
+            skill_draft::SkillDraftValidation::ornn_rejected(["no-readme-md"]).into();
+        assert_eq!(detailed.response_body().message, detailed.to_string());
+        let local: AppError =
+            skill_draft::SkillDraftValidation::at("ornn_validation_failed", "draft")
+                .on_line(2)
+                .into();
+        assert_eq!(local.response_body().message, local.to_string());
+        let ornn = skill_draft::SkillDraftValidation::ornn_rejected([]);
+        let ornn = AppError::SkillDraftValidation(Box::new(ornn));
+        assert_eq!(
+            ornn.response_body().message,
+            "Skill draft failed validation (ornn_format_rejected); details unavailable."
+        );
     }
 
     #[tokio::test]
