@@ -15,9 +15,12 @@ pub struct PlatformManagerDelivery {
     pub manager_authority_epoch: i64,
     pub sender_id: i64,
     pub chat_id: i64,
-    pub ingress_id: String,
-    pub ingress_claim_id: String,
+    pub ingress_id: Option<String>,
+    pub ingress_claim_id: Option<String>,
     pub origin: Option<super::assistant_conversation::PlatformTurnOrigin>,
+    /// The original delivery turn, which may precede this reply's execution.
+    #[serde(default)]
+    pub origin_turn_id: Option<String>,
     pub reference: DeliveryReference,
     pub state: DeliveryState,
     pub claim_id: Option<String>,
@@ -37,6 +40,13 @@ pub enum DeliveryReference {
         conversation_id: String,
         turn_id: String,
         reply_id: String,
+    },
+    PublicReply {
+        public_session_id: String,
+        conversation_id: String,
+        turn_id: String,
+        reply_id: String,
+        public_policy_revision: i64,
     },
     Fixed {
         reason: String,

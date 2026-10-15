@@ -1751,6 +1751,25 @@ async fn run_turn(
         {
             super::assistant_titles::spawn(state.clone(), auth, row.id.clone());
         }
+        if let Some(turn) = row.active_turn.as_ref() {
+            let reply = crate::services::platform_manager_contract::ReplyRef {
+                turn: crate::services::platform_manager_contract::TurnRef {
+                    conversation_id: row.id.clone(),
+                    turn_id: turn.turn_id.clone(),
+                },
+                reply_id: settled.message_id.clone(),
+            };
+            if let Err(error) = crate::services::platform_manager_delivery::saved_personal_reply(
+                &state, &row, &reply,
+            )
+            .await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Saved manager event reply delivery deferred or refused"
+                );
+            }
+        }
         super::assistant_team::after_turn_boxed(state, row, settled.text, settled.error).await;
     }
 }

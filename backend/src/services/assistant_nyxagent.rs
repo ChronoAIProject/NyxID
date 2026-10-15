@@ -2205,6 +2205,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         let lost_turn = lost.clone();
         row.message_count += 1;
         let message = AssistantMessage {
+            platform_delivery_recovery_queued: false,
             platform_reply: lost.platform_reply.clone(),
             platform_origin: lost.platform_origin.clone(),
             retry_of: lost.retry_of.clone(),
@@ -2332,7 +2333,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     row.active_turn = Some(ActiveTurn {
         platform_reply: platform.map(|origin| {
             crate::models::assistant_conversation::PlatformReplyRouting::Captured {
-                origin: origin.clone(),
+                origin: Box::new(origin.clone()),
                 turn_id: turn_id.clone(),
                 expires_at: bson::DateTime::from_chrono(
                     now + chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
@@ -2522,6 +2523,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     let message = AssistantMessage {
+        platform_delivery_recovery_queued: false,
         platform_reply: row
             .active_turn
             .as_ref()
@@ -3134,6 +3136,7 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    platform_delivery_recovery_queued: false,
                     platform_reply: settled_turn.as_ref().and_then(|turn| turn.platform_reply.clone()),
                     platform_origin: settled_turn.as_ref().and_then(|turn| turn.platform_origin.clone()),
                     retry_of: settled_turn.as_ref().and_then(|turn| turn.retry_of.clone()),

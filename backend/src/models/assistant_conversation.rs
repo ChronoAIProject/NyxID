@@ -156,7 +156,7 @@ pub struct PlatformTurnOrigin {
 pub enum PlatformReplyRouting {
     WebOnly,
     Captured {
-        origin: PlatformTurnOrigin,
+        origin: Box<PlatformTurnOrigin>,
         turn_id: String,
         #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
         expires_at: DateTime<Utc>,

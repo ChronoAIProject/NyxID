@@ -395,6 +395,19 @@ impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for Owner
             .await;
         match saved {
             Ok(Some(message)) => {
+                if let Err(error) =
+                    crate::services::platform_manager_delivery::saved_personal_reply(
+                        &self.state,
+                        &row,
+                        &reply,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Saved personal reply delivery deferred or refused"
+                    );
+                }
                 let error = message.error_code.as_deref().map(TurnError::new);
                 after_turn_boxed(self.state.clone(), row, message.text, error).await;
             }

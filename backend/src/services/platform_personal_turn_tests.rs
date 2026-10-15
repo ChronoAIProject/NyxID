@@ -796,7 +796,7 @@ async fn personal_event_captures_fresh_authority_and_unlinked_events_remain_web_
             assert_eq!(binding.active_turn.unwrap().turn_id, turn.turn_id);
             assert!(
                 matches!(&turn.platform_reply, Some(model::PlatformReplyRouting::Captured { origin: reply_origin, turn_id, .. })
-                if reply_origin == origin && turn_id == &turn.turn_id)
+                if reply_origin.as_ref() == origin && turn_id == &turn.turn_id)
             );
         } else {
             assert!(turn.platform_origin.is_none());

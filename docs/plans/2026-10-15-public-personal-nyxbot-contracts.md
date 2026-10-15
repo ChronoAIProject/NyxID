@@ -692,3 +692,50 @@ transport pairing and the separate public encrypted-reply reader remain the next
 required consumers; this checkpoint claims neither complete public readiness
 nor passing runtime tests. The new signup regression sources use local injected
 public state solely to exercise the send boundary.
+
+
+## Saved reply transport completion checkpoint
+
+Personal Telegram delivery now derives its destination only from the actual
+Saved message's `platform_reply: Captured` value. Fresh `platform_origin` remains
+execution provenance. A final send-claim transaction validates the original
+input's route and source turn, the original settled receipt for ingress sources,
+or the retained event input for genuine ThreadEvent sources, then the current
+exact binding/person/manager fences and canonical rendered body. A resumed
+reply may differ from its original receipt's reply ID; it cannot alter that
+receipt or adopt a newer link. Absent routing and explicit WebOnly never acquire
+a Telegram destination. Original expiry (currently the turn's 2100-second
+ceiling) prevents sending while preserving the durable web reply.
+
+`platform_manager_delivery::saved_personal_reply(state, &conversation, &ReplyRef)`
+is called by the handler-owned Saved hook and ordinary event wrapper before
+existing after-turn queue draining. Services do not import handlers. Callback,
+event receiver, and recovery converge on the same metadata-only delivery key.
+Delivery rows have nullable ingress IDs for genuine events and retain the
+original source turn ID. The serde-default message recovery marker and partial
+index permit bounded oldest-first event recovery: enqueue first, source marker
+second; malformed/revoked/expired proofs are terminal, infrastructure failures
+remain pending. No event fabricates an ingress receipt. Captured origin is boxed
+in Rust to bound enum size; serde/BSON shape is unchanged.
+
+Pending action rendering reads a bounded exact-owner/conversation pending set.
+Only exact Saved-turn/current-key cards with retained valid CardRouting and
+unique confirmation codes expose bounded summaries and `yes CODE` / `no CODE`.
+Legacy routing, code collisions, different turns/keys, and unsupported review
+cards direct to the exact web conversation. The final claim re-renders the same
+canonical content. The original authenticated-command decision gate remains
+required; forwarding ordinary text never grants control consent.
+
+The public dispatcher now uses concrete preparation, transactional execution
+fencing and execution producers, establishing its bounded event receiver before
+spawn. Public reply delivery branches before any owner history lookup, reads the
+separate encrypted public-turn collection and invokes the producer's settled
+reply fence within the send-claim transaction. Its metadata reference and rate
+lane are separate from personal replies and one-time signup proof delivery.
+Unsupported upstream readiness remains an actual refusal; no ready evidence or
+successful public execution is fabricated.
+
+Validation for this checkpoint is targeted rustfmt and whitespace checking.
+New journey/card/event/expiry regression sources have been written, not executed
+or compiler-verified in the worker. Primary owns combined compilation, test
+execution, public-loop producer integration and runtime acceptance evidence.

@@ -115,6 +115,7 @@ pub async fn reserve(
             let response = row.active_turn.as_ref().unwrap().running_response.as_ref().unwrap();
             let now = Utc::now();
             let message = AssistantMessage {
+                platform_delivery_recovery_queued: false,
                 platform_reply: None,
                 platform_origin: None,
                 retry_claimed_by: None,

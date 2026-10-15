@@ -25,6 +25,7 @@ use std::sync::Arc;
 struct Transport {
     state: AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
+    public: Arc<dyn PublicTurnProducer>,
 }
 #[async_trait]
 impl ManagerTransportProducer for Transport {
@@ -42,6 +43,23 @@ impl ManagerTransportProducer for Transport {
         reference: &DeliveryRef,
         content: ReplyContent,
     ) -> AppResult<DeliveryOutcome> {
+        if matches!(destination.authority, ReplyAuthority::Public { .. }) {
+            let DeliveryRef::Reply(reply) = reference else {
+                return Err(AppError::Forbidden(
+                    "Public reply reference required".into(),
+                ));
+            };
+            // Ignore caller body; the dedicated encrypted transcript is authoritative.
+            return delivery::deliver_public_reply(
+                &self.state,
+                self.identity.clone(),
+                self.public.clone(),
+                destination,
+                reply,
+                &super::telegram_new_api::TelegramApi::new(&self.state.http_client),
+            )
+            .await;
+        }
         delivery::deliver(
             &self.state,
             self.identity.clone(),
@@ -91,6 +109,7 @@ pub fn assemble(
     let transport = Arc::new(Transport {
         state,
         identity: identity.clone(),
+        public: public.clone(),
     });
     Arc::new(PlatformManagerProducers {
         identity,
@@ -388,7 +407,7 @@ pub(crate) async fn dispatch_update(
             };
             match started {
                 PersonalTurnStart::Started { turn, destination } => {
-                    if !matches!(&destination.authority,ReplyAuthority::Personal {turn:expected,..} if *expected==turn)
+                    if !matches!(&destination.authority,ReplyAuthority::Personal {turn:expected,..}|ReplyAuthority::Public {turn:expected,..} if *expected==turn)
                     {
                         return Err(AppError::Conflict("Personal delivery turn changed".into()));
                     }
@@ -444,22 +463,90 @@ pub(crate) async fn dispatch_update(
                 )
                 .await?;
         }
-        ManagerAudience::Public(_) => {
-            // No public runtime proof exists. Never enter owner preparation.
-            let destination = fixed_destination(
-                super::platform_bot_runtime_control_service::policy(&runtime).manager,
-                &verified,
-                ingress.clone(),
-            );
-            let _ = producers
-                .transport
-                .deliver_platform_reply(
-                    &state.db,
-                    &destination,
-                    &DeliveryRef::Fixed { ingress },
-                    ReplyContent::Fixed(UnavailableReason::PublicNotReady),
+        ManagerAudience::Public(admitted) => {
+            let context = match producers
+                .public
+                .prepare_public_context(&state.db, &admitted)
+                .await
+            {
+                Ok(context) => context,
+                Err(AppError::Conflict(_) | AppError::Forbidden(_)) => {
+                    send_fixed(
+                        state,
+                        &producers,
+                        &verified,
+                        &ingress,
+                        admitted.manager,
+                        UnavailableReason::PublicNotReady,
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            };
+            let mut session = state.db.client().start_session().await?;
+            let fenced = session
+                .start_transaction()
+                .and_run(
+                    (&producers.public, &context),
+                    |session, (public, context)| {
+                        Box::pin(async move {
+                            super::api_key_mutation_service::transaction_result(
+                                public
+                                    .fence_public_execution(&state.db, session, context)
+                                    .await,
+                            )
+                        })
+                    },
+                )
+                .await
+                .map_err(super::api_key_mutation_service::map_transaction_error)?;
+            if let FenceOutcome::Unavailable(reason) = fenced {
+                send_fixed(
+                    state,
+                    &producers,
+                    &verified,
+                    &ingress,
+                    admitted.manager,
+                    reason,
                 )
                 .await?;
+                return Ok(true);
+            }
+            let destination = ReplyDestination {
+                manager: admitted.manager.clone(),
+                sender_id: admitted.sender_id,
+                chat_id: admitted.chat_id,
+                authority: ReplyAuthority::Public {
+                    ingress: admitted,
+                    public_session_id: context.public_session_id.clone(),
+                    turn: context.turn.clone(),
+                },
+                expires_at: context.expires_at,
+            };
+            // Establish the bounded receiver before the execution producer spawns.
+            let (events, receiver) = tokio::sync::mpsc::channel(16);
+            let expected = context.turn.clone();
+            let turn = producers
+                .public
+                .run_public_turn(
+                    &state.db,
+                    context,
+                    TurnInput {
+                        text: text.to_owned(),
+                    },
+                    events,
+                )
+                .await?;
+            if turn != expected {
+                return Err(AppError::Conflict("Public execution turn changed".into()));
+            }
+            tokio::spawn(consume_events(
+                state.clone(),
+                producers.clone(),
+                destination,
+                receiver,
+            ));
         }
         ManagerAudience::Control => {
             return Err(AppError::Conflict("Control receipt cannot execute".into()));
@@ -557,7 +644,7 @@ pub(crate) async fn consume_events(
                 }
             }
             ExecutionEvent::Settled { turn } => {
-                if !matches!(&destination.authority,ReplyAuthority::Personal {turn:expected,..} if *expected==turn)
+                if !matches!(&destination.authority,ReplyAuthority::Personal {turn:expected,..}|ReplyAuthority::Public {turn:expected,..} if *expected==turn)
                 {
                     tracing::warn!("Manager execution emitted settlement for another turn");
                     continue;
@@ -574,6 +661,18 @@ pub(crate) async fn deliver_saved(
     destination: &ReplyDestination,
     reply: &ReplyRef,
 ) -> AppResult<DeliveryOutcome> {
+    if matches!(destination.authority, ReplyAuthority::Public { .. }) {
+        // Public transcripts never enter owner history or credential paths.
+        return delivery::deliver_public_reply(
+            state,
+            producers.identity.clone(),
+            producers.public.clone(),
+            destination,
+            reply,
+            &super::telegram_new_api::TelegramApi::new(&state.http_client),
+        )
+        .await;
+    }
     let ReplyAuthority::Personal { origin, turn } = &destination.authority else {
         return Err(AppError::Forbidden(
             "Personal reply authority required".into(),
@@ -584,13 +683,16 @@ pub(crate) async fn deliver_saved(
     }
     let saved=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"_id":&reply.reply_id,"user_id":&origin.authority.user_id,"conversation_id":&reply.turn.conversation_id,"turn_id":&reply.turn.turn_id,"role":"assistant"}).await?
         .ok_or_else(||AppError::NotFound("Retained reply unavailable".into()))?;
+    let destination = delivery::captured_destination(&saved)?
+        .ok_or_else(|| AppError::Conflict("Reply remains in NyxID".into()))?;
+    let body = delivery::render_personal(state, &saved, None).await?;
     producers
         .transport
         .deliver_platform_reply(
             &state.db,
-            destination,
+            &destination,
             &DeliveryRef::Reply(reply.clone()),
-            ReplyContent::Text(delivery::render_saved(&saved, &state.config.frontend_url)),
+            ReplyContent::Text(body),
         )
         .await
 }
@@ -638,6 +740,7 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
                 "public budget",
                 super::platform_public_budget_service::sweep(&state.db, 100).await,
             );
+            pending |= recovery_progress("saved replies", recover_saved_replies(&state, 100).await);
             if let Err(error) = recover_ingress(&state, &producers, 100).await {
                 tracing::warn!(
                     error_code = error.error_code(),
@@ -646,7 +749,13 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
             }
             pending |= recovery_progress(
                 "delivery",
-                delivery::sweep(&state, producers.identity.clone(), 100).await,
+                delivery::sweep(
+                    &state,
+                    producers.identity.clone(),
+                    producers.public.clone(),
+                    100,
+                )
+                .await,
             );
         }
     });
@@ -676,6 +785,72 @@ fn recovery_progress(component: &'static str, result: AppResult<RecoveryBatch>) 
     }
 }
 
+async fn recover_saved_replies(state: &AppState, limit: u32) -> AppResult<RecoveryBatch> {
+    use futures::TryStreamExt;
+    let batch = limit.min(100);
+    if batch == 0 {
+        return Ok(RecoveryBatch {
+            processed: 0,
+            has_more: false,
+        });
+    }
+    let messages = state.db.collection::<AssistantMessage>(MESSAGES);
+    let mut pending=messages.find(doc! {"role":"assistant","platform_reply.kind":"captured","platform_delivery_recovery_queued":{"$ne":true}})
+        .sort(doc! {"created_at":1,"_id":1}).limit(i64::from(batch)).await?;
+    let mut processed = 0;
+    while let Some(message) = pending.try_next().await? {
+        let result: AppResult<()> = async {
+            let row = state
+                .db
+                .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
+                .await?
+                .ok_or_else(|| AppError::NotFound("Retained conversation unavailable".into()))?;
+            delivery::saved_personal_reply(
+                state,
+                &row,
+                &ReplyRef {
+                    turn: TurnRef {
+                        conversation_id: message.conversation_id.clone(),
+                        turn_id: message.turn_id.clone(),
+                    },
+                    reply_id: message.id.clone(),
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {}
+            Err(
+                AppError::Conflict(_)
+                | AppError::NotFound(_)
+                | AppError::Forbidden(_)
+                | AppError::ValidationError(_),
+            ) => {
+                messages
+                    .update_one(
+                        doc! {"_id":&message.id},
+                        doc! {"$set":{"platform_delivery_recovery_queued":true}},
+                    )
+                    .await?;
+            }
+            Err(error) => tracing::warn!(
+                error_code = error.error_code(),
+                "Saved manager reply recovery remains pending"
+            ),
+        }
+        processed += 1;
+    }
+    Ok(RecoveryBatch {
+        processed,
+        has_more: processed == batch,
+    })
+}
+
 async fn recover_ingress(
     state: &AppState,
     producers: &PlatformManagerProducers,
@@ -694,31 +869,28 @@ async fn recover_ingress(
                 .reply_id
                 .as_ref()
                 .ok_or_else(|| AppError::Conflict("Missing reply reference".into()))?;
+            if let crate::models::platform_manager_ingress::IngressAudience::Public {public_policy_revision}=&receipt.audience {
+                let execution=receipt.execution.as_ref().ok_or_else(||AppError::Conflict("Missing public execution".into()))?;
+                let retained=state.db.collection::<crate::models::platform_public_turn::PlatformPublicTurn>(crate::models::platform_public_turn::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&execution.turn_id,"receipt_id":&receipt.id,"claim_id":&receipt.claim_id,"reply_id":reply_id}).await?
+                    .ok_or_else(||AppError::NotFound("Retained public reply unavailable".into()))?;
+                let manager=ManagerAuthority {profile_id:receipt.profile_id.clone(),manager_bot_id:receipt.manager_bot_id.clone(),telegram_bot_id:receipt.telegram_bot_id,manager_authority_epoch:receipt.manager_authority_epoch};
+                let turn=TurnRef {conversation_id:execution.conversation_id.clone(),turn_id:execution.turn_id.clone()};
+                let admitted=PublicIngress {manager:manager.clone(),sender_id:receipt.sender_id,chat_id:receipt.chat_id,public_policy_revision:*public_policy_revision,
+                    ingress:IngressClaim {receipt_id:receipt.id.clone(),claim_id:receipt.claim_id.clone()}};
+                let destination=ReplyDestination {manager,sender_id:receipt.sender_id,chat_id:receipt.chat_id,expires_at:retained.expires_at,
+                    authority:ReplyAuthority::Public {ingress:admitted,public_session_id:retained.public_session_id,turn:turn.clone()}};
+                deliver_saved(state,producers,&destination,&ReplyRef {turn,reply_id:reply_id.clone()}).await?;
+                return Ok(());
+            }
             let message = state
                 .db
                 .collection::<AssistantMessage>(MESSAGES)
                 .find_one(doc! {"_id":reply_id})
                 .await?
                 .ok_or_else(|| AppError::NotFound("Retained reply unavailable".into()))?;
-            let origin = message
-                .platform_origin
-                .as_ref()
-                .ok_or_else(|| AppError::Conflict("Missing personal reply origin".into()))?;
-            let origin = super::platform_personal_turn_service::contract_origin(origin)?;
-            let turn = TurnRef {
-                conversation_id: message.conversation_id,
-                turn_id: message.turn_id,
-            };
-            let destination = ReplyDestination {
-                manager: origin.authority.manager.clone(),
-                sender_id: origin.authority.sender_id,
-                chat_id: origin.authority.chat_id,
-                authority: ReplyAuthority::Personal {
-                    origin,
-                    turn: turn.clone(),
-                },
-                expires_at: receipt.admitted_at + Duration::minutes(30),
-            };
+            let turn=TurnRef {conversation_id:message.conversation_id.clone(),turn_id:message.turn_id.clone()};
+            let destination=delivery::captured_destination(&message)?.ok_or_else(||AppError::Conflict("Reply remains in NyxID".into()))?;
             let _ = deliver_saved(
                 state,
                 producers,

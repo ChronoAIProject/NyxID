@@ -48,6 +48,17 @@ impl NyxAgentEgress for SavedReplyEgress {
     }
 }
 
+struct TestSettledHook;
+#[async_trait]
+impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for TestSettledHook {
+    async fn settled(
+        &self,
+        _: crate::models::assistant_conversation::AssistantConversation,
+        _: ReplyRef,
+    ) {
+    }
+}
+
 struct LocalTransport {
     state: AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
@@ -184,7 +195,7 @@ impl Journey {
             state.clone(),
             execution,
             egress.clone(),
-            crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+            Arc::new(TestSettledHook),
         );
         let identity = producers.identity.clone();
         Arc::get_mut(&mut producers).unwrap().transport = Arc::new(LocalTransport {
@@ -821,9 +832,14 @@ async fn ambiguous_send_is_terminal_and_same_identity_current_observation_is_use
         j.deliver(&destination, &reply, body).await.unwrap(),
         DeliveryOutcome::Duplicate
     ));
-    delivery::sweep(&j.state, j.producers.identity.clone(), 100)
-        .await
-        .unwrap();
+    delivery::sweep(
+        &j.state,
+        j.producers.identity.clone(),
+        j.producers.public.clone(),
+        100,
+    )
+    .await
+    .unwrap();
     assert_eq!(j.sends().await.len(), 3);
     let row = j
         .state
@@ -943,9 +959,14 @@ async fn public_signup_sends_one_protected_ephemeral_bearer_without_retaining_it
         j.signup_send(&context, replay).await,
         delivery::PublicSignupDeliveryOutcome::Unavailable
     );
-    delivery::sweep(&j.state, j.producers.identity.clone(), 100)
-        .await
-        .unwrap();
+    delivery::sweep(
+        &j.state,
+        j.producers.identity.clone(),
+        j.producers.public.clone(),
+        100,
+    )
+    .await
+    .unwrap();
     let sends = j.sends().await;
     assert_eq!(sends.len(), 1);
     assert!(
@@ -1014,9 +1035,14 @@ async fn public_signup_429_and_ambiguous_outcomes_are_terminal_and_never_replaye
             j.signup_send(&context, replay).await,
             delivery::PublicSignupDeliveryOutcome::Unavailable
         );
-        delivery::sweep(&j.state, j.producers.identity.clone(), 100)
-            .await
-            .unwrap();
+        delivery::sweep(
+            &j.state,
+            j.producers.identity.clone(),
+            j.producers.public.clone(),
+            100,
+        )
+        .await
+        .unwrap();
         assert_eq!(j.sends().await.len(), 1);
         let row = j
             .state
@@ -1092,11 +1118,403 @@ async fn public_signup_refuses_changed_turn_consent_intent_and_transport_before_
             j.signup_send(&context, token).await,
             delivery::PublicSignupDeliveryOutcome::Unavailable
         );
-        delivery::sweep(&j.state, j.producers.identity.clone(), 100)
-            .await
-            .unwrap();
+        delivery::sweep(
+            &j.state,
+            j.producers.identity.clone(),
+            j.producers.public.clone(),
+            100,
+        )
+        .await
+        .unwrap();
         assert!(j.sends().await.is_empty());
         assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
         j.state.db.drop().await.unwrap();
     }
+}
+
+async fn notify_local(j: &Journey, reply: &ReplyRef) -> AppResult<Option<DeliveryOutcome>> {
+    let row = engine::get(&j.state.db, &j.owner, &reply.turn.conversation_id).await?;
+    delivery::saved_personal_reply_with_api(
+        &j.state,
+        &row,
+        reply,
+        &super::super::telegram_new_api::TelegramApi {
+            http: &j.state.http_client,
+            base_url: &j.server.uri(),
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn saved_notification_honors_web_only_absent_and_expired_routes() {
+    use crate::models::assistant_conversation::PlatformReplyRouting;
+    let j = Journey::new().await;
+    j.link().await;
+    let (_, reply, mut saved) = j.prepared_reply(1200).await;
+    let messages = j.state.db.collection::<AssistantMessage>(MESSAGES);
+    for route in [None, Some(PlatformReplyRouting::WebOnly)] {
+        saved.platform_reply = route;
+        messages
+            .replace_one(doc! {"_id":&saved.id}, &saved)
+            .await
+            .unwrap();
+        assert!(notify_local(&j, &reply).await.unwrap().is_none());
+    }
+    let origin = saved.platform_origin.clone().unwrap();
+    saved.platform_reply = Some(PlatformReplyRouting::Captured {
+        origin: Box::new(origin),
+        turn_id: reply.turn.turn_id.clone(),
+        expires_at: Utc::now() - Duration::seconds(1),
+    });
+    messages
+        .replace_one(doc! {"_id":&saved.id}, &saved)
+        .await
+        .unwrap();
+    assert!(notify_local(&j, &reply).await.is_err());
+    let batch = recover_saved_replies(&j.state, 100).await.unwrap();
+    assert_eq!(batch.processed, 1);
+    let retained = messages
+        .find_one(doc! {"_id":&saved.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.platform_delivery_recovery_queued);
+    assert_eq!(retained.text, "Retained personal answer");
+    assert_eq!(j.sends().await.len(), 2);
+    assert!(
+        engine::messages(&j.state.db, &j.owner, &reply.turn.conversation_id, 50, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.id == reply.reply_id)
+    );
+}
+
+#[tokio::test]
+async fn delayed_saved_result_uses_original_receipt_without_replacing_its_reply() {
+    let j = Journey::new().await;
+    j.link().await;
+    let (_, original, mut delayed) = j.prepared_reply(1201).await;
+    let original_route = delayed.platform_reply.clone();
+    delayed.id = uuid::Uuid::new_v4().to_string();
+    delayed.turn_id = uuid::Uuid::new_v4().to_string();
+    delayed.seq += 2;
+    delayed.text = "A delayed persisted result".into();
+    delayed.platform_origin.as_mut().unwrap().source =
+        crate::models::assistant_conversation::PlatformOriginSource::ThreadEvent {
+            admission_id: delayed.turn_id.clone(),
+        };
+    assert_eq!(delayed.platform_reply, original_route);
+    j.state
+        .db
+        .collection::<AssistantMessage>(MESSAGES)
+        .insert_one(&delayed)
+        .await
+        .unwrap();
+    let reply = ReplyRef {
+        turn: TurnRef {
+            conversation_id: delayed.conversation_id.clone(),
+            turn_id: delayed.turn_id.clone(),
+        },
+        reply_id: delayed.id.clone(),
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(matches!(
+        notify_local(&j, &reply).await.unwrap(),
+        Some(DeliveryOutcome::Sent { .. })
+    ));
+    assert!(matches!(
+        notify_local(&j, &reply).await.unwrap(),
+        Some(DeliveryOutcome::Duplicate)
+    ));
+    let origin = super::super::platform_personal_turn_service::contract_origin(
+        delayed.platform_origin.as_ref().unwrap(),
+    )
+    .unwrap();
+    let original_saved = j
+        .state
+        .db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id":&original.reply_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let captured = super::super::platform_personal_turn_service::contract_origin(
+        original_saved.platform_origin.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_ne!(origin.source, captured.source);
+    let PlatformOriginSource::Ingress(claim) = captured.source else {
+        panic!("ingress required");
+    };
+    let receipt = j
+        .state
+        .db
+        .collection::<PlatformManagerIngress>(INGRESS)
+        .find_one(doc! {"_id":claim.receipt_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.reply_id.as_ref(), Some(&original.reply_id));
+    let queued = j
+        .state
+        .db
+        .collection::<PlatformManagerDelivery>(
+            crate::models::platform_manager_delivery::COLLECTION_NAME,
+        )
+        .find_one(doc! {"reference.reply_id":&delayed.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.origin_turn_id.as_ref(), Some(&original.turn.turn_id));
+    assert_eq!(j.sends().await.len(), 3);
+}
+
+#[tokio::test]
+async fn genuine_thread_event_saved_delivery_needs_no_ingress_and_keeps_single_claim() {
+    use crate::models::assistant_conversation::{
+        PlatformOriginSource as ModelSource, PlatformReplyRouting,
+    };
+    let j = Journey::new().await;
+    j.link().await;
+    let (_, reply, mut saved) = j.prepared_reply(1202).await;
+    let mut source=j.state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"conversation_id":&reply.turn.conversation_id,"turn_id":&reply.turn.turn_id,"role":"user"}).await.unwrap().unwrap();
+    let event_id = uuid::Uuid::new_v4().to_string();
+    let mut origin = saved.platform_origin.clone().unwrap();
+    origin.source = ModelSource::ThreadEvent {
+        admission_id: event_id.clone(),
+    };
+    let route = PlatformReplyRouting::Captured {
+        origin: Box::new(origin.clone()),
+        turn_id: event_id.clone(),
+        expires_at: mongodb::bson::DateTime::from_chrono(Utc::now() + Duration::minutes(20))
+            .to_chrono(),
+    };
+    source.id = uuid::Uuid::new_v4().to_string();
+    source.turn_id = event_id.clone();
+    source.role = "event".into();
+    source.seq += 2;
+    source.platform_origin = Some(origin.clone());
+    source.platform_reply = Some(route.clone());
+    saved.id = uuid::Uuid::new_v4().to_string();
+    saved.turn_id = event_id.clone();
+    saved.seq += 2;
+    saved.platform_origin = Some(origin);
+    saved.platform_reply = Some(route);
+    j.state
+        .db
+        .collection::<AssistantMessage>(MESSAGES)
+        .insert_many([source, saved.clone()])
+        .await
+        .unwrap();
+    let event_reply = ReplyRef {
+        turn: TurnRef {
+            conversation_id: saved.conversation_id.clone(),
+            turn_id: event_id,
+        },
+        reply_id: saved.id.clone(),
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (first, second) = tokio::join!(
+        notify_local(&j, &event_reply),
+        notify_local(&j, &event_reply)
+    );
+    assert!(first.is_ok() && second.is_ok());
+    let queued = j
+        .state
+        .db
+        .collection::<PlatformManagerDelivery>(
+            crate::models::platform_manager_delivery::COLLECTION_NAME,
+        )
+        .find_one(doc! {"reference.reply_id":&saved.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(queued.ingress_id.is_none() && queued.ingress_claim_id.is_none());
+    assert_eq!(
+        queued.origin_turn_id.as_ref(),
+        Some(&event_reply.turn.turn_id)
+    );
+    assert_eq!(
+        j.state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .count_documents(doc! {"execution.turn_id":&event_reply.turn.turn_id})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(j.sends().await.len(), 3);
+}
+
+#[tokio::test]
+async fn delayed_original_route_is_not_promoted_by_new_personal_control_revision() {
+    let j = Journey::new().await;
+    j.link().await;
+    let (_, reply, saved) = j.prepared_reply(1203).await;
+    j.state
+        .db
+        .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$inc":{"personal_control_revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(matches!(
+        notify_local(&j, &reply).await.unwrap(),
+        Some(DeliveryOutcome::Refused(UnavailableReason::OriginRevoked))
+    ));
+    assert_eq!(j.sends().await.len(), 2);
+    assert_eq!(
+        j.state
+            .db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"_id":saved.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .text,
+        "Retained personal answer"
+    );
+}
+
+#[tokio::test]
+async fn public_reply_branch_refuses_before_owner_history_lookup_without_runtime_proof() {
+    let j = Journey::new().await;
+    let (context, _) = j.public_signup().await;
+    let destination = ReplyDestination {
+        manager: context.ingress.manager.clone(),
+        sender_id: context.ingress.sender_id,
+        chat_id: context.ingress.chat_id,
+        authority: ReplyAuthority::Public {
+            ingress: context.ingress.clone(),
+            public_session_id: context.public_session_id.clone(),
+            turn: context.turn.clone(),
+        },
+        expires_at: context.expires_at,
+    };
+    let error = deliver_saved(
+        &j.state,
+        &j.producers,
+        &destination,
+        &ReplyRef {
+            turn: context.turn,
+            reply_id: "public-only-reply".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error,AppError::Conflict(message) if message.contains("Public runtime unavailable"))
+    );
+    assert_eq!(
+        j.state
+            .db
+            .collection::<AssistantMessage>(MESSAGES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(j.sends().await.is_empty());
+}
+
+#[tokio::test]
+async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() {
+    use crate::models::assistant_acknowledgement::{
+        AssistantAcknowledgement, COLLECTION_NAME as ACKS,
+    };
+    let j = Journey::new().await;
+    j.link().await;
+    let (_, reply, saved) = j.prepared_reply(1204).await;
+    let row = engine::get(&j.state.db, &j.owner, &reply.turn.conversation_id)
+        .await
+        .unwrap();
+    let card = |id: &str, turn: &str, key: &str, routing: bson::Bson| -> AssistantAcknowledgement {
+        bson::from_document(doc! {"_id":id,"conversation_id":&row.id,"user_id":&j.owner,"api_key_id":key,
+            "kind":"action","summary":"Create the requested report","status":"pending","decider":"user",
+            "requested_turn_id":turn,"created_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(10)),"routing":routing}).unwrap()
+    };
+    let exact = card(
+        "render-action-a",
+        &reply.turn.turn_id,
+        &row.credential_api_key_id,
+        bson::Bson::Document(doc! {"kind":"not_involved"}),
+    );
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(&exact)
+        .await
+        .unwrap();
+    let text = delivery::render_personal(&j.state, &saved, None)
+        .await
+        .unwrap();
+    let code = super::super::assistant_acknowledgement_service::confirm_code(&exact.id);
+    assert!(text.contains(&format!("yes {code}")) && text.contains(&format!("no {code}")));
+    assert!(text.contains("Create the requested report"));
+    assert!(text.contains(&format!("c={}", row.id)));
+    for (field, value) in [
+        ("routing", bson::Bson::Null),
+        ("api_key_id", bson::Bson::String("different-key".into())),
+        ("requested_turn_id", bson::Bson::String("other-turn".into())),
+    ] {
+        let original = bson::to_document(&exact).unwrap();
+        let mut modified = original.clone();
+        modified.insert(field, value);
+        j.state
+            .db
+            .collection::<Document>(ACKS)
+            .replace_one(doc! {"_id":&exact.id}, modified)
+            .await
+            .unwrap();
+        let text = delivery::render_personal(&j.state, &saved, None)
+            .await
+            .unwrap();
+        assert!(!text.contains(&format!("yes {code}")));
+        assert!(text.contains("Pending actions require review"));
+        j.state
+            .db
+            .collection::<Document>(ACKS)
+            .replace_one(doc! {"_id":&exact.id}, original)
+            .await
+            .unwrap();
+    }
+    let colliding = (0..100_000)
+        .map(|n| format!("render-collision-{n}"))
+        .find(|id| super::super::assistant_acknowledgement_service::confirm_code(id) == code)
+        .unwrap();
+    let collision = card(
+        &colliding,
+        &reply.turn.turn_id,
+        &row.credential_api_key_id,
+        bson::Bson::Document(doc! {"kind":"not_involved"}),
+    );
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(collision)
+        .await
+        .unwrap();
+    assert!(
+        !delivery::render_personal(&j.state, &saved, None)
+            .await
+            .unwrap()
+            .contains(&format!("yes {code}"))
+    );
+    // Only the canonical renderer may be sent; old text without pending card
+    // notices cannot bypass final card/body validation.
+    assert!(
+        j.deliver(
+            &delivery::captured_destination(&saved).unwrap().unwrap(),
+            &reply,
+            delivery::render_saved(&saved, &j.state.config.frontend_url)
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(j.sends().await.len(), 2);
 }
