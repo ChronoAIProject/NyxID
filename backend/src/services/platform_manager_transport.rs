@@ -54,13 +54,16 @@ impl ManagerTransportProducer for Transport {
     }
 }
 
-pub fn compose(state: AppState) -> Arc<PlatformManagerProducers> {
+pub fn compose(
+    state: AppState,
+    settled_hook: Arc<dyn super::assistant_nyxagent_runtime::OwnerTurnSettledHook>,
+) -> Arc<PlatformManagerProducers> {
     let identity = bindings::producer(state.clone());
     let egress = super::assistant_nyxagent_egress::producer(state.clone(), identity);
     let public_runtime = super::platform_public_credential_service::producer(state.clone());
     let execution =
         super::assistant_nyxagent_runtime::producer(state.clone(), egress.clone(), public_runtime);
-    assemble(state, execution, egress)
+    assemble(state, execution, egress, settled_hook)
 }
 
 /// Every dependency is real. The public producers remain explicitly unavailable.
@@ -68,6 +71,7 @@ pub fn assemble(
     state: AppState,
     execution: Arc<dyn NyxAgentExecutionProducer>,
     egress: Arc<dyn NyxAgentEgress>,
+    settled_hook: Arc<dyn super::assistant_nyxagent_runtime::OwnerTurnSettledHook>,
 ) -> Arc<PlatformManagerProducers> {
     let identity = bindings::producer(state.clone());
     let ingress = super::platform_manager_ingress_service::producer(state.clone());
@@ -76,6 +80,7 @@ pub fn assemble(
         identity.clone(),
         ingress.clone(),
         egress,
+        settled_hook,
     );
     let public = super::platform_public_agent_service::producer(state.clone(), execution, ingress);
     let lifecycle = super::platform_bot_runtime_control_service::producer(

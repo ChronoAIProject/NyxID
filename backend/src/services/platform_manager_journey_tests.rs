@@ -11,6 +11,7 @@ use crate::{
     },
     services::{assistant_nyxagent as engine, telegram_new_tests as telegram},
 };
+use futures::TryStreamExt;
 use mongodb::bson::{Document, doc};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -179,7 +180,12 @@ impl Journey {
             egress.clone(),
             public_runtime.clone(),
         );
-        let mut producers = assemble(state.clone(), execution, egress.clone());
+        let mut producers = assemble(
+            state.clone(),
+            execution,
+            egress.clone(),
+            crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+        );
         let identity = producers.identity.clone();
         Arc::get_mut(&mut producers).unwrap().transport = Arc::new(LocalTransport {
             state: state.clone(),
@@ -225,6 +231,140 @@ impl Journey {
             .filter(|r| r.url.path().ends_with("/sendMessage"))
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect()
+    }
+    /// Local injected state exercises only the delivery boundary, never runtime
+    /// readiness or authorization from a supported public upstream.
+    async fn public_signup(&self) -> (PublicExecutionContext, zeroize::Zeroizing<String>) {
+        use crate::models::{
+            credits::Credits,
+            platform_bot_runtime_controls::PublicRuntimePolicy,
+            platform_manager_ingress::IngressExecution,
+            platform_public_session::{COLLECTION_NAME as SESSIONS, PlatformPublicSession},
+        };
+        super::super::platform_public_agent_service::ensure_indexes(&self.state.db)
+            .await
+            .unwrap();
+        let update = dispatch::verified_message(
+            &self.profile.id,
+            &self.profile.manager_bot_id,
+            100,
+            &self.profile.observation_id,
+            &self.update(900, "Guide me", false),
+        )
+        .unwrap();
+        let mut public = super::super::platform_public_agent_service::tests::fixture(
+            &self.state.db,
+            update.sender_id,
+            false,
+        )
+        .await;
+        public.profile_id = self.profile.id.clone();
+        public.manager_bot_id = "100".into();
+        public.telegram_bot_id = 100;
+        public.manager_authority_epoch = 1;
+        self.state
+            .db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .replace_one(doc! {"_id":&public.id}, &public)
+            .await
+            .unwrap();
+        self.state
+            .db
+            .collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .insert_one(
+                doc! {"_id":&public.sponsor_owner_user_id,"user_type":"org","is_active":true},
+            )
+            .await
+            .unwrap();
+        self.state.db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+            .update_one(doc! {"platform_config_id":&self.profile.id},doc! {"$set":{
+                "public_enabled":true,"public_policy":bson::to_bson(&PublicRuntimePolicy {
+                    sponsor_owner_user_id:public.sponsor_owner_user_id.clone(),
+                    nyxagent_profile:public.nyxagent_profile.clone(),
+                    total_daily_credits:Credits::from_whole(10),sender_daily_credits:Credits::from_whole(1),
+                }).unwrap(),
+            }}).await.unwrap();
+        let active = public.active_turn.as_ref().unwrap();
+        let context = PublicExecutionContext {
+            ingress: PublicIngress {
+                ingress: IngressClaim {
+                    receipt_id: active.receipt_id.clone(),
+                    claim_id: active.claim_id.clone(),
+                },
+                manager: ManagerAuthority {
+                    profile_id: public.profile_id.clone(),
+                    manager_bot_id: public.manager_bot_id.clone(),
+                    telegram_bot_id: 100,
+                    manager_authority_epoch: 1,
+                },
+                sender_id: public.sender_id,
+                chat_id: public.chat_id,
+                public_policy_revision: public.public_policy_revision,
+            },
+            public_session_id: public.id.clone(),
+            turn: TurnRef {
+                conversation_id: active.conversation_id.clone(),
+                turn_id: active.turn_id.clone(),
+            },
+            sponsor_owner_user_id: public.sponsor_owner_user_id.clone(),
+            policy_digest: public.policy_digest.clone(),
+            nyxagent_profile: public.nyxagent_profile.clone(),
+            model_operations: vec![],
+            limits: PublicExecutionLimits {
+                max_duration_secs: 60,
+                max_model_calls: 2,
+                max_tool_calls: 3,
+                max_continuations: 0,
+                max_input_tokens: 20,
+                max_output_tokens: 10,
+                max_input_bytes: 100,
+                max_context_bytes: 100,
+                max_output_bytes: 100,
+            },
+            expires_at: active.expires_at,
+        };
+        let mut session = self.state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        super::super::platform_manager_ingress_service::record_admission_in_session(
+            &self.state.db,
+            &mut session,
+            &update,
+            &context.ingress.manager,
+            &context.ingress.ingress,
+            &ManagerAudience::Public(context.ingress.clone()),
+        )
+        .await
+        .unwrap();
+        self.state.db.collection::<Document>(INGRESS).update_one(doc! {"_id":&active.receipt_id},doc! {"$set":{
+            "phase":"executing","execution":bson::to_bson(&IngressExecution {conversation_id:active.conversation_id.clone(),turn_id:active.turn_id.clone(),public_session_id:Some(public.id.clone()),payer_user_id:public.sponsor_owner_user_id.clone(),public_policy_digest:Some(public.policy_digest.clone())}).unwrap(),
+        }}).session(&mut session).await.unwrap();
+        let issued = super::super::platform_link_intent_service::begin_public_in_session(
+            &self.state.db,
+            &mut session,
+            self.state.auth_device_hmac_key.as_slice(),
+            &context,
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        (context, issued.token.unwrap())
+    }
+    async fn signup_send(
+        &self,
+        context: &PublicExecutionContext,
+        token: zeroize::Zeroizing<String>,
+    ) -> delivery::PublicSignupDeliveryOutcome {
+        delivery::deliver_public_signup_with_api(
+            &self.state,
+            context,
+            token,
+            &super::super::telegram_new_api::TelegramApi {
+                http: &self.state.http_client,
+                base_url: &self.server.uri(),
+            },
+        )
+        .await
+        .unwrap()
     }
     async fn link(&self) {
         self.webhook(&self.update(10, "/link", false)).await;
@@ -788,4 +928,175 @@ fn bounded_reply_renderer_links_exact_thread_and_strips_unrelated_query_secrets(
             .count()
             <= 4096
     );
+}
+
+#[tokio::test]
+async fn public_signup_sends_one_protected_ephemeral_bearer_without_retaining_it() {
+    let j = Journey::new().await;
+    let (context, token) = j.public_signup().await;
+    let replay = token.clone();
+    assert_eq!(
+        j.signup_send(&context, token).await,
+        delivery::PublicSignupDeliveryOutcome::Sent
+    );
+    assert_eq!(
+        j.signup_send(&context, replay).await,
+        delivery::PublicSignupDeliveryOutcome::Unavailable
+    );
+    delivery::sweep(&j.state, j.producers.identity.clone(), 100)
+        .await
+        .unwrap();
+    let sends = j.sends().await;
+    assert_eq!(sends.len(), 1);
+    assert!(
+        sends[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("#intent_token=nyx_pli_")
+    );
+    assert_eq!(sends[0]["protect_content"], true);
+    assert_eq!(sends[0]["link_preview_options"]["is_disabled"], true);
+    let stored = j
+        .state
+        .db
+        .collection::<PlatformManagerDelivery>(
+            crate::models::platform_manager_delivery::COLLECTION_NAME,
+        )
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        stored.reference,
+        crate::models::platform_manager_delivery::DeliveryReference::PublicSignup { .. }
+    ));
+    for name in j.state.db.list_collection_names().await.unwrap() {
+        let mut documents = j
+            .state
+            .db
+            .collection::<Document>(&name)
+            .find(doc! {})
+            .await
+            .unwrap();
+        while let Some(document) = documents.try_next().await.unwrap() {
+            assert!(!format!("{document:?}").contains("nyx_pli_"));
+        }
+    }
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn public_signup_429_and_ambiguous_outcomes_are_terminal_and_never_replayed() {
+    for (body, expected, state) in [
+        (
+            json!({"ok":false,"error_code":429,"parameters":{"retry_after":1}}),
+            delivery::PublicSignupDeliveryOutcome::Unavailable,
+            DeliveryState::Refused,
+        ),
+        (
+            json!({"unrecognized":"ambiguous response"}),
+            delivery::PublicSignupDeliveryOutcome::Uncertain,
+            DeliveryState::Uncertain,
+        ),
+    ] {
+        let j = Journey::new().await;
+        let (context, token) = j.public_signup().await;
+        j.server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/bot100:manager-test-secret/sendMessage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&j.server)
+            .await;
+        let replay = token.clone();
+        assert_eq!(j.signup_send(&context, token).await, expected);
+        assert_eq!(
+            j.signup_send(&context, replay).await,
+            delivery::PublicSignupDeliveryOutcome::Unavailable
+        );
+        delivery::sweep(&j.state, j.producers.identity.clone(), 100)
+            .await
+            .unwrap();
+        assert_eq!(j.sends().await.len(), 1);
+        let row = j
+            .state
+            .db
+            .collection::<PlatformManagerDelivery>(
+                crate::models::platform_manager_delivery::COLLECTION_NAME,
+            )
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.state == state);
+        j.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn public_signup_refuses_changed_turn_consent_intent_and_transport_before_send() {
+    for mutation in [
+        "stop",
+        "revoke",
+        "personal_pause",
+        "intent_cancel",
+        "observation",
+        "altered_turn",
+    ] {
+        let j = Journey::new().await;
+        let (mut context, token) = j.public_signup().await;
+        let sessions = crate::models::platform_public_session::COLLECTION_NAME;
+        let (collection, filter, change) = match mutation {
+            "stop" => (
+                sessions,
+                doc! {"_id":&context.public_session_id},
+                doc! {"active_turn.stop_requested":true},
+            ),
+            "revoke" => (
+                sessions,
+                doc! {"_id":&context.public_session_id},
+                doc! {"revoked_at":bson::DateTime::now()},
+            ),
+            "personal_pause" => (
+                crate::models::platform_bot_runtime_controls::COLLECTION_NAME,
+                doc! {"platform_config_id":&j.profile.id},
+                doc! {"personal_enabled":false},
+            ),
+            "intent_cancel" => (
+                crate::models::platform_link_intent::COLLECTION_NAME,
+                doc! {},
+                doc! {"state":"cancelled"},
+            ),
+            "observation" => (
+                crate::models::platform_credential::COLLECTION_NAME,
+                doc! {"provider":"telegram-new"},
+                doc! {"fields.observation_id":"rotating-current-observation"},
+            ),
+            "altered_turn" => {
+                context.turn.turn_id = uuid::Uuid::new_v4().to_string();
+                (
+                    sessions,
+                    doc! {"_id":&context.public_session_id},
+                    doc! {"effect_revision":1_i64},
+                )
+            }
+            _ => unreachable!(),
+        };
+        j.state
+            .db
+            .collection::<Document>(collection)
+            .update_one(filter, doc! {"$set":change})
+            .await
+            .unwrap();
+        assert_eq!(
+            j.signup_send(&context, token).await,
+            delivery::PublicSignupDeliveryOutcome::Unavailable
+        );
+        delivery::sweep(&j.state, j.producers.identity.clone(), 100)
+            .await
+            .unwrap();
+        assert!(j.sends().await.is_empty());
+        assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+        j.state.db.drop().await.unwrap();
+    }
 }

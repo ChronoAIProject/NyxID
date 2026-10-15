@@ -10,6 +10,7 @@ use crate::{
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         platform_bot_config::{COLLECTION_NAME as PROFILES, PlatformBotConfig},
+        platform_bot_runtime_controls::PlatformBotRuntimeControls,
         platform_credential::PlatformCredential,
         platform_manager_delivery::{
             COLLECTION_NAME, DeliveryReference, DeliveryState, PlatformManagerDelivery as Delivery,
@@ -33,6 +34,7 @@ use zeroize::Zeroizing;
 
 static PERSONAL_SENDS: Semaphore = Semaphore::const_new(16);
 static STATUS_SENDS: Semaphore = Semaphore::const_new(4);
+static PUBLIC_SENDS: Semaphore = Semaphore::const_new(4);
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     db.collection::<Delivery>(COLLECTION_NAME)
@@ -161,6 +163,7 @@ async fn enqueue(
     let identity = match &reference {
         DeliveryReference::Reply { reply_id, .. } => format!("reply:{reply_id}"),
         DeliveryReference::Command => "command".into(),
+        DeliveryReference::PublicSignup { intent_id, .. } => format!("public-signup:{intent_id}"),
         _ => "fixed".into(),
     };
     let dedupe_key = hex::encode(Sha256::digest(
@@ -224,13 +227,11 @@ async fn enqueue(
     Ok(stored)
 }
 
-async fn validate_in_session(
+async fn fence_transport_in_session(
     state: &AppState,
-    identity: &dyn ManagerIdentityProducer,
     session: &mut mongodb::ClientSession,
     row: &Delivery,
-    body: &str,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<(PlatformManagerIngress, PlatformBotRuntimeControls, String)>> {
     if row.expires_at <= Utc::now() {
         return Err(refused());
     }
@@ -283,6 +284,21 @@ async fn validate_in_session(
     if controls.manager_authority_epoch != row.manager_authority_epoch || controls.retired {
         return Err(refused());
     }
+    Ok(Some((receipt, controls, profile.observation_id)))
+}
+
+async fn validate_in_session(
+    state: &AppState,
+    identity: &dyn ManagerIdentityProducer,
+    session: &mut mongodb::ClientSession,
+    row: &Delivery,
+    body: &str,
+) -> AppResult<Option<String>> {
+    let Some((receipt, controls, observation)) =
+        fence_transport_in_session(state, session, row).await?
+    else {
+        return Ok(None);
+    };
     match &row.reference {
         DeliveryReference::Reply {
             conversation_id,
@@ -365,8 +381,10 @@ async fn validate_in_session(
                 return Err(refused());
             }
         }
+        // Public proof output has its own executing-turn/intent transaction.
+        DeliveryReference::PublicSignup { .. } => return Err(refused()),
     }
-    Ok(Some(profile.observation_id))
+    Ok(Some(observation))
 }
 
 enum CapturedSend {
@@ -499,6 +517,17 @@ async fn send(
             return Err(error);
         }
     };
+    send_claimed(state, &row, &claim_id, body, credential, api).await
+}
+
+async fn send_claimed(
+    state: &AppState,
+    row: &Delivery,
+    claim_id: &str,
+    body: Zeroizing<String>,
+    credential: Box<PlatformCredential>,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<DeliveryOutcome> {
     let values = super::platform_credential_service::decrypt_snapshot(
         &state.encryption_keys,
         Some(credential.as_ref()),
@@ -513,7 +542,7 @@ async fn send(
         .and_then(|id| id.parse::<i64>().ok())
         != Some(row.telegram_bot_id)
     {
-        finish(state, &row, &claim_id, "refused", vec![], None).await?;
+        finish(state, row, claim_id, "refused", vec![], None).await?;
         return Ok(DeliveryOutcome::Refused(
             UnavailableReason::TransportUnavailable,
         ));
@@ -554,30 +583,33 @@ async fn send(
                 .as_i64()
                 .filter(|id| *id > 0)
         {
-            finish(state, &row, &claim_id, "sent", vec![id], None).await?;
+            finish(state, row, claim_id, "sent", vec![id], None).await?;
             return Ok(DeliveryOutcome::Sent {
                 telegram_message_ids: vec![id],
             });
         }
         if envelope["ok"] == false
             && envelope["error_code"] == 429
-            && !matches!(row.reference, DeliveryReference::Command)
+            && !matches!(
+                row.reference,
+                DeliveryReference::Command | DeliveryReference::PublicSignup { .. }
+            )
             && let Some(delay) = envelope["parameters"]["retry_after"]
                 .as_i64()
                 .filter(|value| *value > 0 && *value <= 86400)
         {
             let retry_at = Utc::now() + Duration::seconds(delay);
-            finish(state, &row, &claim_id, "pending", vec![], Some(retry_at)).await?;
+            finish(state, row, claim_id, "pending", vec![], Some(retry_at)).await?;
             return Ok(DeliveryOutcome::Deferred { retry_at });
         }
         if envelope["ok"] == false {
-            finish(state, &row, &claim_id, "refused", vec![], None).await?;
+            finish(state, row, claim_id, "refused", vec![], None).await?;
             return Ok(DeliveryOutcome::Refused(
                 UnavailableReason::TransportUnavailable,
             ));
         }
     }
-    finish(state, &row, &claim_id, "uncertain", vec![], None).await?;
+    finish(state, row, claim_id, "uncertain", vec![], None).await?;
     Ok(DeliveryOutcome::Uncertain)
 }
 
@@ -689,6 +721,170 @@ pub async fn deliver_command(
     Ok(outcome)
 }
 
+/// A public tool sees only this status, never the intent bearer or its URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicSignupDeliveryOutcome {
+    Sent,
+    Unavailable,
+    Uncertain,
+}
+
+/// The intent mint must already be committed. There is no retryable body queue.
+pub(crate) async fn deliver_public_signup(
+    state: &AppState,
+    context: &PublicExecutionContext,
+    token: Zeroizing<String>,
+) -> AppResult<PublicSignupDeliveryOutcome> {
+    deliver_public_signup_with_api(
+        state,
+        context,
+        token,
+        &super::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await
+}
+
+pub(crate) async fn deliver_public_signup_with_api(
+    state: &AppState,
+    context: &PublicExecutionContext,
+    token: Zeroizing<String>,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<PublicSignupDeliveryOutcome> {
+    use super::platform_link_intent_service as intents;
+    let ingress = &context.ingress;
+    if ingress.sender_id <= 0
+        || ingress.sender_id != ingress.chat_id
+        || context.expires_at <= Utc::now()
+    {
+        return Ok(PublicSignupDeliveryOutcome::Unavailable);
+    }
+    // This read obtains metadata for dedupe; the final transaction revalidates
+    // the exact token, intent and execution authority with a write fence.
+    let intent =
+        match intents::preview(&state.db, state.auth_device_hmac_key.as_slice(), &token).await {
+            Ok(intent) => intent,
+            Err(AppError::Conflict(_) | AppError::NotFound(_) | AppError::ValidationError(_)) => {
+                return Ok(PublicSignupDeliveryOutcome::Unavailable);
+            }
+            Err(error) => return Err(error),
+        };
+    let destination = ReplyDestination {
+        manager: ingress.manager.clone(),
+        sender_id: ingress.sender_id,
+        chat_id: ingress.chat_id,
+        authority: ReplyAuthority::Public {
+            ingress: ingress.clone(),
+            public_session_id: context.public_session_id.clone(),
+            turn: context.turn.clone(),
+        },
+        expires_at: context.expires_at.min(intent.expires_at),
+    };
+    let row = enqueue(
+        state,
+        &destination,
+        DeliveryReference::PublicSignup {
+            public_session_id: context.public_session_id.clone(),
+            conversation_id: context.turn.conversation_id.clone(),
+            turn_id: context.turn.turn_id.clone(),
+            intent_id: intent.id.clone(),
+        },
+        &ingress.ingress,
+        None,
+    )
+    .await?;
+    if row.state != DeliveryState::Pending {
+        return Ok(PublicSignupDeliveryOutcome::Unavailable);
+    }
+    let pacing = super::coordination_service::RateWindowStore::admit(
+        &state.db,
+        "manager_public_send",
+        &format!("{}:{}", row.manager_bot_id, row.sender_id),
+        1,
+        std::time::Duration::from_secs(1),
+    )
+    .await?;
+    let lane = super::coordination_service::RateWindowStore::admit(
+        &state.db,
+        "manager_public_lane",
+        &row.manager_bot_id,
+        4,
+        std::time::Duration::from_secs(1),
+    )
+    .await?;
+    let permit = PUBLIC_SENDS.try_acquire();
+    if !pacing.allowed || !lane.allowed || permit.is_err() {
+        refuse_pending(state, &row).await?;
+        return Ok(PublicSignupDeliveryOutcome::Unavailable);
+    }
+    let _permit = permit.map_err(|_| refused())?;
+    let claim = uuid::Uuid::new_v4().to_string();
+    let mut session = state.db.client().start_session().await?;
+    let result = session.start_transaction().and_run(
+        (state, context, &row, token.as_str(), &claim),
+        |session, (state, context, row, token, claim)| Box::pin(async move {
+            let result: AppResult<_> = async {
+                let Some((_, _, observation)) = fence_transport_in_session(state, session, row).await? else {
+                    return Ok(CapturedSend::Deferred);
+                };
+                let intent_id = intents::fence_public_intent_in_session(
+                    &state.db, session, state.auth_device_hmac_key.as_slice(), context, token,
+                ).await?;
+                if !matches!(&row.reference, DeliveryReference::PublicSignup {
+                    public_session_id, conversation_id, turn_id, intent_id: expected,
+                } if public_session_id == &context.public_session_id
+                    && conversation_id == &context.turn.conversation_id
+                    && turn_id == &context.turn.turn_id && expected == &intent_id)
+                    || row.profile_id != context.ingress.manager.profile_id
+                    || row.manager_bot_id != context.ingress.manager.manager_bot_id
+                    || row.telegram_bot_id != context.ingress.manager.telegram_bot_id
+                    || row.manager_authority_epoch != context.ingress.manager.manager_authority_epoch
+                    || row.sender_id != context.ingress.sender_id || row.chat_id != context.ingress.chat_id
+                    || row.ingress_id != context.ingress.ingress.receipt_id
+                    || row.ingress_claim_id != context.ingress.ingress.claim_id
+                {
+                    return Err(refused());
+                }
+                if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+                    doc! {"_id":&row.id,"state":"pending","reference.kind":"public_signup","expires_at":{"$gt":bson::DateTime::now()}},
+                    doc! {"$set":{"state":"dispatching","claim_id":claim.as_str(),"updated_at":bson::DateTime::now()}},
+                ).session(&mut *session).await?.matched_count != 1 {
+                    return Ok(CapturedSend::Duplicate);
+                }
+                let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME)
+                    .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"})
+                    .session(&mut *session).await?.ok_or_else(refused)?;
+                Ok(CapturedSend::Ready(Box::new(credential)))
+            }.await;
+            tx::transaction_result(result)
+        }),
+    ).await.map_err(tx::map_transaction_error);
+    let credential = match result {
+        Ok(CapturedSend::Ready(credential)) => credential,
+        Ok(CapturedSend::Duplicate) => return Ok(PublicSignupDeliveryOutcome::Unavailable),
+        Ok(CapturedSend::Deferred)
+        | Err(AppError::Conflict(_) | AppError::NotFound(_) | AppError::ValidationError(_)) => {
+            refuse_pending(state, &row).await?;
+            return Ok(PublicSignupDeliveryOutcome::Unavailable);
+        }
+        Err(error) => return Err(error),
+    };
+    let body = super::platform_manager_command_service::PersonalCommandReply::Link { token }
+        .render(&state.config.frontend_url)?;
+    if body.encode_utf16().count() > 4096 {
+        finish(state, &row, &claim, "refused", vec![], None).await?;
+        return Ok(PublicSignupDeliveryOutcome::Unavailable);
+    }
+    let outcome = send_claimed(state, &row, &claim, body, credential, api).await?;
+    report_delivery(&outcome, "public_signup");
+    Ok(match outcome {
+        DeliveryOutcome::Sent { .. } => PublicSignupDeliveryOutcome::Sent,
+        DeliveryOutcome::Uncertain => PublicSignupDeliveryOutcome::Uncertain,
+        DeliveryOutcome::Duplicate
+        | DeliveryOutcome::Deferred { .. }
+        | DeliveryOutcome::Refused(_) => PublicSignupDeliveryOutcome::Unavailable,
+    })
+}
+
 fn report_delivery(outcome: &DeliveryOutcome, source: &'static str) {
     match outcome {
         DeliveryOutcome::Sent {
@@ -745,7 +941,12 @@ pub async fn sweep(
                 doc! {"_id":&row.id,"state":"dispatching","claim_id":&row.claim_id,"updated_at":{"$lte":stale_before}},
                 doc! {"$set":{"state":"uncertain","updated_at":due}},
             ).await?;
-        } else if row.expires_at <= now || matches!(row.reference, DeliveryReference::Command) {
+        } else if row.expires_at <= now
+            || matches!(
+                row.reference,
+                DeliveryReference::Command | DeliveryReference::PublicSignup { .. }
+            )
+        {
             refuse_pending(state, &row).await?;
         } else {
             let body = match &row.reference {
@@ -759,7 +960,7 @@ pub async fn sweep(
                     fixed_reason(reason).map(|reason| fixed_text(reason).to_owned())
                 }
                 DeliveryReference::Handoff => Some(handoff_text().to_owned()),
-                DeliveryReference::Command => None,
+                DeliveryReference::Command | DeliveryReference::PublicSignup { .. } => None,
             };
             if let Some(body) = body {
                 match send(

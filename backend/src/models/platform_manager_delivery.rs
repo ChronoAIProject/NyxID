@@ -44,6 +44,13 @@ pub enum DeliveryReference {
     Handoff,
     /// One ephemeral original-private command attempt. Never recover its body.
     Command,
+    /// One ephemeral public-turn proof attempt. Never recover its bearer body.
+    PublicSignup {
+        public_session_id: String,
+        conversation_id: String,
+        turn_id: String,
+        intent_id: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

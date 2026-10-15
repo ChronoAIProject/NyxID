@@ -669,3 +669,26 @@ reports confirmed, deferred, refused and uncertain outcomes without logging
 bodies or bearer tokens. Public runtime and fresh-event obligations remain in
 the contract for their owners to connect. This source cleanup was rustfmt- and
 whitespace-checked only; production compilation remains primary/CI validation.
+
+### Ephemeral public signup and saved-reply hook pairing
+
+`platform_manager_delivery::deliver_public_signup(state, context, token)` accepts
+only an already committed mint and returns `PublicSignupDeliveryOutcome::{Sent,
+Unavailable, Uncertain}`. `PublicSignup` is a separate durable metadata reference,
+deduped by the original public receipt and intent ID. Its claim transaction
+rechecks the exact executing receipt/session/turn, current public authority,
+pending intent HMAC/initiation/sender/chat and manager observation/credential.
+The bearer exists only in `Zeroizing` memory for one protected send with previews
+disabled. It is absent from delivery records, upstream requests and tool results.
+Provider 429, ambiguity and process loss never authorize bearer replay. Recovery
+refuses unattempted ephemeral rows and terminalizes lost dispatch claims.
+
+Composition now receives Part 2's required `OwnerTurnSettledHook` as the fifth
+personal producer dependency. Main and the HTTP router construct the handler
+adapter; services depend only on its trait. The callback receives a durable
+`ReplyRef` and reloads that saved reply before ordinary after-turn orchestration.
+The local journey fixture uses the same adapter. Fresh-event/original-destination
+transport pairing and the separate public encrypted-reply reader remain the next
+required consumers; this checkpoint claims neither complete public readiness
+nor passing runtime tests. The new signup regression sources use local injected
+public state solely to exercise the send boundary.

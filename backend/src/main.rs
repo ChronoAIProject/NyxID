@@ -1055,7 +1055,10 @@ async fn server_main() {
     handlers::assistant_team::spawn_sweeps(state.clone());
     services::platform_manager_transport::spawn_sweeps(
         state.clone(),
-        services::platform_manager_transport::compose(state.clone()),
+        services::platform_manager_transport::compose(
+            state.clone(),
+            handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+        ),
     );
     handlers::trigger_scheduler::spawn(state.clone());
     // Live assistant changes: one change stream for this process, and the

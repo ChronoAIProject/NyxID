@@ -3070,7 +3070,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
     let private = if let Some(state) = router_state.as_ref() {
         private.layer(axum::Extension(
-            crate::services::platform_manager_transport::compose(state.clone()),
+            crate::services::platform_manager_transport::compose(
+                state.clone(),
+                crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+            ),
         ))
     } else {
         private
