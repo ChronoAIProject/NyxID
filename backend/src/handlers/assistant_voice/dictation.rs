@@ -11,6 +11,33 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 
+// The shared PCM worklet sends 480 mono samples at 24 kHz: 20 ms / 50 frames
+// per second. Leave a small finite allowance for Stop and transport Ping/Pong.
+const PCM_FRAMES_PER_SECOND: usize = 50;
+const CONTROL_FRAME_ALLOWANCE: usize = 32;
+const MAX_INGRESS_FRAMES: usize =
+    dictation::MAX_SECONDS as usize * PCM_FRAMES_PER_SECOND + CONTROL_FRAME_ALLOWANCE;
+
+#[derive(Default)]
+struct Ingress {
+    frames: usize,
+}
+impl Ingress {
+    fn forward(&mut self, message: Message, input: &tokio::sync::mpsc::Sender<Input>) -> bool {
+        if self.frames >= MAX_INGRESS_FRAMES {
+            return false;
+        }
+        self.frames += 1;
+        let message = match message {
+            Message::Binary(bytes) => Input::Audio(bytes.to_vec()),
+            Message::Text(text) if text.as_str() == r#"{"type":"stop"}"# => Input::Stop,
+            Message::Ping(_) | Message::Pong(_) => return true,
+            _ => return false,
+        };
+        input.try_send(message).is_ok()
+    }
+}
+
 pub async fn dictation_options(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -82,7 +109,7 @@ async fn serve(
         output,
     ));
     let (mut sender, mut reader) = socket.split();
-    let mut ingress_frames = 0usize;
+    let mut ingress = Ingress::default();
     loop {
         tokio::select! {
             event=events.recv()=> {
@@ -92,15 +119,8 @@ async fn serve(
                 if terminal {break;}
             }
             event=reader.next()=> {
-                ingress_frames += 1;
-                if ingress_frames > 4096 { break; }
-                let message=match event {
-                    Some(Ok(Message::Binary(bytes))) => Input::Audio(bytes.to_vec()),
-                    Some(Ok(Message::Text(text))) if text.as_str()==r#"{"type":"stop"}"# => Input::Stop,
-                    Some(Ok(Message::Ping(_)|Message::Pong(_)))=>continue,
-                    _=>break,
-                };
-                if input.try_send(message).is_err() {break;}
+                let Some(Ok(message))=event else {break};
+                if !ingress.forward(message,&input) {break;}
             }
         }
     }
@@ -110,4 +130,76 @@ async fn serve(
     drop(events);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(15), task).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dictation_handler_ingress_forwards_two_minutes_of_worklet_pcm_and_stop() {
+        let (input, mut receive) = tokio::sync::mpsc::channel(8);
+        let mut ingress = Ingress::default();
+        let samples_per_frame = 480;
+        let sample_rate = 24_000;
+        let duration_seconds = 120;
+        let mut forwarded_bytes = 0;
+        // Exercise the actual handler dispatch/channel path with 6,000 normal
+        // 20 ms packets, consuming each as the relay does during capture.
+        for _ in 0..duration_seconds * sample_rate / samples_per_frame {
+            let bytes = vec![0x42; samples_per_frame * 2];
+            assert!(ingress.forward(Message::Binary(bytes.clone().into()), &input));
+            match receive.try_recv().unwrap() {
+                Input::Audio(forwarded) => {
+                    assert_eq!(forwarded, bytes);
+                    forwarded_bytes += forwarded.len();
+                }
+                Input::Stop => panic!("PCM was dispatched as Stop"),
+            }
+        }
+        assert_eq!(forwarded_bytes, duration_seconds * sample_rate * 2);
+        // Transport controls and Stop fit the explicit control allowance;
+        // Ping/Pong must not enter the PCM channel.
+        assert!(ingress.forward(Message::Ping(Vec::new().into()), &input));
+        assert!(ingress.forward(Message::Pong(Vec::new().into()), &input));
+        assert!(ingress.forward(Message::Text(r#"{"type":"stop"}"#.into()), &input));
+        assert!(matches!(receive.try_recv().unwrap(), Input::Stop));
+        assert!(matches!(
+            receive.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn dictation_handler_ingress_bounds_control_floods_and_channel_backpressure() {
+        let (input, mut receive) = tokio::sync::mpsc::channel(8);
+        let mut ingress = Ingress::default();
+        let mut refused = false;
+        for index in 0..10_000 {
+            let message = if index % 2 == 0 {
+                Message::Ping(Vec::new().into())
+            } else {
+                Message::Pong(Vec::new().into())
+            };
+            if !ingress.forward(message, &input) {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "control-only traffic must exhaust a finite budget");
+        assert!(!ingress.forward(Message::Binary(vec![0; 960].into()), &input));
+        assert!(!ingress.forward(Message::Text(r#"{"type":"stop"}"#.into()), &input));
+        assert!(matches!(
+            receive.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        // Enlarging the lifetime frame count must not enlarge the eight-frame
+        // transient channel or replace its immediate backpressure refusal.
+        let mut ingress = Ingress::default();
+        for _ in 0..8 {
+            assert!(ingress.forward(Message::Binary(vec![0; 960].into()), &input));
+        }
+        assert!(!ingress.forward(Message::Binary(vec![0; 960].into()), &input));
+    }
 }

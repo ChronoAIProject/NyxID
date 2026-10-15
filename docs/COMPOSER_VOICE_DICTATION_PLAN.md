@@ -2,11 +2,11 @@
 
 Branch `fix-specialist-bot-voice`, draft PR **#1907**. Preserve original specialist
 platform-voice fix **`cc42ae85`**. **Merge only AFTER #1904 and #1901**; neither
-prerequisite is merged here. The requested Heca implementer is the sole implementer
+prerequisite was merged by this work. Both merged upstream during verification
+and are included through main `dca7abb7` at merge commit `629138a0`. The requested Heca implementer is the sole implementer
 (gpt-6.1-sol, x_high, full-access); the prohibition applies to spawning any
-additional agents/reviewers. Parent personally reviews and publishes. No commits,
-pushes, merges, deployments or live changes are authorized/performed by the
-implementer. No version source is added (parent classifier: `NO_VERSION`).
+additional agents/reviewers. Parent personally reviews and publishes. The implementer made no Git publication or live changes. The primary assistant
+commits the reviewed work and updates the existing PR. No version source is added (parent classifier: `NO_VERSION`).
 
 ## Established evidence and approved decisions
 
@@ -95,15 +95,13 @@ charges confirmed **input audio seconds**, distinct from conversational call tim
    mute, not a claim that speech was heard. Pause/close retain the final timeline.
    Unit red/green and parent light/dark/mobile/reduced-motion probes pass.
 
-5. **Implementer verification and handoff — completed.** Browser fixtures,
-   regressions, documentation and full declared frontend test/lint/build are
-   complete. Real Mongo voice/dictation lanes pass without skips. Acceptance:
-   exact commands/counts/logs and frozen source receipt are retained, including
-   red failures and final green evidence. Parent is completing the final
-   authorization, Clippy and browser confirmation on the frozen source, required
-   generated wizard refresh, personal review/publication and Mongo cleanup;
-   their outstanding receipts are explicitly identified below. No additional
-   implementer source changes or duplicate lanes are planned.
+5. **Verification, personal review and publication — completed.** The primary
+   assistant reviewed the final implementation and upstream integration, resolved
+   all identified findings with the requested implementer, and verified the frozen
+   source. Acceptance: full frontend tests/lint/build, browser flows, database-backed
+   voice/authorization/billing regressions, strict Rust lint, formatting and generated
+   wizard freshness all pass. Exact final counts are recorded below. The user preview
+   remains available; no paid-provider or physical-acoustic verification is claimed.
 
 ## Architecture and changed surfaces
 
@@ -153,8 +151,8 @@ No paid live provider requests or deployment evidence are claimed.
 | `cargo fmt --all -- --check` |Passed (parent) | Parent review receipt |
 | Parent browser regression |22 passed,22.3s | `target/composer-voice-parent-e2e-recheck.log` |
 | Parent independent browser probes |11/11 green; real oscillator analyser~0.227 and PCM | `target/composer-voice-review/probe*.json/log/png` |
-| Rust Clippy |Parent final rerun in progress; two narrow findings repaired | `target/composer-voice-clippy-final.log` |
-| Required generated wizard artifacts |Parent running `npm run build:wizard` and freshness verification because app.css is a manifest input | Parent review receipt |
+| Rust Clippy |Final integrated `--workspace --all-targets -- -D warnings` passed | `target/composer-voice-final-rust.log` |
+| Required generated wizard artifacts |Integrated rebuild passed; declared Rust freshness test 1 passed | `target/composer-voice-wizard-integrated.log`; `target/composer-voice-final-rust.log` |
 
 Mongo red root cause was confirmed: `doc!{30}` stores valid Int32
 `reserved_until`, rejected by the initial Int64-only reader. Parser now accepts
@@ -228,3 +226,74 @@ Bluetooth or acoustic AEC. Those limits are explicit; no fabricated provider or
 word-synchronization success is reported. Existing conversational provider rollout
 gates remain in the subsystem documentation. Parent owns Mongo cleanup and
 publication; no additional implementer permission or approval step is introduced.
+
+
+## Integrated branch verification and preview
+
+The required upstream PRs are now merged: #1901 (`4f402a4f`) and #1904
+(`dca7abb7`). Both are included in `629138a0`. The primary assistant resolved the
+chat-page conflict by retaining the revised voice integration and upstream's
+platform-thread header label, and regenerated the embedded wizard rather than
+combining generated hashes. No source-level integration decision remained open.
+
+Integrated frontend verification passed **5,679 tests across 544 files**, full
+lint (zero errors; 34 existing warnings outside changed paths), the production
+build and **22 Chromium composer tests**. The browser run uses the upstream
+configuration's own Vite server. The earlier attempt refused an occupied port
+and ran zero tests; it is not counted as verification.
+
+The user-requested preview runs at `http://localhost:4612/assistant?mock=1`,
+using a separate Vite on 4613. It exercises the actual frontend with labelled
+sample transcript/synthetic media fixtures, silent playback and no backend API
+forwarding. Parent verified dictation review/cancel and voice/narration there
+with no page errors, and leaves the preview running for user review. The preview
+adapter is an ignored local artifact, not shipped product code.
+
+Frozen integrated input hashes are in
+`target/composer-voice-integrated-inputs.json`; implementation HEAD `629138a0`.
+Final Rust and generated-file execution receipts are recorded below.
+
+
+Final personal review also caught a duration mismatch in the WebSocket ingress
+message count: normal 20 ms PCM frames need 6,000 messages for two minutes,
+exceeding the former 4,096-message limit. The handler now derives its finite
+limit as `MAX_SECONDS * 50 + 32` and retains the existing per-frame, byte-rate,
+funding and backpressure limits. Two regressions exercise full-duration PCM/Stop
+dispatch, finite control-flood exhaustion and bounded channel refusal. Parent
+reviewed this repair and restarted the Rust build for the final source. The
+interrupted integrated build is not counted as a pass. Final source hashes are
+retained in `target/composer-voice-publication-inputs.json`.
+
+
+## Final publication acceptance record
+
+This record supersedes intermediate handoff/in-progress entries above. Every
+implementation step and identified review finding is complete. Dependencies
+#1901 and #1904 are included; no merge or deployment of this PR is performed.
+
+| Final integrated check | Result |
+| --- | --- |
+| Full frontend tests | 5,679 passed across 544 files |
+| Frontend lint | Passed; zero errors, 34 existing warnings outside changed paths |
+| Production frontend build | Passed; types, Vite, legal prerender, credential-accept, mock footprint |
+| Composer Chromium suites | 22 passed in 28.3s |
+| Additional interaction/visual probes | 11 passed |
+| Backend test compilation | Passed in 10m37s |
+| `voice --test-threads=2` | 90 passed, zero failed/ignored, 59.14s |
+| `operation_scope --test-threads=2` | 26 passed, zero failed/ignored, 248.73s |
+| `org_agent --test-threads=2` | 29 passed, zero failed/ignored, 102.83s |
+| `mw::auth::tests::delegated_account_read --test-threads=2` | 7 passed, zero failed/ignored, 0.01s |
+| `billing_route_coverage_smoke --test-threads=1` | 1 passed, zero failed/ignored, 7.60s |
+| Strict workspace/all-target Rust Clippy | Passed in 6m08s |
+| Integrated generated wizard build | Passed; 175-file source manifest, hash prefix `922e5fdcda8e` |
+| `cargo test -p nyxid-cli --test wizard_bundle_freshness` | 1 passed, zero failed/ignored |
+| Rust formatting and diff whitespace | Passed |
+
+Backend filter counts overlap and are not a unique aggregate. Database tests use
+`NYXID_TEST_DATABASE_URL=mongodb://127.0.0.1:27019/?replicaSet=voice-test` and the
+freshly built `target/debug/deps/nyxid_server-4364b07c7739ce97`. Logs are
+`target/composer-voice-final-rust.log`, `target/composer-voice-final-backend-tests.log`,
+`target/composer-voice-integrated-{test,lint,build}.log`, and
+`target/composer-voice-integrated-e2e-recheck.log`. Existing macOS linker/dependency
+advisories are recorded in the personal review; no new source lint is waived.
+The final snapshot check found no source/build-input changes after these checks.

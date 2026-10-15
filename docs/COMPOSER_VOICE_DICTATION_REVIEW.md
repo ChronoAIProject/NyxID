@@ -3,7 +3,8 @@
 Personal review of the composer expansion of PR #1907. The primary assistant
 reviews the implementation directly; the existing Heca `gpt-6.1-sol` implementer
 uses xhigh reasoning and full access. No additional agents or delegated reviewers.
-Merge only after #1904 and #1901. This document records verification evidence,
+Merge prerequisites #1904 and #1901 were merged upstream on 2026-10-15 and
+integrated here at `629138a0` (main `dca7abb7`). This document records verification evidence,
 not a claim that production audio or provider billing has been exercised.
 
 ## Findings resolved during implementation and personal review
@@ -75,15 +76,15 @@ Retrieved 2026-10-15:
 
 ## Expanded review evidence
 
-- The existing PR remains draft; #1904 and #1901 are both still open at the latest check.
+- Earlier review used the draft PR while #1904 and #1901 were open. Both are now
+  merged upstream and included in the final integration check below.
 - Initial browser smoke probe after voice-view integration could not render the composer.
   The null dereference in the initial-draft `currentVoice` expression was sent back
   to the implementer; browser checks resume after that repair.
 - Revised six-file frontend run passed **74 tests** (`target/composer-voice-frontend.log`).
   It includes shared microphone ownership/revocation and caption delivery through the
   memoized `ChatMessageList`. Dictation hook regression run separately passed **7 tests**
-  (`target/composer-dictation-hook-tests.log`). Source changes remain in progress;
-  these are intermediate evidence, not the frozen publication check.
+  (`target/composer-dictation-hook-tests.log`). These were intermediate runs; the frozen integrated publication results appear below.
 - Idle browser rerun passed at **320, 390 and 1280px**, with no page errors. At 320px,
   composer bounds are x=12..308; editor x=25..295 (270px wide); Send x=263..295.
   All attachment, model, dictation, voice and Send controls fit. Screenshots:
@@ -162,7 +163,96 @@ Retrieved 2026-10-15:
 
 ## Final verification
 
-Final full frontend lint/build, the repaired Rust lint, authorization regression
-counts and source freeze are being reconciled before publication. Passing runs
-and any source changes are recorded below; no paid provider or physical device
-claim is inferred from fixture results.
+The integrated frontend suite, production build, strict Rust lint and source
+review pass. Final executable regression and generated-file receipts are recorded
+below; no paid provider or physical device claim is inferred from fixture results.
+
+
+## Upstream integration and interactive preview
+
+Both required PRs merged while final verification was running: #1901 at
+`4f402a4f` and #1904 at `dca7abb7`. Merged main into this branch at `629138a0`.
+The chat-page conflict preserves both the new voice state/captions and upstream's
+platform-thread header label. Generated wizard assets/hash were rebuilt from the
+combined tree. Shared message initialization additions merged cleanly. Public
+credential purpose remains rejected through the existing `api_key_auth_user` and
+`ensure_llm_proxy_access` checks; no public credential exception was introduced.
+
+The final all-targets lint also found the test provider enum's large socket
+variant. The implementer boxed that test-only value and updated its construction;
+personal review verified the change. No suppression was added.
+
+Integrated frontend checks: **544 files / 5,679 tests passed**; lint exited zero
+with 34 existing warnings and none on changed paths; production build passed
+TypeScript, Vite, legal prerender, credential-accept and mock-footprint checks.
+Integrated Chromium suite: **22 passed**. The initial attempt ran zero tests
+because upstream now requires its own Vite server; after moving the user preview
+to a separate port, the unchanged command passed. No product/test gate changed.
+Logs: `target/composer-voice-integrated-{test,lint,build}.log` and
+`target/composer-voice-integrated-e2e-recheck.log`.
+
+An interactive user preview is available on loopback port 4612, backed by a
+separate Vite server on 4613 and the same explicit test fixtures. Its private
+adapter blocks backend API forwarding, supplies sample transcripts/synthetic
+audio and labels the page as a silent UI preview. An independent browser smoke
+verified dictation start/stop/review/cancel and voice/pending captions with no page
+errors. No production source or package change is needed for this preview.
+Parent deliberately leaves these two processes running for the user's review.
+
+Final integrated Rust compilation and strict lint passed. Executable regression
+and generated-file receipts follow below.
+
+
+### Two-minute ingress budget repair
+
+Final review compared the handler's message cap to the actual encoder: the
+worklet emits 480 samples at 24 kHz every 20 ms, so a 4,096-message cap would end
+a normal recording at about 81.9 seconds. The handler now derives a finite
+6,032-message budget from the 120-second duration plus 32 control messages.
+The same dispatch helper used by the handler is exercised with all 6,000 normal
+960-byte PCM frames, their exact forwarded bytes, and terminal Stop. A second
+regression checks control-only budget exhaustion and unchanged eight-frame
+channel backpressure. Frame-size, byte-rate, paid-window and duration bounds
+remain enforced independently. This was personally reviewed before rebuilding.
+
+The first integrated Rust build was intentionally interrupted to incorporate
+this repair; no passing build or test count is attributed to that interrupted
+command. Final input hashes are retained separately in
+`target/composer-voice-publication-inputs.json`.
+
+
+## Publication verification receipt
+
+- `cargo test -p nyxid --no-run`: passed in 10m37s on the integrated source
+  including the full-duration ingress repair. Binary:
+  `target/debug/deps/nyxid_server-4364b07c7739ce97`.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed in 6m08s.
+- Log for both declared commands and the wizard test:
+  `target/composer-voice-final-rust.log`. The macOS linker reports its existing
+  large unwind-section advisory; Cargo also reports the existing
+  `proc-macro-error2` future-compatibility advisory. Neither is a source lint
+  finding introduced by this change.
+- Integrated `voice --test-threads=2`: **90 passed, 0 failed, 0 ignored**, 59.14s.
+- Integrated `operation_scope --test-threads=2`: **26 passed, 0 failed, 0 ignored**,
+  248.73s. Log: `target/composer-voice-final-backend-tests.log`.
+- All database lanes use the explicit isolated MongoDB replica set; the rebuilt
+  executable was identified from the successful Cargo build before execution.
+- Final source/build inputs are bound by SHA-256 in
+  `target/composer-voice-publication-inputs.json`. The frontend files have not
+  changed since the 5,679-test integrated run, production build and 22-test
+  browser run. The late repair touches only the backend ingress and its tests.
+
+- Integrated `org_agent --test-threads=2`: **29 passed**, zero failed/ignored,
+  102.83s. Delegated account-read filter: **7 passed**, zero failed/ignored.
+- Integrated billing-route smoke: **1 passed**, zero failed/ignored, 7.60s.
+- `cargo test -p nyxid-cli --test wizard_bundle_freshness`: **1 passed**, zero
+  failed/ignored; integrated wizard source hash prefix `922e5fdcda8e`.
+- These filters overlap; their counts are not summed as a unique-test total.
+- Final formatting and whitespace checks pass. The snapshot comparison confirms
+  unchanged consumed source/build inputs. Only the reviewed documentation receipt
+  is updated after execution.
+
+**Personal review verdict:** all identified implementation findings are resolved
+and covered by the recorded checks. No additional reviewer agents were used.
+The final source includes both required upstream PRs. The explicit local-fixture
+versus paid-provider/physical-device evidence boundary remains unchanged.
